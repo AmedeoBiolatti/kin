@@ -10,6 +10,7 @@ uniform float uEmissive, uAlphaCutoff, uMetallic, uRoughness, uNormalScale, uOcc
 uniform vec3 uEmissionColor;
 uniform bool uIndependentEmission;
 uniform float uSpecularAa; // Scene3D::specular_aa
+uniform float uSingleScatter; // 1: Scene3D::specular_multiscatter off
 uniform int uBlend, uPointCount;
 uniform vec4 uPoints[32];
 in vec3 vWorld;
@@ -66,7 +67,7 @@ vec3 lighting(vec3 base, vec3 n, float metallic, float roughness, float occlusio
     s.diffuse = base * (1.0 - metallic);
     s.f0 = mix(vec3(0.04), base, metallic);
     vec2 ab = environment_brdf(roughness, s.n_v);
-    s.boost = vec3(1.0) + s.f0 * (1.0 / max(ab.x + ab.y, 1e-3) - 1.0);
+    s.boost = uSingleScatter > 0.5 ? vec3(1.0) : vec3(1.0) + s.f0 * (1.0 / max(ab.x + ab.y, 1e-3) - 1.0);
     s.backlight = vec3(0.0);
     s.coat = 0.0;
     s.coat_alpha = 1.0;
@@ -84,8 +85,8 @@ vec3 lighting(vec3 base, vec3 n, float metallic, float roughness, float occlusio
     vec3 reflected = normalize(mix(reflect(-v,n),n,s.alpha));
     vec3 around = mix(uGround,uAmbient,n.y*0.5+0.5);
     vec3 above = mix(uGround,uAmbient,reflected.y*0.5+0.5);
-    vec3 dielectric = sky_reflectance(vec3(0.04),ab);
-    vec3 reflectance = mix(dielectric,sky_reflectance(base,ab),metallic);
+    vec3 dielectric = uSingleScatter > 0.5 ? vec3(0.04 * ab.x + ab.y) : sky_reflectance(vec3(0.04),ab);
+    vec3 reflectance = mix(dielectric, uSingleScatter > 0.5 ? base * ab.x + ab.y : sky_reflectance(base,ab), metallic);
     return light + (s.diffuse*(vec3(1.0)-dielectric)*around + reflectance*above)*occlusion;
 }
 void main() {

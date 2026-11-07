@@ -1443,13 +1443,8 @@ private:
             _x.note(name + ": the instance's fade: 1 (none)");
             return std::string("1");
         }
-        if (kind == "ObjectPositionWS") { // (Unreal's world: its axes and centimetres)
-            if (_vertex)
-                return glsl("kin_object_position().xzy * 100.0", 3, {});
-            _x.note(name + ": the object's position, beyond the offset: the world's origin (a fragment does not have "
-                           "the object's placing)");
-            return std::string("[0, 0, 0]");
-        }
+        if (kind == "ObjectPositionWS") // (Unreal's world: its axes and centimetres)
+            return _b.add("multiply", {{"a", _b.member(GraphBuilder::quote("object_position"), "xzy")}, {"b", "100"}});
         if (kind == "DepthFade") { // (its fade where the surface nears what is behind it: kin's graphs see no depth)
             _x.note(name + ": Depth Fade: its opacity, without the fade near what is behind (kin's graphs see no "
                            "scene depth)");

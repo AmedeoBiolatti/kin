@@ -309,6 +309,19 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   blended in index order, which Unreal's mesh build reorders: reversed in kin, they look like Unreal's) and the
   Desert's quad (its world-aligned UVs on an upright quad read one texel row at v = 0, a wrap edge: 3 mm of depth
   changes it more than the gap to Unreal).
+  Time and placing: Unreal's snapshots logged the clock of the frame before the one that drew the screenshot (a tick
+  late for kin: the ocean's quad 45.8 -> 11.5 once logged right); now the world's clock is stopped (its least time
+  dilation) while a material is pictured, so the time logged is the time drawn. A fragment now has the copy's origin
+  (`object_position`: a flat value from the mesh's vertex shader), so Unreal's Object Position is read as it is beyond
+  the offset too: the waterfalls offset their clock by it (time + position / 4096 s, a quad and a sphere 2.2 m apart
+  ran 0.05 s apart), Waterfall Cheaper 3.1/23.0 -> 2.5/2.6, Waterfall Arc Cheaper 12.1/39.5 -> 3.0/3.2. Rough metals:
+  Scene3D::specular_multiscatter (on) left out with kin_material_lineup --single-scatter, as Unreal's legacy shading
+  (Substrate off: no energy conservation) does: Test R10 M1 23.1 -> 0.2, R05 14.7 -> 2.8, the FancyDev metals minor.
+  Now close 59, minor 22, major 18 (with multiple scattering, kin's default); close 61, minor 25, major 13 like for
+  like with Unreal's single scattering. The majors left: foam and moving ocean (Rapids' high contrast; the ocean
+  spheres' lower halves), the mirrors' sun glint (kin's roughness floor, 0.045), the pond scum's darker patches, and
+  the lake and river spheres (a vertex animation texture read by UV sets 2 and 3, which neither sphere has, on
+  translucent petals blended in index order).
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the

@@ -408,7 +408,7 @@ constexpr BuiltIn built_ins[] = {
     {"time", "frame.time.x", Type::Float},
     {"screen", "(gl_FragCoord.xy * frame.occlusion.zw)", Type::Vec2},
     {"camera_distance", "length(frame.eye.xyz - vWorld)", Type::Float},
-    {"object_position", "", Type::Vec3}, // (at a vertex only: vertex_input's)
+    {"object_position", "kin_object_position()", Type::Vec3}, // the copy's origin (a flat varying; at a vertex, its own)
 };
 struct Field {
     const char* name;

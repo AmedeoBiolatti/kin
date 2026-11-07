@@ -164,6 +164,10 @@ def next_material():
         log("missing", path, unreal_path(path))
 
 
+def world():
+    return unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+
+
 def tick(_dt):
     state["tick"] += 1
     n = state["tick"]
@@ -182,18 +186,20 @@ def tick(_dt):
             state["phase"], state["at"] = "load", n
         elif state["phase"] == "load" and n > state["at"] + 30:
             unreal.AutomationLibrary.finish_loading_before_screenshot()  # shaders compiled, textures resident
+            # The world's clock stopped (its least dilation) until the picture is taken: the time logged is the time
+            # drawn, whichever frame draws the screenshot (a moving material's Time: kin_material_lineup --time).
+            unreal.GameplayStatics.set_global_time_dilation(world(), 0.0001)
             state["phase"], state["at"] = "settle", n
         elif state["phase"] == "settle" and n > state["at"] + 60:
             w, h = SCENE["size"]
             target = os.path.join(OUT, picture_name(MATERIALS[state["index"]]))
             state["task"] = unreal.AutomationLibrary.take_high_res_screenshot(w, h, target, state["camera"])
-            # The world's clock as the picture is taken (a material's Time: kin_material_lineup --time, to match)
-            world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
-            log("time", MATERIALS[state["index"]], unreal.GameplayStatics.get_time_seconds(world),
-                unreal.GameplayStatics.get_real_time_seconds(world))
+            log("time", MATERIALS[state["index"]], unreal.GameplayStatics.get_time_seconds(world()),
+                unreal.GameplayStatics.get_real_time_seconds(world()))
             state["phase"], state["at"] = "shot", n
         elif state["phase"] == "shot" and state["task"].is_task_done():
-            log("pictured", MATERIALS[state["index"]])
+            log("pictured", MATERIALS[state["index"]], "(clock at", unreal.GameplayStatics.get_time_seconds(world()), ")")
+            unreal.GameplayStatics.set_global_time_dilation(world(), 1.0)
             state["phase"], state["at"] = "next", n
     except Exception as e:  # leave, saying why
         log("FAILED", e)

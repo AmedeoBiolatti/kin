@@ -430,8 +430,8 @@ void offsets() {
 }
 
 // The object's space in an offset: the copy's origin and its model matrix (a point local to it, swayed by its height
-// above the origin, back to the world); in a fragment's output, refused (the fragments don't have the placing). With
-// glslc, every vertex variant compiles.
+// above the origin, back to the world); in a fragment's output, its origin (a flat varying), its matrix refused (the
+// fragments don't have it). With glslc, every vertex variant compiles.
 void offset_reads_the_object() {
     const std::string text = graph("",
                                    R"({"id": "local", "type": "world_to_object", "inputs": {"x": "position"}},
@@ -446,11 +446,11 @@ void offset_reads_the_object() {
     CHECK(g.ok() && g.offset && g.warnings.empty());
     CHECK(contains(g.surface, "kin_graph_world_to_object(kin_position(), 1.0)") &&
           contains(g.surface, "kin_graph_object_to_world(") && contains(g.surface, "kin_object_position()"));
-    for (const char* output : {R"("base_color": "object_position")", R"("emission": "o")"}) {
-        const auto bad = compile_material_graph3d(
-            graph("", R"({"id": "o", "type": "object_to_world", "inputs": {"x": [0, 1, 0]}})", output));
-        CHECK(!bad.ok() && contains(bad.errors.front().message, "only at a vertex"));
-    }
+    const auto origin = compile_material_graph3d(graph("", "", R"("base_color": "object_position")"));
+    CHECK(origin.ok() && contains(origin.surface, "s.base_color = max(kin_object_position()"));
+    const auto bad = compile_material_graph3d(
+        graph("", R"({"id": "o", "type": "object_to_world", "inputs": {"x": [0, 1, 0]}})", R"("emission": "o")"));
+    CHECK(!bad.ok() && contains(bad.errors.front().message, "only at a vertex"));
     if (!shader_compiler_available())
         return;
     std::string why;

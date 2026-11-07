@@ -9,7 +9,8 @@
 // one material: snapshot.json), a path in <folder> without .kinmaterials. As the other engines'
 // scripts: an LDR view in the linear 2D pipeline (no tone curve, linear light encoded to sRGB), no MSAA, one sun
 // without shadow, no ambient, a black background. --anisotropy N filters the materials' textures as Unreal's default
-// does (8; kin's default is off).
+// does (8; kin's default is off). --single-scatter leaves out the light rough specular surfaces reflect more than once
+// (Scene3D::specular_multiscatter off), as Unreal's legacy shading does (Substrate off: no energy conservation).
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -34,6 +35,7 @@ struct Options {
     int frames = 8;
     f32 time = 0;       // the scene's clock (a material's time)
     u32 anisotropy = 1; // Scene3D::anisotropy (Unreal's default, r.MaxAnisotropy: 8)
+    bool single_scatter = false; // Scene3D::specular_multiscatter off
 };
 
 Vec3f vec3(const JsonValue& v) {
@@ -64,6 +66,7 @@ public:
         _scene.clear();
         _scene.time = _o.time;
         _scene.anisotropy = _o.anisotropy;
+        _scene.specular_multiscatter = !_o.single_scatter;
         for (const auto& d : _draws)
             (void)_scene.draw(d.mesh, d.transform, d.material);
         const auto& cam = *_doc.find("camera");
@@ -179,13 +182,15 @@ int main(int argc, char** argv) {
                 o.frames = std::stoi(value());
             else if (a == "--anisotropy")
                 o.anisotropy = u32(std::stoi(value()));
+            else if (a == "--single-scatter")
+                o.single_scatter = true;
             else
                 runtime.push_back(argv[i]);
         }
         if (o.scene.empty() || o.content.empty() || o.out.empty() || o.frames < 1) {
             std::cerr << "usage: kin_material_lineup --scene lineup.json --content <root> --materials <folder> "
                          "--out picture.png [--meshes <folder>] [--material <path>] [--time s] [--frames n] "
-                         "[--anisotropy n]\n";
+                         "[--anisotropy n] [--single-scatter]\n";
             return 2;
         }
         auto lineup = std::make_unique<Lineup>(o);

@@ -17,8 +17,8 @@
 //    "outputs": {"base_color": "color", "roughness": 0.8}}
 //
 // An input is a reference ("node", "node.output", "node.xyz", a parameter's name, a built-in input's name: "uv",
-// "position", "normal", "view", "vertex_color", "time", "screen", "camera_distance", "surface.<field>"; in the offset
-// only, "object_position": the copy's origin, and object_to_world / world_to_object nodes) or a value (a number, an
+// "position", "normal", "view", "vertex_color", "time", "screen", "camera_distance", "object_position" (the copy's
+// origin), "surface.<field>"; in the offset only, object_to_world / world_to_object nodes) or a value (a number, an
 // array of 2 to 4). The outputs: base_color, alpha, normal, metallic, roughness, occlusion, emission, backlight (the
 // colour a thin surface, a leaf, lets light through in from behind: KinSurface::backlight; 0 by default), clearcoat
 // and clearcoat_roughness (a clear coat over it, glTF's KHR_materials_clearcoat; 0 by default), specular (a

@@ -17,6 +17,14 @@ layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec4 vColor; // linear, straight alpha
 layout(location = 2) in vec2 vUV;
 layout(location = 3) in vec3 vWorld;
+#ifdef KIN_SURFACE
+// The copy's origin in the world (kin_mesh_vertex.inc.glsl's, flat): a surface's object position (as the offset's, at
+// a vertex: kin_surface_vertex.inc.glsl).
+layout(location = 10) flat in vec3 vObject;
+vec3 kin_object_position() {
+    return vObject;
+}
+#endif
 
 layout(set = 2, binding = 0) uniform sampler2D uBase;         // white when the material has none
 layout(set = 2, binding = 1) uniform sampler2DArrayShadow uShadow; // depth from the sun, a layer a cascade, compared
@@ -607,7 +615,9 @@ vec3 kin_lit_surface(KinSurface surface) {
     // multiple-scattering fit): put back in the specular, taken from the diffuse.
     const vec2 ab = environment_brdf(roughness, s.n_v);
     const float single = ab.x + ab.y;
-    s.boost = vec3(1.0) + s.f0 * (1.0 / max(single, 1e-3) - 1.0);
+    // (Not with Scene3D::specular_multiscatter off: frame.time.y.)
+    const bool multiscatter = frame.time.y < 0.5;
+    s.boost = multiscatter ? vec3(1.0) + s.f0 * (1.0 / max(single, 1e-3) - 1.0) : vec3(1.0);
     s.backlight = backlight;
     s.coat = coat;
     s.coat_alpha = coat_roughness * coat_roughness;
@@ -767,9 +777,9 @@ vec3 kin_lit_surface(KinSurface surface) {
     if (wrap > 0.5) {
         around = mix(around, 0.5 * (around + behind), 2.0 * wrap - 1.0);
     }
-    const vec3 dielectric = sky_reflectance(vec3(f0_dielectric), ab);
+    const vec3 dielectric = multiscatter ? sky_reflectance(vec3(f0_dielectric), ab) : vec3(f0_dielectric * ab.x + ab.y);
     const vec2 coat_ab = coat > 0.0 ? environment_brdf(coat_roughness, s.n_v) : vec2(0.0);
-    const vec3 reflectance = mix(dielectric, sky_reflectance(base, ab), metallic);
+    const vec3 reflectance = mix(dielectric, multiscatter ? sky_reflectance(base, ab) : base * ab.x + ab.y, metallic);
 #ifdef KIN_GI
     light += s.diffuse * (vec3(1.0) - dielectric) * area_light;
 #ifdef KIN_LIGHT_GRID

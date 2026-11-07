@@ -4450,6 +4450,42 @@ void test_gpu_environment() {
     });
 }
 
+// Multiple scattering (Scene3D::specular_multiscatter): a rough white metal lit by the sun returns more light with it
+// (the light its microfacets reflect more than once, which single scattering leaves out, put back) than without; a
+// rough grey dielectric, whose reflection is a small part of its light, nearly the same. On by default.
+void test_gpu_specular_multiscatter() {
+    with_gpu("test_gpu_specular_multiscatter", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+        kin::Scene3D scene;
+        assert(scene.specular_multiscatter);
+        scene.camera = kin::Camera3D::look_at(Vec3f{0.0f, 0.0f, 4.0f}, Vec3f{}, 30.0f);
+        scene.lights.sun = {.direction = normalize(Vec3f{0.3f, 0.35f, 1.0f}), .color = {0.6f, 0.6f, 0.6f}};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        const auto light = [&](const kin::Material3D& material, bool multiscatter) {
+            scene.clear();
+            scene.specular_multiscatter = multiscatter;
+            (void)scene.draw(sphere, Mat4f::identity(), material);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            double sum = 0.0;
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x)
+                    sum += linear_level(p.at(x, y));
+            return sum;
+        };
+        const kin::Material3D metal{.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = 0.8f};
+        const kin::Material3D plastic{.color = Color::rgb(128, 128, 128), .metallic = 0.0f, .roughness = 0.8f};
+        const double metal_on = light(metal, true), metal_off = light(metal, false);
+        const double plastic_on = light(plastic, true), plastic_off = light(plastic, false);
+        std::printf("    multiscatter: rough metal %.1f with it, %.1f without; rough plastic %.1f, %.1f\n", metal_on,
+                    metal_off, plastic_on, plastic_off);
+        assert(metal_off < 0.8 * metal_on && metal_off > 0.4 * metal_on); // (0.56 at roughness 0.8)
+        assert(std::abs(plastic_off - plastic_on) < 0.03 * plastic_on);
+    });
+}
+
 // Specular anti-aliasing (Scene3D::specular_aa). A small glossy black sphere (15 pixels across) has its highlight
 // thinner than a pixel: moved by fractions of a pixel, the light it shows comes and goes as the highlight falls on a
 // pixel centre or between them. With it on, the roughness is raised where the normal turns within the pixel and the
@@ -23429,6 +23465,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_taa_over_detail());
     RUN(test_gpu_taa_still_detail());
     RUN(test_gpu_specular_aa());
+    RUN(test_gpu_specular_multiscatter());
     RUN(test_gpu_taa_crowd());
     RUN(test_gpu_taa_overlay());
     RUN(test_gpu_taa_main_velocity());

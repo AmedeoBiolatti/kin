@@ -56,6 +56,7 @@ layout(location = 1) out vec4 vColor;
 layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vWorld;
 layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none)
+layout(location = 10) flat out vec3 vObject; // the copy's origin in the world (a surface's kin_object_position())
 #ifdef KIN_DRAW_MATERIALS
 layout(location = 9) flat out uint vMaterial;
 #endif
@@ -97,6 +98,7 @@ void main() {
     vColor = instance.color * vec4(decode(aColor.rgb), aColor.a);
     vUV = aUV;
     vId = floatBitsToUint(instance.normal0.w);
+    vObject = instance.model[3].xyz;
 #ifdef KIN_VELOCITY
 #ifdef KIN_SKIN
     // The copy's model matrix of the frame before times its pose of the frame before (the same expressions as

@@ -997,8 +997,9 @@ void unreal_approximations() {
         if (n.find("Tier 1 value kept") != std::string::npos || n.find("Tier 1 import only") != std::string::npos)
             std::cerr << "fell back: " << n << '\n';
     CHECK(!said("Tier 1 value kept") && !said("Tier 1 import only"));
-    CHECK(said("Depth Fade") && said("Scene Depth") && said("a cube map") && said("the object's position") &&
-          said("view space") && said("parameter collection's Wetness"));
+    CHECK(said("Depth Fade") && said("Scene Depth") && said("a cube map") && said("view space") &&
+          said("parameter collection's Wetness"));
+    CHECK(!said("the object's position")); // (read as it is: a fragment has the copy's origin)
     // The graph gives the base colour and alpha: the material's colour (Tier 1's black, no input) white and opaque, as
     // the graph's vertex colour includes it.
     const auto c = m->asset.base.material.color;
@@ -1228,7 +1229,7 @@ void unreal_object_space() {
     for (const auto& d : m.diagnostics)
         std::cerr << d << '\n';
     CHECK(m && !m->graph.empty());
-    CHECK(has_note(*m, "Origin: the object's position, beyond the offset: the world's origin"));
+    CHECK(!has_note(*m, "Origin:")); // (a fragment has the copy's origin too)
     CHECK(!has_note(*m, "Placed:") && !has_note(*m, "Turned:"));
     std::ifstream in(m->graph);
     const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
@@ -1238,13 +1239,13 @@ void unreal_object_space() {
         std::cerr << e.node << ": " << e.message << '\n';
     CHECK(g.ok() && g.offset);
     const auto vertex = g.surface.substr(0, g.surface.find("#else"));
-    for (const char* expected : {"kin_object_position().xzy * 100.0", "kin_graph_object_to_world(v.xzy * 0.01, 1.0)",
-                                 "kin_graph_object_to_world(v.xzy, 0.0)"})
+    for (const char* expected : {"(kin_object_position()).xzy * vec3(100.0)",
+                                 "kin_graph_object_to_world(v.xzy * 0.01, 1.0)", "kin_graph_object_to_world(v.xzy, 0.0)"})
         if (!contains_text(vertex, expected)) {
             std::cerr << "missing: " << expected << '\n' << g.surface << '\n';
             CHECK(false);
         }
-    CHECK(g.surface.find("kin_object_position", g.surface.find("#else")) == std::string::npos);
+    CHECK(g.surface.find("kin_object_position", g.surface.find("#else")) != std::string::npos);
     if (shader_compiler_available()) {
         std::string why;
         const auto cooked = cook_material_graph3d(text, &why);

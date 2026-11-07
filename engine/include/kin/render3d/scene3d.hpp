@@ -743,6 +743,12 @@ public:
     // normal turns across the pixel (this times its change, at most 0.18 of alpha more), spreading the highlight over
     // the pixel. 0 (the default) is off: the picture as without it; Godot's is 0.25. The scene's, for the overlay too.
     f32 specular_aa = 0.0f;
+    // The light a rough specular surface reflects more than once among its microfacets, which single scattering
+    // leaves out (Fdez-Aguera's fit: a rough white metal returns all of the light, as a furnace test wants), put back.
+    // On by default; off, a rough metal is darker (a white one at roughness 0.8 returns some 45% less of the sun's
+    // light, kin's test: test_gpu_specular_multiscatter), as engines that leave it out
+    // (Unreal's legacy shading without energy conservation, Substrate off) draw it.
+    bool specular_multiscatter = true;
     Lod3D lod{};
     GlobalIllumination3D global_illumination{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default

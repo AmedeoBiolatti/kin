@@ -588,6 +588,15 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   panelled door: bright-line pixels down from 170 to 61 a frame. Both backends;
   the scene's for the overlay too. `SceneEnvironment3D` authors it as
   `specular_aa`.
+- `Scene3D::specular_multiscatter` (on by default): the light a rough
+  specular surface reflects more than once among its microfacets, which single
+  scattering leaves out, put back (Fdez-Aguera's fit, in the lights' highlights
+  and the ambient reflectance alike): a rough white metal returns all of the
+  light, as a furnace test wants. Off, a rough metal is darker (a white one at
+  roughness 0.8 returns some 45% less of the sun's light; a rough dielectric
+  nearly the same), as engines that leave it out draw it (Unreal's legacy
+  shading, Substrate off). Both backends; `kin_material_lineup
+  --single-scatter` compares with such an engine.
 - `Scene3D::texture_lod_bias` (0 by default; -2 to 2): the mip level the
   materials' mipmapped textures are read from, moved by that many levels;
   negative is finer and sharper. Temporal anti-aliasing averages the shimmer
@@ -1591,8 +1600,9 @@ shadowed, fogged and GI-lit as kin's own materials are.
   before it), so the main pass, the pre-passes, the sun's and lights' shadows, pick and visibility all place the
   vertices alike, and the velocity's previous position takes the view's time of the frame before. At a vertex it reads
   `uv`, `position`, `normal` (the mesh's), `view`, `vertex_color`, `time`, `camera_distance`, the parameters and the
-  maps (their top level: a vertex has no derivatives; no tangent frame, nor the environment), and the object's space,
-  which only a vertex has: `object_position` (the copy's origin) and the `object_to_world` / `world_to_object` nodes (a
+  maps (their top level: a vertex has no derivatives; no tangent frame, nor the environment), and the object's space:
+  `object_position` (the copy's origin; a fragment has it too, flat from the mesh's vertex shader) and, which only a
+  vertex has, the `object_to_world` / `world_to_object` nodes (a
   point, `w` 1, or a direction, `w` 0, through the copy's model matrix: wind swaying a plant by its height, a vertex
   animation's local offsets; the frame before's matrix for the velocity); `surface.*`, `screen`,
   `normal_map`, `tangent_to_world` and `fresnel` it does not have: such an offset is not drawn, warned
