@@ -1,5 +1,6 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/component_schema.hpp>
+#include <kin/core/json.hpp>
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>
 #if KIN_ENABLE_SCRIPTING
@@ -14,8 +15,73 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
+
+std::string builtin_component_schema(const kin::EcsWorld& world) {
+    std::ostringstream out;
+    kin::JsonWriter json(out);
+    kin::write_world_snapshot_json(json, {.components = world.components().descriptors()});
+    return out.str();
+}
+
+void test_builtin_registration_contract() {
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    const std::string first = builtin_component_schema(world);
+    kin::register_builtin_editor_components(world);
+    assert(builtin_component_schema(world) == first);
+
+    // Tools enumerate descriptors in registration order. The groups must keep
+    // their established relative order, including optional components.
+    const auto descriptors = world.components().descriptors();
+    const std::vector<std::string_view> ordered{
+        "Transform2D", "RectRenderer", "SpriteAnimator",
+#if KIN_ENABLE_AUDIO
+        "AudioEmitter",
+#endif
+        "LineRenderer",
+#if KIN_ENABLE_PHYSICS
+        "PhysicsBodyComponent", "PhysicsColliderComponent",
+#endif
+        "ParticleSystemComponent", "TilemapComponent",
+#if KIN_ENABLE_SCRIPTING
+        "ScriptComponent",
+#endif
+        "Animator", "SceneDoor", "Parallax", "UiScreenComponent",
+        "LightComponent", "ShaderEffect", "CameraComponent", "ShapeRenderer",
+        "ClipGroup", "TextRenderer", "Timer", "Lifetime",
+    };
+    auto position = descriptors.begin();
+    for (const auto name : ordered) {
+        position = std::find_if(position, descriptors.end(), [&](const auto& item) { return item.name == name; });
+        assert(position != descriptors.end());
+        ++position;
+    }
+
+    // Every registration still constructs a component whose defaults tools
+    // can inspect without a renderer, assets or a running simulation.
+    for (const auto& descriptor : descriptors) {
+        const auto entity = world.entity("defaults_" + descriptor.name);
+        assert(world.components().add(entity, descriptor.id));
+        const auto defaults = world.components().snapshot(entity, descriptor.id);
+        assert(defaults && defaults->fields.size() == descriptor.fields.size());
+    }
+
+    // A caller's existing schemas win over the built-in defaults.
+    kin::EcsWorld custom;
+    custom.components().native<kin::RectRenderer>("RectRenderer")
+        .field("custom_size", &kin::RectRenderer::size).label("Caller size");
+    custom.components().data("Timer").field_i32("custom_duration", 3);
+    kin::register_builtin_editor_components(custom);
+    const auto* rectangle = custom.components().find("RectRenderer");
+    const auto* timer = custom.components().find("Timer");
+    assert(rectangle && rectangle->fields.size() == 1);
+    assert(rectangle->fields[0].name == "custom_size" && rectangle->fields[0].label == "Caller size");
+    assert(timer && timer->fields.size() == 1 && timer->fields[0].name == "custom_duration");
+}
 
 void write_prefab_file(const std::filesystem::path& path) {
     std::filesystem::create_directories(path.parent_path());
@@ -465,6 +531,7 @@ void test_linked_prefab_save_roundtrip() {
 }
 
 int main() {
+    test_builtin_registration_contract();
     test_scene_asset_instantiates_entities_and_prefabs();
     test_scene_validation_rejects_bad_component();
 #if KIN_ENABLE_SCRIPTING

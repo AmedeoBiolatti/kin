@@ -36,25 +36,28 @@ void mark_ui2_entity_dirty(flecs::entity entity) {
     bump_ui2_root_version(ui2_root_entity_for(entity));
 }
 
-template <typename T>
-void register_ui2_dirty_observers(flecs::world& world, const char* name, bool observe_set = false) {
+void register_ui2_dirty_observers(flecs::world& world, flecs::entity_t component,
+                                  const char* name, bool observe_set = false) {
     const std::string base = std::string{"ui2_dirty_"} + name;
-    world.observer<T>((base + "_add").c_str())
+    // Dirty tracking needs the entity, not the component's value. Share the
+    // observer builder and callback across widget types while retaining the
+    // same query term, events and observer names.
+    const auto mark_dirty = [](flecs::entity entity) {
+        mark_ui2_entity_dirty(entity);
+    };
+    world.observer((base + "_add").c_str())
+        .with(component)
         .event(flecs::OnAdd)
-        .each([](flecs::entity entity, T&) {
-            mark_ui2_entity_dirty(entity);
-        });
-    world.observer<T>((base + "_remove").c_str())
+        .each(mark_dirty);
+    world.observer((base + "_remove").c_str())
+        .with(component)
         .event(flecs::OnRemove)
-        .each([](flecs::entity entity, T&) {
-            mark_ui2_entity_dirty(entity);
-        });
+        .each(mark_dirty);
     if (observe_set) {
-        world.observer<T>((base + "_set").c_str())
+        world.observer((base + "_set").c_str())
+            .with(component)
             .event(flecs::OnSet)
-            .each([](flecs::entity entity, T&) {
-                mark_ui2_entity_dirty(entity);
-            });
+            .each(mark_dirty);
     }
 }
 
@@ -1081,11 +1084,11 @@ void register_ui2_components(flecs::world& world) {
     world.component<Ui2SyncIndex>("Ui2SyncIndex");
     world.component<Ui2Text>("Ui2Text");
 
-    register_ui2_dirty_observers<Ui2Root>(world, "root", true);
-    register_ui2_dirty_observers<Ui2Layout>(world, "layout", true);
-    register_ui2_dirty_observers<Ui2ScrollContainer>(world, "scroll_container", true);
+    register_ui2_dirty_observers(world, world.id<Ui2Root>(), "root", true);
+    register_ui2_dirty_observers(world, world.id<Ui2Layout>(), "layout", true);
+    register_ui2_dirty_observers(world, world.id<Ui2ScrollContainer>(), "scroll_container", true);
     for_each_ui2_widget_type([&]<typename T>() {
-        register_ui2_dirty_observers<T>(world, Ui2RecordTraits<T>::observer_name);
+        register_ui2_dirty_observers(world, world.id<T>(), Ui2RecordTraits<T>::observer_name);
     });
 }
 

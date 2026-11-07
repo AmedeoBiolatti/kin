@@ -59,6 +59,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+include(kin_build)
 include(kin_release_contract)
 
 # Built by default only when kin is the top-level project: a game that adds

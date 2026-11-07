@@ -1,0 +1,788 @@
+{
+  "date": "2026-11-07",
+  "base_commit": "031dd64",
+  "environment": {
+    "platform": "Linux x86_64",
+    "gcc": "15.2.0",
+    "clang": "21.1.8",
+    "cmake": "4.2.3",
+    "configuration": "Release, engine -O2, C++23, PCH enabled, LTO disabled, 2D with physics/audio/scripting enabled",
+    "compiler_cache": "disabled",
+    "source_filesystem": "Linux partition",
+    "output_filesystem": "NTFS/FUSE",
+    "host_load": "Shared development machine; other builds may compete for CPU and I/O."
+  },
+  "method": {
+    "before": "One fresh direct compile per compiler of the original scene_asset.cpp including all registrations. Same flags/PCH as the build compile database; original source copy in the same source directory.",
+    "after_parser": "Three direct serial compiles of scene_asset.cpp alone, alternating GCC/Clang order between rounds. Registrations already compiled.",
+    "after_cluster": "Three synthetic four-worker compile-only batches per compiler: parser, dispatcher and six registration groups. Fixed queue order recorded below. Excludes PCH creation, dependencies, archive and link. Does not reproduce Ninja scheduling of a full engine build.",
+    "cluster_queue": [
+      "scene_asset.cpp",
+      "scene_components.cpp",
+      "scene_components_render.cpp",
+      "scene_components_physics2d.cpp",
+      "scene_components_particles.cpp",
+      "scene_components_gameplay.cpp",
+      "scene_components_lighting.cpp",
+      "scene_components_view.cpp"
+    ],
+    "parser_compiler_order_by_round": [
+      [
+        "gcc",
+        "clang"
+      ],
+      [
+        "clang",
+        "gcc"
+      ],
+      [
+        "gcc",
+        "clang"
+      ]
+    ],
+    "metrics": "GNU time wall/user/system seconds and max RSS. Batch elapsed time includes task scheduling. CPU total is summed user+system across all eight compilers. RSS is per process, not total batch memory."
+  },
+  "summary": {
+    "gcc": {
+      "before_monolithic_wall_seconds": 63.51,
+      "before_monolithic_cpu_seconds": 63.1,
+      "before_monolithic_peak_rss_mib": 2185.844,
+      "after_parser_median_wall_seconds": 12.8,
+      "after_parser_median_peak_rss_mib": 477.949,
+      "after_four_job_batch_median_wall_seconds": 31.103,
+      "after_four_job_batch_cpu_seconds": [
+        94.67,
+        115.41,
+        108.01
+      ],
+      "after_four_job_batch_median_cpu_seconds": 108.01,
+      "after_max_per_process_peak_rss_mib": 841.09
+    },
+    "clang": {
+      "before_monolithic_wall_seconds": 54.01,
+      "before_monolithic_cpu_seconds": 53.91,
+      "before_monolithic_peak_rss_mib": 919.441,
+      "after_parser_median_wall_seconds": 9.24,
+      "after_parser_median_peak_rss_mib": 274.277,
+      "after_four_job_batch_median_wall_seconds": 34.629,
+      "after_four_job_batch_cpu_seconds": [
+        100.75,
+        119.89,
+        110.87
+      ],
+      "after_four_job_batch_median_cpu_seconds": 110.87,
+      "after_max_per_process_peak_rss_mib": 438.18
+    }
+  },
+  "samples": [
+    {
+      "phase": "before",
+      "compiler": "gcc",
+      "label": "before-gcc",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 61.4,
+      "system_seconds": 1.7,
+      "wall_seconds": 63.51,
+      "max_rss_kib": 2238304
+    },
+    {
+      "phase": "before",
+      "compiler": "clang",
+      "label": "before-clang",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 53.25,
+      "system_seconds": 0.66,
+      "wall_seconds": 54.01,
+      "max_rss_kib": 941508
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_asset",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 8.56,
+      "system_seconds": 0.32,
+      "wall_seconds": 9.03,
+      "max_rss_kib": 491296
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_components",
+      "source": "engine/src/scene/scene_components.cpp",
+      "exit_code": 0,
+      "user_seconds": 3.92,
+      "system_seconds": 0.3,
+      "wall_seconds": 4.3,
+      "max_rss_kib": 369756
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_components_render",
+      "source": "engine/src/scene/scene_components_render.cpp",
+      "exit_code": 0,
+      "user_seconds": 14.11,
+      "system_seconds": 0.51,
+      "wall_seconds": 14.81,
+      "max_rss_kib": 682180
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_components_physics2d",
+      "source": "engine/src/scene/scene_components_physics2d.cpp",
+      "exit_code": 0,
+      "user_seconds": 16.66,
+      "system_seconds": 0.69,
+      "wall_seconds": 17.48,
+      "max_rss_kib": 664924
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_components_particles",
+      "source": "engine/src/scene/scene_components_particles.cpp",
+      "exit_code": 0,
+      "user_seconds": 8.82,
+      "system_seconds": 0.42,
+      "wall_seconds": 9.34,
+      "max_rss_kib": 498892
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_components_gameplay",
+      "source": "engine/src/scene/scene_components_gameplay.cpp",
+      "exit_code": 0,
+      "user_seconds": 16.57,
+      "system_seconds": 0.63,
+      "wall_seconds": 17.41,
+      "max_rss_kib": 861196
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_components_lighting",
+      "source": "engine/src/scene/scene_components_lighting.cpp",
+      "exit_code": 0,
+      "user_seconds": 10.8,
+      "system_seconds": 0.41,
+      "wall_seconds": 11.41,
+      "max_rss_kib": 527728
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-0-scene_components_view",
+      "source": "engine/src/scene/scene_components_view.cpp",
+      "exit_code": 0,
+      "user_seconds": 11.48,
+      "system_seconds": 0.47,
+      "wall_seconds": 12.15,
+      "max_rss_kib": 535068
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-batch-0",
+      "wall_seconds": 26.993,
+      "jobs": 4
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_asset",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 10.64,
+      "system_seconds": 0.4,
+      "wall_seconds": 12.19,
+      "max_rss_kib": 490844
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_components",
+      "source": "engine/src/scene/scene_components.cpp",
+      "exit_code": 0,
+      "user_seconds": 4.72,
+      "system_seconds": 0.37,
+      "wall_seconds": 5.32,
+      "max_rss_kib": 369216
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_components_render",
+      "source": "engine/src/scene/scene_components_render.cpp",
+      "exit_code": 0,
+      "user_seconds": 18.85,
+      "system_seconds": 0.63,
+      "wall_seconds": 20.11,
+      "max_rss_kib": 682624
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_components_physics2d",
+      "source": "engine/src/scene/scene_components_physics2d.cpp",
+      "exit_code": 0,
+      "user_seconds": 18.18,
+      "system_seconds": 0.54,
+      "wall_seconds": 19.05,
+      "max_rss_kib": 663136
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_components_particles",
+      "source": "engine/src/scene/scene_components_particles.cpp",
+      "exit_code": 0,
+      "user_seconds": 14.24,
+      "system_seconds": 0.56,
+      "wall_seconds": 17.76,
+      "max_rss_kib": 499248
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_components_gameplay",
+      "source": "engine/src/scene/scene_components_gameplay.cpp",
+      "exit_code": 0,
+      "user_seconds": 19.2,
+      "system_seconds": 0.76,
+      "wall_seconds": 20.5,
+      "max_rss_kib": 861276
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_components_lighting",
+      "source": "engine/src/scene/scene_components_lighting.cpp",
+      "exit_code": 0,
+      "user_seconds": 12.66,
+      "system_seconds": 0.45,
+      "wall_seconds": 13.27,
+      "max_rss_kib": 528296
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-1-scene_components_view",
+      "source": "engine/src/scene/scene_components_view.cpp",
+      "exit_code": 0,
+      "user_seconds": 12.66,
+      "system_seconds": 0.55,
+      "wall_seconds": 13.33,
+      "max_rss_kib": 536556
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-batch-1",
+      "wall_seconds": 33.466,
+      "jobs": 4
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_asset",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 10.6,
+      "system_seconds": 0.38,
+      "wall_seconds": 11.16,
+      "max_rss_kib": 490672
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_components",
+      "source": "engine/src/scene/scene_components.cpp",
+      "exit_code": 0,
+      "user_seconds": 3.05,
+      "system_seconds": 0.33,
+      "wall_seconds": 3.57,
+      "max_rss_kib": 368964
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_components_render",
+      "source": "engine/src/scene/scene_components_render.cpp",
+      "exit_code": 0,
+      "user_seconds": 20.95,
+      "system_seconds": 0.79,
+      "wall_seconds": 22.06,
+      "max_rss_kib": 681668
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_components_physics2d",
+      "source": "engine/src/scene/scene_components_physics2d.cpp",
+      "exit_code": 0,
+      "user_seconds": 16.36,
+      "system_seconds": 0.63,
+      "wall_seconds": 17.24,
+      "max_rss_kib": 661880
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_components_particles",
+      "source": "engine/src/scene/scene_components_particles.cpp",
+      "exit_code": 0,
+      "user_seconds": 10.33,
+      "system_seconds": 0.48,
+      "wall_seconds": 10.99,
+      "max_rss_kib": 499196
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_components_gameplay",
+      "source": "engine/src/scene/scene_components_gameplay.cpp",
+      "exit_code": 0,
+      "user_seconds": 18.61,
+      "system_seconds": 0.79,
+      "wall_seconds": 19.91,
+      "max_rss_kib": 859984
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_components_lighting",
+      "source": "engine/src/scene/scene_components_lighting.cpp",
+      "exit_code": 0,
+      "user_seconds": 11.38,
+      "system_seconds": 0.45,
+      "wall_seconds": 12.09,
+      "max_rss_kib": 526480
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-2-scene_components_view",
+      "source": "engine/src/scene/scene_components_view.cpp",
+      "exit_code": 0,
+      "user_seconds": 12.39,
+      "system_seconds": 0.49,
+      "wall_seconds": 13.1,
+      "max_rss_kib": 535960
+    },
+    {
+      "phase": "after",
+      "compiler": "gcc",
+      "label": "after-gcc-batch-2",
+      "wall_seconds": 31.103,
+      "jobs": 4
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_asset",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 9.22,
+      "system_seconds": 0.23,
+      "wall_seconds": 9.57,
+      "max_rss_kib": 276544
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_components",
+      "source": "engine/src/scene/scene_components.cpp",
+      "exit_code": 0,
+      "user_seconds": 4.08,
+      "system_seconds": 0.23,
+      "wall_seconds": 4.44,
+      "max_rss_kib": 274304
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_components_render",
+      "source": "engine/src/scene/scene_components_render.cpp",
+      "exit_code": 0,
+      "user_seconds": 18.91,
+      "system_seconds": 0.48,
+      "wall_seconds": 19.56,
+      "max_rss_kib": 367044
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_components_physics2d",
+      "source": "engine/src/scene/scene_components_physics2d.cpp",
+      "exit_code": 0,
+      "user_seconds": 14.09,
+      "system_seconds": 0.3,
+      "wall_seconds": 14.56,
+      "max_rss_kib": 360460
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_components_particles",
+      "source": "engine/src/scene/scene_components_particles.cpp",
+      "exit_code": 0,
+      "user_seconds": 8.66,
+      "system_seconds": 0.24,
+      "wall_seconds": 8.99,
+      "max_rss_kib": 312156
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_components_gameplay",
+      "source": "engine/src/scene/scene_components_gameplay.cpp",
+      "exit_code": 0,
+      "user_seconds": 17.38,
+      "system_seconds": 0.42,
+      "wall_seconds": 17.97,
+      "max_rss_kib": 446728
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_components_lighting",
+      "source": "engine/src/scene/scene_components_lighting.cpp",
+      "exit_code": 0,
+      "user_seconds": 13.09,
+      "system_seconds": 0.33,
+      "wall_seconds": 13.54,
+      "max_rss_kib": 328908
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-0-scene_components_view",
+      "source": "engine/src/scene/scene_components_view.cpp",
+      "exit_code": 0,
+      "user_seconds": 12.85,
+      "system_seconds": 0.24,
+      "wall_seconds": 13.22,
+      "max_rss_kib": 332476
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-batch-0",
+      "wall_seconds": 27.818,
+      "jobs": 4
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_asset",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 10.58,
+      "system_seconds": 0.22,
+      "wall_seconds": 10.86,
+      "max_rss_kib": 281408
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_components",
+      "source": "engine/src/scene/scene_components.cpp",
+      "exit_code": 0,
+      "user_seconds": 4.95,
+      "system_seconds": 0.23,
+      "wall_seconds": 5.25,
+      "max_rss_kib": 276552
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_components_render",
+      "source": "engine/src/scene/scene_components_render.cpp",
+      "exit_code": 0,
+      "user_seconds": 24.11,
+      "system_seconds": 0.48,
+      "wall_seconds": 24.68,
+      "max_rss_kib": 372668
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_components_physics2d",
+      "source": "engine/src/scene/scene_components_physics2d.cpp",
+      "exit_code": 0,
+      "user_seconds": 13.75,
+      "system_seconds": 0.27,
+      "wall_seconds": 14.11,
+      "max_rss_kib": 366324
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_components_particles",
+      "source": "engine/src/scene/scene_components_particles.cpp",
+      "exit_code": 0,
+      "user_seconds": 9.28,
+      "system_seconds": 0.25,
+      "wall_seconds": 9.63,
+      "max_rss_kib": 312416
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_components_gameplay",
+      "source": "engine/src/scene/scene_components_gameplay.cpp",
+      "exit_code": 0,
+      "user_seconds": 25.14,
+      "system_seconds": 0.52,
+      "wall_seconds": 25.8,
+      "max_rss_kib": 448696
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_components_lighting",
+      "source": "engine/src/scene/scene_components_lighting.cpp",
+      "exit_code": 0,
+      "user_seconds": 12.14,
+      "system_seconds": 0.26,
+      "wall_seconds": 12.5,
+      "max_rss_kib": 329504
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-1-scene_components_view",
+      "source": "engine/src/scene/scene_components_view.cpp",
+      "exit_code": 0,
+      "user_seconds": 17.34,
+      "system_seconds": 0.37,
+      "wall_seconds": 17.81,
+      "max_rss_kib": 332236
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-batch-1",
+      "wall_seconds": 36.702,
+      "jobs": 4
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_asset",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "exit_code": 0,
+      "user_seconds": 14.16,
+      "system_seconds": 0.32,
+      "wall_seconds": 14.57,
+      "max_rss_kib": 277452
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_components",
+      "source": "engine/src/scene/scene_components.cpp",
+      "exit_code": 0,
+      "user_seconds": 5.01,
+      "system_seconds": 0.24,
+      "wall_seconds": 5.36,
+      "max_rss_kib": 273848
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_components_render",
+      "source": "engine/src/scene/scene_components_render.cpp",
+      "exit_code": 0,
+      "user_seconds": 18.09,
+      "system_seconds": 0.38,
+      "wall_seconds": 18.59,
+      "max_rss_kib": 368972
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_components_physics2d",
+      "source": "engine/src/scene/scene_components_physics2d.cpp",
+      "exit_code": 0,
+      "user_seconds": 17.66,
+      "system_seconds": 0.37,
+      "wall_seconds": 18.16,
+      "max_rss_kib": 362328
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_components_particles",
+      "source": "engine/src/scene/scene_components_particles.cpp",
+      "exit_code": 0,
+      "user_seconds": 9.51,
+      "system_seconds": 0.3,
+      "wall_seconds": 9.91,
+      "max_rss_kib": 311116
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_components_gameplay",
+      "source": "engine/src/scene/scene_components_gameplay.cpp",
+      "exit_code": 0,
+      "user_seconds": 19.44,
+      "system_seconds": 0.45,
+      "wall_seconds": 20.03,
+      "max_rss_kib": 446984
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_components_lighting",
+      "source": "engine/src/scene/scene_components_lighting.cpp",
+      "exit_code": 0,
+      "user_seconds": 12.92,
+      "system_seconds": 0.28,
+      "wall_seconds": 13.34,
+      "max_rss_kib": 328424
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-2-scene_components_view",
+      "source": "engine/src/scene/scene_components_view.cpp",
+      "exit_code": 0,
+      "user_seconds": 11.5,
+      "system_seconds": 0.24,
+      "wall_seconds": 11.87,
+      "max_rss_kib": 332752
+    },
+    {
+      "phase": "after",
+      "compiler": "clang",
+      "label": "after-clang-batch-2",
+      "wall_seconds": 34.629,
+      "jobs": 4
+    },
+    {
+      "phase": "parser-serial",
+      "compiler": "gcc",
+      "label": "parser-serial-gcc-0",
+      "exit_code": 0,
+      "user_seconds": 12.32,
+      "system_seconds": 0.53,
+      "wall_seconds": 13.54,
+      "max_rss_kib": 488780
+    },
+    {
+      "phase": "parser-serial",
+      "compiler": "clang",
+      "label": "parser-serial-clang-0",
+      "exit_code": 0,
+      "user_seconds": 9.49,
+      "system_seconds": 0.24,
+      "wall_seconds": 10.37,
+      "max_rss_kib": 280848
+    },
+    {
+      "phase": "parser-serial",
+      "compiler": "clang",
+      "label": "parser-serial-clang-1",
+      "exit_code": 0,
+      "user_seconds": 8.9,
+      "system_seconds": 0.19,
+      "wall_seconds": 9.24,
+      "max_rss_kib": 280860
+    },
+    {
+      "phase": "parser-serial",
+      "compiler": "gcc",
+      "label": "parser-serial-gcc-1",
+      "exit_code": 0,
+      "user_seconds": 10.38,
+      "system_seconds": 0.45,
+      "wall_seconds": 11.07,
+      "max_rss_kib": 490900
+    },
+    {
+      "phase": "parser-serial",
+      "compiler": "gcc",
+      "label": "parser-serial-gcc-2",
+      "exit_code": 0,
+      "user_seconds": 11.68,
+      "system_seconds": 0.49,
+      "wall_seconds": 12.8,
+      "max_rss_kib": 489420
+    },
+    {
+      "phase": "parser-serial",
+      "compiler": "clang",
+      "label": "parser-serial-clang-2",
+      "exit_code": 0,
+      "user_seconds": 8.24,
+      "system_seconds": 0.2,
+      "wall_seconds": 8.53,
+      "max_rss_kib": 281432
+    }
+  ],
+  "validation": {
+    "registration_bodies": "Dispatcher expanded with the extracted group bodies is byte-for-byte identical to the old registration body; physics registration body also identical.",
+    "component_manifest": "GCC and Clang before/after snapshots match for all 47 components, including registration order, IDs, serialized field metadata, and default field readbacks.",
+    "regression_test": "kin-scene-asset checks idempotence, representative component ordering, default snapshots, and caller-defined schema preservation.",
+    "selected_runtime_tests_per_compiler": [
+      "kin-scene-asset",
+      "kin-scripting",
+      "kin-ecs-system",
+      "kin-runtime",
+      "kin-determinism",
+      "kin-ui2",
+      "kin-anim-core",
+      "hex-demo",
+      "shapes-demo"
+    ],
+    "additional_compile_checks": {
+      "gcc_no_pch_features_disabled": {
+        "files": 7,
+        "passed": true,
+        "disabled": [
+          "PCH",
+          "2D physics",
+          "scripting",
+          "audio",
+          "TTF",
+          "image I/O"
+        ],
+        "physics_registration_omitted_from_compile_database": true
+      },
+      "clang_experimental_3d": {
+        "files": 8,
+        "passed": true,
+        "PCH": true,
+        "physics3d": true,
+        "scope": "Direct compile checks; no full 3D link/runtime test"
+      }
+    },
+    "selected_runtime_test_results": {
+      "gcc": {
+        "passed": 9,
+        "failed": 0
+      },
+      "clang": {
+        "passed": 9,
+        "failed": 0
+      }
+    },
+    "test_execution_note": "An overlapping GCC/Clang CTest run failed in the existing linked-prefab roundtrip test. Both processes use and modify the same named temporary fixture directories. GCC passed 9/9; rerunning Clang separately passed 9/9. Run compiler test suites separately or give each its own TMPDIR."
+  },
+  "limits": [
+    "These are compilation measurements, not full clean-engine or game edit/build/link timings.",
+    "Only one fresh baseline compile was taken per compiler. Later rounds encountered more host contention; treat timing ratios as local estimates.",
+    "Splitting repeats common template work and increases aggregate compiler CPU time; low-parallelism or full clean builds can regress.",
+    "Memory figures are per-process peaks. Running more smaller compiler processes can still consume more total memory.",
+    "No Windows/MSVC or full 3D runtime validation was performed.",
+    "Explicit Kin settings match, but installed GCC and Clang implicit hardening/padding-initialization defaults differ, as documented in the preceding compiler comparison."
+  ]
+}

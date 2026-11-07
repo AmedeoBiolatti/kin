@@ -86,6 +86,12 @@ void test_load_update_actions_and_spawn(Fixture& fixture) {
     const std::filesystem::path script = dir / "scene.lua";
     std::string source = R"lua(
 function on_load(scene)
+    local dialogue = KinDialoguePlayer.new()
+    assert(type(dialogue.ended) == "boolean")
+    assert(type(dialogue.current_node) == "string")
+    assert(type(dialogue:view()) == "table")
+    assert(not pcall(function() dialogue.ended = false end))
+    assert(not pcall(KinEntity.new))
     scene:set_clear_color(1, 2, 3)
     local e = scene:entity("script-rect"):set_transform(4, 5):set_rect(6, 7, 8, 9, 10, 2, 3)
     assert(e:alive())

@@ -1,0 +1,495 @@
+{
+  "date": "2026-11-07",
+  "base_commit": "ae92ca1ae6e51a4954724b9336faf78cee092620",
+  "environment": {
+    "platform": "Linux x86_64",
+    "cpu": "Intel Core i9-13900HX with hybrid cores",
+    "gcc": "15.2.0",
+    "clang": "21.1.8",
+    "cmake": "4.2.3",
+    "ninja": "1.13.2",
+    "configuration": "2D Release -O2, C++23, PCH ON, LTO OFF, compiler cache OFF, mold linker",
+    "source_filesystem": "Linux partition",
+    "output_filesystem": "NTFS/FUSE",
+    "host_load": "Owned benchmark tasks ran serially; other user activity, SMT siblings, thermals and host I/O were not isolated."
+  },
+  "implementation": {
+    "source": "engine/src/ecs/ui2.cpp",
+    "change": "Pass component IDs to one non-template dirty observer helper and share its entity-only callback across all widget types and event registrations. Component data is unused by dirty tracking.",
+    "observer_count": 111,
+    "widget_types": 51,
+    "widget_events": [
+      "OnAdd",
+      "OnRemove"
+    ],
+    "layout_types": [
+      "Ui2Root",
+      "Ui2Layout",
+      "Ui2ScrollContainer"
+    ],
+    "layout_events": [
+      "OnAdd",
+      "OnRemove",
+      "OnSet"
+    ],
+    "preserved": "Observer names, IDs, registration order, event sets, query terms, access flags and callbacks marking the same root dirty. No optimization flags, dependencies, build options or public APIs changed.",
+    "mechanical_check": "Helper and four invocation expressions are the only implementation edits. Inverting the invocation syntax exactly reconstructs the old registration body. Surrounding layout, query and rendering bodies are byte-identical.",
+    "source_sha256": {
+      "before": "fa0a2dd8877ecd0f50fb070f547f8b2cc82253bbe51212701fc83a9cd8fb36ca",
+      "after": "39a14c86998a8c757356fd21ccc78cfe22ab351a983dd8056a36883f9c3b90df"
+    }
+  },
+  "original_profiles": {
+    "clang": {
+      "instrumentation": [
+        "-ftime-trace",
+        "-ftime-trace-granularity=1000"
+      ],
+      "process": {
+        "wall_seconds": 27.99,
+        "user_seconds": 27.19,
+        "system_seconds": 0.36,
+        "max_rss_kib": 516408
+      },
+      "total_seconds": {
+        "ExecuteCompiler": 27.76844,
+        "Frontend": 7.372017,
+        "Backend": 20.317675,
+        "Optimizer": 14.216501,
+        "InstantiateFunction": 3.983464,
+        "InstantiateClass": 2.580153
+      },
+      "note": "Profiler totals are nested/overlapping and must not be added. Instrumented timings are diagnostic and excluded from paired compile comparisons."
+    },
+    "gcc": {
+      "instrumentation": [
+        "-ftime-report"
+      ],
+      "process": {
+        "wall_seconds": 31.99,
+        "user_seconds": 30.62,
+        "system_seconds": 0.66,
+        "max_rss_kib": 1027628
+      }
+    }
+  },
+  "compile_method": {
+    "unit": "engine/src/ecs/ui2.cpp",
+    "rounds": 3,
+    "affinity": "taskset -c 2",
+    "timing": "/usr/bin/time wall, user, system seconds and maximum resident set size (KiB)",
+    "execution": "One translation unit per process, serial execution, original respective PCHs and compile database commands, fresh object output each time, no profiler instrumentation. Other owned validation builds did not overlap these measured rounds.",
+    "order": "Raw sample order below is execution order. Rounds 0 and 2: Clang before/after then GCC before/after. Round 1: GCC after/before then Clang after/before.",
+    "normalized_before_after_commands_match": true,
+    "normalized_commands": {
+      "gcc": "/usr/bin/c++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_GLSLC_PATH=\\\"/bin/glslc\\\" -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DKIN_SHADER_INCLUDE_DIR=\\\"SOURCE/cmake/../engine/shaders\\\" -DNDEBUG -Dflecs_STATIC -ISOURCE/engine/include -IBUILD/engine/kin_embed/kin_engine -IBUILD/generated/kin/include -IBUILD/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/earcut-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -fpch-preprocess -Winvalid-pch -include BUILD/engine/CMakeFiles/kin_engine.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o -c SOURCE/engine/src/ecs/ui2.cpp",
+      "clang": "/usr/bin/clang++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_GLSLC_PATH=\\\"/bin/glslc\\\" -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DKIN_SHADER_INCLUDE_DIR=\\\"SOURCE/cmake/../engine/shaders\\\" -DNDEBUG -Dflecs_STATIC -ISOURCE/engine/include -IBUILD/engine/kin_embed/kin_engine -IBUILD/generated/kin/include -IBUILD/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/earcut-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -Winvalid-pch -Xclang -include-pch -Xclang BUILD/engine/CMakeFiles/kin_engine.dir/cmake_pch.hxx.pch -Xclang -include -Xclang BUILD/engine/CMakeFiles/kin_engine.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o -c SOURCE/engine/src/ecs/ui2.cpp"
+    }
+  },
+  "compile_summary": {
+    "gcc": {
+      "before": {
+        "samples": 3,
+        "median_wall_seconds": 36.98,
+        "median_cpu_seconds": 36.49,
+        "median_max_rss_mib": 1002.29296875
+      },
+      "after": {
+        "samples": 3,
+        "median_wall_seconds": 29.85,
+        "median_cpu_seconds": 29.41,
+        "median_max_rss_mib": 875.90234375
+      },
+      "wall_reduction_percent": 19.280692266089773,
+      "peak_rss_reduction_percent": 12.610147825104157
+    },
+    "clang": {
+      "before": {
+        "samples": 3,
+        "median_wall_seconds": 31.18,
+        "median_cpu_seconds": 30.98,
+        "median_max_rss_mib": 503.3046875
+      },
+      "after": {
+        "samples": 3,
+        "median_wall_seconds": 23.84,
+        "median_cpu_seconds": 23.71,
+        "median_max_rss_mib": 440.46484375
+      },
+      "wall_reduction_percent": 23.540731237973056,
+      "peak_rss_reduction_percent": 12.4854477438182
+    }
+  },
+  "compile_samples": [
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "run": 0,
+      "wall_seconds": 31.18,
+      "user_seconds": 30.59,
+      "system_seconds": 0.39,
+      "max_rss_kib": 515360
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "run": 0,
+      "wall_seconds": 23.84,
+      "user_seconds": 23.39,
+      "system_seconds": 0.32,
+      "max_rss_kib": 451068
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "run": 0,
+      "wall_seconds": 36.98,
+      "user_seconds": 35.72,
+      "system_seconds": 0.77,
+      "max_rss_kib": 1028160
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "run": 0,
+      "wall_seconds": 29.85,
+      "user_seconds": 28.7,
+      "system_seconds": 0.71,
+      "max_rss_kib": 902476
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "run": 1,
+      "wall_seconds": 31.76,
+      "user_seconds": 30.87,
+      "system_seconds": 0.77,
+      "max_rss_kib": 896864
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "run": 1,
+      "wall_seconds": 38.95,
+      "user_seconds": 37.9,
+      "system_seconds": 0.81,
+      "max_rss_kib": 1026348
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "run": 1,
+      "wall_seconds": 22.92,
+      "user_seconds": 22.5,
+      "system_seconds": 0.3,
+      "max_rss_kib": 450736
+    },
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "run": 1,
+      "wall_seconds": 27.73,
+      "user_seconds": 27.31,
+      "system_seconds": 0.32,
+      "max_rss_kib": 515504
+    },
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "run": 2,
+      "wall_seconds": 37.91,
+      "user_seconds": 37.38,
+      "system_seconds": 0.4,
+      "max_rss_kib": 515384
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "run": 2,
+      "wall_seconds": 28.49,
+      "user_seconds": 28.02,
+      "system_seconds": 0.4,
+      "max_rss_kib": 451036
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "run": 2,
+      "wall_seconds": 30.98,
+      "user_seconds": 30.03,
+      "system_seconds": 0.69,
+      "max_rss_kib": 1026092
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "run": 2,
+      "wall_seconds": 27.0,
+      "user_seconds": 26.18,
+      "system_seconds": 0.61,
+      "max_rss_kib": 896924
+    }
+  ],
+  "observer_descriptor_validation": {
+    "comparison": "Clang original vs changed, plus GCC changed vs Clang original",
+    "identical": true,
+    "count": 111,
+    "sha256": "0aae07d4c863834a0bf0ba7a0eda76fa037319f752fa2cf035b5d2e69e31be00",
+    "fields": [
+      "name",
+      "observer entity ID",
+      "event count and event IDs",
+      "query term count",
+      "query field count",
+      "query flags",
+      "query read_fields",
+      "query write_fields",
+      "query data_fields",
+      "each term: id, src.id, first.id, second.id, trav, inout, oper, field_index, flags_"
+    ],
+    "excluded": "Function/context addresses depend on the binary and are intentionally excluded.",
+    "sorted_manifest_lines": [
+      "ui2_dirty_advanced_text_add 661 1 296 1 1 126892032 1 1 1 60 9511602413006487821 9367487224930631740 0 0 0 0 0 2208",
+      "ui2_dirty_advanced_text_remove 662 1 297 1 1 126892032 1 1 1 60 9511602413006487821 9367487224930631740 0 0 0 0 0 2208",
+      "ui2_dirty_animated_value_add 667 1 296 1 1 126892032 1 1 1 63 9511602413006487821 9367487224930631743 0 0 0 0 0 2208",
+      "ui2_dirty_animated_value_remove 668 1 297 1 1 126892032 1 1 1 63 9511602413006487821 9367487224930631743 0 0 0 0 0 2208",
+      "ui2_dirty_asset_browser_add 629 1 296 1 1 126892032 1 1 1 44 9511602413006487821 9367487224930631724 0 0 0 0 0 2208",
+      "ui2_dirty_asset_browser_remove 630 1 297 1 1 126892032 1 1 1 44 9511602413006487821 9367487224930631724 0 0 0 0 0 2208",
+      "ui2_dirty_breadcrumb_bar_add 627 1 296 1 1 126892032 1 1 1 43 9511602413006487821 9367487224930631723 0 0 0 0 0 2208",
+      "ui2_dirty_breadcrumb_bar_remove 628 1 297 1 1 126892032 1 1 1 43 9511602413006487821 9367487224930631723 0 0 0 0 0 2208",
+      "ui2_dirty_button_add 593 1 296 1 1 126892032 1 1 1 26 9511602413006487821 9367487224930631706 0 0 0 0 0 2208",
+      "ui2_dirty_button_remove 594 1 297 1 1 126892032 1 1 1 26 9511602413006487821 9367487224930631706 0 0 0 0 0 2208",
+      "ui2_dirty_color_picker_add 675 1 296 1 1 126892032 1 1 1 67 9511602413006487821 9367487224930631747 0 0 0 0 0 2208",
+      "ui2_dirty_color_picker_remove 676 1 297 1 1 126892032 1 1 1 67 9511602413006487821 9367487224930631747 0 0 0 0 0 2208",
+      "ui2_dirty_combo_box_add 673 1 296 1 1 126892032 1 1 1 66 9511602413006487821 9367487224930631746 0 0 0 0 0 2208",
+      "ui2_dirty_combo_box_remove 674 1 297 1 1 126892032 1 1 1 66 9511602413006487821 9367487224930631746 0 0 0 0 0 2208",
+      "ui2_dirty_dialog_box_add 639 1 296 1 1 126892032 1 1 1 49 9511602413006487821 9367487224930631729 0 0 0 0 0 2208",
+      "ui2_dirty_dialog_box_remove 640 1 297 1 1 126892032 1 1 1 49 9511602413006487821 9367487224930631729 0 0 0 0 0 2208",
+      "ui2_dirty_dialogue_view_add 641 1 296 1 1 126892032 1 1 1 50 9511602413006487821 9367487224930631730 0 0 0 0 0 2208",
+      "ui2_dirty_dialogue_view_remove 642 1 297 1 1 126892032 1 1 1 50 9511602413006487821 9367487224930631730 0 0 0 0 0 2208",
+      "ui2_dirty_dock_panel_add 625 1 296 1 1 126892032 1 1 1 42 9511602413006487821 9367487224930631722 0 0 0 0 0 2208",
+      "ui2_dirty_dock_panel_remove 626 1 297 1 1 126892032 1 1 1 42 9511602413006487821 9367487224930631722 0 0 0 0 0 2208",
+      "ui2_dirty_floating_text_add 665 1 296 1 1 126892032 1 1 1 62 9511602413006487821 9367487224930631742 0 0 0 0 0 2208",
+      "ui2_dirty_floating_text_remove 666 1 297 1 1 126892032 1 1 1 62 9511602413006487821 9367487224930631742 0 0 0 0 0 2208",
+      "ui2_dirty_icon_button_add 607 1 296 1 1 126892032 1 1 1 33 9511602413006487821 9367487224930631713 0 0 0 0 0 2208",
+      "ui2_dirty_icon_button_remove 608 1 297 1 1 126892032 1 1 1 33 9511602413006487821 9367487224930631713 0 0 0 0 0 2208",
+      "ui2_dirty_icon_grid_add 677 1 296 1 1 126892032 1 1 1 68 9511602413006487821 9367487224930631748 0 0 0 0 0 2208",
+      "ui2_dirty_icon_grid_remove 678 1 297 1 1 126892032 1 1 1 68 9511602413006487821 9367487224930631748 0 0 0 0 0 2208",
+      "ui2_dirty_icon_meter_add 655 1 296 1 1 126892032 1 1 1 57 9511602413006487821 9367487224930631737 0 0 0 0 0 2208",
+      "ui2_dirty_icon_meter_remove 656 1 297 1 1 126892032 1 1 1 57 9511602413006487821 9367487224930631737 0 0 0 0 0 2208",
+      "ui2_dirty_icon_slot_add 609 1 296 1 1 126892032 1 1 1 34 9511602413006487821 9367487224930631714 0 0 0 0 0 2208",
+      "ui2_dirty_icon_slot_remove 610 1 297 1 1 126892032 1 1 1 34 9511602413006487821 9367487224930631714 0 0 0 0 0 2208",
+      "ui2_dirty_image_add 601 1 296 1 1 126892032 1 1 1 30 9511602413006487821 9367487224930631710 0 0 0 0 0 2208",
+      "ui2_dirty_image_remove 602 1 297 1 1 126892032 1 1 1 30 9511602413006487821 9367487224930631710 0 0 0 0 0 2208",
+      "ui2_dirty_label_add 587 1 296 1 1 126892032 1 1 1 23 9511602413006487821 9367487224930631703 0 0 0 0 0 2208",
+      "ui2_dirty_label_remove 588 1 297 1 1 126892032 1 1 1 23 9511602413006487821 9367487224930631703 0 0 0 0 0 2208",
+      "ui2_dirty_labeled_bar_add 653 1 296 1 1 126892032 1 1 1 56 9511602413006487821 9367487224930631736 0 0 0 0 0 2208",
+      "ui2_dirty_labeled_bar_remove 654 1 297 1 1 126892032 1 1 1 56 9511602413006487821 9367487224930631736 0 0 0 0 0 2208",
+      "ui2_dirty_layout_add 579 1 296 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+      "ui2_dirty_layout_remove 580 1 297 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+      "ui2_dirty_layout_set 581 1 298 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+      "ui2_dirty_list_view_add 679 1 296 1 1 126892032 1 1 1 69 9511602413006487821 9367487224930631749 0 0 0 0 0 2208",
+      "ui2_dirty_list_view_remove 680 1 297 1 1 126892032 1 1 1 69 9511602413006487821 9367487224930631749 0 0 0 0 0 2208",
+      "ui2_dirty_log_console_add 633 1 296 1 1 126892032 1 1 1 46 9511602413006487821 9367487224930631726 0 0 0 0 0 2208",
+      "ui2_dirty_log_console_remove 634 1 297 1 1 126892032 1 1 1 46 9511602413006487821 9367487224930631726 0 0 0 0 0 2208",
+      "ui2_dirty_menu_bar_add 619 1 296 1 1 126892032 1 1 1 39 9511602413006487821 9367487224930631719 0 0 0 0 0 2208",
+      "ui2_dirty_menu_bar_remove 620 1 297 1 1 126892032 1 1 1 39 9511602413006487821 9367487224930631719 0 0 0 0 0 2208",
+      "ui2_dirty_menu_list_add 617 1 296 1 1 126892032 1 1 1 38 9511602413006487821 9367487224930631718 0 0 0 0 0 2208",
+      "ui2_dirty_menu_list_remove 618 1 297 1 1 126892032 1 1 1 38 9511602413006487821 9367487224930631718 0 0 0 0 0 2208",
+      "ui2_dirty_meter_add 611 1 296 1 1 126892032 1 1 1 35 9511602413006487821 9367487224930631715 0 0 0 0 0 2208",
+      "ui2_dirty_meter_remove 612 1 297 1 1 126892032 1 1 1 35 9511602413006487821 9367487224930631715 0 0 0 0 0 2208",
+      "ui2_dirty_nameplate_add 643 1 296 1 1 126892032 1 1 1 51 9511602413006487821 9367487224930631731 0 0 0 0 0 2208",
+      "ui2_dirty_nameplate_remove 644 1 297 1 1 126892032 1 1 1 51 9511602413006487821 9367487224930631731 0 0 0 0 0 2208",
+      "ui2_dirty_nine_slice_add 603 1 296 1 1 126892032 1 1 1 31 9511602413006487821 9367487224930631711 0 0 0 0 0 2208",
+      "ui2_dirty_nine_slice_remove 604 1 297 1 1 126892032 1 1 1 31 9511602413006487821 9367487224930631711 0 0 0 0 0 2208",
+      "ui2_dirty_node_graph_add 637 1 296 1 1 126892032 1 1 1 48 9511602413006487821 9367487224930631728 0 0 0 0 0 2208",
+      "ui2_dirty_node_graph_remove 638 1 297 1 1 126892032 1 1 1 48 9511602413006487821 9367487224930631728 0 0 0 0 0 2208",
+      "ui2_dirty_number_input_add 671 1 296 1 1 126892032 1 1 1 65 9511602413006487821 9367487224930631745 0 0 0 0 0 2208",
+      "ui2_dirty_number_input_remove 672 1 297 1 1 126892032 1 1 1 65 9511602413006487821 9367487224930631745 0 0 0 0 0 2208",
+      "ui2_dirty_panel_add 585 1 296 1 1 126892032 1 1 1 22 9511602413006487821 9367487224930631702 0 0 0 0 0 2208",
+      "ui2_dirty_panel_remove 586 1 297 1 1 126892032 1 1 1 22 9511602413006487821 9367487224930631702 0 0 0 0 0 2208",
+      "ui2_dirty_progress_bar_add 599 1 296 1 1 126892032 1 1 1 29 9511602413006487821 9367487224930631709 0 0 0 0 0 2208",
+      "ui2_dirty_progress_bar_remove 600 1 297 1 1 126892032 1 1 1 29 9511602413006487821 9367487224930631709 0 0 0 0 0 2208",
+      "ui2_dirty_prompt_label_add 613 1 296 1 1 126892032 1 1 1 36 9511602413006487821 9367487224930631716 0 0 0 0 0 2208",
+      "ui2_dirty_prompt_label_remove 614 1 297 1 1 126892032 1 1 1 36 9511602413006487821 9367487224930631716 0 0 0 0 0 2208",
+      "ui2_dirty_prompt_row_add 615 1 296 1 1 126892032 1 1 1 37 9511602413006487821 9367487224930631717 0 0 0 0 0 2208",
+      "ui2_dirty_prompt_row_remove 616 1 297 1 1 126892032 1 1 1 37 9511602413006487821 9367487224930631717 0 0 0 0 0 2208",
+      "ui2_dirty_property_grid_add 685 1 296 1 1 126892032 1 1 1 72 9511602413006487821 9367487224930631752 0 0 0 0 0 2208",
+      "ui2_dirty_property_grid_remove 686 1 297 1 1 126892032 1 1 1 72 9511602413006487821 9367487224930631752 0 0 0 0 0 2208",
+      "ui2_dirty_property_inspector_add 635 1 296 1 1 126892032 1 1 1 47 9511602413006487821 9367487224930631727 0 0 0 0 0 2208",
+      "ui2_dirty_property_inspector_remove 636 1 297 1 1 126892032 1 1 1 47 9511602413006487821 9367487224930631727 0 0 0 0 0 2208",
+      "ui2_dirty_resource_row_add 651 1 296 1 1 126892032 1 1 1 55 9511602413006487821 9367487224930631735 0 0 0 0 0 2208",
+      "ui2_dirty_resource_row_remove 652 1 297 1 1 126892032 1 1 1 55 9511602413006487821 9367487224930631735 0 0 0 0 0 2208",
+      "ui2_dirty_rich_text_line_add 657 1 296 1 1 126892032 1 1 1 58 9511602413006487821 9367487224930631738 0 0 0 0 0 2208",
+      "ui2_dirty_rich_text_line_remove 658 1 297 1 1 126892032 1 1 1 58 9511602413006487821 9367487224930631738 0 0 0 0 0 2208",
+      "ui2_dirty_root_add 576 1 296 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+      "ui2_dirty_root_remove 577 1 297 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+      "ui2_dirty_root_set 578 1 298 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+      "ui2_dirty_scroll_container_add 582 1 296 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+      "ui2_dirty_scroll_container_remove 583 1 297 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+      "ui2_dirty_scroll_container_set 584 1 298 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+      "ui2_dirty_scroll_view_add 649 1 296 1 1 126892032 1 1 1 54 9511602413006487821 9367487224930631734 0 0 0 0 0 2208",
+      "ui2_dirty_scroll_view_remove 650 1 297 1 1 126892032 1 1 1 54 9511602413006487821 9367487224930631734 0 0 0 0 0 2208",
+      "ui2_dirty_selection_rect_add 645 1 296 1 1 126892032 1 1 1 52 9511602413006487821 9367487224930631732 0 0 0 0 0 2208",
+      "ui2_dirty_selection_rect_remove 646 1 297 1 1 126892032 1 1 1 52 9511602413006487821 9367487224930631732 0 0 0 0 0 2208",
+      "ui2_dirty_separator_add 591 1 296 1 1 126892032 1 1 1 25 9511602413006487821 9367487224930631705 0 0 0 0 0 2208",
+      "ui2_dirty_separator_remove 592 1 297 1 1 126892032 1 1 1 25 9511602413006487821 9367487224930631705 0 0 0 0 0 2208",
+      "ui2_dirty_slider_add 597 1 296 1 1 126892032 1 1 1 28 9511602413006487821 9367487224930631708 0 0 0 0 0 2208",
+      "ui2_dirty_slider_remove 598 1 297 1 1 126892032 1 1 1 28 9511602413006487821 9367487224930631708 0 0 0 0 0 2208",
+      "ui2_dirty_spacer_add 605 1 296 1 1 126892032 1 1 1 32 9511602413006487821 9367487224930631712 0 0 0 0 0 2208",
+      "ui2_dirty_spacer_remove 606 1 297 1 1 126892032 1 1 1 32 9511602413006487821 9367487224930631712 0 0 0 0 0 2208",
+      "ui2_dirty_splitter_add 623 1 296 1 1 126892032 1 1 1 41 9511602413006487821 9367487224930631721 0 0 0 0 0 2208",
+      "ui2_dirty_splitter_remove 624 1 297 1 1 126892032 1 1 1 41 9511602413006487821 9367487224930631721 0 0 0 0 0 2208",
+      "ui2_dirty_status_bar_add 631 1 296 1 1 126892032 1 1 1 45 9511602413006487821 9367487224930631725 0 0 0 0 0 2208",
+      "ui2_dirty_status_bar_remove 632 1 297 1 1 126892032 1 1 1 45 9511602413006487821 9367487224930631725 0 0 0 0 0 2208",
+      "ui2_dirty_tab_bar_add 621 1 296 1 1 126892032 1 1 1 40 9511602413006487821 9367487224930631720 0 0 0 0 0 2208",
+      "ui2_dirty_tab_bar_remove 622 1 297 1 1 126892032 1 1 1 40 9511602413006487821 9367487224930631720 0 0 0 0 0 2208",
+      "ui2_dirty_table_add 681 1 296 1 1 126892032 1 1 1 70 9511602413006487821 9367487224930631750 0 0 0 0 0 2208",
+      "ui2_dirty_table_remove 682 1 297 1 1 126892032 1 1 1 70 9511602413006487821 9367487224930631750 0 0 0 0 0 2208",
+      "ui2_dirty_target_reticle_add 647 1 296 1 1 126892032 1 1 1 53 9511602413006487821 9367487224930631733 0 0 0 0 0 2208",
+      "ui2_dirty_target_reticle_remove 648 1 297 1 1 126892032 1 1 1 53 9511602413006487821 9367487224930631733 0 0 0 0 0 2208",
+      "ui2_dirty_text_area_add 659 1 296 1 1 126892032 1 1 1 59 9511602413006487821 9367487224930631739 0 0 0 0 0 2208",
+      "ui2_dirty_text_area_remove 660 1 297 1 1 126892032 1 1 1 59 9511602413006487821 9367487224930631739 0 0 0 0 0 2208",
+      "ui2_dirty_text_input_add 669 1 296 1 1 126892032 1 1 1 64 9511602413006487821 9367487224930631744 0 0 0 0 0 2208",
+      "ui2_dirty_text_input_remove 670 1 297 1 1 126892032 1 1 1 64 9511602413006487821 9367487224930631744 0 0 0 0 0 2208",
+      "ui2_dirty_toast_stack_add 663 1 296 1 1 126892032 1 1 1 61 9511602413006487821 9367487224930631741 0 0 0 0 0 2208",
+      "ui2_dirty_toast_stack_remove 664 1 297 1 1 126892032 1 1 1 61 9511602413006487821 9367487224930631741 0 0 0 0 0 2208",
+      "ui2_dirty_toggle_add 595 1 296 1 1 126892032 1 1 1 27 9511602413006487821 9367487224930631707 0 0 0 0 0 2208",
+      "ui2_dirty_toggle_remove 596 1 297 1 1 126892032 1 1 1 27 9511602413006487821 9367487224930631707 0 0 0 0 0 2208",
+      "ui2_dirty_tree_view_add 683 1 296 1 1 126892032 1 1 1 71 9511602413006487821 9367487224930631751 0 0 0 0 0 2208",
+      "ui2_dirty_tree_view_remove 684 1 297 1 1 126892032 1 1 1 71 9511602413006487821 9367487224930631751 0 0 0 0 0 2208",
+      "ui2_dirty_wrapped_text_add 589 1 296 1 1 126892032 1 1 1 24 9511602413006487821 9367487224930631704 0 0 0 0 0 2208",
+      "ui2_dirty_wrapped_text_remove 590 1 297 1 1 126892032 1 1 1 24 9511602413006487821 9367487224930631704 0 0 0 0 0 2208"
+    ]
+  },
+  "validation": {
+    "gcc": {
+      "passed": 9,
+      "failed": 0,
+      "tests": [
+        "hex-demo",
+        "shapes-demo",
+        "kin-ui2",
+        "kin-ui2-text-edit",
+        "kin-ui2-touch-controls",
+        "kin-ui2-text",
+        "kin-ui2-theme-file",
+        "kin-lua-workflows2d",
+        "kin-scripting"
+      ]
+    },
+    "clang": {
+      "passed": 9,
+      "failed": 0,
+      "tests": [
+        "hex-demo",
+        "shapes-demo",
+        "kin-ui2",
+        "kin-ui2-text-edit",
+        "kin-ui2-touch-controls",
+        "kin-ui2-text",
+        "kin-ui2-theme-file",
+        "kin-lua-workflows2d",
+        "kin-scripting"
+      ]
+    },
+    "environment": {
+      "SDL_VIDEODRIVER": "dummy",
+      "SDL_AUDIODRIVER": "dummy",
+      "TMPDIR": "Separate directories per compiler"
+    },
+    "assertions_enabled": true,
+    "new_lifecycle_coverage": [
+      "OnAdd and OnRemove exactly once",
+      "Repeated add/remove emits no extra invalidation",
+      "Widget OnSet is ignored",
+      "Nontrivial component destruction",
+      "Deferred mutations",
+      "Layout/root/scroll OnSet",
+      "Unrelated roots unchanged",
+      "Observer re-registration does not duplicate callbacks",
+      "Rootless entities"
+    ],
+    "old_implementation_contract": "The current expanded UI2 suite was also linked to the original Clang ui2.cpp object, ahead of the updated static library, and passed.",
+    "extra_compile_checks": [
+      {
+        "configuration": "clang-3d",
+        "source": "engine/src/ecs/ui2.cpp",
+        "PCH": false,
+        "check": "syntax and template instantiation",
+        "exit_code": 0
+      },
+      {
+        "configuration": "gcc-minimal",
+        "source": "engine/src/ecs/ui2.cpp",
+        "PCH": false,
+        "check": "syntax and template instantiation",
+        "exit_code": 0
+      }
+    ]
+  },
+  "runtime_stress": {
+    "compiler": "clang",
+    "affinity": "taskset -c 2",
+    "workload": "Add and remove ui2::Label on one child of a Ui2Root 100000 times per sample (200000 structural operations).",
+    "processes_per_phase": 3,
+    "warmup_samples_per_process": 3,
+    "measured_samples_per_process": 30,
+    "preconditioning": "Run the changed benchmark continuously on CPU 2 for at least five seconds before the measured processes.",
+    "sample_summary": "Each process reports the upper median (sorted index 15 of 30 measured samples); phase summaries are the median of three process results.",
+    "versions": "The before binary links the original profiled ui2.cpp object; the after binary links the changed implementation. All other engine libraries are shared. Assertions enabled.",
+    "expected_final_tree_version_each_process": 6600003,
+    "callback_count_assertions_passed": true,
+    "median_milliseconds": {
+      "before": 109.977,
+      "after": 111.653
+    },
+    "after_time_change_percent": 1.523955008774558,
+    "samples": [
+      {
+        "phase": "before",
+        "run": 0,
+        "add_remove_100000_ms": 111.333
+      },
+      {
+        "phase": "after",
+        "run": 0,
+        "add_remove_100000_ms": 111.717
+      },
+      {
+        "phase": "after",
+        "run": 1,
+        "add_remove_100000_ms": 111.653
+      },
+      {
+        "phase": "before",
+        "run": 1,
+        "add_remove_100000_ms": 109.75
+      },
+      {
+        "phase": "before",
+        "run": 2,
+        "add_remove_100000_ms": 109.977
+      },
+      {
+        "phase": "after",
+        "run": 2,
+        "add_remove_100000_ms": 111.602
+      }
+    ],
+    "note": "This narrow structural-event stress measured about 1.5% slower after the change. No runtime speedup or whole-game performance claim is made. Earlier short exploratory samples were bimodal and were superseded by this longer warmed run."
+  },
+  "reproduction_sources": {
+    "probe_cpp": "#include <kin/ecs/ui2.hpp>\n#include <algorithm>\n#include <cassert>\n#include <chrono>\n#include <iostream>\n#include <string>\n#include <vector>\nint main(int argc,char**argv) {\n    kin::EcsWorld world;\n    kin::register_ui2_components(world);\n    if(argc>1 && std::string(argv[1])==\"bench\") {\n        auto root=world.raw().entity().set(kin::Ui2Root{{0,0,100,100}});\n        auto child=world.raw().entity().child_of(root);\n        std::vector<double> samples;\n        for(int r=0;r<33;++r) {\n            auto start=std::chrono::steady_clock::now();\n            for(int i=0;i<100000;++i) {child.add<kin::ui2::Label>();child.remove<kin::ui2::Label>();}\n            if(r>=3)samples.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());\n        }\n        assert(root.get<kin::Ui2LayoutCache>()->tree_version==6600003);\n        std::sort(samples.begin(),samples.end());\n        std::cout<<\"add_remove_100000_ms \"<<samples[samples.size()/2]<<'\\n';\n        return 0;\n    }\n    world.raw().each(flecs::Observer,[&](flecs::entity e) {\n        std::string name=e.name().c_str();if(!name.starts_with(\"ui2_dirty_\"))return;\n        const auto* o=ecs_observer_get(world.raw().c_ptr(),e.id());assert(o&&o->query);\n        const auto* q=o->query;\n        std::cout<<name<<' '<<e.id()<<' '<<o->event_count;\n        for(int i=0;i<o->event_count;++i)std::cout<<' '<<o->events[i];\n        std::cout<<' '<<int(q->term_count)<<' '<<int(q->field_count)<<' '<<q->flags<<' '<<q->read_fields<<' '<<q->write_fields<<' '<<q->data_fields;\n        for(int i=0;i<q->term_count;++i) {\n            const auto&t=q->terms[i];\n            std::cout<<' '<<t.id<<' '<<t.src.id<<' '<<t.first.id<<' '<<t.second.id<<' '<<t.trav<<' '<<t.inout<<' '<<t.oper<<' '<<int(t.field_index)<<' '<<t.flags_;\n        }\n        std::cout<<'\\n';\n    });\n}\n",
+    "compile_measurement_python": "import json,pathlib,shlex,subprocess\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');out=base/'kin-build-time-ui2-profile';rows=[]\nfor run in range(3):\n for compiler in (['clang','gcc'] if run%2==0 else ['gcc','clang']):\n  for phase in (['before','after'] if run%2==0 else ['after','before']):\n   name=('kin-build-time-before-'+compiler) if phase=='before' else ('kin-build-time-out' if compiler=='gcc' else 'kin-build-time-clang')\n   b=base/name;e=next(e for e in json.loads((b/'compile_commands.json').read_text()) if e['file'].endswith('/ecs/ui2.cpp'))\n   args=shlex.split(e['command']);label=f'paired-{compiler}-{phase}-{run}';args[args.index('-o')+1]=str(out/(label+'.o'));stats=out/(label+'.stats.json')\n   with (out/(label+'.log')).open('w') as log:\n    p=subprocess.run(['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_rss_kib\":%M}','-o',str(stats),'taskset','-c','2',*args],cwd=b,stdout=log,stderr=subprocess.STDOUT)\n   if p.returncode:print(log.read_text()[-5000:],flush=True);raise SystemExit(p.returncode)\n   r={'compiler':compiler,'phase':phase,'run':run,**json.loads(stats.read_text())};rows.append(r);print(json.dumps(r),flush=True)\n   pathlib.Path('/tmp/kin-build-bench/ui2-compile-results.json').write_text(json.dumps(rows,indent=2)+'\\n')\n",
+    "runtime_measurement_python": "import json,pathlib,subprocess,time\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-ui2-profile');rows=[]\nwarm_until=time.monotonic()+5\nwhile time.monotonic()<warm_until:\n subprocess.run(['taskset','-c','2',str(base/'clang-after-probe'),'bench'],check=True,capture_output=True)\nfor run in range(3):\n for phase in (['before','after'] if run%2==0 else ['after','before']):\n  p=subprocess.run(['taskset','-c','2',str(base/f'clang-{phase}-probe'),'bench'],check=True,capture_output=True,text=True)\n  name,value=p.stdout.split();r={'phase':phase,'run':run,name:float(value)};rows.append(r);print(json.dumps(r),flush=True)\npathlib.Path('/tmp/kin-build-bench/ui2-runtime-results.json').write_text(json.dumps(rows,indent=2)+'\\n')\n",
+    "probe_build_python": "import json,pathlib,shlex,subprocess,sys\nphase=sys.argv[1];compiler=sys.argv[2] if len(sys.argv)>2 else 'clang'\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');b=base/('kin-build-time-out' if compiler=='gcc' else 'kin-build-time-clang')\nout=base/'kin-build-time-ui2-profile';out.mkdir(exist_ok=True);label=compiler+'-'+phase+'-probe'\ne=next(e for e in json.loads((b/'compile_commands.json').read_text()) if e['file'].endswith('/tests/ui2_tests.cpp'))\ncmd=shlex.split(e['command']);cmd[cmd.index('-o')+1]=str(out/(label+'.o'));cmd[cmd.index('-c')+1]='/tmp/kin-build-bench/ui2_probe.cpp'\nsubprocess.run(cmd,cwd=b,check=True)\nlines=subprocess.check_output(['ninja','-C',str(b),'-t','commands','kin_ui2_tests'],text=True).splitlines()\nargs=shlex.split(next(l for l in lines if '-o bin/kin_ui2_tests ' in l));start=next(i for i,x in enumerate(args) if x in ['/usr/bin/c++','/usr/bin/clang++']);end=next((i for i in range(start,len(args)) if args[i]=='&&'),len(args));args=args[start:end]\nargs[args.index('-o')+1]=str(out/label);args[args.index('tests/CMakeFiles/kin_ui2_tests.dir/ui2_tests.cpp.o')]=str(out/(label+'.o'))\nif phase=='before':args.insert(args.index(str(out/(label+'.o'))),str(out/(compiler+'-before.o')))\nsubprocess.run(args,cwd=b,check=True)\nresult=subprocess.check_output([str(out/label)],text=True);(out/(label+'.txt')).write_text(''.join(sorted(result.splitlines(True))))\nprint(label,len(result.splitlines()),'observers',flush=True)\n",
+    "note": "Scripts retain session-local paths; adapt the source/build/artifact roots to reproduce. Build the same base commit and changed source with matching compile options and dependencies."
+  },
+  "limits": [
+    "Translation-unit compile measurements are local estimates; total clean engine/game rebuild time was not measured in this phase.",
+    "Maximum RSS is for one compiler process, not total parallel-build memory.",
+    "CPU pinning does not isolate SMT siblings, frequency changes, thermals or background I/O.",
+    "MSVC/Windows compilation and full 3D runtime tests were not run; 3D validation was syntax/template instantiation only."
+  ]
+}

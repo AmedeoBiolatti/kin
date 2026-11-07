@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
+  precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters,
+  and earlier independent runtime compilation with Ninja. See [build-time measurements and setup](build_times.md).
+
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
   `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D
