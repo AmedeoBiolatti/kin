@@ -258,6 +258,42 @@ experimental 3D configuration. These additional checks cover compilation;
 Windows and a full 3D runtime suite were not tested.
 
 The [scene split data](build_scene_split_2026-11-07.json) includes individual
-samples, queue order, CPU totals and measurement limits. The next useful
-measurement is a paired full engine rebuild at the developer's usual job
-count, before choosing further splits of the Lua binding translation units.
+samples, queue order, CPU totals and measurement limits.
+
+### Full runtime rebuild
+
+A subsequent comparison rebuilt all Kin libraries needed by `hex_demo`,
+including Lua, audio, physics, PCHs and the game's final link, using Ninja
+with four jobs. The before and after commits were `031dd64` and `fc41b58`,
+in separate worktrees/build directories. Third-party libraries, generated
+shaders/embedding and initial CMake configuration were already built.
+All 213 common engine/runtime compile commands matched after normalizing
+source/build paths. There was no third-party compilation in the timed runs.
+
+| Toolchain | Before split | After split | Observed change |
+|---|---:|---:|---:|
+| GCC 15.2 | 240.80 s | 248.59 s | 3.2% slower |
+| Clang 21.1.8 | 229.45 s | 221.92 s | 3.3% faster |
+
+There is one paired observation per compiler: GCC before/after, then Clang
+after/before, run sequentially. These small, mixed differences do not
+demonstrate a reliable full-rebuild improvement at four jobs. Host load,
+hybrid-core scheduling, filesystem/cache effects and thermals can affect
+these timings. The split remains useful for source edits and reduced
+per-process memory; the scene-only four-worker result above should not be
+used to predict a full engine rebuild.
+
+The largest child-process peak RSS fell from 2,184 to 1,583 MiB with GCC
+and from 920 to 882 MiB with Clang. These are not total parallel-build RAM
+figures. All four builds succeeded and each resulting game passed its
+headless/render smoke test.
+
+The task traces identify `script_engine.cpp` and `entity_scripts.cpp` among
+the last compilations before the final link in all four builds. In the GCC
+baseline, the scene file finished at 187.82 s, while the game linked at
+240.80 s. The next experiment should profile these Lua compilation tasks
+and their scheduling before adding more template-instantiation groups.
+
+The [full rebuild data](build_full_rebuild_2026-11-07.json) retains the run
+order, CPU/RSS measurements, smoke results and complete Ninja task timelines.
+This phase adds measurement records without further engine behavior changes.
