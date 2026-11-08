@@ -265,7 +265,16 @@ scripts.update(world, ctx.input, ctx.dt);
 - `on_start(self)` runs once, before the entity's first `on_update(self, dt)`.
 - `on_contact(self, other)` runs when the entity's body begins to touch
   another, and `on_contact_end(self, other)` when it stops, when the entity
-  has a `PhysicsContactQueue`.
+  has a `PhysicsContactQueue`. Finding `other` looks through every entity with
+  a body (then every tilemap collider) for each contact, so a scene of
+  thousands of bodies with many contacts a step pays for it: a known gap.
+- A file's `on_update`, `on_dialogue_event`, `on_contact` and
+  `on_contact_end` are looked up once an update, not once an entity: a script
+  that defines one while it runs (in `on_start`, say) has it called from the
+  next update. `self`'s entity methods (`self:position()`) are bound to it the
+  first time each is used. A scripted foe walking to the player costs about
+  1.1 µs an update on a desktop (2.4 before;
+  [the bench](../tests/entity_scripts_bench.cpp)).
 - Script files are checked for changes every `check_frames` updates. A changed
   file is prepared in a fresh VM, preserving each entity's data. Optional
   `on_reload(self)` migrates it without rerunning `on_start`. Failed edits keep

@@ -8,6 +8,7 @@
 #include <iostream>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/scene_session3d.hpp>
 #include <stdexcept>

@@ -2,7 +2,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/platform/gamepad.hpp>
-#include <kin/platform/window.hpp>
+#include <kin/platform/window_types.hpp>
 
 #include <array>
 #include <filesystem>

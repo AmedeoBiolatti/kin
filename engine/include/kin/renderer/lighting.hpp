@@ -2,7 +2,6 @@
 
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
-#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/texture.hpp>
 
 #include <array>
@@ -10,6 +9,8 @@
 #include <vector>
 
 namespace kin {
+
+class Renderer2D;
 
 // 2D lighting: darken what is already drawn to an ambient light, and brighten it
 // where lights reach.

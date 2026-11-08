@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <emscripten.h>
 #include <emscripten/html5.h>
+#include <kin/platform/window.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <memory>
 #include <stdexcept>

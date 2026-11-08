@@ -5310,6 +5310,90 @@ void test_compose_scroll_box() {
     assert(approx(ui.scroll_offset(id).y, 200.0f));
 }
 
+// A finger dragged across a scroll box scrolls it, and the row it began on
+// is not clicked; let go with a flick, it glides on; a tap still clicks.
+// A mouse dragged over it does not scroll it.
+void test_compose_touch_drag_scrolls() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id id = ui2::make_id("touch_scroll");
+    i32 clicked = -1;
+    const auto build = [&]() {
+        ui.begin(input, renderer, 1.0f / 60.0f);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto s = ui.scroll(id, {.layout = {.width = ui2::grow(), .height = ui2::fixed(100)}});
+            for (i32 i = 0; i < 20; ++i) {
+                auto row = ui.box(ui2::make_id(ui2::make_id("row"), static_cast<u64>(i)), ui2::hbox().w(ui2::grow()).h(30));
+                if (row.clicked) {
+                    clicked = i;
+                }
+            }
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    const auto frame = [&](auto&& events) {
+        input.begin_frame();
+        events();
+        build();
+    };
+    frame([] {});
+    frame([] {});
+    frame([&] { input.set_touch_down(1, {50, 80}); });
+    frame([] {}); // the press lands
+    for (i32 k = 1; k <= 4; ++k) {
+        frame([&] { input.set_touch_moved(1, {50, 80.0f - 10.0f * static_cast<f32>(k)}); });
+    }
+    // Taken past 8 units (at 70), and moved with the finger from there.
+    assert(approx(ui.scroll_offset(id).y, 30.0f));
+    frame([&] { input.set_touch_up(1); });
+    frame([] {});
+    assert(clicked == -1);
+    // A flick of 10 units a frame: it goes on, slowing down.
+    const f32 let_go = ui.scroll_offset(id).y;
+    frame([] {});
+    const f32 first = ui.scroll_offset(id).y - let_go;
+    assert(first > 3.0f);
+    for (i32 k = 0; k < 10; ++k) {
+        frame([] {});
+    }
+    const f32 later = ui.scroll_offset(id).y;
+    frame([] {});
+    assert(ui.scroll_offset(id).y - later < first);
+    for (i32 k = 0; k < 200; ++k) {
+        frame([] {});
+    }
+    const f32 rest = ui.scroll_offset(id).y;
+    assert(rest > let_go + 20.0f && rest <= 500.0f);
+    frame([] {});
+    assert(ui.scroll_offset(id).y == rest); // stopped
+    // A tap: no drag, and the row under it clicked.
+    frame([&] {
+        input.set_touch_down(2, {50, 15});
+        input.set_touch_up(2);
+    });
+    frame([] {});
+    frame([] {});
+    assert(clicked == static_cast<i32>((rest + 15.0f) / 30.0f));
+    assert(ui.scroll_offset(id).y == rest);
+    // A mouse drag: not a scroll. (A fresh Input: set_mouse_pos is no mouse
+    // event, so the pointer would still count as the finger.)
+    input = Input{};
+    clicked = -1;
+    frame([&] {
+        input.set_mouse_pos({50, 80});
+        input.set_mouse_pressed(MouseButton::Left);
+        input.set_mouse_held(MouseButton::Left, true);
+    });
+    for (i32 k = 1; k <= 4; ++k) {
+        frame([&] { input.set_mouse_pos({50, 80.0f - 10.0f * static_cast<f32>(k)}); });
+    }
+    assert(ui.scroll_offset(id).y == rest);
+    frame([&] { input.set_mouse_held(MouseButton::Left, false); });
+}
+
 void test_compose_lazy_list() {
     Input input;
     Renderer2D renderer = make_renderer();
@@ -7446,6 +7530,70 @@ void test_ecs_bridge_static_dynamic_filtering() {
     assert(scratch.records[1].prompt_row);
 }
 
+void test_ecs_bridge_query_storage_and_worlds() {
+    for (const bool owned : {true, false}) {
+        kin::EcsWorld owner;
+        flecs::world standalone;
+        flecs::world& world = owned ? owner.raw() : standalone;
+        register_ui2_components(world);
+        world.component<ui2::Panel>().add(flecs::Sparse);
+        world.component<ui2::Label>()
+            .add(flecs::CanToggle)
+            .add(flecs::OnInstantiate, flecs::Inherit);
+
+        const auto first_panel = world.entity().set(ui2::Panel{.bounds = {0, 0, 10, 10}});
+        const auto second_panel = world.entity().set(ui2::Panel{.bounds = {10, 0, 10, 10}});
+        const auto base = world.prefab().set(ui2::Label{.bounds = {0, 0, 10, 10}, .text = "Shared"});
+        const auto first_instance = world.entity().is_a(base);
+        const auto second_instance = world.entity().is_a(base);
+        const auto local = world.entity().set(ui2::Label{.bounds = {0, 0, 10, 10}, .text = "Local"});
+        world.entity().set(ui2::Label{.text = "Disabled entity"}).disable();
+        const auto toggled = world.entity().set(ui2::Label{.text = "Disabled component"});
+        toggled.disable<ui2::Label>();
+
+        Input input;
+        Renderer2D renderer = make_renderer();
+        ui2::Context ui;
+        Ui2WorldRenderScratch scratch;
+        const auto frame = [&]() {
+            input.begin_frame();
+            ui.begin(input, renderer);
+            update_ui2_world(world, ui, scratch);
+            ui.end();
+        };
+        const auto record_for = [&](flecs::entity entity) -> const Ui2WorldRecord& {
+            const auto found = std::ranges::find(scratch.records, static_cast<kin::EcsId>(entity.id()),
+                                                 &Ui2WorldRecord::entity_id);
+            assert(found != scratch.records.end());
+            return *found;
+        };
+
+        frame();
+        assert(scratch.size() == 5);
+        assert(record_for(first_panel).panel == first_panel.get<ui2::Panel>());
+        assert(record_for(second_panel).panel == second_panel.get<ui2::Panel>());
+        assert(record_for(first_instance).label == base.get<ui2::Label>());
+        assert(record_for(second_instance).label == base.get<ui2::Label>());
+        assert(record_for(local).label == local.get<ui2::Label>());
+        assert(record_for(first_panel).widget == record_for(first_panel).panel);
+        assert(record_for(first_instance).widget == record_for(first_instance).label);
+
+        // Kept queries must observe new tables, deferred removals and toggles.
+        world.defer_begin();
+        const auto added = world.entity().set(ui2::Spacer{.bounds = {0, 0, 10, 10}});
+        first_panel.remove<ui2::Panel>();
+        world.defer_end();
+        toggled.enable<ui2::Label>();
+        frame();
+        assert(scratch.size() == 6);
+        assert(record_for(added).spacer == added.get<ui2::Spacer>());
+        assert(record_for(toggled).label == toggled.get<ui2::Label>());
+        assert(std::ranges::none_of(scratch.records, [&](const auto& record) {
+            return record.entity_id == first_panel.id();
+        }));
+    }
+}
+
 void test_ecs_sync_stable_keys_sweep_and_state() {
     kin::EcsWorld world;
     register_ui2_components(world);
@@ -9442,6 +9590,7 @@ int main() {
     test_layout_end_to_end();
     test_compose_box_nesting_and_clicks();
     test_compose_scroll_box();
+    test_compose_touch_drag_scrolls();
     test_compose_lazy_list();
     test_compose_split();
     test_compose_clicks_double_and_secondary();
@@ -9529,6 +9678,7 @@ int main() {
     test_ecs_bridge_editor_widgets_layout_and_records();
     test_ecs_bridge_remaining_basic_widgets_and_scroll_container();
     test_ecs_bridge_static_dynamic_filtering();
+    test_ecs_bridge_query_storage_and_worlds();
     test_ecs_sync_stable_keys_sweep_and_state();
     test_ecs_sync_explicit_keys_survive_reorder();
     test_ecs_dirty_observer_lifecycle();

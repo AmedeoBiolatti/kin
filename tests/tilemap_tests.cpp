@@ -1,5 +1,6 @@
 #include <kin/tilemap/tilemap.hpp>
 #include <kin/pathfinding/pathfinding.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/shape.hpp>
 
 #include <algorithm>

@@ -30,6 +30,13 @@ std::optional<f64> parse_number(std::string_view text, f64 min, f64 max, bool wh
     if (!text.empty() && text.front() == '+') {
         text.remove_prefix(1);
     }
+    // A decimal comma, as a keyboard in much of the world types it: 62,5.
+    std::string pointed;
+    if (!whole && text.find('.') == std::string_view::npos && std::ranges::count(text, ',') == 1) {
+        pointed = std::string(text);
+        pointed[pointed.find(',')] = '.';
+        text = pointed;
+    }
     f64 value = 0.0;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
     if (text.empty() || error != std::errc{} || end != text.data() + text.size() || !std::isfinite(value) || value < min ||
@@ -52,6 +59,7 @@ ValueFieldResult Context::checked_value_field(Id id, std::string_view shown, con
     TextInput& input = edit.input;
     UiTextInputState& state = input.state;
     input.id = id;
+    state.keyboard = options.keyboard;
     const auto show = [&](std::string_view text) {
         state.text = std::string(text);
         state.caret = std::min(state.caret, state.text.size());
@@ -69,6 +77,10 @@ ValueFieldResult Context::checked_value_field(Id id, std::string_view shown, con
         edit.before = std::string(shown);
     } else if (state.active && !edit.was_active) {
         edit.before = std::string(shown); // typed in from last frame's run (a click, Tab)
+        if (options.select_all && state.text == shown) {
+            state.caret = state.text.size();
+            state.selection_anchor = 0; // typing replaces it
+        }
     }
     // Typed in until last frame's run: left now (Enter, Tab, a press elsewhere, Esc).
     result.left = edit.was_active && !state.active;
@@ -120,7 +132,8 @@ ValueFieldResult Context::checked_value_field(Id id, std::string_view shown, con
     {
         const BoxScope holder(this, begin_box(make_id(id, "field"), BoxStyle{.layout = options.layout, .interactive = false}),
                               &Context::end_box);
-        widget(input, {.width = grow()});
+        // As tall as the field when it is given a height (a row of 40), else its own.
+        widget(input, {.width = grow(), .height = options.layout.height.mode == SizeMode::Fit ? fit() : grow()});
         const f32 inset = input.style.padding.left;
         if (state.text.empty() && !options.placeholder.empty()) {
             label(options.placeholder, faint, LayoutStyle{}.at(UiAnchor::CenterLeft, {inset, 0.0f}));
@@ -153,7 +166,12 @@ void Context::stop_value_fields() {
 
 std::optional<f64> Context::number_field(Id id, f64 value, const NumberFieldOptions& options) {
     const std::string shown = number_text(value, options.digits, options.whole);
-    const ValueFieldResult field = value_field(id, shown, options.field, [&](std::string_view text) {
+    ValueFieldOptions field_options = options.field;
+    if (field_options.keyboard == TextInputKind::Text && options.min >= 0.0) {
+        field_options.keyboard = options.whole ? TextInputKind::Number : TextInputKind::Decimal; // a pad has no minus
+    }
+    field_options.select_all = true; // a number is typed afresh, not edited a digit at a time
+    const ValueFieldResult field = value_field(id, shown, field_options, [&](std::string_view text) {
         return parse_number(text, options.min, options.max, options.whole).has_value();
     });
     return field.committed ? parse_number(*field.committed, options.min, options.max, options.whole) : std::nullopt;

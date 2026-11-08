@@ -1,3 +1,5 @@
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/renderer/color_grading.hpp>

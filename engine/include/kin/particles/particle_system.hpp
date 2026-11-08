@@ -4,7 +4,6 @@
 #include <kin/core/rng.hpp>
 #include <kin/particles/particle_catalog.hpp>
 #include <kin/renderer/render_queue.hpp>
-#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 
 #include <memory>
@@ -12,6 +11,8 @@
 #include <vector>
 
 namespace kin {
+
+class Renderer2D;
 
 // What a burst's particles share past their start: their curves over life and
 // their sub-effects (ParticleBurst's, which see).

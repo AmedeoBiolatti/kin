@@ -1,0 +1,1192 @@
+{
+  "date": "2026-11-07",
+  "base_commit": "239834256c3f4d916bc8d1d2c8dd20098c4ef90f",
+  "source_sha256": {
+    "engine/CMakeLists.txt": {
+      "before": "f314c8b9f247a8578a29f241caf70c85872dc5bf1fd3c7196df3043dab2e4492",
+      "after": "1cac0f43e18d4718710841f2e0ce58dfa73239cfe1acea67f20a93680ae8e126"
+    },
+    "tests/entity_scripts_tests.cpp": {
+      "before": "c4813e51db0108525d72727b04dfffd92a277e65983cf83f07aaf288975ea1a3",
+      "after": "d9fabf267e0cf819b506bc7139c44739b26f77aa5e5afeb90489f21e29e94fb7"
+    },
+    "engine/src/scripting/entity_scripts.cpp": {
+      "before": "70279ef2e196928b882b30560ff1b84753d0d200f5c54b2f1f3f026b2ea74fd6",
+      "after": "aafbc5678b6900fdc51f3de6efa70762df04dbcb8d68f77c10a2599831dddf17"
+    },
+    "engine/src/scripting/entity_script_bindings.cpp": {
+      "before": null,
+      "after": "928f27d41c5bbe3e5b76cbb88f66788aa3632af9e82618e17bdcf6da9b8b0a44"
+    },
+    "engine/src/scripting/entity_service_bindings.cpp": {
+      "before": null,
+      "after": "a7601560f1aa2ab012e90f765972a91e4788ec3f4e524a3f13825121e60ad98a"
+    },
+    "engine/src/scripting/entity_scripts_internal.hpp": {
+      "before": null,
+      "after": "b487d7079d441e2d3ac801e0a13bb2363924c65d24156f92e60650dbc97e4c45"
+    }
+  },
+  "environment": {
+    "host": [
+      "Linux",
+      "bamedeo-Legion-Pro-7-16IRX8H",
+      "7.0.0-42-generic",
+      "#42-Ubuntu SMP PREEMPT_DYNAMIC Thu Oct 15 08:06:44 UTC 2026",
+      "x86_64"
+    ],
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "logical_cpus": 32,
+    "memtotal": "MemTotal:       15571804 kB",
+    "versions": {
+      "clang++": "Ubuntu clang version 21.1.8 (6ubuntu1)",
+      "c++": "c++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "cmake": "cmake version 4.2.3",
+      "ninja": "1.13.2"
+    },
+    "source_directory": "/home/bamedeo/kin-wt/build-time",
+    "build_and_temp_directory": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-entity-split-bench",
+    "measured_worker_cpus": [
+      0,
+      2,
+      4,
+      6
+    ]
+  },
+  "change": {
+    "runtime": "entity_scripts.cpp retains file loading, reload transactions, per-entity scheduling, save hooks and public methods.",
+    "entity_bindings": "entity_script_bindings.cpp registers the Entity userdata, pool/tween bridge and entity methods.",
+    "service_bindings": "entity_service_bindings.cpp registers input, UI, dialogue, scene, world/prefab, camera, physics and saves, then runs the unchanged Lua self prelude.",
+    "internal_header": "Share original state fields, service guard and entity fields/constructor/alive/live methods. Compact hidden kin::s::ScriptEntity identity keeps sol2 registry keys short.",
+    "public_cpp_headers_changed": false,
+    "lua_names_changed": false,
+    "callback_bodies_or_registration_order_changed": false
+  },
+  "configuration": "Normal Release -O2 target flags on Clang/GCC; existing PCH on, compiler cache/LTO off, KIN_DEV_FAST_SCRIPTING=OFF. mold linker. sol2 safety and Lua limits unchanged.",
+  "compile_commands": {
+    "clang": {
+      "entity_scripts": "/usr/bin/clang++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -Winvalid-pch -Xclang -include-pch -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx.pch -Xclang -include -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o -c /tmp/kin-build-time/engine/src/scripting/entity_scripts.cpp",
+      "entity_script_bindings": "/usr/bin/clang++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -Winvalid-pch -Xclang -include-pch -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx.pch -Xclang -include -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_script_bindings.cpp.o -c /tmp/kin-build-time/engine/src/scripting/entity_script_bindings.cpp",
+      "entity_service_bindings": "/usr/bin/clang++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -Winvalid-pch -Xclang -include-pch -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx.pch -Xclang -include -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_service_bindings.cpp.o -c /tmp/kin-build-time/engine/src/scripting/entity_service_bindings.cpp"
+    },
+    "gcc": {
+      "entity_scripts": "/usr/bin/c++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -fpch-preprocess -Winvalid-pch -include /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o -c /tmp/kin-build-time/engine/src/scripting/entity_scripts.cpp",
+      "entity_script_bindings": "/usr/bin/c++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -fpch-preprocess -Winvalid-pch -include /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_script_bindings.cpp.o -c /tmp/kin-build-time/engine/src/scripting/entity_script_bindings.cpp",
+      "entity_service_bindings": "/usr/bin/c++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -fpch-preprocess -Winvalid-pch -include /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_service_bindings.cpp.o -c /tmp/kin-build-time/engine/src/scripting/entity_service_bindings.cpp"
+    }
+  },
+  "baseline_trace": {
+    "instrumented_stats": {
+      "wall_seconds": 24.81,
+      "user_seconds": 24.32,
+      "system_seconds": 0.41,
+      "max_child_rss_kib": 723944
+    },
+    "totals_seconds": {
+      "Total ExecuteCompiler": 24.662258,
+      "Total Backend": 14.251168,
+      "Total Frontend": 10.342339,
+      "Total Optimizer": 10.050549,
+      "Total ModuleInlinerWrapperPass": 8.307331,
+      "Total ModuleToPostOrderCGSCCPassAdaptor": 8.246332,
+      "Total DevirtSCCRepeatedPass": 8.113516,
+      "Total PassManager<LazyCallGraph::SCC, CGSCCAnalysisManager, LazyCallGraph &, CGSCCUpdateResult &>": 8.067903,
+      "Total PassManager<Function>": 7.168788,
+      "Total CGSCCToFunctionPassAdaptor": 5.953455,
+      "Total InstantiateFunction": 5.949358,
+      "Total InstantiateClass": 4.952936,
+      "Total PerformPendingInstantiations": 4.75491,
+      "Total CodeGenPasses": 4.196507,
+      "Total OptModule": 4.195607,
+      "Total OptFunction": 4.141003,
+      "Total RunPass": 4.103135,
+      "Total ParseDeclarationOrFunctionDefinition": 3.90994,
+      "Total ParseClass": 3.668755,
+      "Total Source": 3.207389,
+      "Total InlinerPass": 1.790106,
+      "Total InstCombinePass": 1.676925,
+      "Total ModuleToFunctionPassAdaptor": 1.34435,
+      "Total CodeGen Function": 1.229913,
+      "Total FunctionToLoopPassAdaptor": 0.611369,
+      "Total GVNPass": 0.59216,
+      "Total SimplifyCFGPass": 0.504118,
+      "Total EarlyCSEPass": 0.476107,
+      "Total ParseFunctionDefinition": 0.467558,
+      "Total DSEPass": 0.450006,
+      "Total CorrelatedValuePropagationPass": 0.37412,
+      "Total PassManager<Loop, LoopAnalysisManager, LoopStandardAnalysisResults &, LPMUpdater &>": 0.339599,
+      "Total SROAPass": 0.338499,
+      "Total BlockFrequencyAnalysis": 0.336345,
+      "Total MemorySSAAnalysis": 0.320615,
+      "Total Load External Specializations for ": 0.307534,
+      "Total JumpThreadingPass": 0.288089,
+      "Total ConstraintEliminationPass": 0.272451,
+      "Total EvaluateAsRValue": 0.271843,
+      "Total EvaluateAsConstantExpr": 0.269294,
+      "Total BranchProbabilityAnalysis": 0.234479,
+      "Total AAManager": 0.212165,
+      "Total PostOrderFunctionAttrsPass": 0.201008,
+      "Total SCCPPass": 0.171802,
+      "Total MemCpyOptPass": 0.168341,
+      "Total ADCEPass": 0.163114,
+      "Total IPSCCPPass": 0.129358,
+      "Total RunLoopPass": 0.123944,
+      "Total LoopAnalysis": 0.11649,
+      "Total GlobalOptPass": 0.113022,
+      "Total DominatorTreeAnalysis": 0.110875,
+      "Total BDCEPass": 0.107577,
+      "Total ReassociatePass": 0.098541,
+      "Total SLPVectorizerPass": 0.09736,
+      "Total LoopIdiomRecognizePass": 0.093805,
+      "Total TailCallElimPass": 0.087244,
+      "Total PostDominatorTreeAnalysis": 0.081677,
+      "Total BasicAA": 0.07564,
+      "Total EvaluateAsInitializer": 0.07496,
+      "Total IndVarSimplifyPass": 0.073312,
+      "Total LICMPass": 0.066678,
+      "Total LoopSimplifyPass": 0.063959,
+      "Total EvaluateAsBooleanCondition": 0.059069,
+      "Total AlwaysInlinerPass": 0.057225,
+      "Total CalledValuePropagationPass": 0.050166,
+      "Total ScalarEvolutionAnalysis": 0.049836,
+      "Total LoopUnrollPass": 0.047949,
+      "Total LoopDeletionPass": 0.042103,
+      "Total EvaluateForOverflow": 0.039122,
+      "Total AggressiveInstCombinePass": 0.038499,
+      "Total AssumptionAnalysis": 0.037666,
+      "Total RequireAnalysisPass<llvm::GlobalsAA, llvm::Module, llvm::AnalysisManager<Module>>": 0.036298,
+      "Total GlobalsAA": 0.03629,
+      "Total LoopVectorizePass": 0.035136,
+      "Total Stable Hash for Template Arguments": 0.035094,
+      "Total CallGraphAnalysis": 0.031769,
+      "Total LoopFullUnrollPass": 0.027004,
+      "Total LCSSAPass": 0.026512,
+      "Total LoopRotatePass": 0.025772,
+      "Total EvaluateAsInt": 0.025351,
+      "Total TargetIRAnalysis": 0.024133,
+      "Total VectorCombinePass": 0.02393,
+      "Total InstSimplifyPass": 0.021112,
+      "Total FunctionAnalysisManagerCGSCCProxy": 0.019659,
+      "Total LazyCallGraphAnalysis": 0.017939,
+      "Total InferAlignmentPass": 0.017847,
+      "Total DeadArgumentEliminationPass": 0.016403,
+      "Total Float2IntPass": 0.016392,
+      "Total InnerAnalysisManagerProxy<CGSCCAnalysisManager, Module>": 0.015677,
+      "Total LoopLoadEliminationPass": 0.015389,
+      "Total GlobalDCEPass": 0.014966,
+      "Total LoopDistributePass": 0.013521,
+      "Total CoroAnnotationElidePass": 0.012961,
+      "Total LoopInstSimplifyPass": 0.012953,
+      "Total LowerExpectIntrinsicPass": 0.012892,
+      "Total RequireAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis, llvm::Function, llvm::AnalysisManager<Function>>": 0.01273,
+      "Total TargetLibraryAnalysis": 0.012,
+      "Total RecomputeGlobalsAAPass": 0.0118,
+      "Total MemoryDependenceAnalysis": 0.011312,
+      "Total LastRunTrackingAnalysis": 0.010568,
+      "Total ReversePostOrderFunctionAttrsPass": 0.009813,
+      "Total EphemeralValuesAnalysis": 0.009799,
+      "Total LibCallsShrinkWrapPass": 0.009739,
+      "Total OuterAnalysisManagerProxy<ModuleAnalysisManager, Function>": 0.00894,
+      "Total isIntegerConstantExpr": 0.008459,
+      "Total MergedLoadStoreMotionPass": 0.0083,
+      "Total LazyValueAnalysis": 0.008258,
+      "Total ScopedNoAliasAA": 0.008029,
+      "Total OptimizationRemarkEmitterAnalysis": 0.007907,
+      "Total TypeBasedAA": 0.007365,
+      "Total PromotePass": 0.007333,
+      "Total AssignmentTrackingPass": 0.007124,
+      "Total LoopSimplifyCFGPass": 0.007049,
+      "Total LoopAccessAnalysis": 0.006994,
+      "Total DemandedBitsAnalysis": 0.006989,
+      "Total CoroSplitPass": 0.006713,
+      "Total EvaluateKnownConstInt": 0.006363,
+      "Total CGProfilePass": 0.005939,
+      "Total MoveAutoInitPass": 0.005542,
+      "Total LowerConstantIntrinsicsPass": 0.005418,
+      "Total CoroElidePass": 0.005413,
+      "Total OpenMPOptCGSCCPass": 0.004927,
+      "Total OuterAnalysisManagerProxy<ModuleAnalysisManager, LazyCallGraph::SCC, LazyCallGraph &>": 0.004805,
+      "Total SpeculativeExecutionPass": 0.004187,
+      "Total SimpleLoopUnswitchPass": 0.003874,
+      "Total EntryExitInstrumenterPass": 0.003286,
+      "Total ReadAST": 0.0031,
+      "Total InvalidateAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis>": 0.002974,
+      "Total InvalidateAnalysisPass<llvm::AAManager>": 0.002888,
+      "Total InjectTLIMappings": 0.002853,
+      "Total ShouldNotRunFunctionPassesAnalysis": 0.00273,
+      "Total InferFunctionAttrsPass": 0.002206,
+      "Total DivRemPairsPass": 0.001924,
+      "Total AnnotationRemarksPass": 0.001802,
+      "Total WarnMissedTransformationsPass": 0.001101,
+      "Total InnerAnalysisManagerProxy<LoopAnalysisManager, Function>": 0.000997,
+      "Total OuterAnalysisManagerProxy<FunctionAnalysisManager, Loop, LoopStandardAnalysisResults &>": 0.000751,
+      "Total Read Loaded AST": 0.000644,
+      "Total AlignmentFromAssumptionsPass": 0.00059,
+      "Total ExtraLoopPassManager<llvm::ShouldRunExtraSimpleLoopUnswitch>": 0.000528,
+      "Total LoopSinkPass": 0.000376,
+      "Total ConstantMergePass": 0.000248,
+      "Total EvaluateAsLValue": 0.00014,
+      "Total EliminateAvailableExternallyPass": 0.000105,
+      "Total RelLookupTableConverterPass": 5.3e-05,
+      "Total ShouldRunExtraVectorPasses": 1.1e-05,
+      "Total CoroEarlyPass": 1.1e-05,
+      "Total CoroCleanupPass": 4e-06,
+      "Total InnerAnalysisManagerProxy<FunctionAnalysisManager, Module>": 3e-06,
+      "Total ShouldRunExtraSimpleLoopUnswitch": 2e-06,
+      "Total Annotation2MetadataPass": 2e-06,
+      "Total ProfileSummaryAnalysis": 2e-06,
+      "Total OpenMPOptPass": 1e-06,
+      "Total ForceFunctionAttrsPass": 0.0,
+      "Total InlineAdvisorAnalysis": 0.0,
+      "Total RequireAnalysisPass<llvm::ProfileSummaryAnalysis, llvm::Module, llvm::AnalysisManager<Module>>": 0.0
+    },
+    "instrumentation_overhead": "Diagnostic only; not mixed into timed before/after samples."
+  },
+  "paired_compile_method": "Two ABBA blocks, four observations/version. Compile stable original single-source or final three-source snapshots using matching Clang target flags/PCH, four fixed workers. Original source/final longest service source use CPU 2; final entity/runtime use CPUs 0/6. Unchanged core/json.cpp control uses CPU 4. Source/header bytes are stable throughout. This measures the entity compilation set only, without archiving/linking or ordinary project scheduling; other objects/dependencies/shaders are cached. Host activity is uncontrolled; loads and all samples are retained.",
+  "paired_compile_samples": [
+    {
+      "phase": "before",
+      "block": 0,
+      "sample": 0,
+      "wall_seconds": 23.277794391004136,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 2,
+          "wall_seconds": 23.27,
+          "user_seconds": 22.8,
+          "system_seconds": 0.43,
+          "max_child_rss_kib": 711992
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 0.92,
+          "user_seconds": 0.85,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 141604
+        }
+      ],
+      "load_before": [
+        9.6220703125,
+        7.4794921875,
+        4.52783203125
+      ],
+      "load_after": [
+        7.673828125,
+        7.19775390625,
+        4.51416015625
+      ]
+    },
+    {
+      "phase": "after",
+      "block": 0,
+      "sample": 1,
+      "wall_seconds": 10.770366677999846,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 6,
+          "wall_seconds": 6.9,
+          "user_seconds": 6.7,
+          "system_seconds": 0.18,
+          "max_child_rss_kib": 350884
+        },
+        {
+          "source": "entity_script_bindings",
+          "cpu": 0,
+          "wall_seconds": 8.77,
+          "user_seconds": 8.52,
+          "system_seconds": 0.23,
+          "max_child_rss_kib": 402596
+        },
+        {
+          "source": "entity_service_bindings",
+          "cpu": 2,
+          "wall_seconds": 10.76,
+          "user_seconds": 10.45,
+          "system_seconds": 0.28,
+          "max_child_rss_kib": 527012
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.85,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 143848
+        }
+      ],
+      "load_before": [
+        7.673828125,
+        7.19775390625,
+        4.51416015625
+      ],
+      "load_after": [
+        7.255859375,
+        7.12451171875,
+        4.51953125
+      ]
+    },
+    {
+      "phase": "after",
+      "block": 0,
+      "sample": 2,
+      "wall_seconds": 11.075631279003574,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 6,
+          "wall_seconds": 7.05,
+          "user_seconds": 6.83,
+          "system_seconds": 0.19,
+          "max_child_rss_kib": 351920
+        },
+        {
+          "source": "entity_script_bindings",
+          "cpu": 0,
+          "wall_seconds": 8.96,
+          "user_seconds": 8.72,
+          "system_seconds": 0.21,
+          "max_child_rss_kib": 402684
+        },
+        {
+          "source": "entity_service_bindings",
+          "cpu": 2,
+          "wall_seconds": 11.06,
+          "user_seconds": 10.75,
+          "system_seconds": 0.29,
+          "max_child_rss_kib": 528516
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 0.92,
+          "user_seconds": 0.84,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 143624
+        }
+      ],
+      "load_before": [
+        7.255859375,
+        7.12451171875,
+        4.51953125
+      ],
+      "load_after": [
+        6.90869140625,
+        7.0537109375,
+        4.525390625
+      ]
+    },
+    {
+      "phase": "before",
+      "block": 0,
+      "sample": 3,
+      "wall_seconds": 22.63136130299972,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 2,
+          "wall_seconds": 22.62,
+          "user_seconds": 22.2,
+          "system_seconds": 0.39,
+          "max_child_rss_kib": 716336
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 1.39,
+          "user_seconds": 1.31,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 144204
+        }
+      ],
+      "load_before": [
+        6.90869140625,
+        7.0537109375,
+        4.525390625
+      ],
+      "load_after": [
+        5.87158203125,
+        6.79248046875,
+        4.505859375
+      ]
+    },
+    {
+      "phase": "before",
+      "block": 1,
+      "sample": 4,
+      "wall_seconds": 22.868393414995808,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 2,
+          "wall_seconds": 22.86,
+          "user_seconds": 22.39,
+          "system_seconds": 0.43,
+          "max_child_rss_kib": 712436
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 0.96,
+          "user_seconds": 0.89,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 141400
+        }
+      ],
+      "load_before": [
+        5.87158203125,
+        6.79248046875,
+        4.505859375
+      ],
+      "load_after": [
+        5.0556640625,
+        6.54638671875,
+        4.47265625
+      ]
+    },
+    {
+      "phase": "after",
+      "block": 1,
+      "sample": 5,
+      "wall_seconds": 10.873738674003107,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 6,
+          "wall_seconds": 7.23,
+          "user_seconds": 7.03,
+          "system_seconds": 0.18,
+          "max_child_rss_kib": 352956
+        },
+        {
+          "source": "entity_script_bindings",
+          "cpu": 0,
+          "wall_seconds": 8.82,
+          "user_seconds": 8.58,
+          "system_seconds": 0.21,
+          "max_child_rss_kib": 401580
+        },
+        {
+          "source": "entity_service_bindings",
+          "cpu": 2,
+          "wall_seconds": 10.86,
+          "user_seconds": 10.53,
+          "system_seconds": 0.31,
+          "max_child_rss_kib": 527144
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 0.95,
+          "user_seconds": 0.88,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 143556
+        }
+      ],
+      "load_before": [
+        5.0556640625,
+        6.54638671875,
+        4.47265625
+      ],
+      "load_after": [
+        5.04638671875,
+        6.4951171875,
+        4.478515625
+      ]
+    },
+    {
+      "phase": "after",
+      "block": 1,
+      "sample": 6,
+      "wall_seconds": 10.952437020001526,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 6,
+          "wall_seconds": 7.05,
+          "user_seconds": 6.82,
+          "system_seconds": 0.2,
+          "max_child_rss_kib": 347988
+        },
+        {
+          "source": "entity_script_bindings",
+          "cpu": 0,
+          "wall_seconds": 8.93,
+          "user_seconds": 8.67,
+          "system_seconds": 0.23,
+          "max_child_rss_kib": 399056
+        },
+        {
+          "source": "entity_service_bindings",
+          "cpu": 2,
+          "wall_seconds": 10.94,
+          "user_seconds": 10.59,
+          "system_seconds": 0.31,
+          "max_child_rss_kib": 524524
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 0.96,
+          "user_seconds": 0.88,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 141800
+        }
+      ],
+      "load_before": [
+        5.04638671875,
+        6.4951171875,
+        4.478515625
+      ],
+      "load_after": [
+        5.14697265625,
+        6.45263671875,
+        4.49755859375
+      ]
+    },
+    {
+      "phase": "before",
+      "block": 1,
+      "sample": 7,
+      "wall_seconds": 22.7412081309958,
+      "compiles": [
+        {
+          "source": "entity_scripts",
+          "cpu": 2,
+          "wall_seconds": 22.73,
+          "user_seconds": 22.29,
+          "system_seconds": 0.4,
+          "max_child_rss_kib": 713716
+        },
+        {
+          "source": "json-control",
+          "cpu": 4,
+          "wall_seconds": 0.92,
+          "user_seconds": 0.85,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 142432
+        }
+      ],
+      "load_before": [
+        5.14697265625,
+        6.45263671875,
+        4.49755859375
+      ],
+      "load_after": [
+        4.802734375,
+        6.29248046875,
+        4.486328125
+      ]
+    }
+  ],
+  "paired_compile_summary": {
+    "before": {
+      "wall_seconds": {
+        "median": 22.804800772995804,
+        "min": 22.63136130299972,
+        "max": 23.277794391004136
+      },
+      "entity_compiler_cpu_seconds": {
+        "median": 22.755,
+        "min": 22.59,
+        "max": 23.23
+      },
+      "unchanged_control_seconds": {
+        "median": 0.94,
+        "min": 0.92,
+        "max": 1.39
+      }
+    },
+    "after": {
+      "wall_seconds": {
+        "median": 10.913087847002316,
+        "min": 10.770366677999846,
+        "max": 11.075631279003574
+      },
+      "entity_compiler_cpu_seconds": {
+        "median": 26.83,
+        "min": 26.36,
+        "max": 26.990000000000002
+      },
+      "unchanged_control_seconds": {
+        "median": 0.94,
+        "min": 0.92,
+        "max": 0.96
+      }
+    }
+  },
+  "tradeoffs": "Splitting exposes parallel work and smaller implementation edit scopes, but repeats frontend/template work and can increase total compiler CPU, object/COMDAT overhead and simultaneous memory. Max-child RSS is not aggregate concurrent peak memory. Do not extrapolate a parallel compilation-set gain to single-worker or clean whole-project builds.",
+  "edit_method": "Three trailing-comment implementation edits of the original combined file and final runtime; one exploratory observation per final entity/service binding file. Canonical Ninja graph, four workers pinned to CPUs 0/2/4/6, through final hex_demo archive/link. Exact planned and actual C++ output sets checked. Bytes and nanosecond mtimes restored after each sample. Canonical objects recompiled from restored bytes afterward. Shared internal header edits reach all three production sources and the entity regression test; game-main implementation scope is unchanged.",
+  "edit_samples": {
+    "before-entity_scripts": [
+      {
+        "phase": "before",
+        "source": "engine/src/scripting/entity_scripts.cpp",
+        "sample": 0,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o"
+        ],
+        "load_before": [
+          1.65625,
+          1.85400390625,
+          2.205078125
+        ],
+        "load_after": [
+          4.3154296875,
+          2.40966796875,
+          2.3759765625
+        ],
+        "wall_seconds": 24.31,
+        "user_seconds": 23.4,
+        "system_seconds": 0.57,
+        "max_child_rss_kib": 716448
+      },
+      {
+        "phase": "before",
+        "source": "engine/src/scripting/entity_scripts.cpp",
+        "sample": 1,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o"
+        ],
+        "load_before": [
+          4.3154296875,
+          2.40966796875,
+          2.3759765625
+        ],
+        "load_after": [
+          7.455078125,
+          3.30859375,
+          2.67529296875
+        ],
+        "wall_seconds": 26.53,
+        "user_seconds": 25.48,
+        "system_seconds": 0.64,
+        "max_child_rss_kib": 715768
+      },
+      {
+        "phase": "before",
+        "source": "engine/src/scripting/entity_scripts.cpp",
+        "sample": 2,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o"
+        ],
+        "load_before": [
+          7.455078125,
+          3.30859375,
+          2.67529296875
+        ],
+        "load_after": [
+          8.6025390625,
+          3.98193359375,
+          2.92041015625
+        ],
+        "wall_seconds": 26.44,
+        "user_seconds": 25.31,
+        "system_seconds": 0.71,
+        "max_child_rss_kib": 716308
+      }
+    ],
+    "after-entity_scripts": [
+      {
+        "phase": "after",
+        "source": "engine/src/scripting/entity_scripts.cpp",
+        "sample": 0,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o"
+        ],
+        "load_before": [
+          4.802734375,
+          6.29248046875,
+          4.486328125
+        ],
+        "load_after": [
+          4.525390625,
+          6.18359375,
+          4.4697265625
+        ],
+        "wall_seconds": 7.47,
+        "user_seconds": 6.96,
+        "system_seconds": 0.28,
+        "max_child_rss_kib": 353052
+      },
+      {
+        "phase": "after",
+        "source": "engine/src/scripting/entity_scripts.cpp",
+        "sample": 1,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o"
+        ],
+        "load_before": [
+          4.525390625,
+          6.18359375,
+          4.4697265625
+        ],
+        "load_after": [
+          4.40283203125,
+          6.13037109375,
+          4.46142578125
+        ],
+        "wall_seconds": 7.51,
+        "user_seconds": 6.98,
+        "system_seconds": 0.3,
+        "max_child_rss_kib": 353204
+      },
+      {
+        "phase": "after",
+        "source": "engine/src/scripting/entity_scripts.cpp",
+        "sample": 2,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_scripts.cpp.o"
+        ],
+        "load_before": [
+          4.40283203125,
+          6.13037109375,
+          4.46142578125
+        ],
+        "load_after": [
+          4.41455078125,
+          6.076171875,
+          4.46142578125
+        ],
+        "wall_seconds": 7.56,
+        "user_seconds": 7.04,
+        "system_seconds": 0.29,
+        "max_child_rss_kib": 352892
+      }
+    ],
+    "after-entity_script_bindings": [
+      {
+        "phase": "after",
+        "source": "engine/src/scripting/entity_script_bindings.cpp",
+        "sample": 0,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_script_bindings.cpp.o"
+        ],
+        "load_before": [
+          4.41455078125,
+          6.076171875,
+          4.46142578125
+        ],
+        "load_after": [
+          4.50537109375,
+          6.04052734375,
+          4.46728515625
+        ],
+        "wall_seconds": 9.54,
+        "user_seconds": 8.89,
+        "system_seconds": 0.38,
+        "max_child_rss_kib": 403808
+      }
+    ],
+    "after-entity_service_bindings": [
+      {
+        "phase": "after",
+        "source": "engine/src/scripting/entity_service_bindings.cpp",
+        "sample": 0,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/entity_service_bindings.cpp.o"
+        ],
+        "load_before": [
+          4.50537109375,
+          6.04052734375,
+          4.46728515625
+        ],
+        "load_after": [
+          4.8095703125,
+          6.0556640625,
+          4.4892578125
+        ],
+        "wall_seconds": 11.53,
+        "user_seconds": 10.9,
+        "system_seconds": 0.41,
+        "max_child_rss_kib": 529144
+      }
+    ]
+  },
+  "edit_summary": {
+    "before-entity_scripts": {
+      "median": 26.44,
+      "min": 24.31,
+      "max": 26.53
+    },
+    "after-entity_scripts": {
+      "median": 7.51,
+      "min": 7.47,
+      "max": 7.56
+    },
+    "after-entity_script_bindings": {
+      "median": 9.54,
+      "min": 9.54,
+      "max": 9.54
+    },
+    "after-entity_service_bindings": {
+      "median": 11.53,
+      "min": 11.53,
+      "max": 11.53
+    }
+  },
+  "runtime_probe": {
+    "method": "Assertions-enabled -O2 binaries linked before changing source and after the split, separately for Clang/GCC. Three processes/version/compiler in alternating order; 30 timed samples after three warmups, CPU 2. Measure an unchanged scene VM creation/control loop and 50,000 entity bridge calls per entity update sample. Assert final entity positions 330000 and 3300. These narrow probes do not establish whole-game FPS or bound every service/query operation.",
+    "samples": {
+      "clang": [
+        {
+          "compiler": "clang",
+          "phase": "before",
+          "run": 0,
+          "scene_vm_create_ms": 0.790886,
+          "scene_20000_calls_ms": 6.24372,
+          "entity_50000_calls_ms": 36.6064,
+          "positions_match": true
+        },
+        {
+          "compiler": "clang",
+          "phase": "after",
+          "run": 0,
+          "scene_vm_create_ms": 0.796611,
+          "scene_20000_calls_ms": 6.23897,
+          "entity_50000_calls_ms": 36.7133,
+          "positions_match": true
+        },
+        {
+          "compiler": "clang",
+          "phase": "after",
+          "run": 1,
+          "scene_vm_create_ms": 0.795496,
+          "scene_20000_calls_ms": 6.30084,
+          "entity_50000_calls_ms": 36.7316,
+          "positions_match": true
+        },
+        {
+          "compiler": "clang",
+          "phase": "before",
+          "run": 1,
+          "scene_vm_create_ms": 0.802308,
+          "scene_20000_calls_ms": 6.42687,
+          "entity_50000_calls_ms": 35.8614,
+          "positions_match": true
+        },
+        {
+          "compiler": "clang",
+          "phase": "before",
+          "run": 2,
+          "scene_vm_create_ms": 0.79356,
+          "scene_20000_calls_ms": 6.47718,
+          "entity_50000_calls_ms": 36.033,
+          "positions_match": true
+        },
+        {
+          "compiler": "clang",
+          "phase": "after",
+          "run": 2,
+          "scene_vm_create_ms": 0.786685,
+          "scene_20000_calls_ms": 6.32722,
+          "entity_50000_calls_ms": 36.7613,
+          "positions_match": true
+        }
+      ],
+      "gcc": [
+        {
+          "compiler": "gcc",
+          "phase": "before",
+          "run": 0,
+          "scene_vm_create_ms": 1.01344,
+          "scene_20000_calls_ms": 6.41464,
+          "entity_50000_calls_ms": 36.6724,
+          "positions_match": true
+        },
+        {
+          "compiler": "gcc",
+          "phase": "after",
+          "run": 0,
+          "scene_vm_create_ms": 0.795487,
+          "scene_20000_calls_ms": 6.43624,
+          "entity_50000_calls_ms": 37.2672,
+          "positions_match": true
+        },
+        {
+          "compiler": "gcc",
+          "phase": "after",
+          "run": 1,
+          "scene_vm_create_ms": 0.796809,
+          "scene_20000_calls_ms": 6.40683,
+          "entity_50000_calls_ms": 36.9011,
+          "positions_match": true
+        },
+        {
+          "compiler": "gcc",
+          "phase": "before",
+          "run": 1,
+          "scene_vm_create_ms": 0.81059,
+          "scene_20000_calls_ms": 6.41351,
+          "entity_50000_calls_ms": 36.5782,
+          "positions_match": true
+        },
+        {
+          "compiler": "gcc",
+          "phase": "before",
+          "run": 2,
+          "scene_vm_create_ms": 0.812367,
+          "scene_20000_calls_ms": 6.35325,
+          "entity_50000_calls_ms": 36.5927,
+          "positions_match": true
+        },
+        {
+          "compiler": "gcc",
+          "phase": "after",
+          "run": 2,
+          "scene_vm_create_ms": 0.806171,
+          "scene_20000_calls_ms": 6.30867,
+          "entity_50000_calls_ms": 36.9899,
+          "positions_match": true
+        }
+      ]
+    },
+    "median_of_process_medians": {
+      "clang": {
+        "before": {
+          "scene_vm_create_ms": 0.79356,
+          "scene_20000_calls_ms": 6.42687,
+          "entity_50000_calls_ms": 36.033
+        },
+        "after": {
+          "scene_vm_create_ms": 0.795496,
+          "scene_20000_calls_ms": 6.30084,
+          "entity_50000_calls_ms": 36.7316
+        }
+      },
+      "gcc": {
+        "before": {
+          "scene_vm_create_ms": 0.812367,
+          "scene_20000_calls_ms": 6.41351,
+          "entity_50000_calls_ms": 36.5927
+        },
+        "after": {
+          "scene_vm_create_ms": 0.796809,
+          "scene_20000_calls_ms": 6.40683,
+          "entity_50000_calls_ms": 36.9899
+        }
+      }
+    },
+    "binary_sizes": [
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "file_bytes": 25128608,
+        "text_and_readonly_bytes": 16976351,
+        "data_bytes": 294609,
+        "bss_bytes": 86881
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "file_bytes": 25127200,
+        "text_and_readonly_bytes": 16988869,
+        "data_bytes": 293289,
+        "bss_bytes": 84009
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "file_bytes": 27417152,
+        "text_and_readonly_bytes": 19126879,
+        "data_bytes": 304225,
+        "bss_bytes": 103433
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "file_bytes": 27422944,
+        "text_and_readonly_bytes": 19169775,
+        "data_bytes": 302929,
+        "bss_bytes": 102841
+      }
+    ]
+  },
+  "mechanical_checks": {
+    "regenerates_exactly": true,
+    "preserved_out_of_line_method_bodies": [
+      "prefab_of",
+      "make_script",
+      "remember_times",
+      "file",
+      "bind_world",
+      "reload",
+      "stop",
+      "reload_changed",
+      "task_owner_alive",
+      "entity_of",
+      "filter_of",
+      "physics_or_throw",
+      "hit_table",
+      "entities_table",
+      "bind_physics"
+    ],
+    "binding_body_and_registration_order_preserved": true,
+    "public_member_definitions_byte_identical": true,
+    "public_member_count": 14,
+    "userdata_definition_body_identical": true,
+    "state_fields_byte_identical": true,
+    "live_service_guard_identical": true,
+    "player_selection_identical": true,
+    "self_prelude_byte_identical": true
+  },
+  "userdata_layout_and_traits": [
+    {
+      "compiler": "clang",
+      "assertions": 8,
+      "pch": false,
+      "sizeof_alignment_and_six_traits_match": true
+    },
+    {
+      "compiler": "gcc",
+      "assertions": 8,
+      "pch": false,
+      "sizeof_alignment_and_six_traits_match": true
+    }
+  ],
+  "validation": [
+    {
+      "compiler": "clang",
+      "selected_tests_passed": 39,
+      "test_regex": "^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$",
+      "api_matches_baseline": {
+        "scene": "08470f48946f2eaa38dde430c5535d8caf01a02b13d7d911acc55092a635cc7b",
+        "entity": "54894ae4057667ea1ababbb13dfe12ec019adbab7c4129c4280e532dca48b786",
+        "test": "7dd4d5cd07817d20596c66b7186d0a126c67dd1b929afc918b3950d6997a3bc8",
+        "scenario": "06a2650d93f6bf9ddb4ada71fdbaf95941cef05d64f1eba5cb7151cbf7ce3d28"
+      }
+    },
+    {
+      "compiler": "gcc",
+      "selected_tests_passed": 39,
+      "test_regex": "^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$",
+      "api_matches_baseline": {
+        "scene": "08470f48946f2eaa38dde430c5535d8caf01a02b13d7d911acc55092a635cc7b",
+        "entity": "54894ae4057667ea1ababbb13dfe12ec019adbab7c4129c4280e532dca48b786",
+        "test": "7dd4d5cd07817d20596c66b7186d0a126c67dd1b929afc918b3950d6997a3bc8",
+        "scenario": "06a2650d93f6bf9ddb4ada71fdbaf95941cef05d64f1eba5cb7151cbf7ce3d28"
+      }
+    }
+  ],
+  "no_pch_optional_configuration_checks": [
+    {
+      "mode": "clang-3d",
+      "source": "entity_scripts",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 5.892317654004728
+    },
+    {
+      "mode": "clang-3d",
+      "source": "entity_script_bindings",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 6.383104991997243
+    },
+    {
+      "mode": "clang-3d",
+      "source": "entity_service_bindings",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 8.378107039003226
+    },
+    {
+      "mode": "clang-3d",
+      "source": "private-header",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 4.189510021999013
+    },
+    {
+      "mode": "gcc-no-physics-audio",
+      "source": "entity_scripts",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 5.089896013996622
+    },
+    {
+      "mode": "gcc-no-physics-audio",
+      "source": "entity_script_bindings",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 5.273265160998562
+    },
+    {
+      "mode": "gcc-no-physics-audio",
+      "source": "entity_service_bindings",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 6.403706326993415
+    },
+    {
+      "mode": "gcc-no-physics-audio",
+      "source": "private-header",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 3.2609190359944478
+    }
+  ],
+  "final_state": [
+    {
+      "compiler": "clang",
+      "smoke_tests_passed": 4,
+      "api_reports_match": {
+        "scene": "90edda75b78327c28b64e94bab6a149d12de2c4d63ceec4acaea706070c5ff9b",
+        "entity": "859eefd052c74a1cefd56f4ba47b1a91267ad88b462ceafd77294a6e5f0370b1",
+        "test": "c9c81cdb99307e41f0f871e2672813ca045882444fef20e683b9ae26f582ff59",
+        "scenario": "a84f5a7a59be91d8149640d2e8e8a66ef94c8afeb3b744024a67e8156e7e9167"
+      },
+      "no_change_compiles_and_links": 0,
+      "generated_sources_match": true
+    },
+    {
+      "compiler": "gcc",
+      "smoke_tests_passed": 4,
+      "api_reports_match": {
+        "scene": "90edda75b78327c28b64e94bab6a149d12de2c4d63ceec4acaea706070c5ff9b",
+        "entity": "859eefd052c74a1cefd56f4ba47b1a91267ad88b462ceafd77294a6e5f0370b1",
+        "test": "c9c81cdb99307e41f0f871e2672813ca045882444fef20e683b9ae26f582ff59",
+        "scenario": "a84f5a7a59be91d8149640d2e8e8a66ef94c8afeb3b744024a67e8156e7e9167"
+      },
+      "no_change_compiles_and_links": 0,
+      "generated_sources_match": true
+    }
+  ],
+  "limits": [
+    "No clean whole-project or cumulative speedup claim; the recorded compilation set gains come from parallelism and smaller edit scopes.",
+    "No Windows/MSVC or full native desktop/3D/GPU runtime validation. Clang 3D and GCC physics/audio-disabled checks compile templates without a PCH only.",
+    "Private C++ userdata and sol registry identities change; public Lua reports and userdata layouts/traits match. This is not cross-platform ABI certification.",
+    "The original baseline dry-run initially stopped at a required CMake regeneration after creating the branch. The source was restored, the build settled, and all three recorded baseline edit samples then verified exactly one C++ output. The initial dry-run plan is retained in the artifact directory."
+  ],
+  "reproduction": {
+    "artifact_directory": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-entity-split-bench",
+    "steps": [
+      "At base_commit, configure normal Clang/GCC targets and prebuild tests, kin_lua and hex_demo. Set TMPDIR to an output filesystem with room. Adjust script paths/affinity for the host. Save entity_scripts.cpp and engine/CMakeLists.txt as before-<basename> plus base-commit in the artifact directory.",
+      "Run entity_split_before.py on the original sources to preserve baseline probes and API reports, collect the diagnostic trace and baseline edits. Settle any pending CMake regeneration first.",
+      "Run entity_split_transform.py and configure/build the split target. Add the short-key regression to the entity test, then run entity_split_validate.py clang gcc.",
+      "Run entity_split_measure.py for mechanical/layout/no-PCH checks, paired runtime/compile measurements, implementation edits and final canonical refresh/smoke/API/no-change checks. No source, header, configuration or Ninja-log changes while compilers run.",
+      "Run entity_split_record.py to write the complete record. Keep every sample and the diagnostic trace separate from performance samples."
+    ],
+    "scripts": {
+      "entity_split_common.py": "import json, os, pathlib, shlex, subprocess, sys\nfrom bench_compiler_guard import assert_no_active_compilers\n\nrepo = pathlib.Path('/home/bamedeo/kin-wt/build-time')\nbase = pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev')\nout = base / 'kin-entity-split-bench'\nenv = {**os.environ, 'TMPDIR': str(out/'tmp'), 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'}\n\ndef build_dir(compiler='clang'):\n    return base / ('kin-build-time-out' if compiler == 'gcc' else 'kin-build-time-clang')\n\ndef compile_args(name, obj, compiler='clang', source=None):\n    build = build_dir(compiler)\n    db = json.loads((build/'compile_commands.json').read_text())\n    entry = next(e for e in db if e['file'].endswith('/scripting/'+name+'.cpp'))\n    args = shlex.split(entry['command'])\n    args[args.index('-o')+1] = str(obj)\n    if source is not None:\n        args[args.index('-c')+1] = str(source)\n        args += ['-iquote', str(repo/'engine/src/scripting')]\n    return args\n\ndef run(args, label, cwd=None, cpus=None, timed=False):\n    command = (['taskset', '-c', cpus] if cpus else []) + list(map(str,args))\n    if timed:\n        command = ['/usr/bin/time', '-f', '{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}', '-o', str(out/(label+'.stats.json'))] + command\n    with (out/(label+'.log')).open('w') as log:\n        result = subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT)\n    if result.returncode:\n        print((out/(label+'.log')).read_text()[-8000:], flush=True)\n        raise RuntimeError((label,result.returncode))\n    return json.loads((out/(label+'.stats.json')).read_text()) if timed else None\n\ndef save(name,value):\n    (out/(name+'.json')).write_text(json.dumps(value,indent=2)+'\\n')\n\ndef edit_samples(phase, name='entity_scripts', count=3):\n    import re, shutil\n    assert_no_active_compilers()\n    build=build_dir(); source=repo/('engine/src/scripting/'+name+'.cpp')\n    original=source.read_bytes(); stat=source.stat(); rows=[]\n    manifest=out/(phase+'-'+name+'-edit.ninja')\n    shutil.copy2(build/'build.ninja',manifest)\n    clean=subprocess.check_output(['ninja','-C',str(build),'-f',str(manifest),'-n','hex_demo'],env=env,text=True)\n    assert 'Building C' not in clean and 'Linking C' not in clean, clean\n    try:\n        for sample in range(count):\n            assert_no_active_compilers()\n            source.write_bytes(original+f'\\n// Entity implementation edit probe {phase} {sample}.\\n'.encode())\n            label=f'{phase}-{name}-edit-{sample}'\n            plan=subprocess.check_output(['ninja','-C',str(build),'-f',str(manifest),'-n','hex_demo'],env=env,text=True)\n            (out/(label+'-plan.log')).write_text(plan)\n            planned=re.findall(r'Building CXX object ([^\\n]+)',plan)\n            assert planned==['engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/'+name+'.cpp.o'],planned\n            load=os.getloadavg()\n            stats=run(['ninja','-C',build,'-j4','hex_demo'],label,cpus='0,2,4,6',timed=True)\n            actual=re.findall(r'Building CXX object ([^\\n]+)',(out/(label+'.log')).read_text())\n            assert actual==planned\n            row={'phase':phase,'source':str(source.relative_to(repo)),'sample':sample,'planned_and_actual_cpp_outputs':actual,'load_before':load,'load_after':os.getloadavg(),**stats}\n            rows.append(row); save(phase+'-'+name+'-edits',rows); print(json.dumps(row),flush=True)\n            source.write_bytes(original);os.utime(source,ns=(stat.st_atime_ns,stat.st_mtime_ns))\n    finally:\n        source.write_bytes(original);os.utime(source,ns=(stat.st_atime_ns,stat.st_mtime_ns))\n    return rows\n",
+      "entity_split_before.py": "from entity_split_common import *\n\nassert_no_active_compilers()\nfor compiler in ['clang','gcc']:\n    original=pathlib.Path('/tmp/kin-build-bench/scene_split_runtime.py').read_text()\n    original=original.replace(\"out=base/'kin-scene-split-bench'\", \"out=base/'kin-entity-split-bench'\")\n    script=out/'runtime-build.py';script.write_text(original)\n    subprocess.run([sys.executable,str(script),'before',compiler],env={**env,'PYTHONPATH':'/tmp/kin-build-bench'},check=True)\n    for host in ['scene','entity','test','scenario']:\n        report=subprocess.check_output([str(build_dir(compiler)/'bin/kin_lua'),'api','--host',host],env=env,text=True)\n        (out/f'before-api-{compiler}-{host}.json').write_text(report)\ntrace=run(compile_args('entity_scripts',out/'before-trace.o')+['-ftime-trace'], 'before-trace',cwd=build_dir(),cpus='2',timed=True)\nsave('before-trace-stats',trace);print('Captured fresh baseline trace',flush=True)\nedit_samples('before')\n",
+      "entity_split_transform.py": "import pathlib, re, textwrap\nfrom entity_split_common import repo, out, assert_no_active_compilers\n\ndef generated():\n    old=(out/'before-entity_scripts.cpp').read_text()\n    def method(name):\n        start=re.search(r'^    (?=\\S)[^\\n]*\\b'+re.escape(name)+r'\\([^\\n]*\\)(?: const)? \\{',old,re.M).start()\n        end=old.index('\\n    }',start)+len('\\n    }')\n        return old[start:end]\n    methods={n:method(n) for n in ['player_of','bind','prefab_of','entity_of','filter_of','physics_or_throw','hit_table','entities_table','bind_physics','make_script','remember_times','file','bind_world','reload','stop','reload_changed','task_owner_alive']}\n    def unindent(code):\n        return '\\n'.join(line[4:] if line.startswith('    ') else line for line in code.split('\\n'))\n    def definition(name):\n        code=unindent(methods[name])\n        code=code.replace('static PhysicsFilter filter_of(', 'PhysicsFilter filter_of(',1)\n        code=code.replace(name+'(', 'EntityScripts::Impl::'+name+'(',1)\n        if name=='file':code=code.replace('File& EntityScripts::', 'EntityScripts::Impl::File& EntityScripts::',1)\n        if name=='bind_world':code=code.replace('WorldScope EntityScripts::', 'EntityScripts::Impl::WorldScope EntityScripts::',1)\n        return code+'\\n\\n'\n    entity=old[old.index('// What a script holds of an entity:'):old.index('// Makes a script\\'s `self`:')].rstrip()\n    entity=entity.replace('struct ScriptEntity {','struct KIN_ENTITY_SCRIPT_TYPE ScriptEntity {',1)\n    live=old[old.index('// A live host service'):old.index('} // namespace\\n\\nstruct EntityScripts::Impl')].rstrip()\n    fields=old[old.index('    EntityScriptsConfig config;'):old.index('    // A player as a script names it')]\n    scope=old[old.index('    struct WorldScope {'):old.index('    WorldScope bind_world()')]\n    decls=[]\n    for name in ['bind','prefab_of','entity_of','filter_of','physics_or_throw','hit_table','entities_table','bind_physics','make_script','remember_times','file','bind_world','reload','stop','reload_changed','task_owner_alive']:\n        first=methods[name][:methods[name].index(' {')].rstrip()+';'\n        if name=='entity_of':decls.append('#if KIN_ENABLE_PHYSICS')\n        if name=='make_script':decls.append('#endif')\n        decls.append(first)\n        if name=='bind':decls += ['    void bind_entity(sol::state& lua);','    void bind_services(sol::state& lua);']\n    header='''#pragma once\n\n#include \"lua_reload_internal.hpp\"\n\n#include <kin/ecs/lifecycle.hpp>\n#include <kin/ecs/world.hpp>\n#include <kin/scripting/entity_scripts.hpp>\n#include <kin/scripting/lua_script.hpp>\n#if KIN_ENABLE_PHYSICS\n#include <kin/physics/physics.hpp>\n#endif\n\n#include <map>\n#include <optional>\n#include <unordered_map>\n#include <vector>\n\n// One private userdata identity for registration, pushing and reload migration.\n// Compact names keep sol2's primary/reference keys within Lua's short strings.\n#if defined(__GNUC__) && !defined(_WIN32)\n#define KIN_ENTITY_SCRIPT_TYPE __attribute__((visibility(\"hidden\")))\n#else\n#define KIN_ENTITY_SCRIPT_TYPE\n#endif\n\nnamespace kin::s {\n\n'''+entity+'''\n\n} // namespace kin::s\n\n#undef KIN_ENTITY_SCRIPT_TYPE\n\nnamespace kin::entity_script_detail {\n\nusing FileTime = std::optional<std::filesystem::file_time_type>;\n\n'''+live+'''\n\n} // namespace kin::entity_script_detail\n\nnamespace kin {\n\nclass ScriptWorkflows2D;\nstruct PrefabAsset;\n\nusing entity_script_detail::FileTime;\nusing entity_script_detail::LiveService;\nusing s::ScriptEntity;\n\nstruct EntityScripts::Impl {\n'''+fields+'''    // A player as a script names it (1 the first, 0 anyone; none: its entity's), as Input numbers them.\n'''+methods['player_of']+'\\n\\n'+scope+'\\n'+'\\n'.join(decls)+'''\n};\n\n} // namespace kin\n'''\n    def includes(private, public, standard):\n        return ''.join('#include \"'+name+'.hpp\"\\n' for name in private)+'\\n'+''.join('#include <kin/'+name+'.hpp>\\n' for name in public)+'''#if KIN_ENABLE_PHYSICS\n#include <kin/ecs/physics.hpp>\n#endif\n\n'''+''.join('#include <'+name+'>\\n' for name in standard)+'\\n'\n    runtime_includes=includes(['lua_api_surface','lua_state_copy','lua_vm'],['ecs/dialogue','ecs/render','ecs/saving','ecs/script','platform/input','platform/log','prefab/prefab_asset','scripting/lua_values','scripting/workflows2d'],['algorithm','system_error','utility'])\n    entity_includes=includes(['lua_api_surface','lua_workflows2d_internal'],['ecs/animator','ecs/particles','ecs/render','ecs/tween','scripting/lua_values','scripting/workflows2d'],['algorithm','functional','tuple','utility'])\n    service_includes=includes([],['ecs/camera','ecs/dialogue','ecs/render','ecs/saving','ecs/scene_flow','ecs/ui_screens','l10n/localization','platform/input','prefab/prefab_asset','scripting/lua_values'],['algorithm','cstdio','functional','tuple','utility'])\n    bind=methods['bind'];body=bind[bind.index(' {')+2:-len('\\n    }')]\n    cut=body.index('        sol::table input_table')\n    entity_bind='void EntityScripts::Impl::bind_entity(sol::state& lua) {'+unindent(body[:cut]).rstrip()+'\\n}\\n'\n    # Keep the original initialization and registration order across the boundary.\n    services_bind='void EntityScripts::Impl::bind_services(sol::state& lua) {\\n'+unindent(body[cut:]).rstrip()+'\\n}\\n'\n    prelude=old[old.index('// Makes a script\\'s `self`:'):old.index('} // namespace\\n\\nnamespace {')].rstrip()\n    fmt=old[old.index('// A number as text:'):old.index('// What a character found')].rstrip()\n    helpers=old[old.index('// What a character found'):old.index('} // namespace\\n\\nnamespace {\\n\\n// A live host')].rstrip()\n    prefix='#include \"entity_scripts_internal.hpp\"\\n\\n'\n    runtime=prefix+runtime_includes+'''namespace kin {\nnamespace {\n\n'''+old[old.index('FileTime time_of'):old.index('// What a script holds')].rstrip()+'''\n\n} // namespace\n\nvoid EntityScripts::Impl::bind(sol::state& lua) {\n    bind_entity(lua);\n    bind_services(lua);\n}\n\n'''+''.join(definition(n) for n in ['prefab_of','make_script','remember_times','file','bind_world','reload','stop','reload_changed','task_owner_alive'])+old[old.index('EntityScripts::EntityScripts'):]\n    bindings=prefix+entity_includes+'namespace kin {\\nnamespace {\\n\\n'+helpers+'\\n\\n} // namespace\\n\\n'+entity_bind+'\\n} // namespace kin\\n'\n    services=prefix+service_includes+'namespace kin {\\nnamespace {\\n\\n'+prelude+'\\n\\n'+fmt+'\\n\\n} // namespace\\n\\n'+services_bind+'\\n#if KIN_ENABLE_PHYSICS\\n'+''.join(definition(n) for n in ['entity_of','filter_of','physics_or_throw','hit_table','entities_table','bind_physics'])+'#endif\\n\\n} // namespace kin\\n'\n    cmake=(out/'before-CMakeLists.txt').read_text().replace('        src/scripting/entity_scripts.cpp)', '        src/scripting/entity_scripts.cpp\\n        src/scripting/entity_script_bindings.cpp\\n        src/scripting/entity_service_bindings.cpp)')\n    return {'engine/src/scripting/entity_scripts.cpp':runtime,'engine/src/scripting/entity_script_bindings.cpp':bindings,'engine/src/scripting/entity_service_bindings.cpp':services,'engine/src/scripting/entity_scripts_internal.hpp':header,'engine/CMakeLists.txt':cmake}\n\nif __name__=='__main__':\n    assert_no_active_compilers()\n    for rel,code in generated().items():\n        (repo/rel).write_text(code)\n    print('Generated runtime, entity bindings, service bindings and shared private header.')\n",
+      "entity_split_validate.py": "import re\nfrom entity_split_common import *\n\nassert_no_active_compilers()\n# Reuse the prior suite and target lists, but write a separate result set and\n# compare every public API report to this change's own baseline.\nscript=pathlib.Path('/tmp/kin-build-bench/scene_split_validate.py').read_text()\nscript=script[:script.index(\" if compiler=='gcc':\\n  subprocess.run([sys.executable,'/tmp/kin-build-bench/scene_split_runtime.py','after','gcc']\")]\nscript=script.replace(\"out=base/'kin-scene-split-bench'\", \"out=base/'kin-entity-split-bench'\")\nscript=script.replace(\"(base/'kin-workflow-build-bench'/('api-after-'+compiler)/(host+'.json'))\", \"(out/('before-api-'+compiler+'-'+host+'.json'))\")\n(out/'validate.py').write_text(script)\nsubprocess.run([sys.executable,str(out/'validate.py'),*(sys.argv[1:] or ['clang','gcc'])],env={**env,'PYTHONPATH':'/tmp/kin-build-bench'},check=True)\n",
+      "entity_split_checks.py": "import hashlib, re\nfrom entity_split_common import *\nfrom entity_split_transform import generated\n\nassert_no_active_compilers()\nold=(out/'before-entity_scripts.cpp').read_text()\nnew={path:pathlib.Path(repo/path).read_text() for path in generated()}\nassert all(new[path]==code for path,code in generated().items())\ndef norm(text):return re.sub(r'\\s+','',text)\ndef old_method(name):\n    start=re.search(r'^    (?=\\S)[^\\n]*\\b'+name+r'\\([^\\n]*\\)(?: const)? \\{',old,re.M).start()\n    end=old.index('\\n    }',start)\n    return old[start: end+len('\\n    }')]\ndef body(code):return code[code.index(' {')+2:code.rfind('}')]\ndef new_method(code,name):\n    start=re.search(r'^[^\\n]*EntityScripts::Impl::'+name+r'\\(',code,re.M).start()\n    end=code.index('\\n}',start)\n    return code[start:end+2]\nruntime=new['engine/src/scripting/entity_scripts.cpp'];entity=new['engine/src/scripting/entity_script_bindings.cpp'];service=new['engine/src/scripting/entity_service_bindings.cpp'];header=new['engine/src/scripting/entity_scripts_internal.hpp']\nassert norm(body(old_method('bind')))==norm(body(new_method(entity,'bind_entity'))+body(new_method(service,'bind_services')))\nnames=['prefab_of','make_script','remember_times','file','bind_world','reload','stop','reload_changed','task_owner_alive','entity_of','filter_of','physics_or_throw','hit_table','entities_table','bind_physics']\nfor name in names:\n    code=runtime if name in names[:9] else service\n    assert norm(body(old_method(name)))==norm(body(new_method(code,name))),name\npublic=old[old.index('EntityScripts::EntityScripts'):]\nassert runtime[runtime.index('EntityScripts::EntityScripts'):]==public\nfields=old[old.index('    EntityScriptsConfig config;'):old.index('    // A player as a script names it')]\nassert fields in header\noriginal_entity=old[old.index('struct ScriptEntity {'):old.index('// Makes a script\\'s `self`:')].strip()\nnew_entity=header[header.index('struct KIN_ENTITY_SCRIPT_TYPE ScriptEntity {'):header.index('} // namespace kin::s')].strip().replace('KIN_ENTITY_SCRIPT_TYPE ','')\nassert original_entity==new_entity\noriginal_live=old[old.index('template <typename T> class LiveService'):old.index('} // namespace\\n\\nstruct EntityScripts::Impl')].strip()\nassert original_live in header\nassert old_method('player_of') in header\nlua=old[old.index('constexpr const char* self_prelude'):old.index(')lua\";')+len(')lua\";')]\nassert lua in service\nrow={'regenerates_exactly':True,'preserved_out_of_line_method_bodies':names,'binding_body_and_registration_order_preserved':True,'public_member_definitions_byte_identical':True,'public_member_count':len(re.findall(r'^.*\\bEntityScripts::\\w+\\(',public,re.M))+1,'userdata_definition_body_identical':True,'state_fields_byte_identical':True,'live_service_guard_identical':True,'player_selection_identical':True,'self_prelude_byte_identical':True}\nsave('mechanical-results',row);print(json.dumps(row),flush=True)\n",
+      "entity_split_layout.py": "import re\nfrom entity_split_common import *\nfrom entity_split_syntax import no_pch\n\nassert_no_active_compilers()\nold=(out/'before-entity_scripts.cpp').read_text();prefix=old[:old.index('struct EntityScripts::Impl')]\nfor name in ['ScriptEntity','LiveService','FileTime']:\n    prefix=re.sub(r'\\b'+name+r'\\b','Original'+name,prefix)\nchecks=['static_assert(sizeof(kin::OriginalScriptEntity) == sizeof(kin::s::ScriptEntity));','static_assert(alignof(kin::OriginalScriptEntity) == alignof(kin::s::ScriptEntity));']\nfor trait in ['is_aggregate_v','is_standard_layout_v','is_trivially_copyable_v','is_copy_constructible_v','is_nothrow_move_constructible_v','is_nothrow_destructible_v']:\n    checks.append(f'static_assert(std::{trait}<kin::OriginalScriptEntity> == std::{trait}<kin::s::ScriptEntity>);')\nprobe=out/'layout.cpp';probe.write_text('#include \"entity_scripts_internal.hpp\"\\n'+prefix+'\\n} // namespace kin\\n'+ '\\n'.join(checks)+'\\n')\nrows=[]\nfor compiler in ['clang','gcc']:\n    args=no_pch(compile_args('entity_scripts',out/'unused.o',compiler=compiler,source=probe))+['-fsyntax-only']\n    run(args,'layout-'+compiler,cwd=build_dir(compiler));row={'compiler':compiler,'assertions':len(checks),'pch':False,'sizeof_alignment_and_six_traits_match':True};rows.append(row);save('layout-results',rows);print(json.dumps(row),flush=True)\n",
+      "entity_split_syntax.py": "import concurrent.futures, time\nfrom entity_split_common import *\n\nassert_no_active_compilers()\ndef no_pch(args):\n    result=[];i=0\n    while i<len(args):\n        if args[i:i+2] in [['-Xclang','-include-pch'],['-Xclang','-include']] and i+3<len(args) and args[i+2]=='-Xclang' and 'cmake_pch.' in args[i+3]:i+=4;continue\n        if args[i] in ['-include','-include-pch'] and i+1<len(args) and 'cmake_pch.' in args[i+1]:i+=2;continue\n        if args[i]=='-o':i+=2;continue\n        if args[i] in ['-c','-fpch-preprocess','-Winvalid-pch','-fpch-instantiate-templates']:i+=1;continue\n        result.append(args[i]);i+=1\n    return result\n\nif __name__=='__main__':\n    run(['cmake','-S','/tmp/kin-build-time','-B',base/'kin-build-time-3d-clang','-DKIN_DEV_FAST_SCRIPTING=OFF','-DKIN_COMPILER_CACHE=off','-DKIN_ENABLE_PCH=ON','-DKIN_ENABLE_LTO=OFF'],'3d-configure')\n    tasks=[]\n    header=out/'private-header.cpp';header.write_text('#include \"entity_scripts_internal.hpp\"\\n')\n    for mode,compiler,build in [('clang-3d','clang',base/'kin-build-time-3d-clang'),('gcc-no-physics-audio','gcc',build_dir('gcc'))]:\n        db=json.loads((build/'compile_commands.json').read_text())\n        for name in ['entity_scripts','entity_script_bindings','entity_service_bindings','private-header']:\n            entry=next(e for e in db if e['file'].endswith('/scripting/'+('entity_scripts' if name=='private-header' else name)+'.cpp'))\n            args=no_pch(shlex.split(entry['command']))\n            if mode=='gcc-no-physics-audio':\n                args=[a for a in args if a.split('=')[0] not in ['-DKIN_ENABLE_PHYSICS','-DKIN_ENABLE_AUDIO']]+['-UKIN_ENABLE_PHYSICS','-UKIN_ENABLE_AUDIO']\n            if name=='private-header':args=[str(header) if a==entry['file'] else a for a in args]+['-iquote',str(repo/'engine/src/scripting')]\n            tasks.append((mode,name,build,args+['-fsyntax-only']))\n    def check(task):\n        mode,name,build,args=task;start=time.monotonic()\n        run(args,'syntax-'+mode+'-'+name,cwd=build)\n        return {'mode':mode,'source':name,'pch':False,'exit_code':0,'wall_seconds':time.monotonic()-start}\n    rows=[]\n    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:\n        for row in pool.map(check,tasks):rows.append(row);save('syntax-results',rows);print(json.dumps(row),flush=True)\n",
+      "entity_split_runtime.py": "from entity_split_common import *\n\nassert_no_active_compilers()\nfor compiler in ['clang','gcc']:\n    subprocess.run([sys.executable,str(out/'runtime-build.py'),'after',compiler],env={**env,'PYTHONPATH':'/tmp/kin-build-bench'},check=True)\n    script=pathlib.Path('/tmp/kin-build-bench/scene_split_runtime_samples.py').read_text().replace(\"kin-scene-split-bench\", \"kin-entity-split-bench\")\n    (out/'runtime-samples.py').write_text(script)\n    subprocess.run([sys.executable,str(out/'runtime-samples.py'),compiler],env=env,check=True)\n",
+      "entity_split_pairs.py": "import concurrent.futures, shutil, time\nfrom entity_split_common import *\n\nassert_no_active_compilers()\nnames=['entity_scripts','entity_script_bindings','entity_service_bindings']\nsnapshot=out/'final-snapshot';snapshot.mkdir(exist_ok=True)\nfor name in names+['entity_scripts_internal']:\n    extension='.hpp' if name.endswith('_internal') else '.cpp'\n    shutil.copy2(repo/('engine/src/scripting/'+name+extension),snapshot/(name+extension))\ndb=json.loads((build_dir()/'compile_commands.json').read_text())\ncontrol=next(e for e in db if e['file'].endswith('/core/json.cpp'))\nrows=[]\nfor block in range(2):\n    for phase in ['before','after','after','before']:\n        sample=len(rows);label=f'pair-{sample}-{phase}'\n        current=out/label;current.mkdir(exist_ok=True)\n        tasks=[]\n        for name in (['entity_scripts'] if phase=='before' else names):\n            source=out/'before-entity_scripts.cpp' if phase=='before' else snapshot/(name+'.cpp')\n            args=compile_args(name,current/(name+'.o'),source=source)\n            cpu='2' if phase=='before' or name=='entity_service_bindings' else ('0' if name=='entity_script_bindings' else '6')\n            tasks.append((name,args,cpu))\n        args=shlex.split(control['command']);args[args.index('-o')+1]=str(current/'json.o')\n        tasks.append(('json-control',args,'4'))\n        assert_no_active_compilers();load=os.getloadavg();start=time.monotonic()\n        def compile_one(task):\n            name,args,cpu=task\n            stats=run(args,label+'-'+name,cwd=build_dir(),cpus=cpu,timed=True)\n            return {'source':name,'cpu':int(cpu),**stats}\n        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:\n            compiles=list(pool.map(compile_one,tasks))\n        row={'phase':phase,'block':block,'sample':sample,'wall_seconds':time.monotonic()-start,'compiles':compiles,'load_before':load,'load_after':os.getloadavg()}\n        rows.append(row);save('paired-compiles',rows);print(json.dumps(row),flush=True)\n",
+      "entity_split_measure.py": "import subprocess, sys\nfrom entity_split_common import *\n\nfor script in ['entity_split_checks.py','entity_split_layout.py','entity_split_syntax.py','entity_split_runtime.py','entity_split_pairs.py']:\n    subprocess.run([sys.executable,'/tmp/kin-build-bench/'+script],check=True)\nfor name in ['entity_scripts','entity_script_bindings','entity_service_bindings']:\n    edit_samples('after',name,3 if name=='entity_scripts' else 1)\nassert_no_active_compilers()\nfor name in ['entity_scripts','entity_script_bindings','entity_service_bindings']:\n    (repo/('engine/src/scripting/'+name+'.cpp')).touch()\nrun(['cmake','--build',build_dir(),'--parallel','4','--target','hex_demo','kin_lua','kin_entity_scripts_tests'],'canonical-refresh')\nsubprocess.run([sys.executable,'/tmp/kin-build-bench/entity_split_final.py'],check=True)\n",
+      "entity_split_final.py": "import hashlib, re\nfrom entity_split_common import *\nfrom entity_split_transform import generated\n\nassert_no_active_compilers()\nfor rel,code in generated().items():assert (repo/rel).read_text()==code,rel\nrows=[]\nfor compiler in ['clang','gcc']:\n    build=build_dir(compiler)\n    run(['cmake','--build',build,'--parallel','4','--target','hex_demo','shapes_demo','kin_lua','kin_entity_scripts_tests','kin_lua_runtime_tests'],'final-build-'+compiler)\n    run(['ctest','--test-dir',build,'--output-on-failure','-R','^(kin-(entity-scripts|lua-runtime)|hex-demo|shapes-demo)$'],'final-tests-'+compiler)\n    report=(out/('final-tests-'+compiler+'.log')).read_text()\n    assert '100% tests passed, 0 tests failed out of 4' in report\n    apis={}\n    for host in ['scene','entity','test','scenario']:\n        value=json.loads(subprocess.check_output([str(build/'bin/kin_lua'),'api','--host',host],env=env,text=True))\n        assert value==json.loads((out/f'before-api-{compiler}-{host}.json').read_text())\n        apis[host]=hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()\n    run(['cmake','--build',build,'--parallel','4','--target','hex_demo','shapes_demo','kin_lua','kin_entity_scripts_tests','kin_lua_runtime_tests'],'final-no-change-'+compiler)\n    unchanged=(out/('final-no-change-'+compiler+'.log')).read_text()\n    assert 'Building C' not in unchanged and 'Linking C' not in unchanged,unchanged\n    row={'compiler':compiler,'smoke_tests_passed':4,'api_reports_match':apis,'no_change_compiles_and_links':0,'generated_sources_match':True}\n    rows.append(row);save('final-results',rows);print(json.dumps(row),flush=True)\n",
+      "entity_split_record.py": "import hashlib, statistics\nfrom entity_split_common import *\n\ndef read(name):return json.loads((out/(name+'.json')).read_text())\ndef stats(values):return {'median':statistics.median(values),'min':min(values),'max':max(values)}\nassert_no_active_compilers()\npairs=read('paired-compiles');assert len(pairs)==8\nsummary={}\nfor phase in ['before','after']:\n    rows=[row for row in pairs if row['phase']==phase];assert len(rows)==4\n    summary[phase]={'wall_seconds':stats([row['wall_seconds'] for row in rows]),'entity_compiler_cpu_seconds':stats([sum(c['user_seconds']+c['system_seconds'] for c in row['compiles'] if c['source']!='json-control') for row in rows]),'unchanged_control_seconds':stats([next(c['wall_seconds'] for c in row['compiles'] if c['source']=='json-control') for row in rows])}\nedits={name:read(name+'-edits') for name in ['before-entity_scripts','after-entity_scripts','after-entity_script_bindings','after-entity_service_bindings']}\nassert all(len(rows)==(3 if name in ['before-entity_scripts','after-entity_scripts'] else 1) and all(len(r['planned_and_actual_cpp_outputs'])==1 for r in rows) for name,rows in edits.items())\nedit_summary={name:stats([row['wall_seconds'] for row in rows]) for name,rows in edits.items()}\nruntime={compiler:read('runtime-'+('gcc-' if compiler=='gcc' else '')+'results') for compiler in ['clang','gcc']}\nruntime_summary={}\nfor compiler,rows in runtime.items():\n    assert len(rows)==6 and all(row['positions_match'] for row in rows)\n    runtime_summary[compiler]={phase:{metric:statistics.median(row[metric] for row in rows if row['phase']==phase) for metric in ['scene_vm_create_ms','scene_20000_calls_ms','entity_50000_calls_ms']} for phase in ['before','after']}\nbase_commit=(out/'base-commit').read_text().strip()\npaths=['engine/CMakeLists.txt','tests/entity_scripts_tests.cpp']+['engine/src/scripting/'+n for n in ['entity_scripts.cpp','entity_script_bindings.cpp','entity_service_bindings.cpp','entity_scripts_internal.hpp']]\nhashes={}\nfor rel in paths:\n    p=subprocess.run(['git','show',base_commit+':'+rel],cwd=repo,capture_output=True)\n    hashes[rel]={'before':hashlib.sha256(p.stdout).hexdigest() if p.returncode==0 else None,'after':hashlib.sha256((repo/rel).read_bytes()).hexdigest()}\ncommands={}\nfor compiler in ['clang','gcc']:\n    db=json.loads((build_dir(compiler)/'compile_commands.json').read_text())\n    commands[compiler]={name:next(entry['command'] for entry in db if entry['file'].endswith('/scripting/'+name+'.cpp')) for name in ['entity_scripts','entity_script_bindings','entity_service_bindings']}\nsizes=[]\nfor compiler in ['clang','gcc']:\n    for phase in ['before','after']:\n        exe=out/('runtime-'+('gcc-' if compiler=='gcc' else '')+phase)\n        values=subprocess.check_output(['size','-B',str(exe)],text=True).splitlines()[-1].split()\n        sizes.append({'compiler':compiler,'phase':phase,'file_bytes':exe.stat().st_size,'text_and_readonly_bytes':int(values[0]),'data_bytes':int(values[1]),'bss_bytes':int(values[2])})\ntrace=json.loads((out/'before-trace.json').read_text())['traceEvents']\ntrace_totals={row['name']:row['dur']/1e6 for row in trace if row['name'].startswith('Total ')}\nscripts=['entity_split_common.py','entity_split_before.py','entity_split_transform.py','entity_split_validate.py','entity_split_checks.py','entity_split_layout.py','entity_split_syntax.py','entity_split_runtime.py','entity_split_pairs.py','entity_split_measure.py','entity_split_final.py','entity_split_record.py','bench_compiler_guard.py','lua_runtime_probe.cpp']\nvalidation=read('validation-results');syntax=read('syntax-results');layout=read('layout-results');final=read('final-results')\nassert len(validation)==2 and all(row['selected_tests_passed']==39 for row in validation)\nassert len(syntax)==8 and all(row['exit_code']==0 and row['pch']==False for row in syntax)\nassert len(layout)==2 and all(row['assertions']==8 for row in layout)\nassert len(final)==2 and all(row['smoke_tests_passed']==4 for row in final)\nrecord={\n    'date':'2026-11-07','base_commit':base_commit,'source_sha256':hashes,\n    'environment':{'host':list(os.uname()),'cpu':next(line.split(':',1)[1].strip() for line in pathlib.Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),'logical_cpus':os.cpu_count(),'memtotal':pathlib.Path('/proc/meminfo').read_text().splitlines()[0],'versions':{name:subprocess.check_output([name,'--version'],text=True).splitlines()[0] for name in ['clang++','c++','cmake','ninja']},'source_directory':str(repo),'build_and_temp_directory':str(out),'measured_worker_cpus':[0,2,4,6]},\n    'change':{'runtime':'entity_scripts.cpp retains file loading, reload transactions, per-entity scheduling, save hooks and public methods.','entity_bindings':'entity_script_bindings.cpp registers the Entity userdata, pool/tween bridge and entity methods.','service_bindings':'entity_service_bindings.cpp registers input, UI, dialogue, scene, world/prefab, camera, physics and saves, then runs the unchanged Lua self prelude.','internal_header':'Share original state fields, service guard and entity fields/constructor/alive/live methods. Compact hidden kin::s::ScriptEntity identity keeps sol2 registry keys short.','public_cpp_headers_changed':False,'lua_names_changed':False,'callback_bodies_or_registration_order_changed':False},\n    'configuration':'Normal Release -O2 target flags on Clang/GCC; existing PCH on, compiler cache/LTO off, KIN_DEV_FAST_SCRIPTING=OFF. mold linker. sol2 safety and Lua limits unchanged.',\n    'compile_commands':commands,\n    'baseline_trace':{'instrumented_stats':read('before-trace-stats'),'totals_seconds':trace_totals,'instrumentation_overhead':'Diagnostic only; not mixed into timed before/after samples.'},\n    'paired_compile_method':'Two ABBA blocks, four observations/version. Compile stable original single-source or final three-source snapshots using matching Clang target flags/PCH, four fixed workers. Original source/final longest service source use CPU 2; final entity/runtime use CPUs 0/6. Unchanged core/json.cpp control uses CPU 4. Source/header bytes are stable throughout. This measures the entity compilation set only, without archiving/linking or ordinary project scheduling; other objects/dependencies/shaders are cached. Host activity is uncontrolled; loads and all samples are retained.',\n    'paired_compile_samples':pairs,'paired_compile_summary':summary,\n    'tradeoffs':'Splitting exposes parallel work and smaller implementation edit scopes, but repeats frontend/template work and can increase total compiler CPU, object/COMDAT overhead and simultaneous memory. Max-child RSS is not aggregate concurrent peak memory. Do not extrapolate a parallel compilation-set gain to single-worker or clean whole-project builds.',\n    'edit_method':'Three trailing-comment implementation edits of the original combined file and final runtime; one exploratory observation per final entity/service binding file. Canonical Ninja graph, four workers pinned to CPUs 0/2/4/6, through final hex_demo archive/link. Exact planned and actual C++ output sets checked. Bytes and nanosecond mtimes restored after each sample. Canonical objects recompiled from restored bytes afterward. Shared internal header edits reach all three production sources and the entity regression test; game-main implementation scope is unchanged.',\n    'edit_samples':edits,'edit_summary':edit_summary,\n    'runtime_probe':{'method':'Assertions-enabled -O2 binaries linked before changing source and after the split, separately for Clang/GCC. Three processes/version/compiler in alternating order; 30 timed samples after three warmups, CPU 2. Measure an unchanged scene VM creation/control loop and 50,000 entity bridge calls per entity update sample. Assert final entity positions 330000 and 3300. These narrow probes do not establish whole-game FPS or bound every service/query operation.','samples':runtime,'median_of_process_medians':runtime_summary,'binary_sizes':sizes},\n    'mechanical_checks':read('mechanical-results'),'userdata_layout_and_traits':layout,'validation':validation,'no_pch_optional_configuration_checks':syntax,'final_state':final,\n    'limits':['No clean whole-project or cumulative speedup claim; the recorded compilation set gains come from parallelism and smaller edit scopes.','No Windows/MSVC or full native desktop/3D/GPU runtime validation. Clang 3D and GCC physics/audio-disabled checks compile templates without a PCH only.','Private C++ userdata and sol registry identities change; public Lua reports and userdata layouts/traits match. This is not cross-platform ABI certification.','The original baseline dry-run initially stopped at a required CMake regeneration after creating the branch. The source was restored, the build settled, and all three recorded baseline edit samples then verified exactly one C++ output. The initial dry-run plan is retained in the artifact directory.'],\n    'reproduction':{'artifact_directory':str(out),'steps':['At base_commit, configure normal Clang/GCC targets and prebuild tests, kin_lua and hex_demo. Set TMPDIR to an output filesystem with room. Adjust script paths/affinity for the host. Save entity_scripts.cpp and engine/CMakeLists.txt as before-<basename> plus base-commit in the artifact directory.','Run entity_split_before.py on the original sources to preserve baseline probes and API reports, collect the diagnostic trace and baseline edits. Settle any pending CMake regeneration first.','Run entity_split_transform.py and configure/build the split target. Add the short-key regression to the entity test, then run entity_split_validate.py clang gcc.','Run entity_split_measure.py for mechanical/layout/no-PCH checks, paired runtime/compile measurements, implementation edits and final canonical refresh/smoke/API/no-change checks. No source, header, configuration or Ninja-log changes while compilers run.','Run entity_split_record.py to write the complete record. Keep every sample and the diagnostic trace separate from performance samples.'],'scripts':{name:pathlib.Path('/tmp/kin-build-bench',name).read_text() for name in scripts},'runtime_build_script':(out/'runtime-build.py').read_text(),'runtime_samples_script':(out/'runtime-samples.py').read_text(),'validation_script':(out/'validate.py').read_text()}\n}\n(repo/'docs/build_entity_bindings_split_2026-11-07.json').write_text(json.dumps(record,indent=2)+'\\n')\nprint(json.dumps({'pairs':summary,'edits':edit_summary,'runtime':runtime_summary,'sizes':sizes},indent=2),flush=True)\n",
+      "bench_compiler_guard.py": "\"\"\"Keep header-edit experiments separate from worktree compiler processes.\"\"\"\nimport os\nfrom pathlib import Path\n\nROOTS = (b'/tmp/kin-build-time/', b'/home/bamedeo/kin-wt/build-time/')\nBUILD_ROOTS = tuple(b'/mnt/windows/Users/amedeo/Desktop/gamedev/' + name for name in (b'kin-build-time-clang', b'kin-build-time-out', b'kin-build-time-3d-clang'))\n\ndef active_compilers():\n    found = []\n    for process in Path('/proc').iterdir():\n        if not process.name.isdigit() or int(process.name) == os.getpid():\n            continue\n        try:\n            arguments = (process / 'cmdline').read_bytes().split(b'\\0')\n            program = arguments[0].rsplit(b'/', 1)[-1]\n            is_compiler = b'clang' in program or program in (b'g++', b'c++', b'cc1plus', b'cc1') or program.endswith(b'-g++')\n            is_build_tool = program in (b'ninja', b'ninja-build', b'cmake')\n            build_match = False\n            if is_build_tool:\n                cwd = os.fsencode(os.readlink(process / 'cwd'))\n                build_match = any(root in argument for argument in arguments for root in BUILD_ROOTS) or any(cwd.startswith(root) for root in BUILD_ROOTS) or any(root.rstrip(b'/') in argument for argument in arguments for root in ROOTS)\n            if (is_compiler and any(root in argument for argument in arguments for root in ROOTS)) or build_match:\n                found.append((int(process.name), program.decode(errors='replace')))\n        except (FileNotFoundError, PermissionError, ProcessLookupError):\n            continue\n    return sorted(found)\n\ndef assert_no_active_compilers():\n    found = active_compilers()\n    if found:\n        raise RuntimeError(f'Wait for worktree compiler/configure/build processes before experiments: {found}')\n",
+      "lua_runtime_probe.cpp": "#include <kin/ecs/render.hpp>\n#include <kin/ecs/script.hpp>\n#include <kin/platform/input.hpp>\n#include <kin/scene/scene_asset.hpp>\n#include <kin/scripting/entity_scripts.hpp>\n#include <kin/scripting/script_engine.hpp>\n#include <algorithm>\n#include <cassert>\n#include <chrono>\n#include <filesystem>\n#include <fstream>\n#include <iostream>\n#include <vector>\nusing Clock = std::chrono::steady_clock;\ndouble ms(Clock::time_point start) { return std::chrono::duration<double,std::milli>(Clock::now()-start).count(); }\ntemplate<class F> void samples(const char* name,F fn) {\n    std::vector<double> times;\n    for(int i=0;i<33;++i) { auto start=Clock::now(); fn(); if(i>=3)times.push_back(ms(start)); }\n    std::sort(times.begin(),times.end());\n    std::cout << name << ' ' << times[times.size()/2] << '\\n';\n}\nint main(int argc,char**argv) {\n    assert(argc==2);\n    const std::filesystem::path root=argv[1]; std::filesystem::create_directories(root);\n    std::ofstream(root/\"scene.lua\") << R\"lua(\nlocal entity\nfunction on_load(scene)\n    entity=scene:entity('scene_probe')\n    entity:set_transform(0,0)\nend\nfunction update(ctx)\n    assert(ctx.dt>0)\n    for i=1,10000 do\n        assert(entity:alive())\n        entity:translate(1,-1)\n    end\nend\n)lua\";\n    std::ofstream(root/\"entity.lua\") << R\"lua(\nfunction on_update(self,dt)\n    for i=1,100 do\n        assert(self:alive())\n        local x,y=self:position()\n        self:move(1,-1)\n        self:set_rotation(self:rotation()+1)\n    end\nend\n)lua\";\n    samples(\"scene_vm_create_ms\",[&]{kin::ScriptEngine engine;});\n    kin::EcsWorld scene_world;kin::register_builtin_editor_components(scene_world);\n    kin::ScriptEngine scene;\n    assert(scene.load_file(root,\"scene.lua\"));\n    assert(scene.call_on_load({.world=&scene_world,.script_path=root/\"scene.lua\"}));\n    samples(\"scene_20000_calls_ms\",[&]{\n        if(!scene.call_update(kin::ScriptFrameContext{.dt=1.f/60})) {\n            std::cerr<<scene.last_error()<<'\\n';std::abort();\n        }\n    });\n    const auto entity=scene_world.entities().find_by_name(\"scene_probe\");\n    assert(entity.get<kin::Transform2D>()->pos.x==330000.f);\n    kin::EcsWorld world;kin::register_builtin_editor_components(world);\n    for(int i=0;i<100;++i)\n        world.entity(\"entity_probe_\"+std::to_string(i)).set(kin::Transform2D{}).set(kin::ScriptComponent{.asset={.id=\"entity.lua\"}});\n    kin::EntityScripts scripts{{.content=root,.check_frames=0}};kin::Input input;\n    samples(\"entity_50000_calls_ms\",[&]{scripts.update(world,input,1.f/60);});\n    const auto actor=world.entities().find_by_name(\"entity_probe_0\");\n    assert(actor.get<kin::Transform2D>()->pos.x==3300.f);\n    std::cout<<\"positions \"<<entity.get<kin::Transform2D>()->pos.x<<' '<<actor.get<kin::Transform2D>()->pos.x<<'\\n';\n}\n"
+    },
+    "runtime_build_script": "import json,os,pathlib,shlex,subprocess,sys\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');compiler=sys.argv[2] if len(sys.argv)>2 else 'clang';build=base/('kin-build-time-out' if compiler=='gcc' else 'kin-build-time-clang');out=base/'kin-entity-split-bench';env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};phase=sys.argv[1];label='runtime-'+('gcc-' if compiler=='gcc' else '')+phase;db=json.loads((build/'compile_commands.json').read_text());entry=next(e for e in db if e['file'].endswith('/tests/scripting_tests.cpp'));cmd=shlex.split(entry['command']);cmd[cmd.index('-o')+1]=str(out/(label+'.o'));cmd[cmd.index('-c')+1]='/tmp/kin-build-bench/lua_runtime_probe.cpp';cmd+=['-O2']\nwith (out/(label+'-build.log')).open('w') as log:\n subprocess.run(cmd,cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n commands=subprocess.check_output(['ninja','-C',str(build),'-t','commands','kin_scripting_tests'],env=env,text=True);line=next(l for l in commands.splitlines() if '-o bin/kin_scripting_tests ' in l);args=shlex.split(line);begin=next(i for i,x in enumerate(args) if x in ['/usr/bin/c++','/usr/bin/clang++']);end=next((i for i in range(begin,len(args)) if args[i]=='&&'),len(args));args=args[begin:end];args[args.index('-o')+1]=str(out/label);args=[('--dependency-file='+str(out/(label+'.link.d'))) if a.startswith('--dependency-file=') else a for a in args];args[args.index('tests/CMakeFiles/kin_scripting_tests.dir/scripting_tests.cpp.o')]=str(out/(label+'.o'));subprocess.run(args,cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\nprint('Linked '+label,flush=True)\n",
+    "runtime_samples_script": "import json,os,pathlib,subprocess,sys\nout=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev/kin-entity-split-bench');env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};compiler=sys.argv[1] if len(sys.argv)>1 else 'clang';tag='gcc-' if compiler=='gcc' else '';rows=[]\nvariant=sys.argv[2] if len(sys.argv)>2 else 'after'\nfor run in range(3):\n for phase in (['before',variant] if run%2==0 else [variant,'before']):\n  p=subprocess.run(['taskset','-c','2',str(out/('runtime-'+tag+phase)),str(out/('runtime-content-'+phase))],env=env,text=True,capture_output=True,check=True);(out/f'runtime-{tag}{phase}-{run}.log').write_text(p.stdout+p.stderr);values={}\n  for line in p.stdout.splitlines():\n   parts=line.split()\n   if len(parts)==2 and parts[0].endswith('_ms'):values[parts[0]]=float(parts[1])\n  assert len(values)==3 and 'positions 330000 3300' in p.stdout,p.stdout\n  row={'compiler':compiler,'phase':phase,'run':run,**values,'positions_match':True};rows.append(row);(out/('runtime-'+tag+(variant+'-' if variant!='after' else '')+'results.json')).write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps(row),flush=True)\n",
+    "validation_script": "import hashlib,json,os,pathlib,re,subprocess,sys\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');out=base/'kin-entity-split-bench';results=json.loads((out/'validation-results.json').read_text()) if (out/'validation-results.json').exists() else []\npattern='^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$'\ntargets=['kin_ecs_tests','kin_ecs_entity_tests','kin_ecs_events_tests','kin_ecs_component_tests','kin_ecs_inspection_tests','kin_ecs_editor_tests','kin_ecs_system_tests','kin_ecs_animation_tests','kin_ecs_time_tests','kin_ecs_spawn_tests','kin_ecs_lifecycle_tests','kin_platform_headers_check','kin_platform_tests','kin_window_points_tests','kin_input_workflow_tests','kin_renderer_headers_check','kin_renderer_tests','kin_rendering_tests','kin_ecs_render_tests','kin_sprite_animation_tests','kin_particle_tests','kin_tilemap_tests','kin_animation_lighting2d_tests','kin_scene_headers_check','kin_lua','kin_lua_script_tests','kin_scripting_tests','kin_entity_scripts_tests','kin_lua_workflows2d_tests','kin_lua_runtime_tests','kin_scene_tests','kin_scene_asset_tests','kin_scene_flow_tests','kin_scene_workflow2d_tests','kin_development_tests','kin_ui2_tests','kin_ui2_text_edit_tests','kin_ui2_touch_controls_tests','kin_ui2_text_tests','kin_ui2_theme_file_tests','hex_demo','shapes_demo']\nfor compiler in sys.argv[1:] or ['clang','gcc']:\n if compiler=='gcc' and not (out/'runtime-gcc-before').exists():subprocess.run([sys.executable,'/tmp/kin-build-bench/scene_split_runtime.py','before','gcc'],check=True)\n build=base/('kin-build-time-clang' if compiler=='clang' else 'kin-build-time-out');env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'}\n with (out/(compiler+'-validation-build.log')).open('w') as log:\n  subprocess.run(['cmake','-S','/tmp/kin-build-time','-B',str(build),'-DKIN_DEV_FAST_SCRIPTING=OFF','-DKIN_COMPILER_CACHE=off','-DKIN_ENABLE_PCH=ON','-DKIN_ENABLE_LTO=OFF'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n  subprocess.run(['cmake','--build',str(build),'--parallel','4','--target',*targets,'--','-k','0'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n with (out/(compiler+'-tests.log')).open('w') as log:subprocess.run(['ctest','--test-dir',str(build),'--output-on-failure','-j','2','-R',pattern],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n count=re.search(r'100% tests passed, 0 tests failed out of (\\d+)',(out/(compiler+'-tests.log')).read_text());assert count and int(count[1])==39\n reports={}\n for host in ['scene','entity','test','scenario']:\n  p=subprocess.run([str(build/'bin/kin_lua'),'api','--host',host],env=env,text=True,capture_output=True,check=True);actual=json.loads(p.stdout);reference=json.loads((out/('before-api-'+compiler+'-'+host+'.json')).read_text());assert actual==reference,(compiler,host);(out/(compiler+'-api-'+host+'.json')).write_text(p.stdout);reports[host]=hashlib.sha256(json.dumps(actual,sort_keys=True,separators=(',',':')).encode()).hexdigest()\n row={'compiler':compiler,'selected_tests_passed':39,'test_regex':pattern,'api_matches_baseline':reports};results=[r for r in results if r['compiler']!=compiler]+[row];(out/'validation-results.json').write_text(json.dumps(results,indent=2)+'\\n');print('39 tests and four API reports pass: '+compiler,flush=True)\n"
+  }
+}

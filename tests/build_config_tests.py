@@ -1,8 +1,10 @@
 """Exercise developer build settings from a parent game's CMake project."""
 
 import argparse
+import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -42,6 +44,12 @@ class BuildConfigTests(unittest.TestCase):
 include("${KIN_ROOT}/cmake/kin_game.cmake")
 add_library(engine STATIC engine.cpp plain.c)
 kin_precompile_target(engine)
+add_library(script_bindings STATIC EXCLUDE_FROM_ALL engine.cpp)
+target_compile_options(script_bindings PRIVATE
+    "$<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O2>"
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Werror=invalid-pch>")
+kin_configure_scripting_build(script_bindings)
+kin_precompile_target(script_bindings)
 ''')
         (source / "main.cpp").write_text('''
 #include <flecs.h>
@@ -68,6 +76,7 @@ get_target_property(custom_launcher custom CXX_COMPILER_LAUNCHER)
 get_target_property(custom_headers custom PRECOMPILE_HEADERS)
 file(WRITE "${CMAKE_BINARY_DIR}/settings.txt"
     "${engine_launcher}\\n${game_launcher}\\n${custom_launcher}\\n${custom_headers}\\n")
+file(WRITE "${CMAKE_BINARY_DIR}/compiler-id.txt" "${CMAKE_CXX_COMPILER_ID}")
 ''')
         return source, root / "build"
 
@@ -111,6 +120,71 @@ file(WRITE "${CMAKE_BINARY_DIR}/settings.txt"
             settings = (build / "settings.txt").read_text().splitlines()
             self.assertTrue(all(value.endswith("-NOTFOUND") for value in settings[:2]))
             self.assertEqual(settings[2], "custom-launcher")
+
+    def test_fast_scripting_is_private_and_uses_a_matching_pch(self):
+        with tempfile.TemporaryDirectory(prefix="kin fast scripting ") as directory:
+            source, build = self.fixture(Path(directory))
+            self.configure(source, build, "-DKIN_ENABLE_PCH=ON", "-DKIN_COMPILER_CACHE=off",
+                           "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_CONFIGURATION_TYPES=Release",
+                           "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
+            if (build / "compiler-id.txt").read_text() not in ("GNU", "Clang"):
+                self.skipTest("Fast scripting requires GCC or Clang")
+            if not (build / "compile_commands.json").exists():
+                self.skipTest("Generator does not export compile commands")
+
+            def commands():
+                return json.loads((build / "compile_commands.json").read_text())
+
+            def check_binding_optimization(expected):
+                entries = [e for e in commands() if "script_bindings.dir" in e["command"]]
+                self.assertEqual(len(entries), 2)  # source and PCH
+                for entry in entries:
+                    options = [x for x in shlex.split(entry["command"]) if x.startswith("-O")]
+                    self.assertEqual(options[-1], expected, entry["command"])
+
+            check_binding_optimization("-O2")  # Default remains unchanged.
+            self.configure(source, build, "-DKIN_DEV_FAST_SCRIPTING=ON")
+            check_binding_optimization("-O1")
+            for entry in commands():
+                if "script_bindings.dir" not in entry["command"]:
+                    self.assertNotIn("-O1", shlex.split(entry["command"]))
+            output = self.run_command(ARGS.cmake, "--build", str(build), "--config", "Release",
+                                      "--target", "script_bindings", "--parallel", "2")
+            self.assertNotIn("not used because", output)
+            self.assertNotIn("invalid precompiled", output.lower())
+            self.configure(source, build, "-DKIN_DEV_FAST_SCRIPTING=OFF")
+            check_binding_optimization("-O2")
+            self.run_command(ARGS.cmake, "--build", str(build), "--config", "Release",
+                             "--target", "script_bindings", "--parallel", "2")
+
+            for config in ("RelWithDebInfo", "Debug", "MinSizeRel"):
+                with self.subTest(config=config):
+                    self.configure(source, build, "-DKIN_DEV_FAST_SCRIPTING=ON",
+                                   f"-DCMAKE_BUILD_TYPE={config}", f"-DCMAKE_CONFIGURATION_TYPES={config}")
+                    if config == "RelWithDebInfo":
+                        check_binding_optimization("-O1")
+                    else:
+                        for entry in commands():
+                            self.assertNotIn("-O1", shlex.split(entry["command"]))
+
+    def test_fast_scripting_rejects_shipping_and_unsupported_compilers(self):
+        with tempfile.TemporaryDirectory(prefix="kin fast scripting policy ") as directory:
+            script = Path(directory) / "check.cmake"
+            for shipping, compiler, message in (("ON", "GNU", "disable it for KIN_SHIPPING"),
+                                                ("OFF", "MSVC", "requires GCC or Clang")):
+                with self.subTest(shipping=shipping, compiler=compiler):
+                    script.write_text(f'''
+cmake_minimum_required(VERSION 3.22)
+set(KIN_DEV_FAST_SCRIPTING ON)
+set(KIN_SHIPPING {shipping})
+set(CMAKE_CXX_COMPILER_ID {compiler})
+include("{ROOT.as_posix()}/cmake/kin_build.cmake")
+kin_configure_scripting_build(unused)
+''')
+                    result = subprocess.run([ARGS.cmake, "-P", str(script)], text=True,
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn(message, result.stdout)
 
 
 if __name__ == "__main__":

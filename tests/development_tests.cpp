@@ -1,4 +1,5 @@
 #include <cassert>
+#include <kin/renderer/renderer2d.hpp>
 #include <chrono>
 #include <fstream>
 #include <kin/core/json.hpp>

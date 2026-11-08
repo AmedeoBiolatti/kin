@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "../engine/src/renderer/gpu/gpu_memory.hpp"
 #include "../engine/src/renderer/gpu/gpu_device.hpp"
 

@@ -1,5 +1,7 @@
 #include <kin/ecs/skeleton2d.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
 #include "../anim/skeleton2d_internal.hpp"
 #include "render_internal.hpp"
 

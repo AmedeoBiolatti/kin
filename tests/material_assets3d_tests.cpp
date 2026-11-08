@@ -8,6 +8,7 @@
 #include <kin/ecs/scene3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/material_graph3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 #include <kin/scene/scene_session3d.hpp>

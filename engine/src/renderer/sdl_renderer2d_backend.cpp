@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "sdl_renderer2d_backend.hpp"
 #include "rounded_rect_loop.hpp"
 #include "../platform/window_points.hpp"

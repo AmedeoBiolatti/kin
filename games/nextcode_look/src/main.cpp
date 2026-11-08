@@ -13,6 +13,7 @@
 // --menu=<title> opens that menu at start, --submenu=<label> a submenu in it (for
 // screenshots).
 
+#include <kin/platform/window.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/runtime/game_info.hpp>

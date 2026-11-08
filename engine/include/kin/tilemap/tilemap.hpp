@@ -6,7 +6,6 @@
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/render_layer.hpp>
 #include <kin/renderer/render_queue.hpp>
-#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 #include <kin/renderer/sprite_sheet.hpp>
 
@@ -21,6 +20,8 @@
 #include <vector>
 
 namespace kin {
+
+class Renderer2D;
 
 struct ShapeMesh;
 

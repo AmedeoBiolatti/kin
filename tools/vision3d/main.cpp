@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <thread>
 using namespace kin;
 using vision3d::Graph;

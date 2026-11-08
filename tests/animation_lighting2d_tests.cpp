@@ -1,4 +1,6 @@
+#include <kin/renderer/backend.hpp>
 #include <cassert>
+#include <kin/renderer/renderer2d.hpp>
 #include <cmath>
 #include <kin/ecs/lighting.hpp>
 #include <kin/ecs/normal_sprite2d.hpp>

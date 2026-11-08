@@ -1,3 +1,5 @@
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/runtime/scene_server.hpp>
 #include <kin/render3d/camera3d.hpp> // view.frame's camera3d (its fields only: in 2D builds too)
 #ifdef KIN_EXPERIMENTAL_3D

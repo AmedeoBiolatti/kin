@@ -3,6 +3,7 @@
 #include <kin/assets/asset_server.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/renderer/renderer2d.hpp>
 
 #include <algorithm>
 #include <cmath>

@@ -10,6 +10,7 @@
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
 #include <kin/physics3d/world3d.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
 #include <kin/runtime/run_report.hpp>

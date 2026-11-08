@@ -132,6 +132,51 @@ function(kin_add_component_test component target test_name)
     endif()
 endfunction()
 
+# Each translation unit includes just one public header. Keep the checks
+# independent of PCH/unity builds so missing includes cannot be hidden.
+add_library(kin_scene_headers_check OBJECT scene_header_check.cpp script_engine_header_check.cpp)
+target_include_directories(kin_scene_headers_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
+target_link_libraries(kin_scene_headers_check PRIVATE kin::components)
+target_compile_features(kin_scene_headers_check PRIVATE cxx_std_23)
+set_target_properties(kin_scene_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
+
+# Compile each renderer data header on its own. PCH/unity builds must not
+# hide missing direct includes.
+add_library(kin_renderer_headers_check OBJECT
+    ecs_render_header_check.cpp
+    renderer_command_header_check.cpp
+    renderer_queue_header_check.cpp
+    renderer_sprite_instance_header_check.cpp
+    renderer_sprite_catalog_header_check.cpp
+    renderer_lighting_header_check.cpp
+    particle_system_header_check.cpp
+    tilemap_header_check.cpp
+    normal_lighting2d_header_check.cpp
+    renderer_flip_header_check.cpp
+    renderer_backend_header_check.cpp
+    renderer_interface_header_check.cpp
+    renderer_backend_types_header_check.cpp
+)
+target_include_directories(kin_renderer_headers_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
+target_link_libraries(kin_renderer_headers_check PRIVATE kin::components flecs::flecs_static)
+target_compile_features(kin_renderer_headers_check PRIVATE cxx_std_23)
+set_target_properties(kin_renderer_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
+
+# Public platform/UI headers must compile without transitive Window definitions.
+# Compile them independently of PCH and unity builds.
+add_library(kin_platform_headers_check OBJECT
+    window_types_header_check.cpp
+    windowed_app_header_check.cpp
+    window_header_check.cpp
+    input_header_check.cpp
+    app_header_check.cpp
+    ui2_context_header_check.cpp
+)
+target_include_directories(kin_platform_headers_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
+target_link_libraries(kin_platform_headers_check PRIVATE kin::components flecs::flecs_static)
+target_compile_features(kin_platform_headers_check PRIVATE cxx_std_23)
+set_target_properties(kin_platform_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
+
 kin_add_test(kin_component_tests kin-component-config SOURCES component_tests.cpp)
 # Platform services (kin/platform/services.hpp). The Steam backend opens a
 # stand-in for Steam's library, built here with the same file name.
@@ -697,6 +742,12 @@ target_link_libraries(kin_ecs_bench PRIVATE kin::engine)
 # A step of 2D physics around Box2D in a small top-down game's world (update_physics_world).
 add_executable(kin_physics2d_bench EXCLUDE_FROM_ALL physics2d_bench.cpp)
 target_link_libraries(kin_physics2d_bench PRIVATE kin::engine)
+# Lua scripts on many entities (a horde's foes and seeds), per EntityScripts::update.
+# Built on request (ninja kin_entity_scripts_bench), not by CI.
+if(TARGET kin::scripting_scenes AND KIN_ENABLE_PHYSICS)
+    add_executable(kin_entity_scripts_bench EXCLUDE_FROM_ALL entity_scripts_bench.cpp)
+    target_link_libraries(kin_entity_scripts_bench PRIVATE kin::scripting_scenes kin::physics_ecs)
+endif()
 # Python systems against plain C++, per update (docs/python_scripting.md).
 # Built on request (ninja kin_python_bench), not by CI.
 if(KIN_ENABLE_PYTHON)

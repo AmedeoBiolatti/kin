@@ -231,6 +231,12 @@ state preservation and the remaining structural/controller limitations.
 
 ## Limits
 
+An instance has its prefab's components by inheritance until it sets its own:
+`remove<T>()` on an instance that never set `T` itself removes nothing, and it
+keeps the prefab's `T` (a Lua script keeps running). Set the component on the
+instance instead (`ScriptComponent{.enabled = false}`), or use
+`remove_prefab_component` for an editor's removal.
+
 V1 does not serialize raw/unregistered Flecs components. Asset GUID ownership,
 automatic live prefab synchronization, independent nested-instance editing and Lua
 structural editing helpers remain separate work; Lua field patches use the registry.

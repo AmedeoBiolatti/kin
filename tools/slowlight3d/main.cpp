@@ -11,6 +11,7 @@
 #include <kin/assets/image.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/graph_resources.hpp>
 #include <kin/ui2/context.hpp>
 #include <stdexcept>

@@ -6,6 +6,8 @@
 #include <kin/scene/scene_manager.hpp>
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scripting/script_scene.hpp>
+#include <kin/scripting/script_engine.hpp>
+#include <sol/sol.hpp>
 
 #include <cassert>
 #include <chrono>
@@ -62,6 +64,45 @@ kin::ScriptScene make_scene(const std::filesystem::path& root,
         .name = "TestScript",
         .hot_reload = hot_reload,
     }};
+}
+
+// sol2 checks these registry keys on every receiver conversion. A long C++
+// namespace previously pushed them past Lua's default 40-byte short-string limit.
+void test_scene_userdata_registry_keys_stay_short() {
+    bool inspected = false;
+    kin::ScriptEngine engine{[&](sol::state& lua) {
+        const sol::table types = lua.registry()["kin.api_types"];
+        const char* names[] = {"KinEntity", "KinDeferredEntity", "KinCommandBuffer", "KinSystemContext", "KinScene",
+                               "KinInput", "KinApp", "KinContext", "KinActions", "KinDialoguePlayer"};
+        lua_State* state = lua.lua_state();
+        for (const char* name : names) {
+            const sol::table expected = types[name];
+            expected.push();
+            const void* identity = lua_topointer(state, -1);
+            lua_pop(state, 1);
+            std::string registry_key;
+            // Use raw stack access: creating sol::references while iterating the
+            // registry would modify the table being visited.
+            lua_pushnil(state);
+            while (lua_next(state, LUA_REGISTRYINDEX) != 0) {
+                if (lua_type(state, -2) == LUA_TSTRING && lua_topointer(state, -1) == identity) {
+                    std::size_t length = 0;
+                    const char* text = lua_tolstring(state, -2, &length);
+                    const std::string_view key{text, length};
+                    if (key.starts_with("sol.")) registry_key.assign(key);
+                }
+                lua_pop(state, 1);
+            }
+            assert(!registry_key.empty() && registry_key.size() <= 40);
+            const std::string reference_key = registry_key + ".user";
+            assert(reference_key.size() <= 40);
+            lua_getfield(state, LUA_REGISTRYINDEX, reference_key.c_str());
+            assert(lua_istable(state, -1));
+            lua_pop(state, 1);
+        }
+        inspected = true;
+    }};
+    assert(inspected);
 }
 
 // The editor entry point lives in the optional scene integration library.
@@ -850,6 +891,7 @@ int main() {
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
+    test_scene_userdata_registry_keys_stay_short();
     Fixture fixture;
     test_editor_reload_coordinator();
     test_load_update_actions_and_spawn(fixture);

@@ -4,7 +4,6 @@
 #include <kin/core/types.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/input.hpp>
-#include <kin/platform/window.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <filesystem>
 #include <memory>
@@ -13,6 +12,7 @@
 
 namespace kin {
 
+class Window;
 struct FrameContext;
 
 struct WindowedAppConfig {
@@ -45,6 +45,9 @@ struct WindowedAppConfig {
     bool high_pixel_density = false;
     // Draw only when something changes (see AppConfig::wait_for_events).
     bool wait_for_events = false;
+    // While waiting, wake at least this often anyway (0: never; an app with
+    // nothing that changes unseen, such as a file watcher, needs no waking).
+    f32 max_idle_wait = 0.5f;
     std::optional<InputMap> input_map;
     // A PNG (read through the content layer) for the window's icon; none: the system's.
     std::filesystem::path icon;

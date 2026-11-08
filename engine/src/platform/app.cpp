@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/platform/app.hpp>
 
 #include <kin/platform/log.hpp>
@@ -6,6 +7,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstdlib>
 #include <string_view>
@@ -207,6 +209,7 @@ bool App::watch_app_events(void* userdata, SDL_Event* event) {
         if (app._in_background) {
             app._in_background = false;
             app._forget_elapsed = true;
+            app._settle_frames = 3; // drawn again at once, not when next touched
             app.app_event(AppEvent::Foreground);
         }
         break;
@@ -257,6 +260,10 @@ void App::start_loop(std::function<void(f32)> update, std::function<void(f32)> r
     _advance_input = true;
     _frame_stats = {};
     _running = true;
+    // Under wait_for_events the first frames are drawn before any waiting: the
+    // very first steps nothing (no time has passed), and a scene draws once it
+    // has stepped, so waiting after it would show nothing until a touch.
+    _settle_frames = 3;
     KIN_LOG_INFO_F(
         "runtime", "app loop started",
         (LogFields{
@@ -401,8 +408,30 @@ bool App::wait_for_change() {
         timeout = timeout < 0.0f ? _redraw_in : std::min(timeout, _redraw_in);
     }
     const u64 start = SDL_GetTicksNS();
+#if defined(SDL_PLATFORM_ANDROID)
+    // SDL's wait spins on Android (a whole core busy while nothing happens:
+    // its lifecycle wait returns at once): sleep in short steps instead, and
+    // look for events between them: 8 ms apart at first, 25 once it has
+    // been idle a while (a touch then waits a frame and a half at most).
+    const u64 deadline = timeout < 0.0f ? std::numeric_limits<u64>::max() : start + static_cast<u64>(static_cast<f64>(timeout) * 1.0e9);
+    bool event = false;
+    for (;;) {
+        SDL_PumpEvents();
+        if (SDL_HasEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST)) {
+            event = true;
+            break;
+        }
+        const u64 now = SDL_GetTicksNS();
+        if (now >= deadline) {
+            break;
+        }
+        const u64 step = now - start < 250'000'000 ? 8'000'000 : 25'000'000;
+        SDL_DelayNS(std::min<u64>(deadline - now, step));
+    }
+#else
     // A null event leaves it queued for pump_events().
     const bool event = SDL_WaitEventTimeout(nullptr, timeout < 0.0f ? -1 : static_cast<Sint32>(std::ceil(timeout * 1000.0f)));
+#endif
     _idle_wait = static_cast<f32>(SDL_GetTicksNS() - start) / 1'000'000'000.0f;
     if (event) {
         _settle_frames = 2;

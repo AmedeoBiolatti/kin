@@ -1,4 +1,6 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/assets/asset_manager.hpp>
+#include <kin/renderer/renderer2d.hpp>
 #include <kin/anim/events.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>

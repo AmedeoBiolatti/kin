@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <functional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -520,6 +522,68 @@ void test_runtime_component_copy_and_owner_patch_policy() {
     assert(!original.events().since(sequence).empty());
 }
 
+void test_native_field_accessors_survive_schema_copy() {
+    struct Native {
+        struct Nested { kin::f32 weight = 1.0f; } nested;
+        kin::i32 count = 2;
+        std::string text = "initial";
+        std::vector<kin::Vec2f> points{{1.0f, 2.0f}};
+    };
+    kin::EcsWorld destination;
+    {
+        kin::EcsWorld source;
+        auto native = source.components().native<Native>("NativeAccessors");
+        native.field("count", &Native::count).label("Count").range(0, 100)
+            .field("weight", &Native::nested, &Native::Nested::weight)
+            .field("text", &Native::text)
+            .field("points", &Native::points)
+            .property<kin::i32>("adapted",
+                [offset = 10](const Native& value) { return value.count + offset; },
+                [offset = 10](Native& value, const kin::i32& given) {
+                    if (given < offset) return false;
+                    value.count = given - offset;
+                    return true;
+                });
+        const auto* descriptor = source.components().find("NativeAccessors");
+        assert(descriptor && descriptor->fields.size() == 5);
+        assert(descriptor->fields[0].label == "Count");
+        assert(descriptor->fields[0].min_value == 0 && descriptor->fields[0].max_value == 100);
+
+        native.property<kin::i32>("", {}, {});
+        assert(source.components().last_error() == "component field name is required");
+        native.property<kin::i32>("missing", {}, [](Native&, const kin::i32&) { return true; });
+        assert(source.components().last_error() == "component property requires a reader and writer");
+        native.field("count", &Native::count);
+        assert(source.components().last_error().find("duplicate field") != std::string::npos);
+        assert(descriptor->fields.size() == 5);
+        auto invalid = source.components().native<Native>("NativeAccessors");
+        const std::string error = source.components().last_error();
+        invalid.field("ignored", &Native::count);
+        assert(source.components().last_error() == error);
+        source.components().copy_schema_to(destination.components());
+    }
+    // The copied callbacks own their accessors after the original registry dies.
+    auto entity = destination.entity().set(Native{});
+    auto initial = destination.components().snapshot(entity, "NativeAccessors");
+    assert(initial && initial->fields.size() == 5);
+    assert(std::get<kin::i32>(initial->fields[0].value) == 2);
+    assert(std::get<kin::f32>(initial->fields[1].value) == 1.0f);
+    assert(std::get<std::string>(initial->fields[2].value) == "initial");
+    assert((std::get<std::vector<kin::Vec2f>>(initial->fields[3].value) == std::vector<kin::Vec2f>{{1.0f, 2.0f}}));
+    assert(std::get<kin::i32>(initial->fields[4].value) == 12);
+    assert(destination.components().patch_field(entity, "NativeAccessors", "count", kin::i32{7}));
+    assert(destination.components().patch_field(entity, "NativeAccessors", "weight", kin::f32{4}));
+    assert(destination.components().patch_field(entity, "NativeAccessors", "text", std::string{"edited"}));
+    const std::vector<kin::Vec2f> points{{3.0f, 4.0f}, {5.0f, 6.0f}};
+    assert(destination.components().patch_field(entity, "NativeAccessors", "points", points));
+    assert(!destination.components().patch_field(entity, "NativeAccessors", "count", std::string{"wrong"}));
+    assert(!destination.components().patch_field(entity, "NativeAccessors", "adapted", kin::i32{-1}));
+    assert(entity.get<Native>()->count == 7 && entity.get<Native>()->nested.weight == 4);
+    assert(entity.get<Native>()->text == "edited" && entity.get<Native>()->points == points);
+    assert(destination.components().patch_field(entity, "NativeAccessors", "adapted", kin::i32{33}));
+    assert(entity.get<Native>()->count == 23);
+}
+
 } // namespace
 
 int main() {
@@ -537,5 +601,6 @@ int main() {
     test_failure_paths_set_diagnostics();
     test_component_fields_can_be_visited_without_snapshot_ownership();
     test_runtime_component_copy_and_owner_patch_policy();
+    test_native_field_accessors_survive_schema_copy();
     return 0;
 }

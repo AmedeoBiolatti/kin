@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 

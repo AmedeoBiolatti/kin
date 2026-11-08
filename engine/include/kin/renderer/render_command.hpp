@@ -1,9 +1,10 @@
 #pragma once
 
+#include <kin/renderer/clip.hpp>
+#include <kin/renderer/flip.hpp>
 #include <kin/renderer/material.hpp>
 #include <kin/renderer/render_layer.hpp>
 #include <kin/renderer/render_view.hpp>
-#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/sprite.hpp>
 
 #include <functional>
@@ -11,6 +12,9 @@
 #include <string>
 
 namespace kin {
+
+class Renderer2D;
+struct ShapeMesh;
 
 namespace render_pass_mask {
 constexpr u64 world = u64{1} << 0;

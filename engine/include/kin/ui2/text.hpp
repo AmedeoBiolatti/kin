@@ -105,6 +105,10 @@ struct TtfFontOptions {
     // At most this many pages of glyphs (each some 16 ASCII cells a side) before
     // the atlas starts over (with what the text drawn then needs): a memory budget.
     i32 atlas_pages = 4;
+    // Drawn bolder than the file is (FreeType's emboldening): a bold where the
+    // system has none of its own, as on Android, whose Roboto is one variable
+    // font (its "bold" files link to it) that SDL_ttf opens at its regular weight.
+    bool embolden = false;
 };
 
 // A TrueType or OpenType font. Text is laid out glyph by glyph from an atlas

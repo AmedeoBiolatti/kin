@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/core/jobs.hpp>
 #include "gpu_renderer2d_backend.hpp"
 #include "../rounded_rect_loop.hpp"

@@ -29,9 +29,88 @@ releases may change APIs.
 - Material UV transform (`Material3D::uv_scale`, `uv_offset`) in every pass. TIFF and PSD textures decode for
   imports, and 16-bit greyscale PNGs no longer overflow SDL_image's surface.
 
+- Fixed area-light BVH construction: empty spatial bins no longer corrupt split bounds,
+  reducing traversal work without changing GI budgets. See [measurements and validation](gi_bvh_empty_bins.md).
+
+- Native workflow lifetime and stepping compile separately from Lua registration, reducing
+  service-only edit rebuilds. See [workflow split measurements](build_times.md#split-native-workflow-stepping-from-lua-bindings) for compilation CPU and runtime tradeoffs.
+
+- UI2 widget collection reuses Flecs query cache types and iteration code across widget types,
+  reducing compiler work and peak compiler memory. See [UI2 collection measurements](build_times.md#shared-ui2-record-collection) for timings and runtime tradeoffs.
+
+- Entity scripting separates runtime/reload/scheduling, entity methods and game-service bindings,
+  shortening independent edit rebuilds and exposing parallel compilation. Normal optimization
+  and safety settings remain enabled. See [entity split measurements](build_times.md#split-entity-scripting-translation-unit) for timings and CPU/runtime tradeoffs.
+
+- Scene scripting separates runtime/file loading, native API methods and binding registration into
+  three implementation files, shortening independent edit rebuilds. Shared private userdata types
+  use compact sol registry keys with a regression check. See [scene split measurements](build_times.md#split-scene-scripting-translation-unit).
+
+- Lua API metadata and inspection share one implementation file, reducing repeated registration
+  compilation and narrowing metadata implementation edits from five Lua source files to one.
+  See [Lua API bookkeeping measurements](build_times.md#shared-lua-api-bookkeeping).
+
+- Native ECS fields keep member accessors typed until their stored registry callback, reducing reflected
+  registration compilation and removing redundant `std::function` adapters and allocations. Custom
+  properties retain their callback API. See [field callback measurements](build_times.md#native-component-field-callbacks).
+
+- Lua scripts on many entities call faster: a file's callbacks are looked up once an update, not once an entity
+  (`LuaScript::function` and `call_function` for a host calling one function many times), `self`'s entity methods
+  are bound once each, and the scripts no longer running are found by a sorted search. A scripted foe walking to
+  the player costs 1.1 µs an update instead of 2.4 on a desktop (`kin_entity_scripts_bench`, built on request); a
+  horde game on a Samsung A55 holds 60 fps with about 1215 scripted foes instead of 1050.
+
+- Fixed: spawning a prefab while an earlier copy lived aborted the game when it named its entities (two siblings
+  of one name; the names kin set itself were not in the registry it asked), and copies after the first renamed their
+  children (`Eye.<id>`, so `child("Eye")` found nothing). `Lifetime` and `Timer` given in scene or prefab files
+  are kin's own now, so `update_lifetimes` and `update_timers` count them down (they were data components nothing
+  counted).
+
+- ui2 apps on a phone, from a workout tracker built on it and run on a Samsung A55: a finger dragged across a
+  scroll box scrolls it and a flick glides (`ScrollBoxOptions::touch_drag`, on by default; the drag is then no
+  click). Text fields open the keyboard for what they take: `TextInputKind` (`Text`, `Number`, `Decimal`),
+  `Window::set_text_input_enabled(on, kind)`, `ValueFieldOptions::keyboard`; `number_field` and `NumberInput` show
+  the number pad when their range has no negatives, and numbers take a decimal comma. `ValueFieldOptions::select_all`
+  (`number_field`'s) makes typing replace the value wherever the caret landed. Enter and Esc commit and cancel a
+  one-line field without an input map binding `accept` and `quit`. A value field of a fixed height centres its
+  text in it from top to bottom. `TtfFontOptions::embolden`, used for Android's bold, whose files link to its
+  regular variable font.
+- Fixed: `wait_for_events` on Android spun a whole core (SDL's event wait does there); kin checks for events
+  every 8 to 25 ms instead: idle 101% of a core to 3-4%. The first frames after the loop starts and after
+  coming back to the screen are drawn without waiting (the window stayed blank until touched, and that touch was
+  lost). `WindowedAppConfig::max_idle_wait` (0: never wake without a reason).
+
 - Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
-  precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters,
-  and earlier independent runtime compilation with Ninja. See [build-time measurements and setup](build_times.md).
+  precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters
+  (including repeated 2D workflow signatures), and earlier independent runtime compilation with Ninja.
+  See [build-time measurements and setup](build_times.md).
+
+- Optional `KIN_DEV_FAST_SCRIPTING` and Linux `dev-fast`/`dev-clang-fast` presets use `-O1` for scene/entity
+  Lua bindings during development. It is off by default and rejected for shipping builds.
+  See [compilation/runtime measurements](build_times.md#opt-in-optimization-for-the-whole-binding-target).
+
+- Scene and scripting headers forward-declare borrowed services to reduce rebuilds after App, Input,
+  Window and Renderer2D header edits. Consumers calling service methods include their headers directly.
+  See [header dependency measurements](build_times.md#scene-and-scripting-header-dependencies).
+
+- Rendering data headers use Renderer2D forward declarations, reducing renderer-header rebuilds.
+  Code constructing or calling the renderer includes its header directly; `Flip` helpers have a small
+  standalone header. Rendering fields, method bodies and helper behavior are preserved.
+  See [renderer header measurements](build_times.md#renderer-data-header-dependencies).
+
+- Render queues include the lightweight `sprite_instance.hpp` instead of the full backend interface,
+  reducing backend-header rebuilds. The backend still exports `SpriteInstance` with unchanged fields
+  and defaults. See [queue dependency measurements](build_times.md#render-queue-backend-dependency).
+
+- Renderer2D uses shared backend value types and forward declarations for the backend and Window,
+  reducing header rebuilds. Four small backend forwarding methods now live in the implementation;
+  callers using backend or Window definitions include their headers directly.
+  See [renderer interface measurements](build_times.md#renderer-interface-dependencies).
+
+- Window IDs, configuration and cursor/chrome values have a lightweight `window_types.hpp` header.
+  App, Input, UI2, the windowed app interface and GPU device use narrower dependencies, reducing
+  Window-class rebuilds while preserving fields, function bodies and inline definitions.
+  See [Window value measurements](build_times.md#window-value-dependencies).
 
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described

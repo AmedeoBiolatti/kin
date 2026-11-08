@@ -116,6 +116,7 @@
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <memory>
 #include <sstream>

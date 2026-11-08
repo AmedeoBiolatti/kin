@@ -2,7 +2,6 @@
 // Ported from v0 engine/renderer_gpu. SDL_GPU device + swapchain + upload ring,
 // and a per-frame command-buffer wrapper. kin forces the SPIR-V/Vulkan driver.
 #include <kin/core/types.hpp>
-#include <kin/platform/window.hpp>
 #include <kin/renderer/texture.hpp>
 
 #include "gpu_buffer.hpp"
@@ -21,6 +20,7 @@
 #include <vector>
 
 namespace kin {
+class Window;
 class JobSystem;
 struct CompressedImage;
 }
