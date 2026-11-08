@@ -12,6 +12,7 @@
 #include <iostream>
 #include <iterator>
 #include <kin/render3d/material_graph3d.hpp>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -72,7 +73,11 @@ int main(int argc, char** argv) {
         std::string why;
         const auto cooked = kin::cook_material_graph3d(text, &why);
         if (!cooked) {
-            std::cerr << source.string() << ": " << why << '\n';
+            // An error a line, each naming the graph (as check's do): where a build's output points.
+            std::istringstream lines(why.empty() ? std::string("it can't be cooked") : why);
+            for (std::string line; std::getline(lines, line);)
+                if (!line.empty())
+                    std::cerr << source.string() << ": " << line << '\n';
             return 1;
         }
         const std::filesystem::path out =
