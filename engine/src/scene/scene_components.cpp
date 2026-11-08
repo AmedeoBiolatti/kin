@@ -4,6 +4,7 @@
 
 #include <kin/ecs/normal_sprite2d.hpp>
 #include <kin/ecs/skeleton2d.hpp>
+#include <kin/ecs/time.hpp>
 #include <kin/pathfinding/navigation2d.hpp>
 #if defined(KIN_EXPERIMENTAL_3D) && KIN_ENABLE_PHYSICS3D
 #include <kin/ecs/scene3d.hpp>
@@ -27,17 +28,18 @@ void register_builtin_editor_components(EcsWorld& world) {
     scene_detail::register_scene_gameplay_components(world);
     scene_detail::register_scene_lighting_components(world);
     scene_detail::register_scene_view_components(world);
+    // kin's own (update_timers and update_lifetimes count them), so one a
+    // scene or prefab file gives is one they see.
     if (!world.components().find("Timer")) {
-        world.components().data("Timer")
-            .field_f32("duration", 0.0f)
-            .field_f32("elapsed", 0.0f)
-            .field_bool("repeating", false)
-            .field_bool("finished", false)
-            .field_i32("ticks", 0);
+        world.components().native<kin::Timer>("Timer")
+            .field("duration", &kin::Timer::duration)
+            .field("elapsed", &kin::Timer::elapsed)
+            .field("repeating", &kin::Timer::repeating)
+            .field("finished", &kin::Timer::finished)
+            .field("ticks", &kin::Timer::ticks);
     }
     if (!world.components().find("Lifetime")) {
-        world.components().data("Lifetime")
-            .field_f32("remaining", 0.0f);
+        world.components().native<kin::Lifetime>("Lifetime").field("remaining", &kin::Lifetime::remaining);
     }
 }
 
