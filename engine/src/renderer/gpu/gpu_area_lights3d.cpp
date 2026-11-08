@@ -23,6 +23,8 @@ struct Box {
         hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
     }
     void grow(const Box& b) {
+        if (b.empty())
+            return; // empty SAH bins contribute no bounds
         grow(b.lo);
         grow(b.hi);
     }

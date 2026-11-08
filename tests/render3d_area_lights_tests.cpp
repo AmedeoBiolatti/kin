@@ -115,6 +115,160 @@ std::vector<Emitter> emitters_of(const AreaLightEmitters& d) {
     return out;
 }
 
+// Empty bins must not turn the SAH's bounds into +/-FLT_MAX. Input order deliberately alternates distant groups.
+void sparse_bins() {
+    std::vector<AreaLightTriangle> tris;
+    for (u32 i = 0; i < 8; ++i) {
+        const f32 x = (i % 2 ? -10.0f : 10.0f) + static_cast<f32>(i / 2) * 0.1f;
+        tris.push_back({{x, -.2f, -.2f}, {x, .2f, -.2f}, {x, -.2f, .2f}});
+    }
+    const auto mesh = build_area_light_mesh(tris);
+    check_hierarchy(tris, mesh);
+    const auto nodes = nodes_of(mesh.nodes, mesh.node_count);
+    CHECK(mesh.node_count == 3);
+    if (nodes.size() == 3) {
+        CHECK(nodes[0].count == 0);
+        const auto& a = nodes[nodes[0].first];
+        const auto& b = nodes[nodes[0].first + 1];
+        CHECK(a.count == 4 && b.count == 4);
+        CHECK(a.hi.x < 0 && b.lo.x > 0);
+    }
+    std::vector<AreaLightCopy> copies;
+    for (u32 i = 0; i < 4; ++i) {
+        const f32 x = i % 2 ? -10.0f : 10.0f;
+        copies.push_back({Mat4f::translation({x, 0, 0}), {x - .2f, -.2f, -.2f}, {x + .2f, .2f, .2f}, i * 10, i * 7});
+    }
+    const auto scene = build_area_light_copies(copies);
+    const auto outer = nodes_of(scene.data, scene.node_count);
+    CHECK(scene.node_count == 3);
+    if (outer.size() == 3) {
+        CHECK(outer[0].count == 0);
+        const auto& a = outer[outer[0].first];
+        const auto& b = outer[outer[0].first + 1];
+        CHECK(a.count == 2 && b.count == 2);
+        CHECK(a.hi.x < 0 && b.lo.x > 0);
+    }
+}
+
+// Independent plane/Gram-barycentric triangle intersection, compared with a packed-BVH Moller-Trumbore walk.
+struct D3 {
+    double x, y, z;
+};
+D3 d3(Vec3f v) {
+    return {v.x, v.y, v.z};
+}
+D3 operator-(D3 a, D3 b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+D3 operator+(D3 a, D3 b) {
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+D3 operator*(D3 a, double b) {
+    return {a.x * b, a.y * b, a.z * b};
+}
+double scalar(D3 a, D3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+D3 vector(D3 a, D3 b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+double brute_hit(std::span<const AreaLightTriangle> triangles, D3 o, D3 d) {
+    double closest = 1e30;
+    for (const auto& t : triangles) {
+        D3 a = d3(t.a), e = d3(t.b) - a, f = d3(t.c) - a, n = vector(e, f);
+        const double denominator = scalar(n, d);
+        if (std::abs(denominator) < 1e-12)
+            continue;
+        const double distance = scalar(n, a - o) / denominator;
+        if (distance < 0 || distance > closest)
+            continue;
+        D3 q = o + d * distance - a;
+        double ee = scalar(e, e), ef = scalar(e, f), ff = scalar(f, f), det = ee * ff - ef * ef;
+        if (det <= 1e-24)
+            continue;
+        double u = (scalar(q, e) * ff - scalar(q, f) * ef) / det, v = (scalar(q, f) * ee - scalar(q, e) * ef) / det;
+        if (u >= -1e-10 && v >= -1e-10 && u + v <= 1 + 1e-10)
+            closest = distance;
+    }
+    return closest;
+}
+bool ray_box(const Node& n, D3 o, D3 d, double far) {
+    double lo = 0, hi = far;
+    const double origin[3]{o.x, o.y, o.z}, direction[3]{d.x, d.y, d.z};
+    const double low[3]{n.lo.x, n.lo.y, n.lo.z}, high[3]{n.hi.x, n.hi.y, n.hi.z};
+    for (int k = 0; k < 3; ++k) {
+        if (std::abs(direction[k]) < 1e-20) {
+            if (origin[k] < low[k] || origin[k] > high[k])
+                return false;
+        } else {
+            double a = (low[k] - origin[k]) / direction[k], b = (high[k] - origin[k]) / direction[k];
+            lo = std::max(lo, std::min(a, b));
+            hi = std::min(hi, std::max(a, b));
+            if (lo > hi)
+                return false;
+        }
+    }
+    return true;
+}
+void ray_equivalence() {
+    std::mt19937 rng(1937);
+    std::uniform_real_distribution<float> u(-8, 8), s(-.5f, .5f);
+    std::vector<AreaLightTriangle> tris;
+    for (int i = 0; i < 512; ++i) {
+        Vec3f a{u(rng), u(rng), u(rng)};
+        tris.push_back({a, a + Vec3f{s(rng), s(rng), s(rng)}, a + Vec3f{s(rng), s(rng), s(rng)}});
+    }
+    const auto mesh = build_area_light_mesh(tris);
+    const auto nodes = nodes_of(mesh.nodes, mesh.node_count);
+    u64 node_visits = 0, triangle_tests = 0;
+    for (int ray = 0; ray < 8192; ++ray) {
+        D3 o{u(rng), u(rng), u(rng)};
+        D3 target = ray % 2 ? d3(tris[ray % tris.size()].a) * .2 + d3(tris[ray % tris.size()].b) * .3 +
+                                  d3(tris[ray % tris.size()].c) * .5
+                            : D3{u(rng), u(rng), u(rng)};
+        D3 d = target - o;
+        double magnitude = std::sqrt(scalar(d, d));
+        if (magnitude < 1e-12)
+            continue;
+        d = d * (1 / magnitude);
+        double closest = 1e30;
+        std::vector<u32> stack{0};
+        while (!stack.empty()) {
+            auto at = stack.back();
+            stack.pop_back();
+            const auto& n = nodes[at];
+            ++node_visits;
+            if (!ray_box(n, o, d, closest))
+                continue;
+            if (n.count == 0) {
+                stack.push_back(n.first + 1);
+                stack.push_back(n.first);
+                continue;
+            }
+            for (u32 i = n.first; i < n.first + n.count; ++i) {
+                ++triangle_tests;
+                const float* t = mesh.triangles.data() + i * 16;
+                D3 a{t[0], t[1], t[2]}, e{t[4], t[5], t[6]}, f{t[8], t[9], t[10]}, h = vector(d, f), q = o - a;
+                double det = scalar(e, h);
+                if (std::abs(det) < 1e-12)
+                    continue;
+                double uv = scalar(q, h) / det;
+                D3 c = vector(q, e);
+                double vv = scalar(d, c) / det;
+                double hit = scalar(f, c) / det;
+                if (uv >= -1e-8 && vv >= -1e-8 && uv + vv <= 1 + 1e-8 && hit >= 0 && hit <= closest)
+                    closest = hit;
+            }
+        }
+        double expected = brute_hit(tris, o, d);
+        CHECK((closest < 1e29) == (expected < 1e29));
+        if (closest < 1e29 && expected < 1e29)
+            CHECK(std::abs(closest - expected) < 1e-5 * (1 + expected));
+    }
+    std::printf("8192 rays: nodes=%llu triangle_tests=%llu node_count=%u depth=%u\n",
+                static_cast<unsigned long long>(node_visits), static_cast<unsigned long long>(triangle_tests),
+                mesh.node_count, mesh.depth);
+}
 void random_scene() {
     std::mt19937 rng(7);
     std::uniform_real_distribution<f32> u(-10.0f, 10.0f), s(-0.5f, 0.5f);
@@ -352,6 +506,8 @@ void largest_pieces() {
 }
 
 int main() {
+    sparse_bins();
+    ray_equivalence();
     closed_meshes();
     largest_pieces();
     coarse_occluders();
