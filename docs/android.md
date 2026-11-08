@@ -87,7 +87,12 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
   time (a setting in its options, say), and the display follows.
 - **Saves:** `user_data_dir` is the app's private files folder
   (`/data/user/0/<id>/files`), removed with the app.
-- **Fonts:** the system UI font is Roboto from `/system/fonts`.
+- **Fonts:** the system UI font is Roboto from `/system/fonts`. Its bold
+  files are links to one variable font that SDL_ttf opens at its regular
+  weight, so kin draws a bold from it itself (`TtfFontOptions::embolden`).
+- **Drawing only when something changes** (`wait_for_events`): SDL's wait for
+  an event spins a whole core on Android, so kin checks for events instead,
+  every 8 ms for a quarter of a second after the last one, then every 25 ms.
 - **Back, the cutout, the keyboard:** Back is `Key::Escape`; lay UI out in
   `Window::safe_area()`, clear of the camera cutout and the system's edges; a
   ui2 text field opens the on-screen keyboard
@@ -105,7 +110,12 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
 
 ## Known gaps
 
-- Touch scrolling of ui2 scroll boxes.
+- An app idling with `wait_for_events` still takes 3-4% of a core on the A55,
+  checking for events 40 to 125 times a second; SDL's own wait would block,
+  but spins there.
+- The system's fallback fonts lack some symbols, arrows such as → among them:
+  they are drawn as an empty box.
+- The bold kin makes from Roboto is a little wider than Roboto's own bold.
 - The first frame after returning to the screen logs one Vulkan
   `dequeueBuffer failed` while SDL_GPU replaces the old surface's swapchain;
   drawing continues.

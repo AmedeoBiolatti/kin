@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <system_error>
+#include <tuple>
 #include <utility>
 
 namespace kin {
@@ -94,6 +95,7 @@ EntityScripts::Impl::WorldScope EntityScripts::Impl::bind_world() {
 }
 
 bool EntityScripts::Impl::reload(const std::string& path, File& made) {
+    made.forget_callbacks(); // found again in the state the file has after this
     if (!made.script->loaded()) {
         const bool loaded = made.script->load_file(config.content / path);
         if (loaded) {
@@ -355,16 +357,17 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     });
     // Values given back to entities gone since (or running no script): let go.
     std::erase_if(impl.restored, [&](const auto& entry) { return !world.raw().is_alive(entry.first); });
+    std::ranges::sort(scripted, [](const auto& a, const auto& b) { return a.first.id() < b.first.id(); });
     // Those that no longer run theirs: gone.
     std::erase_if(impl.running, [&](const auto& entry) {
-        const auto found = std::ranges::find_if(scripted, [&](const auto& item) { return item.first.id() == entry.first; });
-        const bool remove = found == scripted.end() || found->second != entry.second.path;
+        const auto found = std::ranges::lower_bound(scripted, entry.first, {}, [](const auto& item) { return item.first.id(); });
+        const bool remove = found == scripted.end() || found->first.id() != entry.first || found->second != entry.second.path;
         if (remove) {
             impl.stop(entry.second, !world.raw().is_alive(entry.first) ? "destroyed" : "disabled_or_removed");
         }
         return remove;
     });
-    std::ranges::sort(scripted, [](const auto& a, const auto& b) { return a.first.id() < b.first.id(); });
+    const u64 update = ++impl.updates;
     for (const auto& [entity, path] : scripted) {
         if (!entity.is_alive()) {
             continue;
@@ -413,22 +416,24 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
                 }
             }
         }
+        file.find_callbacks(update);
         if (entity.is_alive()) {
-            file.script->call("on_update", run.self, dt);
+            file.script->call_function(file.on_update, "on_update", run.self, dt);
         }
         // What the dialogue told this step (the game clears them once the step has seen them).
-        if (impl.dialogue && entity.is_alive() && file.script->has("on_dialogue_event")) {
+        if (impl.dialogue && entity.is_alive() && file.on_dialogue_event.valid()) {
             const std::vector<DialogueEvent> told = impl.dialogue->events();
             for (const DialogueEvent& event : told) {
                 if (!entity.is_alive()) break;
-                file.script->call("on_dialogue_event", run.self, event.id, event.node_id);
+                file.script->call_function(file.on_dialogue_event, "on_dialogue_event", run.self, event.id, event.node_id);
             }
         }
 #if KIN_ENABLE_PHYSICS
         // What its body began touching this step, and stopped touching.
-        for (const auto& [type, callback] : {std::pair{PhysicsContactEventType::Begin, "on_contact"},
-                                             std::pair{PhysicsContactEventType::End, "on_contact_end"}}) {
-            if (!entity.is_alive() || !file.script->has(callback)) {
+        for (const auto& [type, callback, function] :
+             {std::tuple{PhysicsContactEventType::Begin, "on_contact", &file.on_contact},
+              std::tuple{PhysicsContactEventType::End, "on_contact_end", &file.on_contact_end}}) {
+            if (!entity.is_alive() || !function->valid()) {
                 continue;
             }
             const PhysicsContactQueue* queue = entity.get<PhysicsContactQueue>();
@@ -457,7 +462,7 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
                     });
                 }
                 if (other && entity.is_alive()) {
-                    file.script->call(callback, run.self, ScriptEntity{&world, other});
+                    file.script->call_function(*function, callback, run.self, ScriptEntity{&world, other});
                 }
             }
         }

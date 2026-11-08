@@ -30,7 +30,7 @@ namespace kin::ui2 {
 namespace {
 
 // Opens a font from the content (a mounted pack, or disk), face `source.face`.
-TTF_Font* open_font(const FontSource& source, f32 size) {
+TTF_Font* open_font(const FontSource& source, f32 size, bool embolden = false) {
     SDL_IOStream* stream = open_content_stream(source.path);
     if (!stream) {
         return nullptr;
@@ -44,6 +44,9 @@ TTF_Font* open_font(const FontSource& source, f32 size) {
     }
     TTF_Font* font = TTF_OpenFontWithProperties(props);
     SDL_DestroyProperties(props);
+    if (font && embolden) {
+        TTF_SetFontStyle(font, TTF_STYLE_BOLD);
+    }
     return font;
 }
 
@@ -793,7 +796,7 @@ class TtfFontBackend final : public IFontBackend {
 public:
     TtfFontBackend(const std::filesystem::path& path, f32 point_size, const TtfFontOptions& options)
         : _path(path), _point_size(point_size), _oversample(std::max(1.0f, options.oversample)),
-          _rendering(options.rendering), _atlas_pages(static_cast<std::size_t>(std::clamp(options.atlas_pages, 1, 255))),
+          _rendering(options.rendering), _embolden(options.embolden), _atlas_pages(static_cast<std::size_t>(std::clamp(options.atlas_pages, 1, 255))),
           _kerning(path) {
         ensure_ttf();
         for (const FontSource& fallback : options.fallbacks) {
@@ -984,7 +987,7 @@ private:
     FontFace* sdf_face() const {
         if (!_sdf.font) {
             _sdf.point_size = sdf_base * static_cast<f32>(sdf_supersample);
-            _sdf.font = open_font({_path, 0}, _sdf.point_size);
+            _sdf.font = open_font({_path, 0}, _sdf.point_size, _embolden);
             set_language(_sdf.font);
         }
         return _sdf.font ? &_sdf : nullptr;
@@ -1111,7 +1114,7 @@ private:
     TTF_Font* fallback_font(FontFace& face, std::size_t i) const {
         face.fallbacks.resize(_fallbacks.size(), nullptr);
         if (!face.fallbacks[i] && probe(i)) {
-            face.fallbacks[i] = open_font(_fallbacks[i].source, face.point_size);
+            face.fallbacks[i] = open_font(_fallbacks[i].source, face.point_size, _embolden);
             set_language(face.fallbacks[i]);
         }
         return face.fallbacks[i];
@@ -1371,7 +1374,7 @@ private:
             _faces.erase(oldest);
         }
 
-        TTF_Font* font = open_font({_path, 0}, size);
+        TTF_Font* font = open_font({_path, 0}, size, _embolden);
         if (!font) {
             KIN_LOG_ERROR_F("ui",
                             "font open failed",
@@ -1772,6 +1775,7 @@ private:
     f32 _point_size = 0.0f;
     f32 _oversample = 1.0f;
     TextRendering _rendering = TextRendering::Bitmap;
+    bool _embolden = false;
     std::size_t _atlas_pages = 4; // TtfFontOptions::atlas_pages
     std::vector<FontSource> _general_fallbacks;
     std::vector<LanguageFont> _language_fallbacks;

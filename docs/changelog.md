@@ -29,11 +29,31 @@ releases may change APIs.
   registration compilation and removing redundant `std::function` adapters and allocations. Custom
   properties retain their callback API. See [field callback measurements](build_times.md#native-component-field-callbacks).
 
+- Lua scripts on many entities call faster: a file's callbacks are looked up once an update, not once an entity
+  (`LuaScript::function` and `call_function` for a host calling one function many times), `self`'s entity methods
+  are bound once each, and the scripts no longer running are found by a sorted search. A scripted foe walking to
+  the player costs 1.1 µs an update instead of 2.4 on a desktop (`kin_entity_scripts_bench`, built on request); a
+  horde game on a Samsung A55 holds 60 fps with about 1215 scripted foes instead of 1050.
+
 - Fixed: spawning a prefab while an earlier copy lived aborted the game when it named its entities (two siblings
   of one name; the names kin set itself were not in the registry it asked), and copies after the first renamed their
   children (`Eye.<id>`, so `child("Eye")` found nothing). `Lifetime` and `Timer` given in scene or prefab files
   are kin's own now, so `update_lifetimes` and `update_timers` count them down (they were data components nothing
   counted).
+
+- ui2 apps on a phone, from a workout tracker built on it and run on a Samsung A55: a finger dragged across a
+  scroll box scrolls it and a flick glides (`ScrollBoxOptions::touch_drag`, on by default; the drag is then no
+  click). Text fields open the keyboard for what they take: `TextInputKind` (`Text`, `Number`, `Decimal`),
+  `Window::set_text_input_enabled(on, kind)`, `ValueFieldOptions::keyboard`; `number_field` and `NumberInput` show
+  the number pad when their range has no negatives, and numbers take a decimal comma. `ValueFieldOptions::select_all`
+  (`number_field`'s) makes typing replace the value wherever the caret landed. Enter and Esc commit and cancel a
+  one-line field without an input map binding `accept` and `quit`. A value field of a fixed height centres its
+  text in it from top to bottom. `TtfFontOptions::embolden`, used for Android's bold, whose files link to its
+  regular variable font.
+- Fixed: `wait_for_events` on Android spun a whole core (SDL's event wait does there); kin checks for events
+  every 8 to 25 ms instead: idle 101% of a core to 3-4%. The first frames after the loop starts and after
+  coming back to the screen are drawn without waiting (the window stayed blank until touched, and that touch was
+  lost). `WindowedAppConfig::max_idle_wait` (0: never wake without a reason).
 
 - Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
   precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters

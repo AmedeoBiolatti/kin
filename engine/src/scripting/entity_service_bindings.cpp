@@ -70,17 +70,22 @@ function own.tween(self, property, to, seconds, easing, options)
     return id
 end
 function __kin_self(entity)
-    return setmetatable({entity = entity}, {__index = function(_, key)
+    -- Its entity's methods, each bound to it once, when first used: then
+    -- self:position() is two table reads, not a new function each call.
+    local bound = setmetatable({}, {__index = function(bound, key)
         local mine = own[key]
         if mine then
             return mine
         end
         local method = entity[key]
         if type(method) == "function" then
-            return function(_, ...) return method(entity, ...) end
+            local call = function(_, ...) return method(entity, ...) end
+            rawset(bound, key, call)
+            return call
         end
         return nil
     end})
+    return setmetatable({entity = entity}, {__index = bound})
 end
 )lua";
 

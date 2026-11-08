@@ -346,12 +346,17 @@ Font cached_system_font(f32 point_size, bool bold, TextRendering rendering, f32 
         return it->second;
     }
     const std::filesystem::path& path = system_ui_font_path(bold);
+    // A "bold" that is the regular file (none found, or a link to it: Android's
+    // variable Roboto) is drawn bolder.
+    std::error_code same_error;
+    const bool embolden = bold && !path.empty() && std::filesystem::equivalent(path, system_ui_font_path(false), same_error);
     Font font = path.empty() ? bitmap_font()
                              : load_ttf_font(path, static_cast<f32>(clamped),
                                              TtfFontOptions{.oversample = oversample,
                                                             .rendering = rendering,
                                                             .fallbacks = system_fallback_fonts(),
-                                                            .language_fallbacks = system_language_fonts()});
+                                                            .language_fallbacks = system_language_fonts(),
+                                                            .embolden = embolden});
     cache.emplace(key, font);
     return font;
 }

@@ -2,6 +2,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/platform/input.hpp>
+#include <kin/platform/text_input_kind.hpp>
 #include <kin/platform/window_types.hpp>
 #include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -200,6 +201,12 @@ struct ValueFieldOptions {
     std::optional<TextStyle> text_style{};
     std::optional<TextStyle> faint_style{}; // the placeholder's, prefix's, suffix's: the text's in the theme's muted colour unless given
     LayoutStyle layout{.width = grow()};
+    // The keyboard a phone shows for it (number_field: the number pad when
+    // its range has no negatives).
+    TextInputKind keyboard = TextInputKind::Text;
+    // Typing in it starts with all it shows selected, so what is typed
+    // replaces it (number_field's), wherever a click or a finger put the caret.
+    bool select_all = false;
 };
 struct ValueFieldResult {
     std::optional<std::string> committed; // what was typed, once: when it was left (or as typed, `live`)
@@ -264,6 +271,10 @@ struct ScrollBoxOptions {
     // Kept at the end while it is there, as the content grows (a log's last
     // lines in view); scrolled up, it stays where it was put.
     bool stick_to_end = false;
+    // A finger dragged across it scrolls it, as a phone's lists do, and it
+    // goes on gliding (slowing down) when the finger lets go with a flick.
+    // Only a finger: a mouse drag over its content does what it always did.
+    bool touch_drag = true;
 };
 
 // A key, with exactly these modifiers, fires `action` while focus is inside a box
@@ -633,7 +644,10 @@ public:
     std::string_view text_composition() const;
     i32 text_composition_cursor() const;
     bool wants_text_input() const { return _wants_text_input; }
-    void request_text_input() { _wants_text_input = true; }
+    void request_text_input(TextInputKind kind = TextInputKind::Text) {
+        _wants_text_input = true;
+        _wants_text_input_kind = kind;
+    }
     // The system ended the text input apply_text_input started (a phone's
     // keyboard put away with Back) since the last frame: text fields leave
     // editing, and it is not started again until one is chosen again.
@@ -1109,6 +1123,7 @@ private:
     f32 _debug_last_hue = 0.0f;               // hue of the last debug-tinted fill (font uses its complement)
     Color _surface_fill_under{};              // last opaque fill, used as text background for contrast
     bool _wants_text_input = false;
+    TextInputKind _wants_text_input_kind = TextInputKind::Text;
     mutable bool _text_input_on = false;        // apply_text_input started it
     mutable bool _text_input_dismissed = false; // and the system ended it
     bool _text_input_dismissed_now = false;     // ...since the last frame
@@ -1162,6 +1177,22 @@ private:
         std::array<f32, 2> grab{-1.0f, -1.0f}; // pointer-to-thumb offset while one is dragged
         u64 frame = 0;
     };
+    // A finger scrolling a scroll box (ScrollBoxOptions::touch_drag): down
+    // and not yet moved far enough to be a drag, then dragging `target`, then
+    // its glide once let go.
+    struct TouchScroll {
+        bool down = false;      // a finger is the pointer and pressed in this gesture
+        bool dragging = false;  // it took `target`: the press is no click now
+        Vec2f origin{};         // where it went down
+        Id target{};            // the box dragged, or gliding
+        Vec2f grab{};           // the pointer when the drag took the box
+        Vec2f grab_offset{};    // the box's offset then
+        Vec2f last_offset{};    // last frame's, for the velocity
+        Vec2f velocity{};       // of the offset, units a second (the glide's, once let go)
+        bool x = false;         // the axes it moves
+        bool y = false;
+    };
+    TouchScroll _touch_scroll{};
     struct SplitFrame {
         Id id{};
         SplitOptions options{};

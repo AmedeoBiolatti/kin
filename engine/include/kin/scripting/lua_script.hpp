@@ -71,6 +71,10 @@ public:
 
     // Whether the loaded script defines a global function `function`.
     bool has(std::string_view function) const;
+    // The loaded script's global function `function` as it is now (invalid
+    // when it defines none), for a host calling it many times in a row:
+    // call_function() then skips looking it up each time.
+    sol::protected_function function(std::string_view function) const { return find(function); }
 
     // Calls the script's global `function` with `args`, if it defines one.
     // Returns false if it does not, or if the call fails (error() says why).
@@ -80,6 +84,10 @@ public:
     // missing, failing, or not an R.
     template <typename R, typename... Args>
     std::optional<R> call_for(std::string_view function, Args&&... args);
+    // Calls `target`, found by function(name) in this script's state (false
+    // when it is invalid or fails); `name` is what failures and profiles say.
+    template <typename... Args>
+    bool call_function(const sol::protected_function& target, std::string_view name, Args&&... args);
 
     // The last failure, with script:line where Lua knows it; empty after a
     // successful load.
@@ -132,13 +140,17 @@ private:
 
 template <typename... Args>
 bool LuaScript::call(std::string_view function, Args&&... args) {
-    sol::protected_function target = find(function);
+    return call_function(find(function), function, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+bool LuaScript::call_function(const sol::protected_function& target, std::string_view name, Args&&... args) {
     if (!target.valid()) {
         return false;
     }
-    LuaCall call{runtime(), lua().lua_state(), function};
+    LuaCall call{runtime(), lua().lua_state(), name};
     const auto result = call.invoke(target, std::forward<Args>(args)...);
-    return check(result, function);
+    return check(result, name);
 }
 
 template <typename R, typename... Args>

@@ -192,10 +192,14 @@ blinking caret, asks for another frame (`wants_redraw()`).
 A tool can draw only when something changes: set `wait_for_events` in its
 `GameWindowInfo` (or `AppConfig`), and the loop sleeps until input or a window
 event comes (drawing two frames more, as hover resolves a frame late), a
-`request_redraw()` falls due, or `max_idle_wait` passes. Call
+`request_redraw()` falls due, or `max_idle_wait` passes (half a second by
+default; `WindowedAppConfig::max_idle_wait = 0` for an app with nothing that
+changes unseen, such as a file watcher). Call
 `ui.apply(ctx.app, ctx.window)` after `end()` each frame: it hands over the text
 input, the pointer shape and the redraw requests. Each frame drawn runs one
-fixed step, so game time stops while the window idles.
+fixed step, so game time stops while the window idles. The first frames after
+the loop starts and after the app comes back to the screen are drawn without
+waiting, so the window is never blank until touched.
 
 ### Menus and popovers
 
@@ -257,6 +261,13 @@ to `shown`. What `valid` turns down is outlined and not committed. `live`
 commits as it is typed, and Esc commits the value from before the typing. `number_field(id, value, {.min, .max, .whole})` does
 this for numbers, and `edit_value(id)` starts typing in one (a rename from a
 menu). `NumberInput` and `PropertyInspector` rows behave the same way.
+Enter and Esc always commit and cancel a one-line field, whatever the input map
+binds to `accept` and `quit`. `select_all` starts the typing with what the field
+shows selected, so what is typed replaces it wherever a click or a finger put
+the caret; `number_field` does so. `keyboard` is the keyboard a phone shows for
+it (`TextInputKind::Text`, `Number` or `Decimal`); `number_field` and
+`NumberInput` show the number pad when their range has no negatives, and a
+number is read with a decimal comma as well as a point.
 
 ```cpp
 if (auto name = ui.value_field(ui::make_id("name"), entity.name, {.placeholder = "Name"},
@@ -387,7 +398,12 @@ text field has the keys, so typing is not taken for commands.
 
 A finger is the pointer ([touch](input.md#touch)): a tap clicks, a finger held
 on a slider drags it. Nothing is hovered and no tooltip shows while no finger is
-down. `prompt_for_action` names touch bindings ("Tap", "Swipe Right"), and
+down. A finger dragged more than 8 units across a scroll box scrolls it, as a
+phone's lists do: the innermost box under it that can scroll that way, even
+when the finger went down on a button or a chart, and the press is then no
+click. Let go with a flick, it glides on, slowing down, until it stops or meets
+an end; a finger landing on it stops it. `ScrollBoxOptions::touch_drag = false`
+turns this off for one box. A mouse drag over a box's content does what it did. `prompt_for_action` names touch bindings ("Tap", "Swipe Right"), and
 `PromptBindingMode::Device` names them while the pointer is a finger.
 
 On-screen controls (`kin/ui2/touch_controls.hpp`) are a stick and buttons drawn
@@ -867,3 +883,14 @@ have grown; `focused` is as `end()` left the focus.
 `write_snapshot` serializes the same tree. Keep assertable game state in
 `Scene::write_report` and inspect ECS scenes through `world.snapshot` alongside it.
 
+## Known gaps
+
+- **Wrapped text in a layout box** (`WrappedText` added with `ui.add`) breaks
+  its lines at the width it is given (`bounds.w`, 240 when none), not at the
+  width the box gives it: layout has no height-for-width pass. Give it the
+  width it will have (the box's, less its padding).
+- **A text field asks to be at least 160 units wide** when its width is its
+  content's (`fit()`); give it a width or let it grow to fit a narrow one.
+- **A field's text cannot be centred**; it starts at the field's left.
+- **The touch glide is ui2's own**, not the system's: no overscroll bounce or
+  edge glow, and its slowing down is a fixed curve.

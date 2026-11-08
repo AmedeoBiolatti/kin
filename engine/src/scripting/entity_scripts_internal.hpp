@@ -38,7 +38,8 @@ struct KIN_ENTITY_SCRIPT_TYPE ScriptEntity {
             lifetime = entity_lifetime(EcsEntity{entity});
         }
     }
-    bool alive() const { return entity && same_lifetime(EcsEntity{entity}, lifetime); }
+    // same_lifetime(), less a second check that it is alive (every binding asks).
+    bool alive() const { return entity && entity.is_alive() && entity_lifetime(EcsEntity{entity}) == lifetime; }
     flecs::entity live() const {
         if (scripting_detail::reload_staging)
             throw sol::error("live entity access is unavailable while preparing reload");
@@ -102,6 +103,29 @@ struct EntityScripts::Impl {
         std::unique_ptr<LuaScript> script;
         std::vector<std::pair<std::filesystem::path, FileTime>> times;
         u64 generation = 0; // bumped by each read: its selves belong to one
+        // Its callbacks as found in the update numbered `found_in`: looked up
+        // once an update, not once an entity (a script that defines one
+        // anew has it called from the next update). Declared after `script`,
+        // they go first; forget() lets go of them before its state closes.
+        u64 found_in = 0;
+        sol::protected_function on_update, on_dialogue_event, on_contact, on_contact_end;
+        void find_callbacks(u64 update) {
+            if (found_in == update) {
+                return;
+            }
+            found_in = update;
+            on_update = script->function("on_update");
+            on_dialogue_event = script->function("on_dialogue_event");
+            on_contact = script->function("on_contact");
+            on_contact_end = script->function("on_contact_end");
+        }
+        void forget_callbacks() {
+            found_in = 0;
+            on_update = {};
+            on_dialogue_event = {};
+            on_contact = {};
+            on_contact_end = {};
+        }
     };
     // An entity running a script: its self, made in the file's state then.
     struct Running {
@@ -117,6 +141,7 @@ struct EntityScripts::Impl {
     std::map<std::string, std::string> problems;
     std::unordered_map<std::string, std::shared_ptr<const PrefabAsset>> prefabs;
     i32 frames = 0;
+    u64 updates = 0; // EntityScripts::update calls, numbering them for File::found_in
 
     // What the bindings reach, during an update.
     LiveService<EcsWorld> world;

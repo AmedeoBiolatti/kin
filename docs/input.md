@@ -152,6 +152,9 @@ On a phone:
 - **The on-screen keyboard** opens while a ui2 text field is being edited, as
   text input starts on a desktop. Putting it away (Back) leaves the field
   (`ui2::Context::text_input_dismissed()`); touching the field opens it again.
+  A number field opens the number pad (with a decimal point unless the number
+  is whole): the field's `keyboard`, or `Window::set_text_input_enabled(true,
+  TextInputKind::Decimal)` for a game's own field.
 
 ## For editors
 
