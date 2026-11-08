@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Fixed area-light BVH construction: empty spatial bins no longer corrupt split bounds,
+  reducing traversal work without changing GI budgets. See [measurements and validation](gi_bvh_empty_bins.md).
+
 - Native workflow lifetime and stepping compile separately from Lua registration, reducing
   service-only edit rebuilds. See [workflow split measurements](build_times.md#split-native-workflow-stepping-from-lua-bindings) for compilation CPU and runtime tradeoffs.
 
