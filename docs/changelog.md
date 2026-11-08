@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Native workflow lifetime and stepping compile separately from Lua registration, reducing
+  service-only edit rebuilds. See [workflow split measurements](build_times.md#split-native-workflow-stepping-from-lua-bindings) for compilation CPU and runtime tradeoffs.
+
 - UI2 widget collection reuses Flecs query cache types and iteration code across widget types,
   reducing compiler work and peak compiler memory. See [UI2 collection measurements](build_times.md#shared-ui2-record-collection) for timings and runtime tradeoffs.
 

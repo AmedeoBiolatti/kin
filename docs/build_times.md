@@ -1502,3 +1502,100 @@ The [UI2 collection data](build_ui2_collection_2026-11-08.json) retains all
 profiles, timing/control/load observations, real edit plans, runtime samples,
 object/cache holder counts, observer descriptors, validation, hashes, flags and
 reproduction scripts.
+
+### Split native workflow stepping from Lua bindings
+
+Follow-up measured on 2026-11-08 from `7eef736`. `workflows2d.cpp` now owns
+`ScriptWorkflows2D` lifetime, world sharing, stepping, scene handoff, tween
+settlement and native Impl helpers. `lua_workflows2d.cpp` keeps registration,
+userdata, table/value conversion and reload cloning. A private header shares
+the original native fields and tween state. Both files belong to the existing
+scripting target with normal Release `-O2` and its PCH. Compiler cache/LTO and
+`KIN_DEV_FAST_SCRIPTING` are off; safety settings and public headers are unchanged.
+
+All ten public native member definitions, settlement/mutation guards and native
+fields are preserved. All three userdata definitions remain local to the Lua
+binding file, retaining their existing namespace identities. Native `follow()`
+returns shared state; two Lua callbacks construct the original `LuaTween2D`
+aggregate around it. This moves the existing construction across the boundary
+without an extra allocation/Lua wrapper. Other callback bodies, captures,
+registration order, value conversion and reload cloning remain byte-identical.
+
+The original diagnostic trace takes 16.58 s (6.82 frontend, 9.61 backend);
+instrumented time is excluded from performance comparisons. A first split put
+the tween userdata in a shared hidden namespace. It passed tests but gave little
+GCC compilation-set wall improvement while using substantially more CPU. That
+prototype's complete sources, generator and measurements are retained. The final
+boundary keeps userdata private to bindings and shares only native state; no
+direct same-host prototype-vs-final causal speedup is claimed.
+
+Three observations/version/compiler use original/final source and private-header
+snapshots, matching target flags/PCHs and alternating before/after order with the
+middle pair reversed. The original combined file and final binding file run on
+CPU 2; the added native source runs on CPU 0, with an unchanged JSON control on
+CPU 4. No owned validation compilers overlap timing. The medians are:
+
+| Workflow compilation set | Wall before → after | Combined compiler CPU before → after |
+|---|---:|---:|
+| Clang 21.1.8 | 15.04 → 14.34 s | 15.01 → 18.06 s |
+| GCC 15.2 | 14.42 → 12.91 s | 14.23 → 17.46 s |
+
+Observed set wall time is about 4.7% lower with Clang and 10.5% lower with GCC,
+while combined compiler CPU is **20.3% and 22.7% higher**. This measures
+compilation only, with no archiving/linking or ordinary clean-project scheduling.
+Host activity, frequency and SMT siblings are uncontrolled; all samples,
+controls and loads are retained. These are local estimates, not precise
+clean-project/cumulative speedups. Parallel units can use memory simultaneously;
+per-child RSS does not measure total concurrent peak memory. A single-worker
+rebuild of the complete set can be slower.
+
+Real implementation-only edits use the canonical Clang Ninja graph through
+`hex_demo` archive/link, four workers pinned to CPUs 0/2/4/6, three observations
+per source/version:
+
+| Implementation edit | Original combined file | Final source |
+|---|---:|---:|
+| Native lifetime/stepping/helpers | 12.31 s | 3.61 s |
+| Lua registration/conversion/cloning | 12.31 s | 14.30 s |
+
+Native-only edits take **70.7% less wall time**, about **3.4 times faster**,
+in these samples. The binding-edit samples are slower than the original block;
+host conditions also changed between blocks, so they do not establish a precise
+causal effect for registration edits. Every plan/actual build compiles exactly
+one expected C++ object. Bytes and nanosecond timestamps are restored after each
+sample, then both canonical objects are refreshed from restored bytes. Shared
+private-header edits reach two sources; game-main source scope is unchanged.
+
+Five alternating processes/version/compiler use the same assertions-enabled
+`-O2` probe object, each with 30 samples after three warmups on CPU 2. Initial
+prototype timings showed roughly twofold host-wide changes; final probes use
+five fresh processes/version and retain every prototype/final observation.
+Medians across process medians, in milliseconds:
+
+| Runtime workload | Clang before → after | GCC before → after |
+|---|---:|---:|
+| Bind 50 VMs | 5.856 → 6.003 | 6.466 → 6.286 |
+| 400,000 input queries | 27.950 → 26.660 | 27.996 → 27.715 |
+| 100,000 tween state calls | 7.342 → 7.132 | 8.357 → 8.185 |
+| 1,000 native steps | 0.661 → 0.663 | 0.635 → 0.657 |
+| 40,000 controller table calls | 20.713 → 21.908 | 19.455 → 20.395 |
+
+Input/tween-state cases improve by up to about 4.6%; controller-table cases are
+4.8–5.8% slower. VM creation and native stepping also move in both directions.
+These narrow CPU probes assert states/counts, but do not establish whole-game
+FPS or bound all asset, preload, pool and reload operations.
+
+Clang and GCC each pass 39 selected tests and all four Lua API reports match
+their baseline. The new regression checks all three userdata's primary/reference
+registry keys stay within the bundled Lua 40-byte short-string limit. Sixteen
+no-PCH assertions per compiler compare original/new state and tween-wrapper
+sizes, alignments and six traits. Six more no-PCH cases compile both sources and
+the private header with Clang 3D enabled and GCC physics/audio disabled. The full
+workflow suite, including the new regression, also passes linked against the
+original combined object per compiler. Final six scripting/game smoke tests,
+API comparisons and no-change builds pass per compiler. Windows/MSVC and full
+native desktop/3D/GPU runtime are untested.
+
+The [workflow split data](build_workflow_split_2026-11-08.json) retains all
+prototype/final compilation, real-edit and runtime observations, controls/load,
+layout/body checks, executable sizes, hashes, flags, validation and reproduction.

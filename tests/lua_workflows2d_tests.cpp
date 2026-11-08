@@ -16,6 +16,39 @@
 
 using namespace kin;
 namespace {
+void workflow_registry_keys_stay_short() {
+    kin::EcsWorld world;
+    auto services = std::make_shared<ScriptWorkflows2D>(world, ".");
+    sol::state lua;
+    bind_lua_workflows2d(lua, [services] { return services; });
+    const sol::table types = lua.registry()["kin.api_types"];
+    lua_State* state = lua.lua_state();
+    for (const char* name : {"KinTween2D", "KinPrefabLease2D", "KinScenePreload2D"}) {
+        const sol::table expected = types[name];
+        expected.push();
+        const void* identity = lua_topointer(state, -1);
+        lua_pop(state, 1);
+        std::string registry_key;
+        // Avoid making sol references while iterating the registry table.
+        lua_pushnil(state);
+        while (lua_next(state, LUA_REGISTRYINDEX) != 0) {
+            if (lua_type(state, -2) == LUA_TSTRING && lua_topointer(state, -1) == identity) {
+                std::size_t length = 0;
+                const char* text = lua_tolstring(state, -2, &length);
+                const std::string_view key{text, length};
+                if (key.starts_with("sol.")) registry_key.assign(key);
+            }
+            lua_pop(state, 1);
+        }
+        assert(!registry_key.empty() && registry_key.size() <= 40);
+        const std::string reference_key = registry_key + ".user";
+        assert(reference_key.size() <= 40);
+        lua_getfield(state, LUA_REGISTRYINDEX, reference_key.c_str());
+        assert(lua_istable(state, -1));
+        lua_pop(state, 1);
+    }
+}
+
 const char* prefab = R"({"schema":"kin.prefab/1","id":"coin","root":"root","entities":[
     {"id":"root","name":"Coin","components":{"Transform2D":{},"RectRenderer":{"size":{"x":2,"y":2}}}}]})";
 void scene_host(Renderer2D& renderer) {
@@ -166,6 +199,7 @@ void entity_host() {
 }
 } // namespace
 int main() {
+    workflow_registry_keys_stay_short();
     auto profile =
         std::filesystem::temp_directory_path() /
         ("kin-workflow-lua-profile-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

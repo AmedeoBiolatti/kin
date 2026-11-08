@@ -326,6 +326,7 @@ if(KIN_ENABLE_SCRIPTING)
         src/scripting/lua_state_copy.cpp
         src/scripting/lua_values.cpp
         src/scripting/lua_workflows2d.cpp
+        src/scripting/workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp
         src/scripting/entity_scripts.cpp
