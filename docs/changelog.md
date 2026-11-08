@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Hex Demo precompiles five more stable engine headers when development PCHs are enabled.
+  An isolated C++ module pilot records the comparison and rebuild tradeoffs; see
+  [measurements](build_times.md#cpp-modules-pilot).
+
 - Fixed area-light BVH construction: empty spatial bins no longer corrupt split bounds,
   reducing traversal work without changing GI budgets. See [measurements and validation](gi_bvh_empty_bins.md).
 
