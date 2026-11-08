@@ -11,6 +11,16 @@ target_link_libraries(hex_demo PRIVATE
 )
 
 kin_game(hex_demo TITLE "Hex Demo")
+# Stable engine headers used by this game's source, in addition to the common
+# runtime PCH. Keep the game's own logic out so game edits retain the PCH.
+if(KIN_ENABLE_PCH)
+    target_precompile_headers(hex_demo PRIVATE
+        <kin/core/hex.hpp>
+        <kin/core/json.hpp>
+        <kin/pathfinding/pathfinding.hpp>
+        <kin/platform/window.hpp>
+        <kin/ui2/text.hpp>)
+endif()
 if(KIN_HEX_DEMO_BAKED_FONT)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/FONT-LICENSE.txt"
         DESTINATION licenses/game COMPONENT hex_demo)

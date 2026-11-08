@@ -29,6 +29,10 @@ releases may change APIs.
 - Material UV transform (`Material3D::uv_scale`, `uv_offset`) in every pass. TIFF and PSD textures decode for
   imports, and 16-bit greyscale PNGs no longer overflow SDL_image's surface.
 
+- Hex Demo precompiles five more stable engine headers when development PCHs are enabled.
+  An isolated C++ module pilot records the comparison and rebuild tradeoffs; see
+  [measurements](build_times.md#cpp-modules-pilot).
+
 - Fixed area-light BVH construction: empty spatial bins no longer corrupt split bounds,
   reducing traversal work without changing GI budgets. See [measurements and validation](gi_bvh_empty_bins.md).
 

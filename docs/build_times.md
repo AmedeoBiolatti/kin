@@ -1606,3 +1606,81 @@ native desktop/3D/GPU runtime are untested.
 The [workflow split data](build_workflow_split_2026-11-08.json) retains all
 prototype/final compilation, real-edit and runtime observations, controls/load,
 layout/body checks, executable sizes, hashes, flags, validation and reproduction.
+
+
+## C++ modules pilot
+
+A native Linux Clang 21 pilot compared Hex Demo's existing PCH with an
+`import kin.runtime` facade and a PCH covering the same eleven engine headers.
+The facade works with the existing native libraries and preserves their ABI.
+It exports selected names from headers in the global module fragment; engine
+implementation files still use headers. This is an incremental migration pilot,
+not a fully modular engine.
+
+The balanced run used Clang 21.1.8, CMake 4.2.3, Ninja 1.13.2, Release `-O2`,
+four workers pinned to four CPUs, the default GNU linker, no LTO and no compiler
+cache. Project-pinned dependencies and engine libraries were built before the
+measurements. All six case orderings were rotated to reduce ordering bias.
+Times include the final executable link:
+
+| Rebuild scope | Existing PCH | Module + standard PCH | Same-coverage PCH |
+|---|---:|---:|---:|
+| Warm game source edit, median of 12 | 1.723 s | 1.567 s | **1.463 s** |
+| Game/API preparation from cold, median of 3 | 3.766 s | 4.020 s | 3.789 s |
+| Native pathfinding source edit, median of 3 | 1.932 s | 1.947 s | 1.925 s |
+| Pathfinding header comment edit, median of 3 | 7.429 s | 8.423 s | 8.249 s |
+| No-op, median of 12 | 0.059 s | 0.060 s | 0.058 s |
+
+The module facade shortened warm game edits by about **9%**, while the
+same-coverage PCH shortened them by **15%** and was about **7% faster than the
+module client**. Native engine edits and no-ops did not improve. Cold module
+preparation used 4.91 CPU seconds versus 3.75 for the original PCH, with wall
+time about 7% higher. The header-comment rebuild was about 13% slower with the
+module and 11% slower with the broader PCH. This is an invalidation test with
+unchanged declarations, not a measurement of an ABI-changing API edit.
+
+Cold means rebuilding the game PCH, module BMI/object when applicable, game
+object and executable, with the engine and dependencies already built. It is
+not a full project clean build. Maximum process RSS for a warm game edit fell
+from about 188 MiB to 173 MiB with the broader PCH; the module used about
+187 MiB. RSS is the largest single process, not total concurrent memory.
+Background host load and CPU frequency varied; interpret these as one host,
+one game and one compiler. Exploratory reduced-BMI and no-consumer-PCH module
+variants did not beat the ordinary module client.
+
+The normal Hex build therefore keeps headers and adds five stable engine
+headers to its optional PCH: hex coordinates, JSON, pathfinding, window and UI2
+text. Existing transitive PCH coverage supplies the other facade headers. This
+helps game-body edits while those APIs remain stable; editing one of the added
+headers also rebuilds the game PCH. Game-owned headers remain outside the PCH.
+No other game's PCH changes.
+
+A separate A/B of that final five-header change used the original, unchanged
+source include order and normal build plumbing. Six alternating before/after
+rounds (twelve samples each) reduced median edit-to-link time from **2.380 s to
+1.981 s**, about **17%**; CPU time fell from 2.37 s to 1.96 s. Maximum process
+RSS fell from about 189 MiB to 174 MiB. All twelve headless checks passed. Host
+load changed between this batch and the module comparison, so compare cases
+within each batch rather than mixing their absolute times.
+
+The [standalone experiment](../experimental/cpp_modules/README.md) retains the
+working module and three comparable clients without adding module scanning or
+new compiler/CMake requirements to normal builds. The
+[raw samples and toolchain metadata](build_cpp_modules_2026-11-08.json) identify
+the measured checkpoint and distinguish exploratory, balanced and production
+PCH comparisons. All 18 balanced-case headless checks passed with identical
+path length, path cost and reachable-cell counts. The final native 2D suite
+passed (118 executed tests, two GPU tests skipped with the dummy video driver).
+GCC 15 also compiled the final PCH and real Hex source with invalid-PCH warnings
+treated as errors; this is a compile smoke check, not a GCC module benchmark.
+The standalone project also built all three clients and passed all three
+headless tests.
+
+A larger migration should earn its complexity with a new benchmark: partition
+frequently consumed, stable engine interfaces and measure representative games,
+clean preparation, implementation edits and interface invalidation against a
+matched PCH. Modules do not remove template instantiation or optimizer work for
+new bindings. CMake's [module documentation](https://cmake.org/cmake/help/v4.2/manual/cmake-cxxmodules.7.html)
+and Clang's [standard module documentation](https://clang.llvm.org/docs/StandardCPlusPlusModules.html)
+cover the build graph and compiler constraints; this pilot does not establish
+support on other platforms.
