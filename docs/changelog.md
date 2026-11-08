@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Fixed area-light BVH construction: empty spatial bins no longer corrupt split bounds,
+  reducing traversal work without changing GI budgets. See [measurements and validation](gi_bvh_empty_bins.md).
+
 - Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
   precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters,
   and earlier independent runtime compilation with Ninja. See [build-time measurements and setup](build_times.md).
