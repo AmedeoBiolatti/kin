@@ -216,6 +216,14 @@ const std::span<const unsigned char> spirv = my_game_shader("water.frag.spv"); /
 Shaders can also be kept in the content as `.spv` files and read with
 `read_content_file`.
 
+A 3D game's material graphs (`.kingraph` in its content) are cooked by
+`kin_game`, each beside its graph as `<graph>.kingraph.spv` (its parameters'
+layout and every variant's SPIR-V: what a game without glslc loads), when glslc
+and the `kin_material_graph` tool run where it builds. Android's builds can't
+(their tools are Android's): build the game for the desktop first and keep the
+cooked files with the content, or a shipping build stops at configure, naming
+the graphs. Commit them, or ignore `*.kingraph.spv`, as the game prefers.
+
 ## Platforms
 
 **Windows.** The game is a windowed app (no console window) on the static C++

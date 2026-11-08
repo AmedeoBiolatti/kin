@@ -176,6 +176,47 @@ public:
     std::vector<ShaderResourceInfo> textures, buffers;
     bool valid() const override { return bool(shader); }
 };
+// A material's surface shader (Material3D::surface): its variants, in SurfaceVariant3D's order, each standing for the
+// stock mesh fragment shader of the same defines (mesh.frag ... mesh_velocity_light_fog.frag) with its layout.
+class GpuSurfaceShader3D final : public ISurfaceShaderBackend3D {
+public:
+    std::array<GpuShader, surface_variant_count3d> variants;
+    SharedDevice device;
+    // Its variants (but the cut-outs) sample Material3D::graph_maps, the sampler after the stock layout's (made from
+    // kin_material.inc.glsl since graph maps; older SPIR-V has the stock layout as it was).
+    bool graph_maps = false;
+    bool valid() const override {
+        for (u32 i = 0; i < surface_required_variants3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    // Its merged draws' variants (mesh_material.frag's): optional; without them its draws are not merged. (Nor are
+    // they where it moves its vertices: mesh_material.vert has no offset.)
+    bool merges() const {
+        for (u32 i = surface_required_variants3d; i < surface_mask_variant3d; ++i)
+            if (!variants[i])
+                return false;
+        return !offsets();
+    }
+    // Its vertex variants (a surface with an offset: World Position Offset): optional, all or none.
+    bool offsets() const {
+        for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    SDL_GPUShader* vertex(SurfaceVariant3D v) const { return variants[u32(v)].handle(); }
+    // Its cut-outs' variants (a surface defining kin_surface_alpha): optional; without them its cut-outs in the
+    // shadow, occluder, pick, pre- and visibility passes follow the base map's alpha.
+    bool masks() const {
+        for (u32 i = surface_mask_variant3d; i < surface_vertex_variant3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    SDL_GPUShader* mask(SurfaceVariant3D v) const { return variants[u32(v)].handle(); }
+};
 class GpuMaterialInputs3D final : public IMaterialInputsBackend3D {
 public:
     SharedDevice device;
@@ -220,6 +261,9 @@ public:
 
 private:
     friend class GpuRenderer3D;
+    // Scene3D::time of its frame and of the frame before (a moving surface's previous position, for the velocity).
+    f32 _offset_clock[2] = {0.0f, 0.0f};
+    bool _offset_clock_seen = false;
     ResourceGraphCompiler _graph_compiler;
     ResourceGraphCompiler _geometry_compiler;
     ResourceGraphDesc _geometry_recipe;
@@ -434,6 +478,9 @@ public:
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
+    std::shared_ptr<ISurfaceShaderBackend3D>
+    create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) override;
+    Texture create_map_array(Vec2i size, std::span<const u8* const> layers) override;
     Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
                                                       std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
@@ -499,13 +546,15 @@ private:
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                       SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false,
                                       bool fog = false, bool lights = false, Unlit unlit = Unlit::Off,
-                                      bool indexed = false) const;
+                                      bool indexed = false, const GpuSurfaceShader3D* surface = nullptr) const;
     // Pure requests shared by actual draws and conservative warm-up variants.
     struct MaterialPipeline {
         const GpuMaterialShader3D* custom;
         Unlit unlit;
         bool cull, mask;
         Pass pass;
+        // A surface shader's variants in place of the stock ones (never with `custom`, which takes its place).
+        const GpuSurfaceShader3D* surface = nullptr;
     };
     struct MeshPipelineRequest {
         SDL_GPUTextureFormat format;
@@ -515,9 +564,15 @@ private:
         bool fog = false, lights = false, indexed = false, materials = false;
     };
     struct MaterialUniforms {
-        f32 params[4], pbr[4], maps[4], emission[4];
+        f32 params[4], pbr[4], maps[4], emission[4], uv[4];
     };
-    static_assert(sizeof(MaterialUniforms) == 64);
+    static_assert(sizeof(MaterialUniforms) == 80);
+    // A surface shader's slot 1: the stock block, then Material3D::shader_params (kin_surface_param).
+    struct SurfaceMaterialUniforms {
+        MaterialUniforms material;
+        f32 surface[surface_param_count3d];
+    };
+    static_assert(sizeof(SurfaceMaterialUniforms) == 80 + 4 * surface_param_count3d);
     static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
                                        bool fog) const;
@@ -539,8 +594,8 @@ private:
     SDL_GPUGraphicsPipeline* fullscreen_additive(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
-    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                               bool skinned = false) const;
+    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned = false,
+                                               const GpuSurfaceShader3D* surface = nullptr) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
@@ -645,8 +700,24 @@ private:
     // End of a render: counts the renders each feature's targets went unused and releases those unused for
     // `_release_after`; fills RenderDebugStats3D::feature_bytes.
     void age_targets(FrameCtx& ctx);
+    // The surface whose cut-out variants a cut-out material's passes use (none: the stock cut-out shaders).
+    static const GpuSurfaceShader3D* cutout_surface(const Material3D& material);
+    // A material's surface that moves its vertices (an offset: its vertex variants), or null.
+    static const GpuSurfaceShader3D* moving_surface(const Material3D& material);
+    // What a geometry pass (shadow, occluder, pick, pre-, visibility) needs of a material's surface: its cut-out's
+    // variants, or its vertex variants (a pipeline of its own), or null.
+    static const GpuSurfaceShader3D* pass_surface(const Material3D& material) {
+        if (const auto* s = cutout_surface(material))
+            return s;
+        return moving_surface(material);
+    }
+    f32 _cutout_time = 0; // Scene3D::time, for surface cut-outs (bind_cutout)
+    // For moving surfaces' vertices (bind_offset): Scene3D::time now and the time of the frame before (the
+    // velocity's previous position), the camera and its forward.
+    f32 _offset_time[2] = {0.0f, 0.0f};
+    Vec3f _offset_eye{}, _offset_forward{0.0f, 0.0f, -1.0f};
     SDL_GPUGraphicsPipeline* geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned,
-                                               bool indexed) const;
+                                               bool indexed, const GpuSurfaceShader3D* surface = nullptr) const;
     bool draw_geometry(FrameCtx&, SDL_GPURenderPass*, SDL_GPUTextureFormat depth, bool second);
     void prepass(FrameCtx& ctx); // depth and normals (or velocity), then the occlusion and contact shadows
     void draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 which, SDL_GPUTextureFormat depth_format);
@@ -696,6 +767,31 @@ private:
                       SDL_GPUTextureFormat velocity_format, bool encode);
     bool read_gi_scene(IViewBackend3D& view, GiScene3D& out) override;
     void release_gi(GpuView3D& view);
+    // A surface material's stand-in in the GI scene: what its surface (a graph's, a surface shader's) makes of it over
+    // its UV square, gi_proxy_side texels a side, read by the voxelizer in place of the material's base and emissive
+    // maps (which may hold whatever a graph samples: a mask, a normal map). `base`: its base colour and alpha, in the
+    // colour format of materials' maps; `emission`: its emission (linear RGBA16F), made only for a material that emits,
+    // by its own fields (Material3D::emits_light) or its surface's (SurfaceTraits3D::emission): the GI's emitters are
+    // those alone. Drawn with a white vertex colour: the voxelizer multiplies it by the copy's where the surface reads
+    // it (SurfaceTraits3D::vertex_color, vertex_alpha). bake_gi_proxies makes those a render's GI scene lacks, before
+    // its passes (each material drawn twice into the 2D frame's commands, unlit and lit by nothing, and gi_proxy.frag
+    // takes the second from the first), once a look (gi_proxy_key); the unused are let go. An animated surface is
+    // pictured at the time of its bake.
+    struct GiProxy {
+        Texture base, emission;
+        u64 used = 0; // the 2D frame that last asked for it
+    };
+    static bool gi_proxied(const Material3D& material);
+    static u64 gi_proxy_key(const Material3D& material);
+    const GiProxy* gi_proxy(const Material3D& material); // null: none (not a surface material, or none made)
+    void bake_gi_proxies(const Scene3D& scene);
+    bool bake_gi_proxy(const Material3D& material, f32 time, GiProxy& out);
+    void release_gi_proxies();
+    std::unordered_map<u64, GiProxy> _gi_proxies;
+    Mesh3D _gi_proxy_quad;                                    // the UV square, facing +y
+    Texture _gi_proxy_unlit, _gi_proxy_dark, _gi_proxy_depth; // the bake's scratch targets
+    GpuShader _gi_proxy_shader;                               // gi_proxy.frag
+    bool _gi_proxy_broken = false;                            // what a bake needs could not be made: none are
     bool _gi_available = false;
     bool _gi_warned = false;
     SDL_GPUComputePipeline* _gi_clear = nullptr;      // gi_clear.comp
@@ -768,6 +864,9 @@ private:
     SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v,
                                                  std::optional<TextureSampler3D> sampler = {});
     void bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material);
+    // A moving surface's vertex block (its parameters, the clock, the camera, the maps' transform) and its maps as the
+    // vertex samplers, for a draw with its vertex variant (moving_surface, not skinned); nothing for another.
+    void bind_offset(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material, bool skinned);
 
     GpuRenderer2DBackend* _owner = nullptr;
     GpuDevice* _device = nullptr;
@@ -974,6 +1073,7 @@ private:
     u32 _shadow_layers = 0;
     u32 _shadow_layers_limit = max_shadow_cascades; // lowered when the device would not make more
     GpuTexture _no_shadow;                          // 1 x 1, all far: every comparison lit
+    Texture _white_maps; // 1 x 1, one white layer: graph maps for a surface whose material has none
     // P3b. The local array: a layer a spot light's map and six a point light's, `_local_side` texels a side (a light
     // draws into a corner of it); the moon's cascades are an array of their own. `_*_generation` changes when one is
     // made again (nothing cached is in it).
@@ -1109,7 +1209,8 @@ private:
     u32 _anisotropy = 1;
     i32 _lod_bias = 0;
     std::vector<std::shared_ptr<GpuMaterialShader3D>> _material_shaders;
-    std::shared_ptr<GpuBuffer> _instances;    // grows
+    std::vector<std::shared_ptr<GpuSurfaceShader3D>> _surface_shaders; // kept, as _material_shaders
+    std::shared_ptr<GpuBuffer> _instances;                             // grows
     std::shared_ptr<GpuBuffer> _caster_lists; // the cascades' lists of copies (indices into _instances); grows
     std::array<f32, 256> _srgb_to_linear{};
 
@@ -1169,7 +1270,7 @@ private:
         bool operator==(const PreparedKey&) const = default;
     };
     struct DrawBindingKey {
-        std::array<const ITextureBackend*, 5> textures{};
+        std::array<const ITextureBackend*, 6> textures{}; // the five maps, then Material3D::graph_maps
         Wrap3D u{}, v{};
         decltype(Material3D::texture_samplers) sampling{};
         bool operator==(const DrawBindingKey&) const = default;
@@ -1194,6 +1295,9 @@ private:
         u64 scene = 0, revision = 0, upload_frame = ~0ull, used_frame = 0;
         std::weak_ptr<const u64> lifetime;
         std::shared_ptr<GpuBuffer> buffer;
+        // Surface shaders' parameters, surface_param_count3d floats a copy beside `buffer`'s records: only for a
+        // scene that has them.
+        std::shared_ptr<GpuBuffer> surface;
         bool valid = false;
     };
     std::array<DrawMaterials, 8> _draw_material_tables;

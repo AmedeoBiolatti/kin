@@ -752,6 +752,31 @@ settings file. Its CPU mapper tests cover rebinding/edge semantics,
 and GPU gameplay tests drive identical routes with scripted, keyboard and synthetic
 pad commands through the same systems.
 
+## Material gallery
+
+`material_gallery` (3D builds) puts materials imported from another engine by `kin_import_material --graphs` on a
+ring of pedestals under a procedural sky. The band round each pedestal says how far the import got: green, the whole
+node graph; amber, a graph with some outputs falling back to their standard value; red, the standard material only.
+The heads-up line names what fell back.
+
+The materials themselves are not in the repository: the exhibits named in `material_gallery/main.cpp` are free Fab
+packs, whose licence allows using them in a project but not redistributing them. Export them from their Unreal
+project with `tools/import_material/unreal_export.py`, import them, and point the gallery at the folder:
+
+```sh
+kin_import_material unreal <export> --project <export> --content <folder> --out <folder>/m --graphs
+material_gallery --content <folder>
+KIN_RENDER_BACKEND=gpu material_gallery --content <folder> --exhibit 4 --shot zombie.png   # a picture, headless
+```
+
+Exhibits that are missing are left out, said once. Drag to orbit, the wheel to zoom, Left and Right for the
+exhibits, Up for the whole ring, Space for a tour.
+
+Graphs the import left uncooked are cooked on worker threads as the gallery starts, beside their sources
+(`<graph>.spv`, what `kin_material_graph cook` writes), so only the first start pays for glslc; the materials then load
+one a frame behind a progress bar. Large maps still take their time to decode: the zombie skin's four 16-bit 4096
+square PNGs, about 6 s.
+
 ## Summit
 
 Summit now includes selected [Kenney Survival Kit](https://kenney.nl/assets/survival-kit) CC0 assets for camp equipment and

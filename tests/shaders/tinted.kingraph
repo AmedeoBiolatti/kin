@@ -1,0 +1,4 @@
+{"schema": "kin.material-graph/1", "name": "tinted",
+ "parameters": [{"name": "tint", "type": "color", "default": [1, 0.5, 0.25, 1]}],
+ "nodes": [{"id": "lit", "type": "multiply", "inputs": {"a": "surface.base_color", "b": "tint.rgb"}}],
+ "outputs": {"base_color": "lit"}}

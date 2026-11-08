@@ -7,6 +7,28 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Material graphs for 3D (native renderers; WebGL2 draws a graph material's stock fallback). A surface shader
+  (`Material3D::surface`) is a `kin_surface(inout KinSurface)` function inside the stock mesh shader, lit, fogged,
+  shadowed and GI'd as a stock material, in every pass (cut-outs by its alpha included) and in the batched paths.
+  A material graph (`kin.material-graph/1`, `material_graph3d.hpp`) compiles to one: 53 node types, five map slots,
+  64 floats of parameters, a world-position offset, and surface outputs beyond the stock material's (backlight for
+  two-sided foliage, clear coat, specular, diffuse wrap). `.kinmaterials` files name a `"graph"` and its `"params"`;
+  `Assets3D::load_material_graph` loads a graph cooked at build time (`kin_material_graph cook`, cmake's
+  `kin_cook_material_graph`) or compiles it with glslc, and reloads it on edits. `Scene3D::specular_multiscatter`
+  (on) can be turned off to draw rough metals as Unreal's legacy shading does. The GI scene sees a surface material
+  through a stand-in the renderer draws from it (its base colour and emission over its UV square), not through its
+  maps, which a graph may fill with masks or normal maps; `SurfaceTraits3D` (filled in by the graph compiler) says
+  whether a surface glows by itself and whether its colour reads the vertex colour. `kin_game` cooks a game's
+  graphs at build time (`kin_cook_material_graphs`), and a shipping build that can't (Android's) needs them
+  cooked already. Graphs and their imports run on a stack of their own: chains of nodes up to 1024 deep, deeper
+  ones an error naming the node.
+- `kin_import_material godot|unity|unreal` imports other engines' materials as `.kinmaterials`: the standard PBR
+  materials of all three, and with `--graphs` their node graphs (Unreal material graphs with their Material
+  Functions and static switches, Unity Shader Graph 10+, Godot 4 VisualShaders), noting each node it can't express.
+  `kin_material_lineup` renders the same scene in kin, Godot and Unreal to compare the imports.
+- Material UV transform (`Material3D::uv_scale`, `uv_offset`) in every pass. TIFF and PSD textures decode for
+  imports, and 16-bit greyscale PNGs no longer overflow SDL_image's surface.
+
 - Development PCHs include the standard filesystem API; Charts, Text Edit, Shapes and
   ECS Parallel precompile more of their stable engine APIs. See the
   [broader PCH measurements](build_times.md#broader-standard-library-and-game-pchs)

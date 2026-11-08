@@ -99,11 +99,24 @@ bool taa_material_hash(u64& key, const Material3D& material, const ITextureBacke
     for (const auto& sampler : material.texture_samplers)
         taa_hash(key, sampler_identity(sampler));
     taa_hash(key, material.blend);
-    taa_hash(key, material.shader_params);
+    // The parameters something reads: a surface's, a custom shader's first 16; none of a stock material's (each
+    // draw's, each frame).
+    if (material.surface.backend())
+        taa_hash(key, material.shader_params);
+    else if (material.shader.backend())
+        taa_hash(key, material.shader_params.data(), sizeof(f32) * 16);
     taa_hash(key, material.wrap_u);
     taa_hash(key, material.wrap_v);
+    if (!material.uv_identity()) {
+        taa_hash(key, material.uv_scale.x);
+        taa_hash(key, material.uv_scale.y);
+        taa_hash(key, material.uv_offset.x);
+        taa_hash(key, material.uv_offset.y);
+    }
     const auto shader = material.shader.backend().get();
     taa_hash(key, shader);
+    if (const auto surface = material.surface.backend().get())
+        taa_hash(key, surface);
     if (const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(material.inputs.backend().get()))
         taa_hash(key, inputs->signature);
     return taa_texture_hash(key, texture);
@@ -265,8 +278,10 @@ struct FrameUniforms {
     f32 grid[4];      // x: 1 when the light grid lights this pass, y: a tile's side (pixels), z: the first slice's near
                       // depth, w: slices per unit of the log of depth
     f32 grid_size[4]; // x, y: tiles across and down, z: slices, w: cells (where the lists start)
+    f32 time[4];      // x: Scene3D::time (seconds), for materials that move (a graph's time); y: 1 without
+                      // Scene3D::specular_multiscatter
 };
-static_assert(sizeof(FrameUniforms) == 1168);
+static_assert(sizeof(FrameUniforms) == 1184);
 // A light of the light grid (as gi_light.comp's): place and reach, colour and the square of the size, a spot's way and
 // the cosine of its outer angle (a point light: -2), 1 / (cos inner - cos outer) and its shadow's layer (a point
 // light's cube's first; -1: none).
@@ -339,8 +354,9 @@ static_assert(sizeof(TaaUniforms) == 80);
 // shadow_mask.frag's and pick_mask.frag's.
 struct CutoffUniforms {
     f32 cutoff[4]; // the alpha below which nothing is drawn
+    f32 uv[4];     // the maps' scale and offset (Material3D::uv_scale, uv_offset)
 };
-static_assert(sizeof(CutoffUniforms) == 16);
+static_assert(sizeof(CutoffUniforms) == 32);
 // The sky's and the fog's (kin_sky.inc.glsl's KinSky and kin_fog.inc.glsl's KinFog, vec4s all, so no padding to get
 // wrong).
 struct AtmosphereUniforms {
@@ -1540,36 +1556,87 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
     return 1;
 }
 
+const GpuSurfaceShader3D* GpuRenderer3D::cutout_surface(const Material3D& material) {
+    if (material.blend != Blend3D::Mask || material.shader.backend())
+        return nullptr;
+    const auto* surface = dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
+    return surface && surface->masks() ? surface : nullptr;
+}
+
+const GpuSurfaceShader3D* GpuRenderer3D::moving_surface(const Material3D& material) {
+    if (material.shader.backend())
+        return nullptr;
+    const auto* surface = dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
+    return surface && surface->offsets() ? surface : nullptr;
+}
+
+void GpuRenderer3D::bind_offset(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material,
+                                bool skinned) {
+    if (skinned || !moving_surface(material))
+        return;
+    struct {
+        f32 surface[surface_param_count3d], time[4], eye[4], forward[4], flags[4], uv[4];
+    } u{};
+    std::memcpy(u.surface, material.shader_params.data(), sizeof(u.surface));
+    u.time[0] = _offset_time[0];
+    u.time[1] = _offset_time[1];
+    u.eye[0] = _offset_eye.x, u.eye[1] = _offset_eye.y, u.eye[2] = _offset_eye.z;
+    u.forward[0] = _offset_forward.x, u.forward[1] = _offset_forward.y, u.forward[2] = _offset_forward.z;
+    u.flags[1] = _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 1.0f : 0.0f;
+    u.uv[0] = material.uv_scale.x, u.uv[1] = material.uv_scale.y;
+    u.uv[2] = material.uv_offset.x, u.uv[3] = material.uv_offset.y;
+    SDL_PushGPUVertexUniformData(commands, 1, &u, sizeof(u));
+    const Texture& maps = material.graph_maps ? material.graph_maps : _white_maps;
+    if (material.graph_maps)
+        _owner->retain(material.graph_maps);
+    const std::array<SDL_GPUTextureSamplerBinding, 6> samplers{
+        texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]),
+        texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v, material.texture_samplers[1]),
+        texture_binding(material.normal, material.wrap_u, material.wrap_v, material.texture_samplers[2]),
+        texture_binding(material.occlusion, material.wrap_u, material.wrap_v, material.texture_samplers[3]),
+        texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v, material.texture_samplers[4]),
+        texture_binding(maps, Wrap3D::Repeat, Wrap3D::Repeat, TextureSampler3D{})};
+    SDL_BindGPUVertexSamplers(pass, 0, samplers.data(), u32(samplers.size()));
+}
+
 SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                                          bool skinned, bool indexed) const {
+                                                          bool skinned, bool indexed,
+                                                          const GpuSurfaceShader3D* surface) const {
     if (skinned && !_skinning_available)
         return nullptr;
-    return _owner->_pipelines.get(
-        GpuPipelineKey{.vertex = (indexed   ? _indexed_prepass_vertex
-                                  : skinned ? _prepass_skinned_vertex_shader
-                                            : _prepass_vertex_shader)
-                                     .handle(),
-                       .fragment = (mask ? _prepass_mask_shader : _prepass_shader).handle(),
-                       .blend = GpuBlendMode::Replace,
-                       .format = ao_normal_format,
-                       .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
-                       .depth_stencil = depth,
-                       .depth = GpuDepthTest::TestWrite,
-                       .cull = cull ? GpuCull::Back : GpuCull::None});
+    const bool moves = surface && surface->offsets() && !skinned;
+    return _owner->_pipelines.get(GpuPipelineKey{
+        .vertex =
+            moves ? surface->vertex(indexed ? SurfaceVariant3D::VertexPrepassIndexed : SurfaceVariant3D::VertexPrepass)
+            : indexed ? _indexed_prepass_vertex.handle()
+            : skinned ? _prepass_skinned_vertex_shader.handle()
+                      : _prepass_vertex_shader.handle(),
+        .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::PrepassMask)
+                                                        : (mask ? _prepass_mask_shader : _prepass_shader).handle(),
+        .blend = GpuBlendMode::Replace,
+        .format = ao_normal_format,
+        .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
+        .depth_stencil = depth,
+        .depth = GpuDepthTest::TestWrite,
+        .cull = cull ? GpuCull::Back : GpuCull::None});
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass,
                                                  bool mask, SDL_GPUShader* custom, bool velocity, bool skinned,
-                                                 bool fog, bool lights, Unlit unlit, bool indexed) const {
+                                                 bool fog, bool lights, Unlit unlit, bool indexed,
+                                                 const GpuSurfaceShader3D* surface) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
     const GpuVertexLayout layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices;
+    // A moving surface's own vertex variants (World Position Offset), in every pass that places its vertices.
+    const bool moves = surface && surface->offsets() && !skinned && !custom && unlit == Unlit::Off;
 
     if (pass == Pass::Reactive || pass == Pass::ReactiveWire) {
         const bool wire = pass == Pass::ReactiveWire;
         return _owner->_pipelines.get(GpuPipelineKey{
-            .vertex = (skinned ? _mesh_skinned_velocity_vertex_shader : _mesh_velocity_vertex_shader).handle(),
+            .vertex = moves ? surface->vertex(SurfaceVariant3D::VertexMeshVelocity)
+                            : (skinned ? _mesh_skinned_velocity_vertex_shader : _mesh_velocity_vertex_shader).handle(),
             .fragment = _reactive_shader.handle(),
             .blend = GpuBlendMode::Replace,
             .format = hdr_format,
@@ -1589,24 +1656,30 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
         // and does nothing else; a cut-out's also carry its UV and alpha to the
         // fragment shader that discards.
         SDL_GPUShader* vertex =
-            skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
-                    : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle();
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = vertex,
-                                                     .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
-                                                     .blend = GpuBlendMode::Replace,
-                                                     .layout = layout,
-                                                     .depth_stencil = _shadow_format,
-                                                     .depth = GpuDepthTest::TestWrite,
-                                                     .cull = cull ? GpuCull::Back : GpuCull::None,
-                                                     .depth_only = true});
+            moves     ? surface->vertex(mask ? SurfaceVariant3D::VertexShadowMask : SurfaceVariant3D::VertexShadow)
+            : skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
+                      : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle();
+        return _owner->_pipelines.get(GpuPipelineKey{
+            .vertex = vertex,
+            .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::ShadowMask)
+                                                            : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
+            .blend = GpuBlendMode::Replace,
+            .layout = layout,
+            .depth_stencil = _shadow_format,
+            .depth = GpuDepthTest::TestWrite,
+            .cull = cull ? GpuCull::Back : GpuCull::None,
+            .depth_only = true});
     }
     if (pass == Pass::Occluder) {
         // Lod3D::occlusion's depth of the frame's opaque meshes, when no pre-pass draws one: the shadow pass's shaders
         // (a cut-out's discard included) into the single-sample depth the pyramid is built from.
         return _owner->_pipelines.get(GpuPipelineKey{
-            .vertex = skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
-                              : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
-            .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
+            .vertex = moves
+                          ? surface->vertex(mask ? SurfaceVariant3D::VertexShadowMask : SurfaceVariant3D::VertexShadow)
+                      : skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
+                                : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
+            .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::ShadowMask)
+                                                            : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
             .blend = GpuBlendMode::Replace,
             .layout = layout,
             .depth_stencil = _ao_depth_format,
@@ -1615,23 +1688,27 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             .depth_only = true});
     }
     if (pass == Pass::Prepass)
-        return geometry_pipeline(_ao_depth_format, cull, mask, skinned, indexed);
+        return geometry_pipeline(_ao_depth_format, cull, mask, skinned, indexed, surface);
     if (pass == Pass::Pick || pass == Pass::Visibility) {
         // The pick fragment shaders read vWorld and vId, which mesh.vert and mesh_skinned.vert both write.
-        return _owner->_pipelines.get(
-            GpuPipelineKey{.vertex = (indexed   ? _indexed_vertex
-                                      : skinned ? _mesh_skinned_vertex_shader
-                                                : _vertex_shader)
-                                         .handle(),
-                           .fragment = (pass == Pass::Visibility ? (mask ? _visibility_mask_shader : _visibility_shader)
-                                                                 : (mask ? _pick_mask_shader : _pick_shader))
-                                           .handle(),
-                           .blend = GpuBlendMode::Replace,
-                           .format = pass == Pass::Visibility ? format : pick_format,
-                           .layout = layout,
-                           .depth_stencil = pass == Pass::Visibility ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT : _depth_format,
-                           .depth = GpuDepthTest::TestWrite,
-                           .cull = cull ? GpuCull::Back : GpuCull::None});
+        return _owner->_pipelines.get(GpuPipelineKey{
+            .vertex =
+                moves ? surface->vertex(indexed ? SurfaceVariant3D::VertexMeshIndexed : SurfaceVariant3D::VertexMesh)
+                : indexed ? _indexed_vertex.handle()
+                : skinned ? _mesh_skinned_vertex_shader.handle()
+                          : _vertex_shader.handle(),
+            .fragment = mask && surface && surface->masks()
+                            ? surface->mask(pass == Pass::Visibility ? SurfaceVariant3D::VisibilityMask
+                                                                     : SurfaceVariant3D::PickMask)
+                            : (pass == Pass::Visibility ? (mask ? _visibility_mask_shader : _visibility_shader)
+                                                        : (mask ? _pick_mask_shader : _pick_shader))
+                                  .handle(),
+            .blend = GpuBlendMode::Replace,
+            .format = pass == Pass::Visibility ? format : pick_format,
+            .layout = layout,
+            .depth_stencil = pass == Pass::Visibility ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT : _depth_format,
+            .depth = GpuDepthTest::TestWrite,
+            .cull = cull ? GpuCull::Back : GpuCull::None});
     }
     // Opaque: written over what is there, alpha and all; transparent: blended,
     // tested against the depth but not writing it; wireframes over the faces.
@@ -1642,7 +1719,10 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     // writes nothing there, so its draws are masked too (a frame with an opaque custom shader has its pre-pass
     // instead).
     SDL_GPUShader* vertex =
-        skinned ? (velocity && !custom ? _mesh_skinned_velocity_vertex_shader : _mesh_skinned_vertex_shader).handle()
+        moves     ? surface->vertex(velocity  ? SurfaceVariant3D::VertexMeshVelocity
+                                    : indexed ? SurfaceVariant3D::VertexMeshIndexed
+                                              : SurfaceVariant3D::VertexMesh)
+        : skinned ? (velocity && !custom ? _mesh_skinned_velocity_vertex_shader : _mesh_skinned_vertex_shader).handle()
         : velocity && !custom ? _mesh_velocity_vertex_shader.handle()
         : indexed             ? _indexed_vertex.handle()
                               : _vertex_shader.handle();
@@ -1650,7 +1730,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     const bool fogged = fog && !custom && _fog_available && (!velocity || _mesh_velocity_fog_shader);
     // The light variants (P3b), likewise (they have their own fog variants).
     const bool lit = lights && !custom && _lights_available && (!velocity || _mesh_velocity_light_shader);
-    SDL_GPUShader* fragment = custom ? custom
+    SDL_GPUShader* fragment = custom    ? custom
+                              : surface ? surface->variants[4 * u32(velocity) + 2 * u32(lit) + u32(fogged)].handle()
                               : velocity
                                   ? (lit ? (fogged ? _mesh_velocity_light_fog_shader : _mesh_velocity_light_shader)
                                          : (fogged ? _mesh_velocity_fog_shader : _mesh_velocity_shader))
@@ -1686,23 +1767,29 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
 GpuRenderer3D::MaterialPipeline GpuRenderer3D::material_pipeline(const Material3D& material, bool skinned, bool taa,
                                                                  bool velocity, bool fog) const {
     const auto* custom = dynamic_cast<const GpuMaterialShader3D*>(material.shader.backend().get());
+    // A surface shader stands in for the stock shaders (never for a custom one), the unlit ones included.
+    const auto* surface = custom ? nullptr : dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
     const bool general_emission =
         material.emits_light() && (material.emission_mode == EmissionMode3D::Independent || material.emissive_texture);
+    // (The unlit shaders read the base map as the UV has it: a material that moves it takes the stock ones.)
     const Unlit unlit = _unlit_available && (material.unlit || material.wireframe) && !general_emission && !custom &&
-                                !skinned && !taa && !velocity && !fog
+                                !surface && material.uv_identity() && !skinned && !taa && !velocity && !fog
                             ? (material.texture ? Unlit::Textured : Unlit::Colour)
                             : Unlit::Off;
-    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material)};
+    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material), surface};
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& request) const {
     const auto& m = request.material;
     if (request.materials) {
-        if (!_draw_materials_available)
+        if (!_draw_materials_available || (m.surface && !m.surface->merges()))
             return nullptr;
+        const u32 variant = u32(request.fog) + 2 * u32(request.lights);
         return _owner->_pipelines.get(
             GpuPipelineKey{.vertex = _draw_material_vertex.handle(),
-                           .fragment = _draw_material_fragments[u32(request.fog) + 2 * u32(request.lights)].handle(),
+                           .fragment = (m.surface ? m.surface->variants[surface_required_variants3d + variant]
+                                                  : _draw_material_fragments[variant])
+                                           .handle(),
                            .blend = GpuBlendMode::Replace,
                            .format = request.format,
                            .layout = GpuVertexLayout::MeshVertices,
@@ -1713,7 +1800,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& requ
     }
     return pipeline(request.format, request.samples, m.cull, m.pass, m.mask,
                     m.custom ? m.custom->shader.handle() : nullptr, request.velocity, request.skinned, request.fog,
-                    request.lights, m.unlit, request.indexed);
+                    request.lights, m.unlit, request.indexed, m.custom ? nullptr : m.surface);
 }
 
 GpuRenderer3D::MaterialUniforms GpuRenderer3D::material_uniforms(const Material3D& material, Unlit unlit) {
@@ -1724,7 +1811,8 @@ GpuRenderer3D::MaterialUniforms GpuRenderer3D::material_uniforms(const Material3
             {material.normal ? 1.0f : 0.0f, material.emissive_texture ? 1.0f : 0.0f,
              pass_of(material) == Pass::Opaque ? 1.0f : 0.0f, pass_of(material) == Pass::Additive ? 1.0f : 0.0f},
             {material.emission_color.r, material.emission_color.g, material.emission_color.b,
-             material.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f}};
+             material.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f},
+            {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const {
@@ -1798,14 +1886,19 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_velocity_pipeline(SDL_GPUTextureForm
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                                          bool skinned) const {
+                                                          bool skinned, const GpuSurfaceShader3D* surface) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
     // The pre-pass with velocity: one sample, the normal and the velocity in four floats.
+    const bool moves = surface && surface->offsets() && !skinned;
     return _owner->_pipelines.get(GpuPipelineKey{
-        .vertex = (skinned ? _prepass_velocity_skinned_vertex_shader : _prepass_velocity_vertex_shader).handle(),
-        .fragment = (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
+        .vertex = moves
+                      ? surface->vertex(SurfaceVariant3D::VertexPrepassVelocity)
+                      : (skinned ? _prepass_velocity_skinned_vertex_shader : _prepass_velocity_vertex_shader).handle(),
+        .fragment = mask && surface && surface->masks()
+                        ? surface->mask(SurfaceVariant3D::PrepassVelocityMask)
+                        : (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
         .blend = GpuBlendMode::Replace,
         .format = hdr_format,
         .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
@@ -2277,6 +2370,122 @@ std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(
     }
 }
 
+std::shared_ptr<ISurfaceShaderBackend3D>
+GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) {
+    try {
+        auto shader = std::make_shared<GpuSurfaceShader3D>();
+        bool layout_known = false; // whether a variant so far has shown which layout the shader has
+        // First which layout (the graph maps' or not), from any variant that shows it; then each variant made.
+        for (u32 pass = 0; pass < 2; ++pass)
+            for (u32 i = 0; i < surface_variant_count3d; ++i) {
+                if (i >= surface_required_variants3d && spirv[i].empty())
+                    continue; // a merged draws' variant it lacks
+                std::string error;
+                const auto layout = reflect_spirv({spirv[i].data(), static_cast<u32>(spirv[i].size())}, &error);
+                if (i >= surface_vertex_variant3d) { // a vertex variant (an offset): its maps, storage and blocks
+                    if (pass == 0)
+                        continue;
+                    if (!layout || layout->execution_model != 0)
+                        throw std::runtime_error("surface vertex variants must be reflected vertex modules: " + error);
+                    u32 samplers = 0, storage = 0, uniforms = 0;
+                    for (const auto& r : layout->resources) {
+                        if (r.kind == ShaderResourceKind::SampledTexture && r.set == 0 && r.binding < 6)
+                            samplers = std::max(samplers, r.binding + 1);
+                        else if (r.kind == ShaderResourceKind::StorageBuffer && r.set == 0 && r.binding >= 6)
+                            storage = std::max(storage, r.binding - 6 + 1);
+                        else if (r.kind == ShaderResourceKind::UniformBuffer && r.set == 1 && r.binding < 2)
+                            uniforms = std::max(uniforms, r.binding + 1);
+                        else
+                            throw std::runtime_error("surface vertex variant " + std::to_string(i) +
+                                                     " binds beyond kin's vertex layout");
+                    }
+                    // (All six map slots and both blocks: what a draw binds, whether the offset reads them or not.)
+                    shader->variants[i] =
+                        GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
+                                              spirv[i], 2, 6, std::max(storage, u32(1)));
+                    (void)samplers;
+                    (void)uniforms;
+                    continue;
+                }
+                if (!layout || layout->execution_model != 4)
+                    throw std::runtime_error("surface shader variants must be reflected fragment modules: " + error);
+                // The stock variant's layout (mesh.frag ... mesh_velocity_light_fog.frag, as made above): the light
+                // variants' 15 samplers and 4 storage buffers (shadows, GI, the light grid, the area lights), one
+                // uniform block more with fog; the velocity variants the same as the others; the merged draws' (as
+                // mesh_material.frag's) their draws' records after them, and the surface's parameters after those.
+                const bool lights = (i & 2) != 0, fog = (i & 1) != 0,
+                           merged = i >= surface_required_variants3d && i < surface_mask_variant3d,
+                           mask = i >= surface_mask_variant3d;
+                // A cut-out's: the five maps and the cut-out block (the visibility pass's query block too).
+                const u32 uniforms =
+                    mask ? 1 + u32(i == u32(SurfaceVariant3D::VisibilityMask)) : (lights ? 3 : 2) + u32(fog);
+                u32 samplers = mask ? 5 : lights ? 15 : 10;
+                const u32 storage = mask ? 0 : (lights ? 4 : 0) + (merged ? 2 : 0);
+                // Material3D::graph_maps, the sampler after the stock ones in every variant but the cut-outs (shaders
+                // made with kin_material.inc.glsl since graph maps; older SPIR-V has the stock layout): seen by that
+                // sampler, or by storage buffers that start one binding later (a variant that reads no graph map has
+                // none of it).
+                if (!mask) {
+                    std::optional<bool> shifted;
+                    u32 first_storage = ~0u;
+                    for (const auto& r : layout->resources) {
+                        if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2 && r.binding == samplers)
+                            shifted = true;
+                        if (r.kind == ShaderResourceKind::StorageBuffer && r.set == 2)
+                            first_storage = std::min(first_storage, r.binding);
+                    }
+                    if (!shifted && first_storage != ~0u)
+                        shifted = first_storage == samplers + 1;
+                    if (shifted) {
+                        if (layout_known && *shifted != shader->graph_maps)
+                            throw std::runtime_error("surface shader variant " + std::to_string(i) +
+                                                     " differs from the others on the graph maps' sampler");
+                        shader->graph_maps = *shifted;
+                        layout_known = true;
+                    }
+                }
+                if (pass == 0)
+                    continue;
+                if (!mask)
+                    samplers += u32(shader->graph_maps);
+                for (const auto& r : layout->resources)
+                    if ((r.kind == ShaderResourceKind::SampledTexture && (r.set != 2 || r.binding >= samplers)) ||
+                        (r.kind == ShaderResourceKind::StorageBuffer &&
+                         (r.set != 2 || r.binding < samplers || r.binding >= samplers + storage)) ||
+                        (r.kind == ShaderResourceKind::UniformBuffer && (r.set != 3 || r.binding >= uniforms)))
+                        throw std::runtime_error("surface shader variant " + std::to_string(i) +
+                                                 " binds beyond kin's mesh shader layout");
+                shader->variants[i] =
+                    GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV, spirv[i],
+                                          uniforms, samplers, storage);
+            }
+        shader->device = _device->shared();
+        if (shader->graph_maps && !_white_maps) {
+            static constexpr u8 white[4] = {255, 255, 255, 255};
+            const u8* const layer = white;
+            _white_maps = create_map_array({1, 1}, {&layer, 1});
+            if (!_white_maps)
+                throw std::runtime_error("the graph maps' white layer cannot be made");
+        }
+        _surface_shaders.push_back(shader); // kept: pipelines name its variants for good
+        return shader;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: surface shader not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+Texture GpuRenderer3D::create_map_array(Vec2i size, std::span<const u8* const> layers) {
+    try {
+        auto texture = _device->create_texture_array(u32(size.x), u32(size.y), layers);
+        return Texture{std::make_shared<GpuTextureBackend>(std::move(texture), false, ScaleMode::Mipmapped,
+                                                           TextureFormat::Rgba8, true, u32(layers.size()))};
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: map array not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
 Result3D<MaterialInputs3D> GpuRenderer3D::create_material_inputs(const MaterialShader3D& source,
                                                                  std::span<const Texture> textures,
                                                                  std::span<const DataBuffer> buffers) {
@@ -2326,6 +2535,11 @@ bool GpuRenderer3D::validate_material_inputs(const Scene3D& scene, std::span<con
                 if (draw.material.shader.backend() &&
                     (!shader || !shader->valid() || !shader->shader.belongs_to(_device->handle())))
                     return false;
+                if (const auto& surface = draw.material.surface.backend()) {
+                    const auto* gpu = dynamic_cast<const GpuSurfaceShader3D*>(surface.get());
+                    if (!gpu || !gpu->valid() || !gpu->variants[0].belongs_to(_device->handle()))
+                        return false;
+                }
                 if (draw.material.inputs.backend() && (!inputs || !inputs->valid() || inputs->shader.get() != shader ||
                                                        *inputs->device != _device->handle()))
                     return false;
@@ -3755,6 +3969,12 @@ std::shared_ptr<IPreparedSceneBackend3D> GpuRenderer3D::prepare(const Scene3D& s
                         value->array_layers())
                         return {};
                 }
+                if (draw.material.graph_maps) { // (an array: Renderer3D::create_map_array's)
+                    const auto* maps = dynamic_cast<const GpuTextureBackend*>(draw.material.graph_maps.backend().get());
+                    if (!maps || !maps->texture() || !maps->texture().belongs_to(_device->handle()) ||
+                        !draw.material.graph_maps.array_layers())
+                        return {};
+                }
                 count += draw.count;
             }
         }
@@ -4110,8 +4330,9 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
     for (const auto& source : prepared->sources)
         if (source.scene)
             for (const auto& draw : source.scene->draws())
-                for (const auto* t : {&draw.material.texture, &draw.material.metallic_roughness, &draw.material.normal,
-                                      &draw.material.occlusion, &draw.material.emissive_texture})
+                for (const auto* t :
+                     {&draw.material.texture, &draw.material.metallic_roughness, &draw.material.normal,
+                      &draw.material.occlusion, &draw.material.emissive_texture, &draw.material.graph_maps})
                     if (*t && (*t == colour_texture || *t == targets.depth))
                         return false;
     const auto* shadow = options.sun_shadow;
@@ -5231,10 +5452,31 @@ SDL_GPUTextureSamplerBinding GpuRenderer3D::texture_binding(const Texture& textu
 
 // What a pass with cut-outs binds for one: the base colour's alpha, and the cutoff.
 void GpuRenderer3D::bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material) {
+    if (cutout_surface(material)) {
+        // A surface's cut-out: all five maps, and its parameters, the sRGB decoding and the time after the cutoff.
+        const std::array<SDL_GPUTextureSamplerBinding, 5> maps{
+            texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]),
+            texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v,
+                            material.texture_samplers[1]),
+            texture_binding(material.normal, material.wrap_u, material.wrap_v, material.texture_samplers[2]),
+            texture_binding(material.occlusion, material.wrap_u, material.wrap_v, material.texture_samplers[3]),
+            texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v, material.texture_samplers[4])};
+        SDL_BindGPUFragmentSamplers(pass, 0, maps.data(), u32(maps.size()));
+        struct {
+            f32 cutoff[4], uv[4], surface[surface_param_count3d];
+        } u{{material.alpha_cutoff, _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 1.0f : 0.0f,
+             _cutout_time, 0.0f},
+            {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y},
+            {}};
+        std::memcpy(u.surface, material.shader_params.data(), sizeof(u.surface));
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+        return;
+    }
     const SDL_GPUTextureSamplerBinding base =
         texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]);
     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
-    const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f}};
+    const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f},
+                           {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
     SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
 }
 
@@ -5266,6 +5508,19 @@ bool scene_has_soft_particles(const Scene3D& scene) {
 } // namespace
 
 void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
+    _cutout_time = ctx.scene.time;
+    // (The time of the view's frame before, for a moving surface's previous position: its first frame has none.)
+    if (!ctx.view->_offset_clock_seen) {
+        ctx.view->_offset_clock[0] = ctx.view->_offset_clock[1] = ctx.scene.time;
+        ctx.view->_offset_clock_seen = true;
+    } else if (ctx.scene.time != ctx.view->_offset_clock[0]) {
+        ctx.view->_offset_clock[1] = ctx.view->_offset_clock[0];
+        ctx.view->_offset_clock[0] = ctx.scene.time;
+    }
+    _offset_time[0] = ctx.view->_offset_clock[0];
+    _offset_time[1] = ctx.view->_offset_clock[1];
+    _offset_eye = ctx.scene.camera.position;
+    _offset_forward = ctx.scene.camera.forward();
     GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
@@ -6716,6 +6971,15 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 payload.value(ref.skinned);
                 payload.value(m.double_sided);
                 payload.value(m.blend);
+                if (const auto* moving = moving_surface(m);
+                    moving && !ref.skinned) { // its vertices move: its offset's inputs
+                    payload.value(reinterpret_cast<std::uintptr_t>(moving));
+                    payload.value(ctx.scene.time);
+                    payload.append(m.shader_params.data(), sizeof(m.shader_params));
+                    for (const Texture* t : {&m.texture, &m.metallic_roughness, &m.normal, &m.occlusion,
+                                             &m.emissive_texture, &m.graph_maps})
+                        payload.value(reinterpret_cast<std::uintptr_t>(t->backend().get()));
+                }
                 if (m.blend == Blend3D::Mask) {
                     payload.value(m.alpha_cutoff);
                     payload.value(m.wrap_u);
@@ -7176,10 +7440,17 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                 continue;
             }
             const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
-            SDL_GPUGraphicsPipeline*& p = pipelines[variant];
-            if (!p)
-                p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
-                             false, ref.skinned);
+            // (A surface's own cut-out, or its vertices moved, is its pipeline, not one of the pass's few.)
+            const GpuSurfaceShader3D* own = pass_surface(caster);
+            SDL_GPUGraphicsPipeline* surfaced =
+                own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                               false, ref.skinned, false, false, Unlit::Off, false, own)
+                    : nullptr;
+            SDL_GPUGraphicsPipeline*& cached = pipelines[variant];
+            if (!own && !cached)
+                cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                                  false, ref.skinned);
+            SDL_GPUGraphicsPipeline* p = own ? surfaced : cached;
             if (!p) {
                 complete = false;
                 continue;
@@ -7201,6 +7472,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             if (cutout) {
                 bind_cutout(commands, pass, caster);
             }
+            bind_offset(commands, pass, caster, ref.skinned);
             if (entry.clustered) {
                 for (u32 n = 0; n < entry.count; ++n) {
                     const std::array<u32, 2>& run = _local_runs[entry.run_first + n];
@@ -9187,8 +9459,9 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
                 }
                 const Material3D& occluder = ref.draw->material;
                 const bool cutout = occluder.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided,
-                                                      Pass::Occluder, cutout, nullptr, false, ref.skinned);
+                SDL_GPUGraphicsPipeline* p =
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided, Pass::Occluder, cutout, nullptr,
+                             false, ref.skinned, false, false, Unlit::Off, false, pass_surface(occluder));
                 if (!p) {
                     continue;
                 }
@@ -9203,6 +9476,7 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, pass, occluder);
                 }
+                bind_offset(commands, pass, occluder, ref.skinned);
                 if (ref.clustered) {
                     draw_cluster_indirect(ref, commands, pass, u, 0, 0); // the first pass's clusters
                     continue;
@@ -9586,10 +9860,11 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
         struct Hash {
             std::size_t operator()(const DrawBindingKey& key) const {
                 u64 h = u32(key.u) | (u64(key.v) << 8);
-                for (u32 i = 0; i < key.textures.size(); ++i) {
-                    h = (h ^ reinterpret_cast<std::uintptr_t>(key.textures[i])) * 0x9e3779b97f4a7c15ull;
-                    h = (h ^ sampler_identity(key.sampling[i])) * 0x9e3779b97f4a7c15ull;
-                }
+                // (Six textures, the graph maps last, but five samplers: each array by its own length.)
+                for (const ITextureBackend* texture : key.textures)
+                    h = (h ^ reinterpret_cast<std::uintptr_t>(texture)) * 0x9e3779b97f4a7c15ull;
+                for (const auto& sampler : key.sampling)
+                    h = (h ^ sampler_identity(sampler)) * 0x9e3779b97f4a7c15ull;
                 return static_cast<std::size_t>(h ^ (h >> 32));
             }
         };
@@ -9598,7 +9873,8 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
             const auto& material = _refs[r].draw->material;
             const DrawBindingKey binding{{material.texture.backend().get(), material.metallic_roughness.backend().get(),
                                           material.normal.backend().get(), material.occlusion.backend().get(),
-                                          material.emissive_texture.backend().get()},
+                                          material.emissive_texture.backend().get(),
+                                          material.graph_maps.backend().get()},
                                          material.wrap_u,
                                          material.wrap_v,
                                          material.texture_samplers};
@@ -9670,6 +9946,8 @@ void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
     const auto drop = [&](DrawMaterials& table) {
         if (table.buffer)
             _draw_material_bytes -= table.buffer->size();
+        if (table.surface)
+            _draw_material_bytes -= table.surface->size();
         table = {};
     };
     for (auto& table : _draw_material_tables) {
@@ -9752,6 +10030,36 @@ void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
                     }
             };
             _device->upload_storage_buffer(table.buffer->handle(), 0, static_cast<u32>(bytes), nullptr, true, &fill);
+            // Surface shaders' parameters, for a scene with any: surface_param_count3d floats a copy, in the same
+            // places.
+            const bool surfaces = std::any_of(_refs.begin(), _refs.end(), [&](const DrawRef& ref) {
+                return ref.scene == s && ref.direct && ref.draw->material.surface.backend();
+            });
+            const u64 surface_bytes = source->instances().size() * sizeof(f32) * surface_param_count3d;
+            if (!surfaces || (table.surface && table.surface->size() != surface_bytes)) {
+                if (table.surface)
+                    _draw_material_bytes -= table.surface->size();
+                table.surface.reset();
+            }
+            if (surfaces) {
+                if (!table.surface) {
+                    table.surface = std::make_shared<GpuBuffer>(_device->create_buffer(
+                        SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, static_cast<u32>(surface_bytes)));
+                    _draw_material_bytes += surface_bytes;
+                }
+                const std::function<void(std::span<u8>)> params = [&](std::span<u8> out) {
+                    std::memset(out.data(), 0, out.size());
+                    for (const auto& ref : _refs)
+                        if (ref.scene == s && ref.direct && ref.draw->material.surface.backend())
+                            for (u32 i = 0; i < ref.draw->count; ++i)
+                                std::memcpy(
+                                    out.data() + std::size_t(ref.draw->first + i) * sizeof(f32) * surface_param_count3d,
+                                    ref.draw->material.shader_params.data(), sizeof(f32) * surface_param_count3d);
+                };
+                _device->upload_storage_buffer(table.surface->handle(), 0, static_cast<u32>(surface_bytes), nullptr,
+                                               true, &params);
+                ctx.stats.draw_material_upload_bytes += surface_bytes;
+            }
             table.valid = true;
             table.revision = revision;
             table.upload_frame = frame;
@@ -10021,6 +10329,8 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
             static_cast<f32>(ctx.grid_cells));
     }
     put(f.eye, ctx.scenes[s]->camera.position, 1.0f);
+    f.time[0] = ctx.scenes[s]->time;
+    f.time[1] = ctx.scene.specular_multiscatter ? 0.0f : 1.0f; // (0, the block's zero, is kin's own: on)
     if (ctx.environment) {
         // The picture turned by the light's rotation; in the overlay's space the
         // directions come back to the scene's first.
@@ -10286,8 +10596,9 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (ref.skinned && (!storage || !ctx.joints || !ctx.joint_offsets)) {
                     continue;
                 }
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided,
-                                                      Pass::Shadow, cutout, nullptr, false, ref.skinned);
+                SDL_GPUGraphicsPipeline* p =
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                             false, ref.skinned, false, false, Unlit::Off, false, pass_surface(caster));
                 if (!p) {
                     complete = false;
                     continue;
@@ -10314,6 +10625,7 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, pass, caster);
                 }
+                bind_offset(commands, pass, caster, ref.skinned);
                 // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices (this map's).
                 if (ref.clustered && _gc.active) {
                     draw_cluster_indirect(ref, commands, pass, u, ctx.cascades > 1 ? 1 + k : 1);
@@ -10494,6 +10806,14 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
         payload.value(ref.skinned ? ref.mesh->skin_bounds.size() : std::size_t{0});
         payload.value(m.double_sided);
         payload.value(m.blend);
+        if (const auto* moving = moving_surface(m); moving && !ref.skinned) { // its vertices move: its offset's inputs
+            payload.value(reinterpret_cast<std::uintptr_t>(moving));
+            payload.value(ctx.scene.time);
+            payload.append(m.shader_params.data(), sizeof(m.shader_params));
+            for (const Texture* t :
+                 {&m.texture, &m.metallic_roughness, &m.normal, &m.occlusion, &m.emissive_texture, &m.graph_maps})
+                payload.value(reinterpret_cast<std::uintptr_t>(t->backend().get()));
+        }
         if (m.blend == Blend3D::Mask) {
             payload.value(m.alpha_cutoff);
             payload.value(m.wrap_u);
@@ -10690,7 +11010,8 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
         }
         const Material3D& occluder = ref.draw->material;
         const bool cutout = occluder.blend == Blend3D::Mask;
-        SDL_GPUGraphicsPipeline* p = velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned);
+        SDL_GPUGraphicsPipeline* p =
+            velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned, pass_surface(occluder));
         if (!p) {
             continue;
         }
@@ -10705,6 +11026,7 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
         if (cutout) {
             bind_cutout(commands, target_pass, occluder);
         }
+        bind_offset(commands, target_pass, occluder, ref.skinned);
         if (ref.clustered) {
             draw_cluster_copies(ref, commands, target_pass, binder, u, which == 0 ? &stats : nullptr);
             continue;
@@ -10836,8 +11158,10 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
                 taa_hash(ctx.coverage_key, effect);
                 taa_hash(ctx.coverage_key, ref.instances[i].transform);
             }
-            const Vec4f flags{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0};
-            SDL_PushGPUFragmentUniformData(ctx.commands, 0, &flags, sizeof(flags));
+            const std::array<Vec4f, 2> flags{
+                Vec4f{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0},
+                Vec4f{material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
+            SDL_PushGPUFragmentUniformData(ctx.commands, 0, flags.data(), sizeof(flags));
             if (ref.clustered) {
                 draw_cluster_copies(ref, ctx.commands, pass, binder, u, nullptr);
                 if (_gc.active) {
@@ -10892,8 +11216,8 @@ bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL
         }
         const Material3D& occluder = ref.draw->material;
         const bool cutout = occluder.blend == Blend3D::Mask;
-        SDL_GPUGraphicsPipeline* p =
-            geometry_pipeline(depth, !occluder.double_sided, cutout, ref.skinned, ref.retained != ~0u);
+        SDL_GPUGraphicsPipeline* p = geometry_pipeline(depth, !occluder.double_sided, cutout, ref.skinned,
+                                                       ref.retained != ~0u, pass_surface(occluder));
         if (!p) {
             complete = false;
             continue;
@@ -10919,6 +11243,7 @@ bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL
         if (cutout) {
             bind_cutout(commands, prepass, occluder);
         }
+        bind_offset(commands, prepass, occluder, ref.skinned);
         if (ref.clustered) {
             draw_cluster_copies(ref, commands, prepass, binder, u, &stats);
             continue;
@@ -11271,7 +11596,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
-    using Textures = std::array<const ITextureBackend*, 5>;
+    using Textures = std::array<const ITextureBackend*, 6>; // the five maps, then the graph maps
     Textures unbound;
     unbound.fill(reinterpret_cast<const ITextureBackend*>(1)); // none yet
     Textures bound_textures = unbound;
@@ -11356,10 +11681,11 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 storage,           ctx.previous_storage, ctx.joints,
                 ctx.joint_offsets, ctx.previous_joints,  ctx.previous_joint_offsets};
             const Textures textures =
-                command ? _draw_bindings[command->binding].textures
-                        : Textures{material.texture.backend().get(), material.metallic_roughness.backend().get(),
-                                   material.normal.backend().get(), material.occlusion.backend().get(),
-                                   material.emissive_texture.backend().get()};
+                command
+                    ? _draw_bindings[command->binding].textures
+                    : Textures{material.texture.backend().get(),          material.metallic_roughness.backend().get(),
+                               material.normal.backend().get(),           material.occlusion.backend().get(),
+                               material.emissive_texture.backend().get(), material.graph_maps.backend().get()};
             const std::array<SDL_GPUBuffer*, 2> retained_buffers{
                 ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
                 item.materials      ? _main_draw_indices->handle()
@@ -11413,6 +11739,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                     // Custom shaders have twelve; the stock light variants fifteen (global illumination's light and
                     // coverage).
                     SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 15u : 10u);
+                    if (selection.surface && selection.surface->graph_maps) { // the sampler after those
+                        const Texture& maps = material.graph_maps ? material.graph_maps : _white_maps;
+                        _owner->retain(maps);
+                        const auto binding = texture_binding(maps, Wrap3D::Repeat, Wrap3D::Repeat, TextureSampler3D{});
+                        SDL_BindGPUFragmentSamplers(pass, lit_variant ? 15u : 10u, &binding, 1);
+                    }
                     if (lit_variant) {
                         SDL_BindGPUFragmentStorageBuffers(pass, 0, grid_buffers.data(), 2);
                         SDL_BindGPUFragmentStorageBuffers(pass, 2, area_buffers.data(), 2);
@@ -11423,11 +11755,18 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 bound_sampling = material.texture_samplers;
                 bound_binding = command ? command->binding : ~0u;
             }
+            if (selection.surface && !custom)
+                bind_offset(commands, pass, material, ref.skinned); // (a moving surface's: each draw its own values)
             if (item.materials) {
-                SDL_GPUBuffer* buffer = _draw_material_tables[_draw_material_slots[ref.scene]].buffer->handle();
+                const auto& table = _draw_material_tables[_draw_material_slots[ref.scene]];
+                SDL_GPUBuffer* buffer = table.buffer->handle();
                 if (buffer != bound_draw_materials) {
                     SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 4 : 0, &buffer, 1);
                     bound_draw_materials = buffer;
+                }
+                if (selection.surface && table.surface) { // (its parameters, after the records)
+                    SDL_GPUBuffer* params = table.surface->handle();
+                    SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 5 : 1, &params, 1);
                 }
             }
             if (custom)
@@ -11469,7 +11808,13 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             if (ref.skinned) {
                 binder.bind_skin(ref.mesh);
             }
-            if (!item.materials || !material_slot_ready) {
+            if (selection.surface) {
+                // A surface shader's block is the stock one with its parameters after it.
+                SurfaceMaterialUniforms m{material_uniforms(material, unlit), {}};
+                std::memcpy(m.surface, material.shader_params.data(), sizeof(m.surface));
+                SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
+                material_slot_ready = false;
+            } else if (!item.materials || !material_slot_ready) {
                 const MaterialUniforms m = command ? command->uniforms : material_uniforms(material, unlit);
                 // Batched variants don't read slot 1, but SDL's uniform slot
                 // layout still includes it before fog/local-light slots.
@@ -11759,7 +12104,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                 const bool cutout = picked.blend == Blend3D::Mask;
                 SDL_GPUGraphicsPipeline* p =
                     pipeline(pick_format, 1, !picked.double_sided, Pass::Pick, cutout, nullptr, false, ref.skinned,
-                             false, false, Unlit::Off, ref.retained != ~0u);
+                             false, false, Unlit::Off, ref.retained != ~0u, pass_surface(picked));
                 if (!p) {
                     continue;
                 }
@@ -11784,6 +12129,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, picking, picked);
                 }
+                bind_offset(commands, picking, picked, ref.skinned);
                 if (ref.clustered) {
                     draw_cluster_copies(ref, commands, picking, binder, u, nullptr);
                     continue;
@@ -11892,9 +12238,9 @@ bool GpuRenderer3D::render_visibility(const VisibilityTargets3D& targets, IPrepa
             }
             const Material3D& picked = ref.draw->material;
             const bool cutout = picked.blend == Blend3D::Mask;
-            SDL_GPUGraphicsPipeline* p =
-                pipeline(SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 1, !picked.double_sided, Pass::Visibility, cutout,
-                         nullptr, false, ref.skinned, false, false, Unlit::Off, ref.retained != ~0u);
+            SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 1, !picked.double_sided,
+                                                  Pass::Visibility, cutout, nullptr, false, ref.skinned, false, false,
+                                                  Unlit::Off, ref.retained != ~0u, pass_surface(picked));
             if (!p) {
                 complete = false;
                 break;
@@ -11921,6 +12267,7 @@ bool GpuRenderer3D::render_visibility(const VisibilityTargets3D& targets, IPrepa
             if (cutout) {
                 bind_cutout(commands, picking, picked);
             }
+            bind_offset(commands, picking, picked, ref.skinned);
             if (ref.clustered) {
                 RenderDebugStats3D drawn{};
                 draw_cluster_copies(ref, commands, picking, binder, u, &drawn);
@@ -12058,6 +12405,9 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     if (view->_output_format != _owner->_target_format && !make_targets(*view)) {
         return false;
     }
+    // The GI scene's stand-ins for surface materials it has none of yet, drawn before this render's passes (each a
+    // render of its own into the frame's commands).
+    bake_gi_proxies(scene);
     const std::size_t pipelines_before = _owner->_pipelines.size();
     u64 input_signature = 0;
     const std::array material_outputs{view->texture()};

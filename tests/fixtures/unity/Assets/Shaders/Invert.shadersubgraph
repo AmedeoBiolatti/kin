@@ -1,0 +1,161 @@
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.GraphData",
+    "m_ObjectId": "g0",
+    "m_Properties": [
+        {
+            "m_Id": "p_in"
+        }
+    ],
+    "m_Keywords": [],
+    "m_Nodes": [
+        {
+            "m_Id": "s_prop"
+        },
+        {
+            "m_Id": "s_om"
+        },
+        {
+            "m_Id": "s_out"
+        }
+    ],
+    "m_Edges": [
+        {
+            "m_OutputSlot": {
+                "m_Node": {
+                    "m_Id": "s_prop"
+                },
+                "m_SlotId": 0
+            },
+            "m_InputSlot": {
+                "m_Node": {
+                    "m_Id": "s_om"
+                },
+                "m_SlotId": 0
+            }
+        },
+        {
+            "m_OutputSlot": {
+                "m_Node": {
+                    "m_Id": "s_om"
+                },
+                "m_SlotId": 1
+            },
+            "m_InputSlot": {
+                "m_Node": {
+                    "m_Id": "s_out"
+                },
+                "m_SlotId": 1
+            }
+        }
+    ],
+    "m_OutputNode": {
+        "m_Id": "s_out"
+    }
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.Internal.Vector1ShaderProperty",
+    "m_ObjectId": "p_in",
+    "m_Guid": {
+        "m_GuidSerialized": "4f1c6b0e-0000-4000-8000-000000000001"
+    },
+    "m_Name": "In",
+    "m_DefaultReferenceName": "Vector1_In",
+    "m_OverrideReferenceName": "",
+    "m_Value": 0.0
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.Vector1MaterialSlot",
+    "m_ObjectId": "ss_prop",
+    "m_Id": 0,
+    "m_DisplayName": "In",
+    "m_SlotType": 1,
+    "m_Value": 0.0
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.PropertyNode",
+    "m_ObjectId": "s_prop",
+    "m_Name": "Property",
+    "m_Slots": [
+        {
+            "m_Id": "ss_prop"
+        }
+    ],
+    "m_Property": {
+        "m_Id": "p_in"
+    }
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.DynamicVectorMaterialSlot",
+    "m_ObjectId": "ss_om_in",
+    "m_Id": 0,
+    "m_DisplayName": "In",
+    "m_SlotType": 0,
+    "m_Value": {
+        "x": 0,
+        "y": 0,
+        "z": 0,
+        "w": 0
+    }
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.DynamicVectorMaterialSlot",
+    "m_ObjectId": "ss_om_out",
+    "m_Id": 1,
+    "m_DisplayName": "Out",
+    "m_SlotType": 1,
+    "m_Value": {
+        "x": 0,
+        "y": 0,
+        "z": 0,
+        "w": 0
+    }
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.OneMinusNode",
+    "m_ObjectId": "s_om",
+    "m_Name": "One Minus",
+    "m_Slots": [
+        {
+            "m_Id": "ss_om_in"
+        },
+        {
+            "m_Id": "ss_om_out"
+        }
+    ]
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.Vector1MaterialSlot",
+    "m_ObjectId": "ss_out",
+    "m_Id": 1,
+    "m_DisplayName": "Out",
+    "m_SlotType": 0,
+    "m_Value": 0.0
+}
+
+{
+    "m_SGVersion": 0,
+    "m_Type": "UnityEditor.ShaderGraph.SubGraphOutputNode",
+    "m_ObjectId": "s_out",
+    "m_Name": "Output",
+    "m_Slots": [
+        {
+            "m_Id": "ss_out"
+        }
+    ]
+}
+

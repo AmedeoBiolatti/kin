@@ -13,13 +13,17 @@ struct Instance {
     vec4 normal2;
     vec4 color;
 };
-layout(std430, set = 0, binding = 0) readonly buffer Instances {
+// (A surface's vertex variants bind its maps as the vertex samplers first: their storage bindings follow those.)
+#ifndef KIN_VS_SHIFT
+#define KIN_VS_SHIFT 0
+#endif
+layout(std430, set = 0, binding = 0 + KIN_VS_SHIFT) readonly buffer Instances {
     Instance instances[];
 };
 
 // Retained records keep their stable slot; each view uploads only compact indices.
 #ifdef KIN_INDEXED
-layout(std430, set = 0, binding = 1) readonly buffer VisibleInstances { uint instance_indices[]; };
+layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer VisibleInstances { uint instance_indices[]; };
 uint instance_at(uint i) { return instance_indices[i]; }
 #else
 uint instance_at(uint i) { return i; }

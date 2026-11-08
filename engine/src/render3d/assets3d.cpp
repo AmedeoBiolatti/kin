@@ -2,6 +2,7 @@
 #include "model_bounds3d.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
@@ -10,6 +11,7 @@
 #include <kin/render3d/material_asset3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 #include <limits>
 #include <list>
 
@@ -69,6 +71,7 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
 // What a material names as its shader where nothing draws (a session without 3D): a handle, so that the material binds
 // as it would with 3D, that no renderer is ever given.
 struct CpuMaterialShader final : IMaterialShaderBackend3D {};
+struct CpuSurfaceShader final : ISurfaceShaderBackend3D {};
 
 } // namespace
 
@@ -85,6 +88,11 @@ struct Assets3D::Data {
         bool nearest, srgb;
         std::weak_ptr<ITextureBackend> texture;
     };
+    struct MapArrayEntry {
+        std::vector<std::filesystem::path> paths;
+        std::weak_ptr<ITextureBackend> texture;
+    };
+    std::list<MapArrayEntry> map_arrays;
     struct MaterialEntry {
         std::filesystem::path path;
         std::string variant;
@@ -95,6 +103,12 @@ struct Assets3D::Data {
         std::weak_ptr<IMaterialShaderBackend3D> shader;
     };
     std::list<ShaderEntry> shaders;
+    struct GraphEntry {
+        std::filesystem::path path;
+        std::weak_ptr<ISurfaceShaderBackend3D> surface;
+        CompiledMaterialGraph3D graph;
+    };
+    std::list<GraphEntry> graphs;
     Renderer3D* renderer;
     std::filesystem::path root;
     Limits limits;
@@ -111,6 +125,10 @@ Assets3D::Assets3D(Renderer3D& renderer, std::filesystem::path root, Limits limi
     _data->limits = limits;
 }
 Assets3D::~Assets3D() = default;
+
+Renderer3D& Assets3D::renderer() const {
+    return *_data->renderer;
+}
 
 const std::filesystem::path& Assets3D::root() const {
     return _data->root;
@@ -131,6 +149,9 @@ void Assets3D::clear() {
 void Assets3D::invalidate(const std::filesystem::path& source) {
     const auto path = (_data->root / source).lexically_normal();
     _data->shaders.remove_if([&](const auto& entry) { return entry.path == path || entry.shader.expired(); });
+    _data->graphs.remove_if([&](const auto& entry) {
+        return entry.path == path || entry.path.string() + ".spv" == path.string() || entry.surface.expired();
+    });
     std::vector<std::filesystem::path> owners{path};
     _data->models.remove_if([&](const auto& entry) {
         const auto storage = entry.storage.lock();
@@ -155,6 +176,7 @@ Assets3D::Stats Assets3D::stats() const {
     s.texture_entries = _data->textures.size();
     s.material_entries = _data->materials.size();
     s.shader_entries = _data->shaders.size();
+    s.graph_entries = _data->graphs.size();
     return s;
 }
 
@@ -184,6 +206,84 @@ AssetHandle<Model3D> Assets3D::load_model_operation(const std::filesystem::path&
         fail3d(_data->errors, "Assets3D::load_model(" + path.string() + ")", why.empty() ? "model load failed" : why);
     return result;
 }
+namespace {
+// `image` resampled (bilinearly, as a pixel's centre falls) to `size`.
+Image resampled(const Image& image, Vec2i size) {
+    if (image.size == size)
+        return image;
+    Image out{size, std::vector<u8>(size_t(size.x) * size_t(size.y) * 4)};
+    const auto at = [&](i32 x, i32 y, int c) {
+        x = std::clamp(x, 0, image.size.x - 1);
+        y = std::clamp(y, 0, image.size.y - 1);
+        return f32(image.rgba[(size_t(y) * size_t(image.size.x) + size_t(x)) * 4 + size_t(c)]);
+    };
+    for (i32 y = 0; y < size.y; ++y)
+        for (i32 x = 0; x < size.x; ++x) {
+            const f32 u = (f32(x) + 0.5f) * f32(image.size.x) / f32(size.x) - 0.5f;
+            const f32 v = (f32(y) + 0.5f) * f32(image.size.y) / f32(size.y) - 0.5f;
+            const i32 x0 = i32(std::floor(u)), y0 = i32(std::floor(v));
+            const f32 fx = u - f32(x0), fy = v - f32(y0);
+            for (int c = 0; c < 4; ++c) {
+                const f32 top = at(x0, y0, c) * (1 - fx) + at(x0 + 1, y0, c) * fx;
+                const f32 bottom = at(x0, y0 + 1, c) * (1 - fx) + at(x0 + 1, y0 + 1, c) * fx;
+                out.rgba[(size_t(y) * size_t(size.x) + size_t(x)) * 4 + size_t(c)] =
+                    u8(std::clamp(top * (1 - fy) + bottom * fy + 0.5f, 0.0f, 255.0f));
+            }
+        }
+    return out;
+}
+} // namespace
+
+Result3D<Texture> Assets3D::load_map_array(std::span<const std::filesystem::path> maps) {
+    auto& d = *_data;
+    const auto fail = [&](const std::string& why) {
+        fail3d(d.errors, "Assets3D::load_map_array", why);
+        return Result3D<Texture>{std::nullopt, d.errors};
+    };
+    d.errors.clear();
+    if (maps.empty() || maps.size() > max_graph_map_layers3d)
+        return fail("1 to " + std::to_string(max_graph_map_layers3d) + " maps");
+    std::vector<std::filesystem::path> paths;
+    for (const auto& m : maps)
+        paths.push_back(m.empty() ? m : (d.root / m).lexically_normal());
+    for (auto it = d.map_arrays.begin(); it != d.map_arrays.end();) {
+        auto texture = it->texture.lock();
+        if (!texture) {
+            it = d.map_arrays.erase(it);
+            continue;
+        }
+        if (it->paths == paths)
+            return {Texture{std::move(texture)}, {}};
+        ++it;
+    }
+    std::vector<Image> images;
+    Vec2i size{1, 1};
+    for (const auto& path : paths) {
+        if (path.empty()) {
+            images.push_back(Image{{1, 1}, {255, 255, 255, 255}});
+            continue;
+        }
+        const auto bytes = read_content_file(path);
+        Image image =
+            bytes ? decode_image({reinterpret_cast<const u8*>(bytes->data()), bytes->size()}, path.string()) : Image{};
+        if (!image.valid())
+            return fail("cannot read " + path.string());
+        size = {std::max(size.x, image.size.x), std::max(size.y, image.size.y)};
+        images.push_back(std::move(image));
+    }
+    size = {std::min(size.x, 4096), std::min(size.y, 4096)};
+    std::vector<const u8*> layers;
+    for (auto& image : images) {
+        image = resampled(image, size);
+        layers.push_back(image.rgba.data());
+    }
+    Texture texture = d.renderer->create_map_array(size, layers);
+    if (!texture)
+        return fail("the map array cannot be made here (no surface shaders, or too large)");
+    d.map_arrays.push_back({std::move(paths), texture.backend()});
+    return {std::move(texture), {}};
+}
+
 Result3D<Texture> Assets3D::load_texture(const std::filesystem::path& path, bool nearest, bool srgb) {
     auto value = load_texture_operation(path, nearest, srgb);
     return result3d(std::move(value), _data->errors);
@@ -212,6 +312,93 @@ MaterialShader3D Assets3D::load_material_shader_operation(const std::filesystem:
                why.empty() ? "shader load failed" : why);
     return result;
 }
+Result3D<MaterialGraphShader3D> Assets3D::load_material_graph(const std::filesystem::path& path) {
+    _data->errors.clear();
+    std::string why;
+    auto result = load_material_graph_impl(path, &why);
+    if (!result.surface)
+        fail3d(_data->errors, "Assets3D::load_material_graph(" + path.string() + ")",
+               why.empty() ? "material graph load failed" : why);
+    return result3d(std::move(result), _data->errors);
+}
+
+MaterialGraphShader3D Assets3D::load_material_graph_impl(const std::filesystem::path& source, std::string* error) {
+    auto& d = *_data;
+    const auto path = (d.root / source).lexically_normal();
+    const auto fail = [&](std::string why) {
+        if (error)
+            *error = std::move(why);
+        return MaterialGraphShader3D{};
+    };
+    for (auto it = d.graphs.begin(); it != d.graphs.end(); ++it)
+        if (it->path == path)
+            if (auto surface = it->surface.lock()) {
+                ++d.counters.graph_hits;
+                d.graphs.splice(d.graphs.end(), d.graphs, it);
+                if (error)
+                    error->clear();
+                return {SurfaceShader3D{std::move(surface), it->graph.traits}, it->graph};
+            }
+    ++d.counters.graph_loads;
+    const std::filesystem::path cooked_path = path.string() + ".spv";
+    const auto cooked_size = content_file_size(cooked_path), source_size = content_file_size(path);
+    // The cooked file when there is no source (a shipped game) or it is not older than the source.
+    bool use_cooked = cooked_size.has_value();
+    if (use_cooked && source_size) {
+        std::error_code a, b;
+        const auto cooked_time = std::filesystem::last_write_time(cooked_path, a);
+        const auto source_time = std::filesystem::last_write_time(path, b);
+        use_cooked = a || b || cooked_time >= source_time;
+    }
+    MaterialGraphShader3D made;
+    if (use_cooked) {
+        const auto bytes = read_content_file(cooked_path);
+        std::string why;
+        const auto cooked =
+            bytes ? unpack_cooked_material_graph3d({reinterpret_cast<const u8*>(bytes->data()), bytes->size()}, &why)
+                  : std::nullopt;
+        if (!cooked)
+            return fail(cooked_path.string() + ": " + (why.empty() ? "unreadable" : why));
+        if (d.renderer->available()) {
+            auto r = d.renderer->create_material_graph(*cooked);
+            if (!r)
+                return fail(cooked_path.string() + ": the surface shader was refused");
+            made = std::move(*r);
+        } else {
+            made = {SurfaceShader3D{std::make_shared<CpuSurfaceShader>(), cooked->graph.traits}, cooked->graph};
+        }
+    } else if (source_size) {
+        const auto text = read_content_file(path);
+        if (!text)
+            return fail("cannot read " + path.string());
+        if (!d.renderer->available()) {
+            made.graph = compile_material_graph3d(*text);
+            if (!made.graph.ok())
+                return fail(path.string() + ": " + made.graph.errors.front().node + ": " +
+                            made.graph.errors.front().message);
+            made.surface = SurfaceShader3D{std::make_shared<CpuSurfaceShader>(), made.graph.traits};
+        } else if (!shader_compiler_available()) {
+            return fail(path.string() + ": not cooked (" + cooked_path.filename().string() +
+                        ": kin_material_graph cook, kin_cook_material_graph) and no glslc to compile it");
+        } else {
+            auto r = d.renderer->compile_material_graph(path);
+            if (!r)
+                return fail(diagnostics3d_text(r.diagnostics));
+            made = std::move(*r);
+        }
+    } else {
+        return fail("no material graph " + path.string() + " (nor " + cooked_path.filename().string() + ")");
+    }
+    if (d.limits.shaders) {
+        while (d.graphs.size() >= d.limits.shaders)
+            d.graphs.pop_front();
+        d.graphs.push_back({path, made.surface.backend(), made.graph});
+    }
+    if (error)
+        error->clear();
+    return made;
+}
+
 Result3D<AssetHandle<MaterialBinding3D>> Assets3D::load_materials(const std::filesystem::path& path,
                                                                   const std::shared_ptr<const Model3D>& model,
                                                                   std::string_view variant) {

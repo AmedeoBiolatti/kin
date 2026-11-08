@@ -848,6 +848,7 @@ struct WebGLRenderer3D::Impl {
             ambient.update(scene.sky, lights.sun.direction);
         rgb("uAmbient", sky_lighting ? ambient.ambient : lights.ambient);
         glUniform1f(uniform("uSpecularAa"), std::clamp(scene.specular_aa, 0.0f, 1.0f));
+        glUniform1f(uniform("uSingleScatter"), scene.specular_multiscatter ? 0.0f : 1.0f);
         rgb("uGround", sky_lighting ? ambient.ground
                                     : (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient));
         struct Transparent {

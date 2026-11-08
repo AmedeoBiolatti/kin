@@ -95,6 +95,98 @@ private:
     std::shared_ptr<IMaterialShaderBackend3D> _backend;
 };
 
+// A surface shader's variants (docs/material_graph_plan.md): the function that sets what kin shades, compiled into
+// each of kin's own mesh fragment shaders, in this order. The defines each is compiled with, after #version, are
+// surface_variant_defines's (and surface_shader_source(surface, variant)'s wrapper). After the eight every surface has:
+// the merged draws' four (mesh_material.frag's: without them a surface's draws are not merged with others of the same
+// mesh) and the cut-outs' five (shadow_mask.frag ... visibility_mask.frag's, for a surface that defines
+// kin_surface_alpha: without them its cut-outs in those passes follow the base map's alpha), all optional.
+enum class SurfaceVariant3D : u8 {
+    Plain,
+    Fog,
+    Lights,
+    LightsFog,
+    Velocity,
+    VelocityFog,
+    VelocityLights,
+    VelocityLightsFog,
+    Material,
+    MaterialFog,
+    MaterialLights,
+    MaterialLightsFog,
+    ShadowMask,
+    PickMask,
+    PrepassMask,
+    PrepassVelocityMask,
+    VisibilityMask,
+    // A surface's vertex variants, for one with an offset (World Position Offset: kin_surface_offset), all optional:
+    // mesh.vert, mesh_velocity.vert, mesh_indexed.vert, prepass.vert, prepass_indexed.vert, prepass_velocity.vert,
+    // shadow.vert and shadow_mask.vert's (kin_surface_vertex.inc.glsl before each). Without them the surface's vertices
+    // are not moved.
+    VertexMesh,
+    VertexMeshVelocity,
+    VertexMeshIndexed,
+    VertexPrepass,
+    VertexPrepassIndexed,
+    VertexPrepassVelocity,
+    VertexShadow,
+    VertexShadowMask,
+    Count
+};
+inline constexpr u32 surface_required_variants3d = 8, surface_mask_variant3d = u32(SurfaceVariant3D::ShadowMask),
+                     surface_vertex_variant3d = u32(SurfaceVariant3D::VertexMesh);
+inline constexpr u32 surface_variant_count3d = u32(SurfaceVariant3D::Count);
+
+// The backend's copy of a surface shader (Renderer3D::create_surface_shader).
+class ISurfaceShaderBackend3D {
+public:
+    virtual ~ISurfaceShaderBackend3D() = default;
+    virtual bool valid() const { return true; }
+};
+
+// What a surface does that kin can't read in its SPIR-V, for the GI scene, which sees a surface material through a
+// stand-in: the surface drawn once over its UV square, with a white vertex colour (docs/rendering_3d.md, Global
+// illumination). A material graph's are its compiler's (CompiledMaterialGraph3D::traits); a surface of your own has
+// these defaults (as kin's stock surface: what its material's fields emit, its colour times the vertex colour) unless
+// it is made with others.
+struct SurfaceTraits3D {
+    // It makes its own emission: the GI scene takes in the stand-in's, whatever the material's emission fields say.
+    // Off, a surface material glows there only where those fields emit (Material3D::emits_light).
+    bool emission = false;
+    // Its base colour reads the vertex colour (the mesh's, times the material's colour and the copy's tint; kin's
+    // stock surface does), and its alpha: the GI scene multiplies the stand-in's by the copy's. Off, it doesn't.
+    bool vertex_color = true;
+    bool vertex_alpha = true;
+
+    friend bool operator==(const SurfaceTraits3D&, const SurfaceTraits3D&) = default;
+};
+
+// What a material's surface is, in place of its maps' (Material3D::surface): a function `void kin_surface(inout
+// KinSurface s)` that changes the surface kin's material makes (kin_stock_surface: colour, alpha, normal, metallic,
+// roughness, occlusion, emission) before kin lights, fogs and shadows it, in every variant kin draws (the fog's, the
+// lights', the global illumination's, the velocity's). Made by Renderer3D::create_surface_shader or
+// compile_surface_shader; cheap to copy (copies share it). `traits` (SurfaceTraits3D) are a copy's own:
+// SurfaceShader3D{shader.backend(), traits} is the same shader with others.
+class SurfaceShader3D {
+public:
+    SurfaceShader3D() = default;
+    explicit SurfaceShader3D(std::shared_ptr<ISurfaceShaderBackend3D> backend, SurfaceTraits3D traits = {})
+        : _backend(std::move(backend)), _traits(traits) {}
+
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    const std::shared_ptr<ISurfaceShaderBackend3D>& backend() const { return _backend; }
+    const SurfaceTraits3D& traits() const { return _traits; }
+
+    friend bool operator==(const SurfaceShader3D& a, const SurfaceShader3D& b) {
+        return a._backend == b._backend && a._traits == b._traits;
+    }
+
+private:
+    std::shared_ptr<ISurfaceShaderBackend3D> _backend;
+    SurfaceTraits3D _traits{};
+};
+
 inline constexpr u32 max_material_input_textures3d = 4, max_material_input_buffers3d = 8;
 class IMaterialInputsBackend3D {
 public:
@@ -122,6 +214,12 @@ public:
 private:
     std::shared_ptr<const IMaterialInputsBackend3D> _backend;
 };
+
+// Material3D::shader_params' floats: a custom `shader` reads the first 16 (four vec4s), a `surface` all of them
+// (kin_surface_param(0..15): a material graph's parameters).
+inline constexpr u32 surface_param_count3d = 64;
+// The most layers of a material's graph maps (Material3D::graph_maps).
+inline constexpr u32 max_graph_map_layers3d = 16;
 
 struct Material3D {
     Color color = colors::white; // times the mesh's vertex colours and each instance's tint
@@ -172,16 +270,30 @@ struct Material3D {
     Wrap3D wrap_v = Wrap3D::Clamp;
     // A fragment shader of its own in place of kin's (docs/rendering_3d.md,
     // Custom shaders), which may light itself as kin's does or not. It reads
-    // `shader_params` (four vec4s) and all the material's fields above. The
+    // `shader_params`' first 16 floats (four vec4s) and all the material's fields above. The
     // shadow and pick passes treat the material as they would without it.
     MaterialShader3D shader{};
-    std::array<f32, 16> shader_params{};
+    std::array<f32, surface_param_count3d> shader_params{};
     MaterialInputs3D inputs{}; // optional extra sampled textures/read-only buffers for shader
 
     LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
     EmissionMode3D emission_mode = EmissionMode3D::BaseRelative;
     // Independent of the image. Omitted entries inherit wrap_u/v and the Texture's legacy scale mode.
     std::array<std::optional<TextureSampler3D>, u32(MaterialMap3D::Count)> texture_samplers{};
+    // A surface of its own (SurfaceShader3D: docs/rendering_3d.md, Surface shaders): a function that changes what
+    // the fields and maps above make before kin shades it, as kin shades its own (lit or `unlit`, fogged, its
+    // lights, global illumination and velocity). It reads `shader_params` (kin_surface_param(0..15)) and the maps
+    // above. A `shader` takes its place. The shadow, pick and pre-passes still cut a Blend3D::Mask out by the base
+    // colour's alpha, not the surface's.
+    SurfaceShader3D surface{};
+    // A surface's maps past the five above (a material graph's, past its five slots): a 2D array, a map a layer
+    // (Renderer3D::create_map_array), read repeated, filtered and mipmapped. None: a white layer.
+    Texture graph_maps{};
+    // Where every map is read: the mesh's UV times `uv_scale`, plus `uv_offset` (tiling, as Godot's uv1_scale and
+    // Unity's tiling and offset). A transform the model's glTF gives (KHR_texture_transform) is in its UVs already.
+    Vec2f uv_scale{1.0f, 1.0f};
+    Vec2f uv_offset{0.0f, 0.0f};
+    bool uv_identity() const { return uv_scale.x == 1 && uv_scale.y == 1 && uv_offset.x == 0 && uv_offset.y == 0; }
 
     void set_emission(LinearRgb color, f32 strength = 1.0f) {
         emission_color = color;
@@ -630,6 +742,9 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
+    // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
+    f32 time = 0.0f;
     // Anisotropic filtering of the materials' mipmapped textures: where a surface is seen at a slant (a street, a
     // floor, a wall along the view), its texture is read with up to this many samples along the slant, from the mip
     // that fits the slant's short side, instead of with one from the mip that fits its long side (which blurs it into
@@ -651,6 +766,12 @@ public:
     // normal turns across the pixel (this times its change, at most 0.18 of alpha more), spreading the highlight over
     // the pixel. 0 (the default) is off: the picture as without it; Godot's is 0.25. The scene's, for the overlay too.
     f32 specular_aa = 0.0f;
+    // The light a rough specular surface reflects more than once among its microfacets, which single scattering
+    // leaves out (Fdez-Aguera's fit: a rough white metal returns all of the light, as a furnace test wants), put back.
+    // On by default; off, a rough metal is darker (a white one at roughness 0.8 returns some 45% less of the sun's
+    // light, kin's test: test_gpu_specular_multiscatter), as engines that leave it out
+    // (Unreal's legacy shading without energy conservation, Substrate off) draw it.
+    bool specular_multiscatter = true;
     Lod3D lod{};
     GlobalIllumination3D global_illumination{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default

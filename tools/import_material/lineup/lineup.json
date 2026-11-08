@@ -1,0 +1,27 @@
+{
+  "schema": "kin.material-lineup/1",
+  "about": "A row of unlit quads (graph math, textures, colour spaces: should match to the pixel) over a row of lit spheres (one sun, no ambient), the same materials authored in Godot and in Unreal and imported into kin. Coordinates: metres, +y up, the camera looking down -z (Godot's and kin's; Unreal's: X = -z, Y = x, Z = y, in cm).",
+  "size": [1600, 800],
+  "camera": {"eye": [0, 0, 9], "target": [0, 0, 0], "fov_y": 30},
+  "sun": {"toward": [-0.45, 0.55, 0.7], "intensity": 1.0},
+  "objects": [
+    {"mesh": "quad",   "position": [-3.3,  1.0, 0], "material": "TexTint"},
+    {"mesh": "quad",   "position": [-1.1,  1.0, 0], "material": "UVMath"},
+    {"mesh": "quad",   "position": [ 1.1,  1.0, 0], "material": "LerpSmooth"},
+    {"mesh": "quad",   "position": [ 3.3,  1.0, 0], "material": "DataMask"},
+    {"mesh": "sphere", "position": [-3.3, -1.0, 0], "material": "Plain"},
+    {"mesh": "sphere", "position": [-1.1, -1.0, 0], "material": "Gold"},
+    {"mesh": "sphere", "position": [ 1.1, -1.0, 0], "material": "Bumps"},
+    {"mesh": "sphere", "position": [ 3.3, -1.0, 0], "material": "Rim"}
+  ],
+  "materials": {
+    "TexTint":    "unlit: checker.png (sRGB) at uv x 3, times the colour parameter Tint (linear 0.8, 0.5, 0.25)",
+    "UVMath":     "unlit: (fract(uv.x * 4), uv.y, sin(uv.x * 6.2831853) * 0.5 + 0.5)",
+    "LerpSmooth": "unlit: lerp((0.9, 0.1, 0.05), (0.05, 0.3, 0.9), smoothstep(0.3, 0.7, uv.x)) + step(0.5, uv.y) * 0.1",
+    "DataMask":   "unlit: remap(mask.png's R (linear data), 0..1 to 0.2..0.8) as grey, times (1, 1 - mask G, 1)",
+    "Plain":      "lit: base (0.8, 0.8, 0.8), roughness 0.5, metallic 0",
+    "Gold":       "lit: base (1.0, 0.766, 0.336), roughness 0.3, metallic 1",
+    "Bumps":      "lit: base (0.6, 0.6, 0.6), roughness 0.4, normal.png (OpenGL convention) at uv x 4",
+    "Rim":        "lit: base (0.05, 0.1, 0.3), roughness 0.6, emission fresnel(power 3) x (1, 0.5, 0.1)"
+  }
+}

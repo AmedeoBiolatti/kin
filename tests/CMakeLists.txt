@@ -485,6 +485,30 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set_tests_properties(kin-particle-assets3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_physics3d_asset_tests kin-physics3d-assets SOURCES physics3d_asset_tests.cpp
         DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    # Material graphs (material_graph3d.hpp): the compiler, on the CPU (with glslc: every node type compiled).
+    kin_add_test(kin_material_graph3d_tests kin-material-graph3d SOURCES material_graph3d_tests.cpp)
+    kin_cook_material_graph(_cooked_graph SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tinted.kingraph")
+    if(_cooked_graph)
+        add_custom_target(kin_material_graph_cooked DEPENDS ${_cooked_graph})
+        add_dependencies(kin_material_graph3d_tests kin_material_graph_cooked)
+        target_compile_definitions(kin_material_graph3d_tests PRIVATE KIN_TEST_COOKED_GRAPH="${_cooked_graph}")
+    endif()
+    # A content folder's graphs, every one cooked beside it (kin_cook_material_graphs: what kin_game ships).
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tinted.kingraph" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/graph_content/sub")
+    kin_cook_material_graphs(_cooked_folder CONTENT "${CMAKE_CURRENT_BINARY_DIR}/graph_content")
+    if(_cooked_folder)
+        add_custom_target(kin_material_graph_cooked_folder DEPENDS ${_cooked_folder})
+        add_dependencies(kin_material_graph3d_tests kin_material_graph_cooked_folder)
+        target_compile_definitions(kin_material_graph3d_tests PRIVATE
+            KIN_TEST_COOKED_CONTENT="${CMAKE_CURRENT_BINARY_DIR}/graph_content")
+    endif()
+    # Other engines' materials as kin's (material_import3d.hpp), on the CPU.
+    kin_add_test(kin_material_import3d_tests kin-material-import3d SOURCES material_import3d_tests.cpp
+        DEFINITIONS KIN_TEST_IMAGES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/images"
+                    KIN_TEST_UNREAL="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unreal"
+                    KIN_TEST_UNITY="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unity"
+                    KIN_TEST_GODOT_VISUAL="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/godot_visual")
+    target_include_directories(kin_material_import3d_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/render3d)
     kin_add_test(kin_material_assets3d_tests kin-material-assets3d SOURCES material_assets3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
                     KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
@@ -533,6 +557,14 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     target_compile_definitions(kin_render3d_tests PRIVATE
         KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
         KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    # A surface shader's variants made at build time (kin_compile_surface_shader), drawn against the same surface
+    # compiled at run time (test_gpu_surface_shader).
+    kin_compile_surface_shader(_surface_test_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/surface_tests"
+        SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/surface_tint.surface.glsl")
+    if(_surface_test_spv)
+        kin_embed_files(kin_render3d_tests NAME surface_test_shaders FILES ${_surface_test_spv})
+        target_compile_definitions(kin_render3d_tests PRIVATE KIN_TEST_SURFACE_SPIRV)
+    endif()
     foreach(_shard RANGE 0 ${_last_shard})
         add_test(NAME kin-render3d-shard-${_shard}
             COMMAND kin_render3d_tests --shard=${_shard}/${KIN_RENDER3D_TEST_SHARDS})
