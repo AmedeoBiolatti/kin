@@ -2,15 +2,15 @@
 
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/gpu_memory_stats.hpp>
+#include <kin/renderer/texture.hpp>
 
 #include <span>
 #include <string>
 
 namespace kin {
 
-class DataBuffer;
-class Texture;
 struct ShaderParams;
 
 // How Renderer2D::draw_distance_field reads a distance-field texture: its

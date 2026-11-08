@@ -885,6 +885,13 @@ The four methods that accessed the backend inline (`renderer_3d`,
 `set_overdraw_view`, `pipeline_record`, `prewarm_pipelines`) now have the same
 bodies in `renderer2d.cpp`.
 
+Merge validation on 2026-11-08 added complete `Texture` and `DataBuffer`
+includes to the value header: the MSVC standard library instantiates span
+iterators that need complete element types. It also added direct backend and
+Window includes to optional browser, example, tool and compact-test consumers.
+These are portability corrections to the header split; the measurements below
+were collected before these integration fixes.
+
 Custom backend implementations and callers owning a `make_render_backend()`
 result include `renderer/backend.hpp` directly. Code constructing or calling
 Window includes `platform/window.hpp`. Repository consumers now own those
