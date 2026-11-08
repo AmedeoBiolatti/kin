@@ -17,6 +17,14 @@ layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec4 vColor; // linear, straight alpha
 layout(location = 2) in vec2 vUV;
 layout(location = 3) in vec3 vWorld;
+#ifdef KIN_SURFACE
+// The copy's origin in the world (kin_mesh_vertex.inc.glsl's, flat): a surface's object position (as the offset's, at
+// a vertex: kin_surface_vertex.inc.glsl).
+layout(location = 10) flat in vec3 vObject;
+vec3 kin_object_position() {
+    return vObject;
+}
+#endif
 
 layout(set = 2, binding = 0) uniform sampler2D uBase;         // white when the material has none
 layout(set = 2, binding = 1) uniform sampler2DArrayShadow uShadow; // depth from the sun, a layer a cascade, compared
@@ -45,6 +53,20 @@ layout(set = 2, binding = 14) uniform sampler2D uGiCoverage; // share of probe l
                                                              // the rest ambient; with frame.gi.y, rgb: the area
                                                              // lights' irradiance over pi (gi_area.comp)
 #endif
+#ifdef KIN_SURFACE
+// A surface's maps past its five (Material3D::graph_maps: a material graph's, a layer each), the sampler after the
+// variant's others: its storage buffers bind one later than the stock shader's (KIN_STORAGE_SHIFT).
+#if defined(KIN_GI)
+layout(set = 2, binding = 15) uniform sampler2DArray uGraphMaps;
+#elif defined(KIN_LIGHTS)
+layout(set = 2, binding = 12) uniform sampler2DArray uGraphMaps;
+#else
+layout(set = 2, binding = 10) uniform sampler2DArray uGraphMaps;
+#endif
+#define KIN_STORAGE_SHIFT 1
+#else
+#define KIN_STORAGE_SHIFT 0
+#endif
 #ifdef KIN_LIGHT_GRID
 // The light grid (the stock light variants, with KIN_LIGHTS): every point and spot light in view, and for each cell of
 // the view (frame.grid: tiles of pixels by slices of view depth) those whose reach touches it, so that a fragment
@@ -59,17 +81,17 @@ struct KinGridLight {
 // The area lights' reflections (GlobalIllumination3D::area_lights; kin_area_specular): linearly transformed cosines'
 // two GGX tables (64 x 64 each, rows by sqrt(1 - cos(view, normal)), roughness along), and the emitters, 5 vec4 each as
 // gi_area.comp reads them but their radiance at this render's strength.
-layout(std430, set = 2, binding = 17) readonly buffer KinAreaLtc { vec4 kin_area_ltc[]; };
-layout(std430, set = 2, binding = 18) readonly buffer KinAreaShading { vec4 kin_area_shading[]; };
-layout(std430, set = 2, binding = 15) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+layout(std430, set = 2, binding = 17 + KIN_STORAGE_SHIFT) readonly buffer KinAreaLtc { vec4 kin_area_ltc[]; };
+layout(std430, set = 2, binding = 18 + KIN_STORAGE_SHIFT) readonly buffer KinAreaShading { vec4 kin_area_shading[]; };
+layout(std430, set = 2, binding = 15 + KIN_STORAGE_SHIFT) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
 #else
-layout(std430, set = 2, binding = 14) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+layout(std430, set = 2, binding = 14 + KIN_STORAGE_SHIFT) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
 #endif
 // A cell (slice by row by column): the first of its list << 12 | its count; the lists after the cells.
 #ifdef KIN_GI
-layout(std430, set = 2, binding = 16) readonly buffer KinGridCells { uint grid_cells[]; };
+layout(std430, set = 2, binding = 16 + KIN_STORAGE_SHIFT) readonly buffer KinGridCells { uint grid_cells[]; };
 #else
-layout(std430, set = 2, binding = 15) readonly buffer KinGridCells { uint grid_cells[]; };
+layout(std430, set = 2, binding = 15 + KIN_STORAGE_SHIFT) readonly buffer KinGridCells { uint grid_cells[]; };
 #endif
 #endif
 
@@ -141,6 +163,12 @@ vec2 environment_uv(vec3 d) {
     return vec2(0.5 + atan(d.z, d.x) / (2.0 * PI), 0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI);
 }
 
+// Where a fragment reads the material's maps: its UV times the material's scale, plus its offset (one for all the maps,
+// as glTF's KHR_texture_transform has it when they agree; identity: the UV as it is, exactly).
+vec2 kin_map_uv() {
+    return vUV * material.uv.xy + material.uv.zw;
+}
+
 // The normal bent by the map. The tangent frame comes from how the world
 // position and the UVs change across the pixel, so meshes need no tangents:
 // the directions u and v increase in, solved from the two derivatives (the
@@ -148,7 +176,8 @@ vec2 environment_uv(vec3 d) {
 // runs down. `front` is -1 seen from behind, where the whole frame turns.
 vec3 mapped_normal(vec3 n, float front) {
     const vec3 dp1 = dFdx(vWorld), dp2 = dFdy(vWorld);
-    const vec2 duv1 = dFdx(vUV), duv2 = dFdy(vUV);
+    const vec2 uv = kin_map_uv();
+    const vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
     const float det = duv1.x * duv2.y - duv2.x * duv1.y;
     if (abs(det) < 1e-20) {
         return n; // no UVs to go by here
@@ -157,7 +186,7 @@ vec3 mapped_normal(vec3 n, float front) {
     vec3 b = (dp2 * duv1.x - dp1 * duv2.x) * sign(det);
     t = normalize(t - n * dot(n, t));
     b = normalize(b - n * dot(n, b));
-    vec3 m = texture(uNormalMap, vUV).xyz * 2.0 - 1.0;
+    vec3 m = texture(uNormalMap, uv).xyz * 2.0 - 1.0;
     // No normal of the map points into the surface: where z would (every texel of a map of two channels, BC5, whose
     // blue reads 0), the map holds x and y only, and z is what makes the normal a unit one.
     if (m.z < 0.0) {
@@ -194,7 +223,7 @@ float contact_shadow() {
 // The base colour in linear light and its alpha: the vertex, instance and
 // material colours times the base texture.
 vec4 kin_base_color() {
-    vec4 tex = texture(uBase, vUV);
+    vec4 tex = texture(uBase, kin_map_uv());
     if (frame.flags.y > 0.5) {
         tex.rgb = decode(tex.rgb);
     }
@@ -231,12 +260,12 @@ vec3 kin_position() {
     return vWorld;
 }
 vec2 kin_uv() {
-    return vUV;
+    return kin_map_uv(); // as the maps read it
 }
 
 // The material's metallic (x) and roughness (y), the factors times the map.
 vec2 kin_metallic_roughness() {
-    const vec3 mr = texture(uMetalRough, vUV).rgb;
+    const vec3 mr = texture(uMetalRough, kin_map_uv()).rgb;
     return vec2(clamp(material.pbr.x * mr.b, 0.0, 1.0),
                 // A floor on the roughness: a perfect mirror would be a single bright pixel.
                 clamp(material.pbr.y * mr.g, 0.045, 1.0));
@@ -244,7 +273,7 @@ vec2 kin_metallic_roughness() {
 
 // How much ambient light the occlusion map lets through.
 float kin_occlusion() {
-    return mix(1.0, texture(uOcclusion, vUV).r, material.pbr.w);
+    return mix(1.0, texture(uOcclusion, kin_map_uv()).r, material.pbr.w);
 }
 
 // The material's own light for a surface of colour `base`: its share of the
@@ -252,7 +281,7 @@ float kin_occlusion() {
 vec3 kin_emissive(vec3 base) {
     vec3 own = material.emission.w > 0.5 ? vec3(1.0) : base;
     if (material.maps.y > 0.5) {
-        own = texture(uEmissive, vUV).rgb;
+        own = texture(uEmissive, kin_map_uv()).rgb;
         if (frame.flags.y > 0.5) {
             own = decode(own);
         }
@@ -261,6 +290,59 @@ vec3 kin_emissive(vec3 base) {
         own *= material.emission.rgb;
     }
     return own * material.params.x;
+}
+
+// --- Surfaces (docs/material_graph_plan.md) ---
+
+// What kin shades at a fragment. kin_stock_surface() makes it from the material and its maps, as kin's own shaders
+// do; a surface shader (KIN_SURFACE, kin_mesh_main.inc.glsl) changes it before kin lights it. `normal` is unit, in
+// world space, on the viewer's side; `roughness` within [0.045, 1] (kin's floor: a perfect mirror is a lone pixel).
+struct KinSurface {
+    vec3 base_color; // linear: a dielectric's diffuse colour, a metal's reflection
+    float alpha;     // straight; Blend3D::Mask discards below the material's cutoff
+    vec3 normal;
+    float metallic;
+    float roughness;
+    float occlusion; // the share of ambient light let through
+    vec3 emission;   // linear light of its own, added after the lighting
+    vec3 backlight;  // a thin surface's (a leaf's) colour for the light it lets through from behind (Unreal's
+                     // two-sided foliage, Godot's backlight); 0, none, but in a surface shader's
+    float clearcoat; // a clear coat's strength over it (glTF's KHR_materials_clearcoat, Unreal's Clear Coat); 0: none
+    float clearcoat_roughness; // the coat's, within [0.045, 1]
+    float specular;     // a dielectric's reflectance head on, 0.08 times it (0.5: 4%, kin's own; Unreal's Specular)
+    float diffuse_wrap; // how far the diffuse light wraps round: 0 Lambert's (kin's own), 0.5 and 1 Unreal's volume
+                        // lighting of translucency, directional and not (wrapped_diffuse); no reflection with it
+};
+
+#ifdef KIN_SURFACE
+// A surface shader's parameters (Material3D::shader_params, four at a time, 16 vec4s): the draw's material block's, or, for
+// merged draws (KIN_DRAW_MATERIALS), its copy's in the draws' table.
+vec4 kin_surface_param(int i) {
+#ifdef KIN_DRAW_MATERIALS
+    return kin_surface_params[vMaterial * 16u + uint(i)];
+#else
+    return material.surface[i];
+#endif
+}
+#endif
+
+KinSurface kin_stock_surface() {
+    KinSurface s;
+    const vec4 base = kin_base_color();
+    s.base_color = base.rgb;
+    s.alpha = base.a;
+    s.normal = kin_normal();
+    const vec2 mr = kin_metallic_roughness();
+    s.metallic = mr.x;
+    s.roughness = mr.y;
+    s.occlusion = kin_occlusion();
+    s.emission = kin_emissive(base.rgb);
+    s.backlight = vec3(0.0);
+    s.clearcoat = 0.0;
+    s.clearcoat_roughness = 0.045;
+    s.specular = 0.5;
+    s.diffuse_wrap = 0.0;
+    return s;
 }
 
 // The light of the scene on a surface (linear, what leaves it toward the
@@ -339,6 +421,11 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
 }
 #endif
 
+// Whether the surface lets light through from behind (Surface::backlight): lit, and shadowed, from either side.
+bool kin_backlit(Surface s) {
+    return dot(s.backlight, vec3(1.0)) > 0.0;
+}
+
 #ifdef KIN_LIGHTS
 // A point light's light on the surface: the inverse square, windowed to nothing at the radius (Karis' fall-off, as
 // glTF's punctual lights), no brighter than at the light's own size (colour.w: its square), so a surface inside a
@@ -355,12 +442,15 @@ vec3 kin_point_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour
     }
     const vec3 toward = to * inversesqrt(max(d2, 1e-8));
     float seen = 1.0;
+    // (A back-lit thin surface's shadow is its lit side's: from a point pushed off the other way.)
+    const bool behind = dot(n, toward) <= 0.0;
+    const vec3 through_offset = behind && kin_backlit(s) ? -offset_normal : offset_normal;
     if (material.params.z > 0.5
 #ifndef KIN_DIRECT_LIGHT
-        && dot(n, toward) > 0.0
+        && (!behind || kin_backlit(s))
 #endif
     ) {
-        seen = point_light_shadow_from(first, offset_normal, toward, sqrt(d2));
+        seen = point_light_shadow_from(first, through_offset, toward, sqrt(d2));
     }
 #ifdef KIN_DIRECT_LIGHT
     return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_POINT, at.xyz, sqrt(d2));
@@ -384,12 +474,14 @@ vec3 kin_spot_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour,
         return vec3(0.0);
     }
     float seen = 1.0;
+    const bool behind = dot(n, toward) <= 0.0;
+    const vec3 through_offset = behind && kin_backlit(s) ? -offset_normal : offset_normal;
     if (more.y >= 0.0 && material.params.z > 0.5
 #ifndef KIN_DIRECT_LIGHT
-        && dot(n, toward) > 0.0
+        && (!behind || kin_backlit(s))
 #endif
     ) {
-        seen = local_shadow(int(more.y), offset_normal, toward, sqrt(d2));
+        seen = local_shadow(int(more.y), through_offset, toward, sqrt(d2));
     }
 #ifdef KIN_DIRECT_LIGHT
     return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_SPOT, at.xyz, sqrt(d2));
@@ -484,7 +576,22 @@ vec3 kin_area_specular(Surface s, vec3 n, float roughness, vec3 shadowed) {
 }
 #endif
 
-vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
+// The light of the scene on a surface (kin_lit's), with its backlight and clear coat.
+// The ambient light off a surface (`under`) beneath a clear coat of strength `coat` (none at 0): dimmed by what the
+// coat reflects, plus that (its sky reflectance, by `ab`: environment_brdf at its roughness), as glTF's clear coat.
+vec3 kin_coated(vec3 under, float coat, vec2 ab, float n_v, vec3 coat_above) {
+    if (coat <= 0.0) {
+        return under;
+    }
+    const float fc = coat * fresnel(vec3(0.04), n_v).x;
+    return under * (1.0 - fc) + coat * sky_reflectance(vec3(0.04), ab) * coat_above;
+}
+
+vec3 kin_lit_surface(KinSurface surface) {
+    const vec3 base = surface.base_color, n = surface.normal, backlight = surface.backlight;
+    const float metallic = surface.metallic, occlusion = surface.occlusion, coat = surface.clearcoat;
+    const float wrap = surface.diffuse_wrap, f0_dielectric = 0.08 * surface.specular;
+    float roughness = surface.roughness, coat_roughness = surface.clearcoat_roughness;
     // Specular anti-aliasing (Scene3D::specular_aa; Tokuyoshi and Kaplanyan's, as Godot's roughness limiter): where
     // the normal turns within the pixel, a highlight can be thinner than the pixel, very bright where a sample hits it
     // and missed by the next; the roughness is raised by how much the normal turns across the pixel (at most to an
@@ -493,6 +600,7 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         const vec3 dn_dx = dFdx(n), dn_dy = dFdy(n);
         const float widen = min(2.0 * frame.environment.z * (dot(dn_dx, dn_dx) + dot(dn_dy, dn_dy)), 0.18);
         roughness = sqrt(min(1.0, roughness * roughness + widen));
+        coat_roughness = sqrt(min(1.0, coat_roughness * coat_roughness + widen));
     }
     const vec3 v = kin_view();
     Surface s;
@@ -501,13 +609,21 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     s.n_v = clamp(dot(n, v), 0.0, 1.0);
     s.alpha = roughness * roughness;
     s.diffuse = base * (1.0 - metallic);
-    s.f0 = mix(vec3(0.04), base, metallic);
+    s.f0 = mix(vec3(f0_dielectric), base, metallic);
     // A rough microsurface lights itself with a bounce that single
     // scattering leaves out, most of all a metal's (Fdez-Aguera's
     // multiple-scattering fit): put back in the specular, taken from the diffuse.
     const vec2 ab = environment_brdf(roughness, s.n_v);
     const float single = ab.x + ab.y;
-    s.boost = vec3(1.0) + s.f0 * (1.0 / max(single, 1e-3) - 1.0);
+    // (Not with Scene3D::specular_multiscatter off: frame.time.y.)
+    const bool multiscatter = frame.time.y < 0.5;
+    s.boost = multiscatter ? vec3(1.0) + s.f0 * (1.0 / max(single, 1e-3) - 1.0) : vec3(1.0);
+    s.backlight = backlight;
+    s.coat = coat;
+    s.coat_alpha = coat_roughness * coat_roughness;
+    s.dielectric = f0_dielectric;
+    s.wrap = wrap;
+    const bool backlit = kin_backlit(s);
 
     vec3 light = vec3(0.0);
     // Compute derivatives before the varying sun-facing branch as well as
@@ -521,9 +637,10 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
 #ifdef KIN_DIRECT_LIGHT
     if (dot(frame.sun_color.rgb, vec3(1.0)) > 0.0) {
 #else
-    if (sun > 0.0) {
+    if (sun > 0.0 || backlit || wrap > 0.0) {
 #endif
-        float lit = sunlight(n, world_dx, world_dy);
+        // (A back-lit thin surface's shadow from its side facing the sun: the point pushed off that way.)
+        float lit = sunlight(sun > 0.0 || !backlit ? n : -n, world_dx, world_dy);
 #ifdef KIN_LIGHTS
         lit = mix(1.0, lit, locals.counts.w);
 #endif
@@ -608,13 +725,25 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     // reflection (turned toward the normal as the surface roughens: a
     // rough one sees a wide cone of the sky); or from the environment: the
     // diffuse from its irradiance, the specular from its level for the roughness.
-    vec3 around, above;
+    // A back-lit surface's light from behind (`behind`, by -n) goes through it by its backlight, as Unreal's foliage's.
+    // A clear coat's reflection (`coat_above`) by its own roughness.
+    vec3 around, above, behind = vec3(0.0), coat_above = vec3(0.0);
     if (frame.environment.w > 0.5) {
         around = textureLod(uEnvIrradiance, environment_uv(n), 0.0).rgb * frame.environment.x;
+        if (backlit || wrap > 0.5) {
+            behind = textureLod(uEnvIrradiance, environment_uv(-n), 0.0).rgb * frame.environment.x;
+        }
+        if (coat > 0.0) {
+            coat_above = textureLod(uEnvSpecular, environment_uv(reflect(-v, n)), coat_roughness * frame.environment.y).rgb *
+                         frame.environment.x;
+        }
         above = textureLod(uEnvSpecular, environment_uv(reflect(-v, n)), roughness * frame.environment.y).rgb * frame.environment.x;
     } else {
         const vec3 reflected = normalize(mix(reflect(-v, n), n, s.alpha));
         around = mix(frame.ground_ambient.rgb, frame.ambient.rgb, n.y * 0.5 + 0.5);
+        behind = mix(frame.ground_ambient.rgb, frame.ambient.rgb, -n.y * 0.5 + 0.5);
+        const vec3 coat_reflected = normalize(mix(reflect(-v, n), n, s.coat_alpha));
+        coat_above = mix(frame.ground_ambient.rgb, frame.ambient.rgb, coat_reflected.y * 0.5 + 0.5);
         above = mix(frame.ground_ambient.rgb, frame.ambient.rgb, reflected.y * 0.5 + 0.5);
     }
 #ifdef KIN_GI
@@ -631,6 +760,7 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         float coverage;
         if (kin_gi_resolved(n, r, depth, near, probed, traced, coverage, area_light)) {
             around = mix(around, probed, coverage);
+            behind = mix(behind, probed, coverage); // (the probes' for the front: none from the sky through a roof)
             const vec3 open = frame.environment.w > 0.5
                                   ? textureLod(uEnvIrradiance, environment_uv(r), 0.0).rgb * frame.environment.x
                                   : mix(frame.ground_ambient.rgb, frame.ambient.rgb, r.y * 0.5 + 0.5);
@@ -638,11 +768,18 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
             const float seen = clamp(dot(traced, luma) / max(dot(open, luma), 1e-6), 0.0, 1.0);
             const float smooth_share = (1.0 - roughness) * (1.0 - roughness);
             above = mix(above, mix(traced, above * seen, smooth_share), coverage);
+            const float coat_smooth = (1.0 - coat_roughness) * (1.0 - coat_roughness);
+            coat_above = mix(coat_above, mix(traced, coat_above * seen, coat_smooth), coverage);
         }
     }
 #endif
-    const vec3 dielectric = sky_reflectance(vec3(0.04), ab);
-    const vec3 reflectance = mix(dielectric, sky_reflectance(base, ab), metallic);
+    // A diffuse wrapped past 0.5 sees the ambient light less by its normal: toward the mean of the two sides'.
+    if (wrap > 0.5) {
+        around = mix(around, 0.5 * (around + behind), 2.0 * wrap - 1.0);
+    }
+    const vec3 dielectric = multiscatter ? sky_reflectance(vec3(f0_dielectric), ab) : vec3(f0_dielectric * ab.x + ab.y);
+    const vec2 coat_ab = coat > 0.0 ? environment_brdf(coat_roughness, s.n_v) : vec2(0.0);
+    const vec3 reflectance = mix(dielectric, multiscatter ? sky_reflectance(base, ab) : base * ab.x + ab.y, metallic);
 #ifdef KIN_GI
     light += s.diffuse * (vec3(1.0) - dielectric) * area_light;
 #ifdef KIN_LIGHT_GRID
@@ -664,9 +801,29 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         const vec3 c = 2.7552 * base + vec3(0.6903);
         const vec3 diffuse_light = s.diffuse * (vec3(1.0) - dielectric) * around * max(vec3(ao), ((ao * a + b) * ao + c) * ao);
         const vec3 specular_light = reflectance * above * clamp(pow(s.n_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
-        return light + (diffuse_light + specular_light) * occlusion;
+        return light + kin_coated(diffuse_light + specular_light, coat, coat_ab, s.n_v, coat_above) * occlusion +
+               backlight * behind * (ao * occlusion);
     }
-    return light + (s.diffuse * (vec3(1.0) - dielectric) * around + reflectance * above) * occlusion;
+    return light + kin_coated(s.diffuse * (vec3(1.0) - dielectric) * around + reflectance * above, coat, coat_ab, s.n_v,
+                              coat_above) * occlusion +
+           backlight * behind * occlusion;
+}
+
+vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
+    KinSurface s;
+    s.base_color = base;
+    s.alpha = 1.0;
+    s.normal = n;
+    s.metallic = metallic;
+    s.roughness = roughness;
+    s.occlusion = occlusion;
+    s.emission = vec3(0.0);
+    s.backlight = vec3(0.0);
+    s.clearcoat = 0.0;
+    s.clearcoat_roughness = 0.045;
+    s.specular = 0.5;
+    s.diffuse_wrap = 0.0;
+    return kin_lit_surface(s);
 }
 
 // What a shader writes: `colour` (linear) encoded for the target, with its

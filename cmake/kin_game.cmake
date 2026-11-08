@@ -83,6 +83,9 @@ endfunction()
 #                      (with KIN_PACK_CONTENT; built with the game in shipping builds)
 #   <target>_package   packages/<name>-<version>-<platform>.zip (.tar.gz on Linux):
 #                      the executable, its content, and the license texts it must carry
+#   <target>_graphs    the content's material graphs (*.kingraph) cooked beside them
+#                      (kin_cook_material_graphs), which the game and its pack wait for:
+#                      one target for each content folder, named for the first game
 # With a Steam app id, KIN_GAME_STEAM_APP_ID (a number) and, outside shipping
 # builds, a steam_appid.txt beside the executable, so Steam lets the game start
 # from the build folder instead of starting it again through Steam.
@@ -192,6 +195,44 @@ function(_kin_game_steam_library out_var where)
         endif()
     endforeach()
     message(FATAL_ERROR "kin_game: no ${name} in ${where} (nor in ${sdk_folder}/)")
+endfunction()
+
+# The content's material graphs cooked beside them (kin_cook_material_graphs), for
+# a package with no glslc to compile them: a target the game (and its content pack)
+# waits for, in <out_var> (one for each content folder, whichever game made it).
+# Where they can't be cooked here (no glslc, or Android's cross-compile), a shipping
+# build needs them cooked already (by a desktop build, and kept with the content):
+# it does not configure without them. (Not for the web: WebGL2 draws a graph
+# material's stock fallback, from the graph's source.)
+function(_kin_game_graphs out_var target content)
+    set(${out_var} "" PARENT_SCOPE)
+    if(NOT COMMAND kin_cook_material_graphs)
+        return() # (kin_game without kin's build, cmake/kin_embed.cmake: no tools to cook with)
+    endif()
+    string(MD5 key "${content}")
+    get_property(made GLOBAL PROPERTY "KIN_GAME_GRAPHS_${key}")
+    if(NOT made)
+        kin_cook_material_graphs(cooked CONTENT "${content}" MISSING missing)
+        if(cooked)
+            set(made "${target}_graphs")
+            add_custom_target(${made} DEPENDS ${cooked})
+            set_property(GLOBAL PROPERTY "KIN_GAME_GRAPHS_${key}" "${made}")
+        elseif(missing)
+            list(JOIN missing "\n  " listed)
+            set(why "kin_game(${target}): material graphs not cooked, and this build cannot cook them (it needs "
+                "kin_material_graph and glslc running here): build the game once for the desktop, which cooks each "
+                "beside its graph (<graph>.spv), and keep those with the content:\n  ${listed}")
+            if(KIN_SHIPPING)
+                message(FATAL_ERROR ${why})
+            else()
+                message(WARNING ${why})
+            endif()
+        endif()
+    endif()
+    if(made)
+        add_dependencies(${target} ${made})
+    endif()
+    set(${out_var} "${made}" PARENT_SCOPE)
 endfunction()
 
 function(kin_game target)
@@ -309,6 +350,10 @@ function(kin_game target)
         # (An Android app cannot see the build machine's folders.)
         target_compile_definitions(${target} PRIVATE KIN_GAME_CONTENT_DIR="${content}")
     endif()
+    set(graphs_target "")
+    if(content AND IS_DIRECTORY "${content}" AND NOT EMSCRIPTEN)
+        _kin_game_graphs(graphs_target ${target} "${content}")
+    endif()
 
     if(EMSCRIPTEN)
         kin_package_web_game(${target} CONTENT "${content}" NAME "${ARG_NAME}")
@@ -358,6 +403,9 @@ function(kin_game target)
                 VERBATIM)
             if(TARGET ${target}_import_2d)
                 add_dependencies(${target}_content ${target}_import_2d)
+            endif()
+            if(graphs_target)
+                add_dependencies(${target}_content ${graphs_target})
             endif()
             if(KIN_SHIPPING)
                 add_dependencies(${target} ${target}_content)

@@ -64,7 +64,8 @@ layout(std140, set = 2, binding = 0) uniform Params {
     vec4 origin;   // w: voxels a unit (1 / cell); xyz: 0 (the voxels are counted from the world's origin)
     uvec4 size;    // xyz: voxels a window; w: the draw's first item
     uvec4 mesh;    // x: its first index in Indices, y: its triangles, z: its base vertex, w: its copies
-    uvec4 flags;   // x: skinned, y: a cut-out, z: the textures hold sRGB bytes (decode them), w: an emissive map
+    uvec4 flags;   // x: skinned, y: a cut-out, z: the textures hold sRGB bytes (decode them), w: an emissive map (2: a
+                   // linear one, a surface material's GI stand-in's: gpu_gi3d.cpp)
     vec4 material; // x: emissive strength, y: alpha cutoff, z: 1 double-sided, w: its emitter's number (0: none: the
                    // strength is in the voxel)
     uvec4 first;   // x: the draw's first copy in Copies; y: the level's first word in Work; z: the draw's first run's,
@@ -73,6 +74,8 @@ layout(std140, set = 2, binding = 0) uniform Params {
     ivec4 low;     // xyz: the first voxel of the box round the blocks to make; w: every block inside the box is dirty
     ivec4 high;    // xyz: its last
     vec4 emission; // xyz: linear factor, w: independent emission
+    vec4 vertex;   // the vertex colour's share in the base colour (rgb) and alpha (a): 1, or 0 where a surface's
+                   // stand-in's surface doesn't read it (SurfaceTraits3D)
 } p;
 
 #include "kin_srgb.inc.glsl"
@@ -237,7 +240,7 @@ float mip_for(Tri t, Corners k, vec2 texels) {
 
 // The base colour (linear) and alpha at the voxel's point.
 vec4 base_at(Tri t, Corners k, vec3 b, vec2 uv) {
-    const vec4 vertex = k.colour[0] * b.x + k.colour[1] * b.y + k.colour[2] * b.z;
+    const vec4 vertex = mix(vec4(1.0), k.colour[0] * b.x + k.colour[1] * b.y + k.colour[2] * b.z, p.vertex);
     vec4 tex = textureLod(uBase, uv, mip_for(t, k, vec2(textureSize(uBase, 0))));
     if (p.flags.z != 0u) {
         tex.rgb = decode(tex.rgb);
@@ -277,7 +280,7 @@ void visit(Tri t, Corners k, ivec3 voxel, ivec3 st, uint item) {
         vec3 own = p.emission.w > 0.5 ? vec3(1.0) : base.rgb;
         if (p.flags.w != 0u) {
             own = textureLod(uEmissive, uv, mip_for(t, k, vec2(textureSize(uEmissive, 0)))).rgb;
-            if (p.flags.z != 0u) {
+            if (p.flags.z != 0u && p.flags.w == 1u) {
                 own = decode(own);
             }
         }

@@ -75,6 +75,73 @@ void write_png(const std::filesystem::path& path) {
     (void)ok;
 }
 
+// A 16-bit greyscale PNG (zlib's stored blocks: no compressor needed): pixel (x, y) is x * 256 + y % 256, so its high
+// byte is x. Over 64 KB of scanlines, so more than one stored block.
+std::vector<kin::u8> grey16_png(int width, int height) {
+    std::vector<kin::u8> raw;
+    for (int y = 0; y < height; ++y) {
+        raw.push_back(0); // filter: none
+        for (int x = 0; x < width; ++x) {
+            const int v = x * 256 + y % 256;
+            raw.push_back(kin::u8(v >> 8));
+            raw.push_back(kin::u8(v & 0xff));
+        }
+    }
+    std::vector<kin::u8> z{0x78, 0x01};
+    for (std::size_t at = 0; at < raw.size();) {
+        const std::size_t n = std::min<std::size_t>(65535, raw.size() - at);
+        z.push_back(at + n == raw.size() ? 1 : 0);
+        z.insert(z.end(), {kin::u8(n), kin::u8(n >> 8), kin::u8(~n), kin::u8(~n >> 8)});
+        z.insert(z.end(), raw.begin() + std::ptrdiff_t(at), raw.begin() + std::ptrdiff_t(at + n));
+        at += n;
+    }
+    kin::u32 a = 1, b = 0;
+    for (const kin::u8 c : raw) {
+        a = (a + c) % 65521;
+        b = (b + a) % 65521;
+    }
+    const kin::u32 adler = (b << 16) | a;
+    z.insert(z.end(), {kin::u8(adler >> 24), kin::u8(adler >> 16), kin::u8(adler >> 8), kin::u8(adler)});
+    const auto crc = [](const kin::u8* p, std::size_t n) {
+        kin::u32 c = 0xffffffffu;
+        for (std::size_t i = 0; i < n; ++i) {
+            c ^= p[i];
+            for (int k = 0; k < 8; ++k)
+                c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1u)));
+        }
+        return ~c;
+    };
+    std::vector<kin::u8> png{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    const auto be32 = [&](kin::u32 v) {
+        png.insert(png.end(), {kin::u8(v >> 24), kin::u8(v >> 16), kin::u8(v >> 8), kin::u8(v)});
+    };
+    const auto chunk = [&](const char* type, const std::vector<kin::u8>& data) {
+        be32(kin::u32(data.size()));
+        const std::size_t start = png.size();
+        png.insert(png.end(), type, type + 4);
+        png.insert(png.end(), data.begin(), data.end());
+        be32(crc(png.data() + start, png.size() - start));
+    };
+    const auto w = kin::u32(width), h = kin::u32(height);
+    chunk("IHDR", {kin::u8(w >> 24), kin::u8(w >> 16), kin::u8(w >> 8), kin::u8(w), kin::u8(h >> 24), kin::u8(h >> 16),
+                   kin::u8(h >> 8), kin::u8(h), 16, 0, 0, 0, 0});
+    chunk("sBIT", {16}); // (grey only: dropped with the rest when it is read as grey and alpha)
+    chunk("IDAT", z);
+    chunk("IEND", {});
+    return png;
+}
+
+// SDL_image 3.4 writes a 16-bit grey PNG two bytes a pixel into a one-byte surface (past its end by a whole picture);
+// kin decodes it as 8-bit grey and alpha instead: its high bytes, opaque.
+void check_grey16(const kin::Image& image, int width, int height) {
+    assert(image.valid() && image.size == kin::Vec2i(width, height));
+    for (int y = 0; y < height; y += 37)
+        for (int x = 0; x < width; ++x) {
+            const kin::u8* p = image.rgba.data() + (std::size_t(y) * std::size_t(width) + std::size_t(x)) * 4;
+            assert(p[0] == x && p[1] == x && p[2] == x && p[3] == 255);
+        }
+}
+
 void check_image(const kin::Image& image, kin::Vec2i expected_size) {
     assert(image.valid());
     assert(image.size == expected_size);
@@ -192,6 +259,13 @@ int main() {
     const kin::Image png = kin::load_image(png_path);
     const kin::Vec2i png_size{1, 1};
     check_image(png, png_size);
+
+    const auto grey16 = grey16_png(200, 180);
+    check_grey16(kin::decode_image(grey16, "grey16.png"), 200, 180);
+    const auto grey16_path = dir.parent_path() / "kin-assets-tests-grey16.png"; // (not among dir's assets)
+    write_bytes(grey16_path, grey16);
+    check_grey16(kin::load_image(grey16_path), 200, 180);
+    std::filesystem::remove(grey16_path);
 
     kin::AssetManager assets{dir};
     assert(assets.stats().registered_loaders >= 1);

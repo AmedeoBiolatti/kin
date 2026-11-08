@@ -26,7 +26,7 @@ layout(location = 3) in vec4 aColor; // sRGB
 // pushes the longer block to a pipeline with the plain mesh.vert (a custom shader's) is read right by both.
 // Each copy's matrix of the frame before is in a buffer of its own, indexed as the instances are; its [0][3]
 // (a zero in any placing) is 1 for a copy with no past: new, or matched to nothing believable.
-layout(std430, set = 0, binding = 1) readonly buffer Previous {
+layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer Previous {
     mat4 previous[];
 };
 layout(set = 1, binding = 0) uniform Draw {
@@ -56,6 +56,7 @@ layout(location = 1) out vec4 vColor;
 layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vWorld;
 layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none)
+layout(location = 10) flat out vec3 vObject; // the copy's origin in the world (a surface's kin_object_position())
 #ifdef KIN_DRAW_MATERIALS
 layout(location = 9) flat out uint vMaterial;
 #endif
@@ -77,9 +78,15 @@ void main() {
 #ifdef KIN_SKIN
     // The vertex posed by its joints, in the model's space; the copy's transform places that.
     const mat4 skin = skin_matrix(instance_at(draw.first.x + uint(gl_InstanceIndex)));
-    const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
+    vec4 world = instance.model * (skin * vec4(aPos, 1.0));
 #else
-    const vec4 world = instance.model * vec4(aPos, 1.0);
+    vec4 world = instance.model * vec4(aPos, 1.0);
+#endif
+#ifdef KIN_SURFACE_VERTEX
+    // A surface's World Position Offset (kin_surface_vertex.inc.glsl), at this frame's time.
+    world.xyz = kin_vertex_offset(world.xyz, mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal,
+                                  aUV, instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.x,
+                                  instance.model);
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
@@ -91,6 +98,7 @@ void main() {
     vColor = instance.color * vec4(decode(aColor.rgb), aColor.a);
     vUV = aUV;
     vId = floatBitsToUint(instance.normal0.w);
+    vObject = instance.model[3].xyz;
 #ifdef KIN_VELOCITY
 #ifdef KIN_SKIN
     // The copy's model matrix of the frame before times its pose of the frame before (the same expressions as
@@ -109,7 +117,11 @@ void main() {
     vFresh = before[0][3];
     before[0][3] = 0.0;
     vCurrent = (draw.current * world).xyw;
-    const vec4 previous_world = before * vec4(aPos, 1.0);
+    vec4 previous_world = before * vec4(aPos, 1.0);
+#ifdef KIN_SURFACE_VERTEX
+    previous_world.xyz = kin_vertex_offset(previous_world.xyz, mat3(before) * aNormal, aUV,
+                                           instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.y, before);
+#endif
     vPrevious = (draw.prior * previous_world).xyw;
     vOldInCurrent = (draw.current * previous_world).xyw;
 #endif
