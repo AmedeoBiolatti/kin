@@ -261,6 +261,31 @@ glslc gone (kin_material_assets3d_tests); a graph dropped into the Summit conten
 content (and their packs) depending on it. Not fixed: kin's JSON reader recurses into nested arrays and objects with
 no limit (a pre-existing core matter: a file nested a million deep would still overflow).
 
+**Stock rendering re-checked (2026-11-08).** After the lighting additions (backlight, clear coat, specular, wrap, the
+multiple-scattering switch) and the rebase: the Bistro game built against main (66972da) and against 4d2a9e1 renders
+eight 1600 x 1000 stills (GI, TAA) byte-identically: the bench's five views, one with fog and bloom, two at night
+with 38 and 48 lamps lit; each twice per build, the same (`out/bistro_shots.sh`, `out/bistro_night.sh` in the
+worktree).
+
+**Stock rendering's cost (2026-11-08).** The same two Bistro builds, the bench's perf settings (3408 x 2130, 300
+frames' warm-up, 600 measured), main and the branch run in pairs, alternating which goes first (on this laptop the
+second of a pair runs hotter: about 1% slower in daylight, 13% at night, whichever build it is), the GPU cooled to
+78 C before each pair and its clocks logged (`out/perf/gated.py`, `analyse.py`):
+- GPU: the branch's frame about 1% longer in daylight (+0.5 to +1.1% per view, order-balanced; +1.2 to +1.5% in GPU
+  cycles), about 2% at night with 38 lamps. The new lighting terms are constants in a stock material (zero backlight,
+  coat and wrap; specular 0.5), so likely the UV transform and the draw's material record (64 to 80 bytes): not
+  pinned down.
+- CPU: recording a frame's draws took 0.2 to 0.4 ms more (about 20%), in every view and round. Two causes, found by
+  perf: `GiKey::add` (the GI scene's key of each draw and copy, every render) stopped being inlined once
+  `gi_proxy_key` gave it more callers (1 call site on main, 34 on the branch): every field of every copy became a call
+  and a copy of a size known only at run time; and the TAA key hashed all 64 `shader_params` of each draw (16 on
+  main), though a stock material reads none. Fixed: `GiKey::add<T>` mixes a value's words with its size known (2 call
+  sites left, both of sizes known only at run time); the TAA key takes the parameters something reads (a surface's
+  64, a custom shader's 16, a stock material's none). After, at 1600 x 1000, rounds rotating main / before / after:
+  the start view +0.29 ms before, +0.07 ms after (median of pairs); night -0.05 ms after (noise). The eight stills
+  stay byte-identical to main's. Left: copying the larger `Material3D` (64 floats, the surface and graph maps) into
+  the scene each frame, about 0.1 M cycles a frame for Bistro's 831 draws.
+
 **Cooked size.** 669 KB to about 220 KB: the variants optimised (glslc -O, which also drops the debug names; run-time
 surface compiles too, so development draws what ships: an optimised cooked graph of no outputs is byte-identical to
 the stock material) and the payload deflated (stb_image_write's zlib; inflated by stb_image's), with an FNV-1a hash

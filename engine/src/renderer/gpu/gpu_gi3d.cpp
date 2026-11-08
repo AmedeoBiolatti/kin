@@ -257,9 +257,23 @@ struct GiKey {
         value = (value ^ word) * 0xbf58476d1ce4e5b9ull;
         value ^= value >> 31;
     }
+    // A value's words, as add(data, size) mixes them, its size known here: no call or copy of a size known only when
+    // it runs (the scene's every copy is keyed each render; a compiler that stops inlining add(data, size) makes
+    // each field of each a call).
     template <class T> void add(const T& v) {
         static_assert(std::is_trivially_copyable_v<T>);
-        add(&v, sizeof(v));
+        constexpr std::size_t size = sizeof(T), whole = size / 8 * 8;
+        const auto* bytes = reinterpret_cast<const u8*>(&v);
+        for (std::size_t i = 0; i < whole; i += 8) {
+            u64 word;
+            std::memcpy(&word, bytes + i, 8);
+            mix(word);
+        }
+        if constexpr (size % 8 != 0) {
+            u64 word = 0;
+            std::memcpy(&word, bytes + whole, size % 8);
+            mix(word ^ (static_cast<u64>(size % 8) << 56));
+        }
     }
 };
 

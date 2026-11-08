@@ -99,7 +99,12 @@ bool taa_material_hash(u64& key, const Material3D& material, const ITextureBacke
     for (const auto& sampler : material.texture_samplers)
         taa_hash(key, sampler_identity(sampler));
     taa_hash(key, material.blend);
-    taa_hash(key, material.shader_params);
+    // The parameters something reads: a surface's, a custom shader's first 16; none of a stock material's (each
+    // draw's, each frame).
+    if (material.surface.backend())
+        taa_hash(key, material.shader_params);
+    else if (material.shader.backend())
+        taa_hash(key, material.shader_params.data(), sizeof(f32) * 16);
     taa_hash(key, material.wrap_u);
     taa_hash(key, material.wrap_v);
     if (!material.uv_identity()) {
