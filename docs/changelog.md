@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Fixed: spawning a prefab while an earlier copy lived aborted the game when it named its entities (two siblings
+  of one name; the names kin set itself were not in the registry it asked), and copies after the first renamed their
+  children (`Eye.<id>`, so `child("Eye")` found nothing). `Lifetime` and `Timer` given in scene or prefab files
+  are kin's own now, so `update_lifetimes` and `update_timers` count them down (they were data components nothing
+  counted).
+
 - ui2 apps on a phone, from a workout tracker built on it and run on a Samsung A55: a finger dragged across a
   scroll box scrolls it and a flick glides (`ScrollBoxOptions::touch_drag`, on by default; the drag is then no
   click). Text fields open the keyboard for what they take: `TextInputKind` (`Text`, `Number`, `Decimal`),
