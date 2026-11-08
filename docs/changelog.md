@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
+  with a private six-file cache. It stays off by default because cold/private-header
+  rebuilds cost more; see [measurements](build_times.md#private-widget-implementation-pch).
 - Material graphs for 3D (native renderers; WebGL2 draws a graph material's stock fallback). A surface shader
   (`Material3D::surface`) is a `kin_surface(inout KinSurface)` function inside the stock mesh shader, lit, fogged,
   shadowed and GI'd as a stock material, in every pass (cut-outs by its alpha included) and in the batched paths.

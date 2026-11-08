@@ -157,6 +157,8 @@ jobs:
     if: needs.select-run.outputs.run == 'true'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      CCACHE_SLOPPINESS: ${{ contains(matrix.options, 'KIN_ENABLE_PCH=ON') && 'pch_defines,time_macros' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -170,10 +172,12 @@ jobs:
             os: ubuntu-24.04
             cc: clang-18
             cxx: clang++-18
-            options: -DKIN_EXPERIMENTAL_3D=ON
+            options: >-
+              -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON
+              -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
           - name: Windows MSVC
             os: windows-2022
-            options: -DKIN_EXPERIMENTAL_3D=ON
+            options: -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON
           - name: Linux minimal shipping
             profile: config
             os: ubuntu-24.04

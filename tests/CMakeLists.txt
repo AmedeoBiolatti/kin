@@ -51,6 +51,11 @@ if(Python3_Interpreter_FOUND)
     kin_add_script_test(kin-build-config
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/build_config_tests.py"
             --cmake "${CMAKE_COMMAND}" --generator "${CMAKE_GENERATOR}")
+    if(TARGET kin_ui2_widgets AND CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "^Ninja")
+        kin_add_script_test(kin-widget-pch-build
+            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/widget_pch_build_tests.py"
+                --commands "${CMAKE_BINARY_DIR}/compile_commands.json")
+    endif()
     if(KIN_GLSLC)
         kin_add_script_test(kin-shader-build
             "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/shader_build_tests.py"
