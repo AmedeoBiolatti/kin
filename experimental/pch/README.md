@@ -64,3 +64,33 @@ the experiment includes the game's explicit engine headers, including those
 redundant includes. Lighting and Isometric are measured negative/control
 cases: their broader API PCHs were not retained. Public engine headers remain
 outside engine PCHs, and game-owned headers remain outside game PCHs.
+
+
+## Private widget PCH
+
+`bench_widgets.py` compares `KIN_ENABLE_WIDGET_PCH=OFF` and `ON` with the common
+PCH enabled. Use the same native Clang/Ninja setup above, a clean disposable
+worktree, an exclusive build and a new empty output directory:
+
+```sh
+python3 experimental/pch/bench_widgets.py --source . --build build-dev-clang \
+    --out /tmp/kin-widget-pch-results
+```
+
+The script temporarily appends comments to three widget implementations, the
+private widget preamble and the public widgets header. It alternates option
+order across four rounds and measures three source edits, no-op, cold widget
+cache and private-header invalidation four times per case, plus public-header
+invalidation three times per case. Each build ends at Hex's executable link.
+A cold widget sample removes only the six widget objects and, when enabled,
+the widget PCH. Other engine objects, the common engine PCH, component libraries,
+shaders and dependencies remain built. Public-header comments invalidate a
+wider set of consumers; declarations remain unchanged.
+
+The `finally` restores source/header contents and timestamps, restores the
+starting option, removes the widget PCH and objects to avoid stale input
+metadata, and settles the normal Hex target. Do not run an editor or another
+configure/build against these inputs. After a hard interruption, restore the
+three widget `.cpp` files and two headers in the disposable worktree; remove
+the generated widget PCH and reconfigure/build. The script is specific to native
+Clang `.pch`/`.o` outputs. It is not a Windows or GCC performance benchmark.

@@ -60,6 +60,18 @@ if(KIN_ENABLE_SCRIPTING)
     add_library(kin_scripting_scenes STATIC)
 endif()
 
+set(_kin_widget_sources
+    src/ui2/widgets_core.cpp
+    src/ui2/widgets_inputs.cpp
+    src/ui2/widgets_menus.cpp
+    src/ui2/widgets_collections.cpp
+    src/ui2/widgets_editor.cpp
+    src/ui2/widgets_text_edit.cpp)
+if(KIN_ENABLE_PCH AND KIN_ENABLE_WIDGET_PCH)
+    # Make the shared preamble ready early among equally ready Ninja jobs.
+    add_library(kin_ui2_widgets OBJECT ${_kin_widget_sources})
+endif()
+
 add_library(kin_engine STATIC
     src/anim/animation.cpp
     src/anim/anim_format.cpp
@@ -429,7 +441,6 @@ if(KIN_EXPERIMENTAL_3D)
     if(NOT cgltf_POPULATED)
         FetchContent_Populate(cgltf)
     endif()
-    target_include_directories(kin_engine SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};cgltf.txt|${cgltf_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
     # Levels of detail (kin/render3d/mesh_lod3d.hpp) and clusters (mesh_clusters3d.hpp): the simplifier, the vertex-cache
     # optimiser, the meshlet builder and the cluster partitioner of meshoptimizer (MIT), compiled into the engine;
@@ -449,7 +460,6 @@ if(KIN_EXPERIMENTAL_3D)
     target_sources(kin_engine PRIVATE ${_kin_meshopt_sources})
     set_source_files_properties(${_kin_meshopt_sources} PROPERTIES COMPILE_OPTIONS
         "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
-    target_include_directories(kin_engine SYSTEM PRIVATE "${meshoptimizer_SOURCE_DIR}/src")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
@@ -485,7 +495,11 @@ if(KIN_EXPERIMENTAL_3D)
         "$<$<AND:$<BOOL:${KIN_RENDERER3D_O3}>,$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O3>")
     set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
-    target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
+    # Both the archive and its optional widget object group retain these
+    # private include directories' system-header classification.
+    set(_kin_engine_private_system_includes
+        "${cgltf_SOURCE_DIR}" "${meshoptimizer_SOURCE_DIR}/src" "${stb_SOURCE_DIR}")
+    target_include_directories(kin_engine SYSTEM PRIVATE ${_kin_engine_private_system_includes})
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
     if(KIN_ENABLE_SCENE3D_RUNTIME)
         # Scene/frame orchestration sits above the engine and its adapters. The
@@ -628,4 +642,33 @@ if(TARGET kin_scripting)
 endif()
 if(TARGET kin_scene3d_runtime)
     kin_precompile_target(kin_scene3d_runtime ECS SCRIPTING)
+endif()
+
+# Every file in this group already includes the same private preamble. Keep
+# that PCH local: widget API edits must not invalidate the rest of the engine's
+# standard-library/ECS PCH. The objects still belong to the existing archive.
+if(KIN_ENABLE_PCH AND KIN_ENABLE_WIDGET_PCH)
+    target_compile_features(kin_ui2_widgets PRIVATE cxx_std_23)
+    # Retain the engine's private settings as well as its dependencies' usage
+    # requirements. There is no link back to kin_engine, so no archive cycle.
+    target_link_libraries(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,LINK_LIBRARIES>")
+    target_include_directories(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,INCLUDE_DIRECTORIES>")
+    if(_kin_engine_private_system_includes)
+        target_include_directories(kin_ui2_widgets SYSTEM PRIVATE ${_kin_engine_private_system_includes})
+    endif()
+    target_compile_definitions(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,COMPILE_DEFINITIONS>")
+    target_compile_options(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,COMPILE_OPTIONS>")
+    foreach(property POSITION_INDEPENDENT_CODE MSVC_RUNTIME_LIBRARY CXX_VISIBILITY_PRESET VISIBILITY_INLINES_HIDDEN)
+        get_target_property(value kin_engine ${property})
+        if(NOT value STREQUAL "value-NOTFOUND")
+            set_property(TARGET kin_ui2_widgets PROPERTY ${property} "${value}")
+        endif()
+    endforeach()
+    kin_precompile_target(kin_ui2_widgets ECS)
+    target_precompile_headers(kin_ui2_widgets PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui2/widget_chunk_preamble.hpp")
+    get_target_property(_kin_engine_sources kin_engine SOURCES)
+    list(REMOVE_ITEM _kin_engine_sources ${_kin_widget_sources})
+    set_property(TARGET kin_engine PROPERTY SOURCES "${_kin_engine_sources}")
+    target_sources(kin_engine PRIVATE $<TARGET_OBJECTS:kin_ui2_widgets>)
 endif()

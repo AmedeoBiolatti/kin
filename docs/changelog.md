@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
+  with a private six-file cache. It stays off by default because cold/private-header
+  rebuilds cost more; see [measurements](build_times.md#private-widget-implementation-pch).
+
 - Development PCHs include the standard filesystem API; Charts, Text Edit, Shapes and
   ECS Parallel precompile more of their stable engine APIs. See the
   [broader PCH measurements](build_times.md#broader-standard-library-and-game-pchs)

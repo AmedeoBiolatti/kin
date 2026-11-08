@@ -1765,3 +1765,74 @@ its 120-test 2D suite (118 executed, two GPU checks skipped under SDL dummy).
 GCC 15 compiled the seven real sampled sources using five final PCHs, with
 PCH use confirmed and invalid-PCH warnings treated as errors. That is a compile
 smoke check, not a GCC performance benchmark.
+
+
+## Private widget implementation PCH
+
+When editing UI2's widget implementations, enable the optional private cache:
+
+```sh
+cmake --preset dev-clang -DKIN_ENABLE_WIDGET_PCH=ON
+cmake --build --preset dev-clang --target my_game
+```
+
+`KIN_ENABLE_WIDGET_PCH` defaults to **OFF** and also requires `KIN_ENABLE_PCH`.
+It groups six implementation files that already include
+`ui2/widget_chunk_preamble.hpp` into an object target with its own PCH. Their
+objects still enter `libkin_engine`, with the engine's private options,
+definitions and dependency usage requirements. The remaining engine sources
+keep their existing PCH. No C++ implementation or public API changed.
+
+The opt-in setting fits repeated widget `.cpp` edits. Leave it off when the
+widget headers change frequently or when prioritizing cold cache preparation.
+An isolated source-to-object pilot showed 32–62% shorter compiler times, but the
+real edit loop also rebuilds the engine archive and links the game. Four
+alternating rounds on native Linux Clang 21.1.8, Release `-O2`, four workers
+pinned to four CPUs, no compiler cache or LTO and the default GNU linker gave
+these median **edit-to-Hex-link** times:
+
+| Implementation edit | Common engine PCH | Private widget PCH | Reduction |
+|---|---:|---:|---:|
+| widgets_editor.cpp | 3.967 s | 2.869 s | 27.7% |
+| widgets_core.cpp | 4.508 s | 3.689 s | 18.2% |
+| widgets_inputs.cpp | 2.831 s | 1.622 s | 42.7% |
+
+All three improved in each of the four paired rounds. Warm compiler-process
+RSS fell from roughly 212–226 MiB to 169–189 MiB. No-op builds stayed around
+0.08 s. These gains do not apply to unrelated game or engine source edits.
+
+The extra precompilation has a cost:
+
+| Rebuild through Hex link | Common engine PCH | Private widget PCH | Samples per case |
+|---|---:|---:|---:|
+| Six widget objects plus their private PCH, if present | 8.373 s | 9.437 s | 4 |
+| Private preamble comment edit | 7.663 s | 9.378 s | 4 |
+| Public widgets header comment edit | 62.247 s | 60.818 s | 3 |
+
+Cold widget preparation was about 13% slower and private-preamble invalidation
+about 22% slower, despite lower aggregate CPU work. PCH creation raised maximum
+individual-process RSS to about 356 MiB. Public-header rebuild wall and CPU
+times varied without a clear improvement. Those samples changed comments,
+not API declarations. The common engine PCH, unrelated objects, component
+libraries and dependencies stayed built during these measurements.
+
+A separate single cold-engine sanity pair recreated `kin_engine`'s objects,
+PCH/archive and Hex link, with foundation/scripting/audio/physics libraries,
+shaders and external dependencies retained. It took 219.60 s versus 226.66 s
+(+3.2%). One pair is insufficient for a general cold-build claim; the repeated
+local invalidation costs above are why the option stays off by default.
+
+The [raw samples and scope metadata](build_widget_pch_2026-11-08.json) and
+[reproducer](../experimental/pch/README.md#private-widget-pch) retain the source
+pilot, integrated comparison and cold-engine check separately. All eight
+comparison headless checks passed. The final native 2D/PCH build passed 119
+tests with two GPU checks skipped under SDL dummy. GCC 15 also built the actual
+private PCH and all six widget objects.
+
+The build contract checks that each widget source keeps the normal engine's
+compiler options, definitions and include classifications, and that widget
+headers stay out of the common engine PCH. Clang and Windows MSVC CI enable the
+real widget group as well. Clang's cached CI build uses the
+[ccache 4.9 PCH settings](https://ccache.dev/manual/4.9.html#_precompiled_headers);
+performance measurements disable compiler caching. Host load and CPU frequency
+varied, so remeasure on the compiler and machine used for development.

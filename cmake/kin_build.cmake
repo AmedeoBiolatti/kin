@@ -2,6 +2,7 @@ include_guard(GLOBAL)
 
 # Keep developer build settings separate from the shipping/release contract.
 option(KIN_ENABLE_PCH "Precompile stable headers for the engine and kin_game targets" OFF)
+option(KIN_ENABLE_WIDGET_PCH "Use a private PCH for the six UI2 widget implementation files (requires KIN_ENABLE_PCH)" OFF)
 option(KIN_DEV_FAST_SCRIPTING "Use -O1 for scene/entity Lua bindings in Release development builds (GCC/Clang)" OFF)
 set(KIN_COMPILER_CACHE "off" CACHE STRING "Compiler cache: off, auto, ccache or sccache")
 set_property(CACHE KIN_COMPILER_CACHE PROPERTY STRINGS off auto ccache sccache)
