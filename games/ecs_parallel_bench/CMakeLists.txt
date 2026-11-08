@@ -8,6 +8,14 @@ target_link_libraries(ecs_parallel_bench PRIVATE
 
 kin_game(ecs_parallel_bench TITLE "ECS Parallel Bench")
 
+# Stable engine APIs used while editing this game's own sources.
+if(KIN_ENABLE_PCH)
+    target_precompile_headers(ecs_parallel_bench PRIVATE
+        <kin/core/json.hpp>
+        <kin/ecs/component.hpp>
+        <kin/ecs/system.hpp>)
+endif()
+
 target_compile_options(ecs_parallel_bench PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>

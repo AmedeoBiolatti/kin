@@ -77,7 +77,7 @@ function(kin_precompile_target target)
         return() # A game may provide its own PCH before calling kin_game.
     endif()
     set(headers algorithm array cmath cstdint functional memory optional span
-        string string_view unordered_map utility vector)
+        string string_view unordered_map utility vector filesystem)
     if(PCH_ECS)
         list(APPEND headers flecs.h)
     endif()
