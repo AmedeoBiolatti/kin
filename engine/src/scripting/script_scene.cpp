@@ -3,6 +3,7 @@
 #include <kin/core/json.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
+#include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/runtime/development.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>

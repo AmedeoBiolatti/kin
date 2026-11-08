@@ -2,6 +2,7 @@ include_guard(GLOBAL)
 
 # Keep developer build settings separate from the shipping/release contract.
 option(KIN_ENABLE_PCH "Precompile stable headers for the engine and kin_game targets" OFF)
+option(KIN_DEV_FAST_SCRIPTING "Use -O1 for scene/entity Lua bindings in Release development builds (GCC/Clang)" OFF)
 set(KIN_COMPILER_CACHE "off" CACHE STRING "Compiler cache: off, auto, ccache or sccache")
 set_property(CACHE KIN_COMPILER_CACHE PROPERTY STRINGS off auto ccache sccache)
 if(NOT KIN_COMPILER_CACHE MATCHES "^(off|auto|ccache|sccache)$")
@@ -29,6 +30,21 @@ if(NOT KIN_COMPILER_CACHE STREQUAL "off")
         message(FATAL_ERROR "KIN_COMPILER_CACHE=${KIN_COMPILER_CACHE}, but the program was not found")
     endif()
 endif()
+
+# Applied after the target's normal optimization settings, and also used by its
+# PCH. Keep the override private: games, the engine and Lua keep their settings.
+function(kin_configure_scripting_build target)
+    if(NOT KIN_DEV_FAST_SCRIPTING)
+        return()
+    endif()
+    if(KIN_SHIPPING)
+        message(FATAL_ERROR "KIN_DEV_FAST_SCRIPTING is for development; disable it for KIN_SHIPPING builds")
+    endif()
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+        message(FATAL_ERROR "KIN_DEV_FAST_SCRIPTING requires GCC or Clang")
+    endif()
+    target_compile_options(${target} PRIVATE "$<$<CONFIG:Release,RelWithDebInfo>:-O1>")
+endfunction()
 
 # Games defined in a parent project do not inherit directory-scoped launchers
 # from add_subdirectory(kin). Apply the selected cache without replacing theirs.

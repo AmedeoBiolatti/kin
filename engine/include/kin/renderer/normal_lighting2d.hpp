@@ -19,6 +19,8 @@
 
 #include <kin/assets/image.hpp>
 #include <kin/core/affine.hpp>
+#include <kin/renderer/data_buffer.hpp>
+#include <kin/renderer/flip.hpp>
 #include <kin/renderer/lighting.hpp>
 
 #include <array>
@@ -26,6 +28,8 @@
 #include <span>
 
 namespace kin {
+
+struct RendererBackendCapabilities;
 
 struct SurfaceMaterial2D {
     std::shared_ptr<const Image> albedo;

@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/ecs/ecs_scene.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/platform/app.hpp>

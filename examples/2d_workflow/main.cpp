@@ -9,6 +9,7 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/input_router.hpp>
 #include <kin/platform/user_data.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/runtime/development.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>

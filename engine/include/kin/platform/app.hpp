@@ -3,7 +3,7 @@
 #include <kin/core/types.hpp>
 #include <kin/platform/gamepad.hpp>
 #include <kin/platform/input.hpp>
-#include <kin/platform/window.hpp>
+#include <kin/platform/window_types.hpp>
 
 #include <functional>
 #include <memory>
@@ -13,6 +13,8 @@
 union SDL_Event;
 
 namespace kin {
+
+class Window;
 
 enum class AppMode {
     Windowed,

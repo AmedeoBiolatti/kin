@@ -5,6 +5,7 @@
 #include <iostream>
 #include <kin/core/instrumentation.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/camera_rig3d.hpp>
 #include <limits>

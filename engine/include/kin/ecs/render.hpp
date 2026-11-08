@@ -4,9 +4,9 @@
 #include <kin/ecs/component.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/draw_trace.hpp>
 #include <kin/renderer/render_layer.hpp>
 #include <kin/renderer/render_queue.hpp>
-#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shape.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 
@@ -20,6 +20,8 @@
 #include <vector>
 
 namespace kin {
+
+class Renderer2D;
 
 class JobSystem;
 

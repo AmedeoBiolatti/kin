@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <SDL3/SDL.h>
 #include <cassert>
 #include <kin/platform/input_router.hpp>

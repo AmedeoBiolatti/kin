@@ -496,18 +496,20 @@ public:
 
     template <typename Field>
     NativeComponentBuilder& field(std::string name, Field T::* member) {
-        return property<Field>(std::move(name), [member](const T& component) { return component.*member; },
-                               [member](T& component, const Field& value) { component.*member = value; return true; });
+        return define_property<Field>(
+            std::move(name), [member](const T& component) { return component.*member; },
+            [member](T& component, const Field& value) { component.*member = value; return true; }, true);
     }
 
     // A member of a member (a body's def's damping), by its own name.
     template <typename Outer, typename Field>
     NativeComponentBuilder& field(std::string name, Outer T::* outer, Field Outer::* member) {
-        return property<Field>(std::move(name), [outer, member](const T& component) { return (component.*outer).*member; },
-                               [outer, member](T& component, const Field& value) {
-                                   (component.*outer).*member = value;
-                                   return true;
-                               });
+        return define_property<Field>(
+            std::move(name), [outer, member](const T& component) { return (component.*outer).*member; },
+            [outer, member](T& component, const Field& value) {
+                (component.*outer).*member = value;
+                return true;
+            }, true);
     }
 
     // A reflected authored property can adapt nested members or enum names
@@ -516,46 +518,8 @@ public:
     template <typename Field>
     NativeComponentBuilder& property(std::string name, std::function<Field(const T&)> read,
                                      std::function<bool(T&, const Field&)> write) {
-        using FieldType = std::remove_cv_t<Field>;
-        static_assert(detail::supported_component_field_v<FieldType>, "unsupported ECS component field type");
-        if (!_record) {
-            return *this;
-        }
-        if (name.empty()) {
-            _registry._last_error = "component field name is required";
-            return *this;
-        }
-        if (!read || !write) {
-            _registry._last_error = "component property requires a reader and writer";
-            return *this;
-        }
-        for (const detail::ComponentFieldRecord& field : _record->fields) {
-            if (field.descriptor.name == name) {
-                _registry._last_error = "duplicate field '" + name + "' on component '" + _record->descriptor.name + "'";
-                return *this;
-            }
-        }
-
-        detail::ComponentFieldRecord record;
-        record.descriptor = ComponentFieldDescriptor{
-            .name = std::move(name),
-            .kind = detail::ComponentFieldKindOf<FieldType>::value,
-        };
-        record.read = [read = std::move(read)](const void* raw) -> ComponentFieldValue {
-            const T& component = *static_cast<const T*>(raw);
-            return read(component);
-        };
-        record.patch = [write = std::move(write)](void* raw, const ComponentFieldValue& value) -> bool {
-            T& component = *static_cast<T*>(raw);
-            if (const FieldType* typed = std::get_if<FieldType>(&value)) {
-                return write(component, *typed);
-            }
-            return false;
-        };
-        _record->descriptor.fields.push_back(record.descriptor);
-        _record->fields.push_back(std::move(record));
-        _registry._last_error.clear();
-        return *this;
+        const bool functions_valid = read && write;
+        return define_property<Field>(std::move(name), std::move(read), std::move(write), functions_valid);
     }
 
     NativeComponentBuilder& label(std::string value) {
@@ -595,6 +559,52 @@ public:
     explicit operator bool() const { return _record != nullptr; }
 
 private:
+    // Keep member accessors typed until the registry's erased callback boundary.
+    // A direct field needs no intermediate std::function allocation/adapter.
+    template <typename Field, typename Read, typename Write>
+    NativeComponentBuilder& define_property(std::string name, Read read, Write write, bool functions_valid) {
+        using FieldType = std::remove_cv_t<Field>;
+        static_assert(detail::supported_component_field_v<FieldType>, "unsupported ECS component field type");
+        if (!_record) {
+            return *this;
+        }
+        if (name.empty()) {
+            _registry._last_error = "component field name is required";
+            return *this;
+        }
+        if (!functions_valid) {
+            _registry._last_error = "component property requires a reader and writer";
+            return *this;
+        }
+        for (const detail::ComponentFieldRecord& field : _record->fields) {
+            if (field.descriptor.name == name) {
+                _registry._last_error = "duplicate field '" + name + "' on component '" + _record->descriptor.name + "'";
+                return *this;
+            }
+        }
+
+        detail::ComponentFieldRecord record;
+        record.descriptor = ComponentFieldDescriptor{
+            .name = std::move(name),
+            .kind = detail::ComponentFieldKindOf<FieldType>::value,
+        };
+        record.read = [read = std::move(read)](const void* raw) -> ComponentFieldValue {
+            const T& component = *static_cast<const T*>(raw);
+            return read(component);
+        };
+        record.patch = [write = std::move(write)](void* raw, const ComponentFieldValue& value) -> bool {
+            T& component = *static_cast<T*>(raw);
+            if (const FieldType* typed = std::get_if<FieldType>(&value)) {
+                return write(component, *typed);
+            }
+            return false;
+        };
+        _record->descriptor.fields.push_back(record.descriptor);
+        _record->fields.push_back(std::move(record));
+        _registry._last_error.clear();
+        return *this;
+    }
+
     template <typename Func>
     NativeComponentBuilder& update_last_field(Func&& func) {
         if (!_record || _record->descriptor.fields.empty() || _record->fields.empty()) {

@@ -1,4 +1,5 @@
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/backend.hpp>
 
 #include <algorithm>
 #include <array>

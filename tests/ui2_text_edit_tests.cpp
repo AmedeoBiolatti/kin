@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/core/utf8.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/window.hpp>

@@ -1,5 +1,7 @@
 #include <kin/renderer/render_queue.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
 #include <algorithm>
 #include <cstdint>
 #include <array>

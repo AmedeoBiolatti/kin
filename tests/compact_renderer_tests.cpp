@@ -1,4 +1,5 @@
 #include <kin/platform/app.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/renderer/renderer2d.hpp>
 
 #include <SDL3/SDL.h>

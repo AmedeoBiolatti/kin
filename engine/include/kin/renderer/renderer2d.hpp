@@ -2,18 +2,22 @@
 
 #include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
-#include <kin/platform/window.hpp>
 #include <kin/renderer/clip.hpp>
 #include <kin/renderer/mask.hpp>
 #include <kin/renderer/material.hpp>
-#include <kin/renderer/backend.hpp>
+#include <kin/renderer/backend_types.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/color_grading.hpp>
+#include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/draw_trace.hpp>
 #include <kin/renderer/gradient.hpp>
+#include <kin/renderer/post_process.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/shape.hpp>
 #include <kin/renderer/sprite.hpp>
+#include <kin/renderer/sprite_instance.hpp>
 #include <kin/renderer/texture.hpp>
 
 #include <functional>
@@ -27,6 +31,12 @@
 #include <vector>
 
 namespace kin {
+
+class Window;
+class IRenderer2DBackend;
+class IRendererBackend3D;
+class JobSystem;
+struct CompressedImage;
 
 // Selects the backend included by KIN_RENDERER. `auto` tries SDL_GPU when
 // allow_gpu is true, then falls back to SDL_Renderer. KIN_RENDER_BACKEND=sdl/gpu
@@ -187,7 +197,7 @@ public:
     std::string_view backend_name() const;
     RendererBackendCapabilities capabilities() const;
     // The backend's 3D part (kin/render3d/renderer3d.hpp), null without one.
-    IRendererBackend3D* renderer_3d() { return _backend->renderer_3d(); }
+    IRendererBackend3D* renderer_3d();
     RendererBackendStats backend_stats() const;
     void reset_backend_stats();
     // GPU time per frame in backend_stats().last_gpu_frame_ms (SDL_GPU only; off
@@ -254,7 +264,7 @@ public:
     // every draw adds one layer where it covers, and the screen shows the counts
     // as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or more.
     // Only the screen's own draws show (a render target's composite counts once).
-    void set_overdraw_view(bool enabled) { _backend->set_overdraw_view(enabled); }
+    void set_overdraw_view(bool enabled);
     bool texture_batching_enabled() const;
 
     void clear(Color color = colors::black);
@@ -398,8 +408,8 @@ public:
     // (the engine's own) or as their shader is created, instead of at their
     // first draw: up to ~20 ms each on a cold driver cache. run_scene_app keeps
     // it in the game's user data (windowed runs).
-    std::string pipeline_record() const { return _backend->pipeline_record(); }
-    void prewarm_pipelines(std::string_view record) { _backend->prewarm_pipelines(record); }
+    std::string pipeline_record() const;
+    void prewarm_pipelines(std::string_view record);
     // Replaces a shader with a new version, keeping its handle (hot reload: see
     // kin/renderer/shader_compiler.hpp). Draws already queued use the old one.
     bool reload_shader(ShaderHandle shader, const ShaderDesc& desc);

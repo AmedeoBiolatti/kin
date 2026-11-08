@@ -1,5 +1,6 @@
 // On-screen controls: Input's screen actions and axes, ui2's TouchStick and
 // TouchButton, and a screen file's touch_stick and touch_button.
+#include <kin/renderer/backend.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/context.hpp>

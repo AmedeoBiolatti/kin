@@ -7530,6 +7530,70 @@ void test_ecs_bridge_static_dynamic_filtering() {
     assert(scratch.records[1].prompt_row);
 }
 
+void test_ecs_bridge_query_storage_and_worlds() {
+    for (const bool owned : {true, false}) {
+        kin::EcsWorld owner;
+        flecs::world standalone;
+        flecs::world& world = owned ? owner.raw() : standalone;
+        register_ui2_components(world);
+        world.component<ui2::Panel>().add(flecs::Sparse);
+        world.component<ui2::Label>()
+            .add(flecs::CanToggle)
+            .add(flecs::OnInstantiate, flecs::Inherit);
+
+        const auto first_panel = world.entity().set(ui2::Panel{.bounds = {0, 0, 10, 10}});
+        const auto second_panel = world.entity().set(ui2::Panel{.bounds = {10, 0, 10, 10}});
+        const auto base = world.prefab().set(ui2::Label{.bounds = {0, 0, 10, 10}, .text = "Shared"});
+        const auto first_instance = world.entity().is_a(base);
+        const auto second_instance = world.entity().is_a(base);
+        const auto local = world.entity().set(ui2::Label{.bounds = {0, 0, 10, 10}, .text = "Local"});
+        world.entity().set(ui2::Label{.text = "Disabled entity"}).disable();
+        const auto toggled = world.entity().set(ui2::Label{.text = "Disabled component"});
+        toggled.disable<ui2::Label>();
+
+        Input input;
+        Renderer2D renderer = make_renderer();
+        ui2::Context ui;
+        Ui2WorldRenderScratch scratch;
+        const auto frame = [&]() {
+            input.begin_frame();
+            ui.begin(input, renderer);
+            update_ui2_world(world, ui, scratch);
+            ui.end();
+        };
+        const auto record_for = [&](flecs::entity entity) -> const Ui2WorldRecord& {
+            const auto found = std::ranges::find(scratch.records, static_cast<kin::EcsId>(entity.id()),
+                                                 &Ui2WorldRecord::entity_id);
+            assert(found != scratch.records.end());
+            return *found;
+        };
+
+        frame();
+        assert(scratch.size() == 5);
+        assert(record_for(first_panel).panel == first_panel.get<ui2::Panel>());
+        assert(record_for(second_panel).panel == second_panel.get<ui2::Panel>());
+        assert(record_for(first_instance).label == base.get<ui2::Label>());
+        assert(record_for(second_instance).label == base.get<ui2::Label>());
+        assert(record_for(local).label == local.get<ui2::Label>());
+        assert(record_for(first_panel).widget == record_for(first_panel).panel);
+        assert(record_for(first_instance).widget == record_for(first_instance).label);
+
+        // Kept queries must observe new tables, deferred removals and toggles.
+        world.defer_begin();
+        const auto added = world.entity().set(ui2::Spacer{.bounds = {0, 0, 10, 10}});
+        first_panel.remove<ui2::Panel>();
+        world.defer_end();
+        toggled.enable<ui2::Label>();
+        frame();
+        assert(scratch.size() == 6);
+        assert(record_for(added).spacer == added.get<ui2::Spacer>());
+        assert(record_for(toggled).label == toggled.get<ui2::Label>());
+        assert(std::ranges::none_of(scratch.records, [&](const auto& record) {
+            return record.entity_id == first_panel.id();
+        }));
+    }
+}
+
 void test_ecs_sync_stable_keys_sweep_and_state() {
     kin::EcsWorld world;
     register_ui2_components(world);
@@ -9614,6 +9678,7 @@ int main() {
     test_ecs_bridge_editor_widgets_layout_and_records();
     test_ecs_bridge_remaining_basic_widgets_and_scroll_container();
     test_ecs_bridge_static_dynamic_filtering();
+    test_ecs_bridge_query_storage_and_worlds();
     test_ecs_sync_stable_keys_sweep_and_state();
     test_ecs_sync_explicit_keys_survive_reorder();
     test_ecs_dirty_observer_lifecycle();

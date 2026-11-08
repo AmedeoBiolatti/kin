@@ -1,7 +1,6 @@
 #pragma once
 
 #include <kin/assets/asset_manager.hpp>
-#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/sprite.hpp>
 #include <kin/renderer/sprite_sheet.hpp>
 
@@ -12,6 +11,8 @@
 #include <vector>
 
 namespace kin {
+
+class Renderer2D;
 
 class SpriteCatalog;
 

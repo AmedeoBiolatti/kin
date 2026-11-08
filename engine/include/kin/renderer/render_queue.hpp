@@ -1,7 +1,7 @@
 #pragma once
 
-#include <kin/renderer/backend.hpp>
 #include <kin/renderer/render_command.hpp>
+#include <kin/renderer/sprite_instance.hpp>
 
 #include <algorithm>
 #include <array>

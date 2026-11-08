@@ -1,4 +1,6 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/assets/content.hpp>
+#include <kin/renderer/renderer2d.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/anim/anim_format.hpp>

@@ -2,10 +2,6 @@
 
 #include <kin/core/rng.hpp>
 #include <kin/core/types.hpp>
-#include <kin/platform/app.hpp>
-#include <kin/platform/input.hpp>
-#include <kin/platform/window.hpp>
-#include <kin/renderer/renderer2d.hpp>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -13,6 +9,11 @@
 namespace kin {
 
 class JsonValue;
+class App;
+class Input;
+class InputActionContext;
+class Renderer2D;
+class Window;
 
 namespace ui2 { class Context; }
 

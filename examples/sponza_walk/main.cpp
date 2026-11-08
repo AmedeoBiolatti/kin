@@ -25,6 +25,7 @@
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>

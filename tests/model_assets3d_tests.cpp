@@ -13,6 +13,7 @@
 #include <kin/platform/app.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <limits>
 #include <map>

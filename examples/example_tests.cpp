@@ -16,6 +16,8 @@
 #include <filesystem>
 #include <stdexcept>
 #include <kin/platform/app.hpp>
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
 #include <iostream>
 #include <SDL3/SDL.h>
 

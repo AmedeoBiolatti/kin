@@ -1,4 +1,6 @@
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/build.hpp>
 
 #include <kin/assets/texture_file.hpp>
@@ -260,6 +262,22 @@ Renderer2D& Renderer2D::operator=(Renderer2D&&) noexcept = default;
 
 std::string_view Renderer2D::backend_name() const {
     return _backend->name();
+}
+
+IRendererBackend3D* Renderer2D::renderer_3d() {
+    return _backend->renderer_3d();
+}
+
+void Renderer2D::set_overdraw_view(bool enabled) {
+    _backend->set_overdraw_view(enabled);
+}
+
+std::string Renderer2D::pipeline_record() const {
+    return _backend->pipeline_record();
+}
+
+void Renderer2D::prewarm_pipelines(std::string_view record) {
+    _backend->prewarm_pipelines(record);
 }
 
 RendererBackendCapabilities Renderer2D::capabilities() const {

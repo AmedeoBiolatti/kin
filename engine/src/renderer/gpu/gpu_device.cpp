@@ -1,4 +1,5 @@
 #include "gpu_device.hpp"
+#include <kin/platform/window.hpp>
 
 #include "gpu_memory.hpp"
 

@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "../examples/camp_walk/gameplay.hpp"
 #include <kin/platform/app.hpp>
 #include <kin/renderer/renderer2d.hpp>

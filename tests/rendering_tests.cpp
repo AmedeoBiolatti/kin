@@ -1,3 +1,5 @@
+#include <kin/renderer/backend.hpp>
+#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/material.hpp>
 #include <kin/renderer/render_graph.hpp>
 #include <kin/renderer/render_profile.hpp>

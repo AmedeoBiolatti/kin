@@ -307,6 +307,7 @@ if(KIN_ENABLE_PHYSICS)
 endif()
 if(KIN_ENABLE_SCRIPTING)
     target_sources(kin_scripting PRIVATE
+        src/scripting/lua_api_surface.cpp
         src/scripting/lua_l10n.cpp
         src/scripting/lua_paths.cpp
         src/scripting/lua_script.cpp
@@ -319,13 +320,18 @@ if(KIN_ENABLE_SCRIPTING)
 
     target_sources(kin_scripting_scenes PRIVATE
         src/scripting/script_engine.cpp
+        src/scripting/script_scene_api.cpp
+        src/scripting/script_scene_bindings.cpp
         src/scripting/script_reload.cpp
         src/scripting/lua_state_copy.cpp
         src/scripting/lua_values.cpp
         src/scripting/lua_workflows2d.cpp
+        src/scripting/workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp
-        src/scripting/entity_scripts.cpp)
+        src/scripting/entity_scripts.cpp
+        src/scripting/entity_script_bindings.cpp
+        src/scripting/entity_service_bindings.cpp)
     if(KIN_ENABLE_AUDIO)
         target_sources(kin_scripting_scenes PRIVATE src/scripting/lua_audio.cpp)
     endif()
@@ -335,6 +341,7 @@ if(KIN_ENABLE_SCRIPTING)
         target_link_libraries(kin_scripting_scenes PUBLIC kin_physics) # entity scripts' `physics`
     endif()
     kin_enable_release_optimizations(kin_scripting_scenes)
+    kin_configure_scripting_build(kin_scripting_scenes)
     target_link_libraries(kin_engine_components INTERFACE kin_scripting_scenes)
 endif()
 if(KIN_ENABLE_PYTHON)

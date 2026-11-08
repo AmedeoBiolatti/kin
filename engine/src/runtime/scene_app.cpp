@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include "eval_telemetry.hpp"
 #ifdef KIN_EXPERIMENTAL_3D
