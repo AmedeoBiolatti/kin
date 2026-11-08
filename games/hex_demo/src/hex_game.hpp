@@ -1,4 +1,13 @@
 #pragma once
+#include <kin/core/hex.hpp>
+#include <kin/core/json.hpp>
+#include <kin/pathfinding/pathfinding.hpp>
+#include <kin/renderer/renderer2d.hpp>
+#include <kin/ui2/text.hpp>
+#if KIN_HEX_DEMO_BAKED_FONT
+#include "hud_font.hpp"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -9,20 +18,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#if defined(KIN_HEX_CPP_MODULES)
-import kin.runtime;
-#else
-#include <kin/core/hex.hpp>
-#include <kin/core/json.hpp>
-#include <kin/pathfinding/pathfinding.hpp>
-#include <kin/renderer/renderer2d.hpp>
-#include <kin/ui2/text.hpp>
-#endif
-#if KIN_HEX_DEMO_BAKED_FONT
-#include "hud_font.hpp"
-#endif
-
 
 namespace demo {
 namespace {

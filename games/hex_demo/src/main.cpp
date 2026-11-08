@@ -5,15 +5,13 @@
 //   Right click  move the unit         O    odd / even offset
 //   R            reset                 Esc  quit
 
-#include "hex_game.hpp"
-#if !defined(KIN_HEX_CPP_MODULES)
 #include <kin/platform/window.hpp>
+#include "hex_game.hpp"
 #include <kin/platform/input.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <kin/scene/scene.hpp>
 #include <kin/scene/scene_manager.hpp>
-#endif
 
 namespace demo {
 namespace {
