@@ -8,6 +8,16 @@ target_link_libraries(charts_demo PRIVATE
 
 kin_game(charts_demo TITLE "Charts Demo")
 
+# Stable engine APIs used while editing this game's own sources.
+if(KIN_ENABLE_PCH)
+    target_precompile_headers(charts_demo PRIVATE
+        <kin/core/json.hpp>
+        <kin/ui2/charts.hpp>
+        <kin/ui2/context.hpp>
+        <kin/ui2/text.hpp>
+        <kin/ui2/theme.hpp>)
+endif()
+
 target_compile_options(charts_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>

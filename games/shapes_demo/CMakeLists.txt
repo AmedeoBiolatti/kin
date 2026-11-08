@@ -8,6 +8,16 @@ target_link_libraries(shapes_demo PRIVATE
 
 kin_game(shapes_demo TITLE "Shapes Demo")
 
+# Stable engine APIs used while editing this game's own sources.
+if(KIN_ENABLE_PCH)
+    target_precompile_headers(shapes_demo PRIVATE
+        <kin/core/json.hpp>
+        <kin/ecs/render.hpp>
+        <kin/platform/window.hpp>
+        <kin/renderer/svg.hpp>
+        <kin/ui2/text.hpp>)
+endif()
+
 target_compile_options(shapes_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
