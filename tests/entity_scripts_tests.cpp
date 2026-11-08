@@ -14,6 +14,7 @@
 #include <kin/ecs/world.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/scene/scene_asset.hpp>
+#include <kin/ecs/time.hpp>
 #include <kin/scripting/entity_scripts.hpp>
 #include <kin/scripting/lua_script.hpp>
 #include "../engine/src/scripting/entity_scripts_internal.hpp"
@@ -132,6 +133,56 @@ end
     std::string error;
     assert(kin::check_lua_syntax("local x = 1", "fine.lua", error) && error.empty());
     assert(!kin::check_lua_syntax("function (", "bad.lua", error) && error.find("bad.lua:1") != std::string::npos);
+    fs::remove_all(dir);
+}
+
+// The same prefab spawned again while the last is there (a horde): each
+// instance, its children too, named apart (flecs aborts on two the same).
+void test_spawn_many() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_scripts_spawn_test";
+    fs::remove_all(dir);
+    write(dir / "scripts/spawner.lua", R"lua(
+function on_start(self)
+    self.made = {}
+    for i = 1, 3 do self.made[i] = world.spawn("prefabs/foe.kinprefab", i * 10, 0) end
+end
+function on_update(self, dt)
+    for _, foe in ipairs(self.made) do
+        if not foe:alive() or not foe:child("Eye") then error("lost one") end
+    end
+end
+)lua");
+    write(dir / "prefabs/foe.kinprefab",
+          R"({"schema":"kin.prefab/1","id":"foe","root":"foe","entities":[{"id":"foe","name":"Foe","components":{"Transform2D":{}}},)"
+          R"({"id":"eye","name":"Eye","parent":"foe","components":{"Transform2D":{}}}]})");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    world.entity("Spawner").set(kin::ScriptComponent{.asset = {.id = "scripts/spawner.lua"}});
+    kin::Input input;
+    kin::EntityScripts scripts{{.content = dir}};
+    scripts.update(world, input, 0.1f);
+    scripts.update(world, input, 0.1f);
+    for (const auto& [path, problem] : scripts.problems()) {
+        std::fprintf(stderr, "%s: %s\n", path.c_str(), problem.c_str());
+    }
+    assert(scripts.problems().empty());
+    std::vector<std::string> names;
+    world.raw().each([&](flecs::entity e, const kin::Transform2D&) {
+        if (!e.parent()) names.emplace_back(e.name().c_str());
+    });
+    std::ranges::sort(names);
+    assert(names.size() == 3 && std::ranges::adjacent_find(names) == names.end());
+    assert(world.entities().find_by_name("Foe").valid());
+
+    // A Lifetime a prefab file gives is kin's own: update_lifetimes ends it.
+    write(dir / "prefabs/puff.kinprefab",
+          R"({"schema":"kin.prefab/1","id":"puff","root":"puff","entities":[{"id":"puff","name":"Puff","components":{"Transform2D":{},"Lifetime":{"remaining":0.05}}}]})");
+    write(dir / "scripts/puffer.lua", "function on_start(self) world.spawn(\"prefabs/puff.kinprefab\", 0, 0) end\n");
+    world.entity("Puffer").set(kin::ScriptComponent{.asset = {.id = "scripts/puffer.lua"}});
+    scripts.update(world, input, 0.1f);
+    assert(world.entities().find_by_name("Puff").valid() && world.count<kin::Lifetime>() == 1);
+    kin::update_lifetimes(world, 0.1f);
+    assert(world.count<kin::Lifetime>() == 0);
     fs::remove_all(dir);
 }
 
@@ -562,6 +613,7 @@ end
 int main() {
     test_entity_userdata_registry_keys_stay_short();
     test_entity_scripts();
+    test_spawn_many();
     test_player_scripts();
     test_entity_emit();
     test_scene_go();
