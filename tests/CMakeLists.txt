@@ -665,6 +665,12 @@ target_link_libraries(kin_ecs_bench PRIVATE kin::engine)
 # A step of 2D physics around Box2D in a small top-down game's world (update_physics_world).
 add_executable(kin_physics2d_bench EXCLUDE_FROM_ALL physics2d_bench.cpp)
 target_link_libraries(kin_physics2d_bench PRIVATE kin::engine)
+# Lua scripts on many entities (a horde's foes and seeds), per EntityScripts::update.
+# Built on request (ninja kin_entity_scripts_bench), not by CI.
+if(TARGET kin::scripting_scenes AND KIN_ENABLE_PHYSICS)
+    add_executable(kin_entity_scripts_bench EXCLUDE_FROM_ALL entity_scripts_bench.cpp)
+    target_link_libraries(kin_entity_scripts_bench PRIVATE kin::scripting_scenes kin::physics_ecs)
+endif()
 # Python systems against plain C++, per update (docs/python_scripting.md).
 # Built on request (ninja kin_python_bench), not by CI.
 if(KIN_ENABLE_PYTHON)
