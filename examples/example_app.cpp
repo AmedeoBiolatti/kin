@@ -4,6 +4,7 @@
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/l10n/localization.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/platform/user_data.hpp>
 #include <kin/save/save_store.hpp>

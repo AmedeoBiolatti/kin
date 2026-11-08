@@ -29,6 +29,7 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
+#include <kin/platform/window.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <kin/ui2/context.hpp>

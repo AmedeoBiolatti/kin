@@ -9,6 +9,7 @@
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/l10n/localization.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
 
