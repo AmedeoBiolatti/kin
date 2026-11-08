@@ -420,16 +420,35 @@ void Window::hint_frame_rate(f32 fps) {
 #endif
 }
 
-void Window::set_text_input_enabled(bool enabled) {
+void Window::set_text_input_enabled(bool enabled, TextInputKind kind) {
     if (!_handle) {
         return;
     }
-
-    if (enabled) {
-        SDL_StartTextInput(to_sdl_window(_handle));
-    } else {
-        SDL_StopTextInput(to_sdl_window(_handle));
+    SDL_Window* window = to_sdl_window(_handle);
+    if (!enabled) {
+        SDL_StopTextInput(window);
+        return;
     }
+    if (SDL_TextInputActive(window) && kind != _text_input_kind) {
+        SDL_StopTextInput(window); // another keyboard: started again for this kind
+    }
+    _text_input_kind = kind;
+    if (kind == TextInputKind::Text) {
+        SDL_StartTextInput(window);
+        return;
+    }
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_TYPE_NUMBER, SDL_TEXTINPUT_TYPE_NUMBER);
+    SDL_SetBooleanProperty(props, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
+#if defined(__ANDROID__)
+    if (kind == TextInputKind::Decimal) {
+        // Android's InputType: TYPE_CLASS_NUMBER | TYPE_NUMBER_FLAG_DECIMAL (SDL's
+        // number type has no decimal point).
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_ANDROID_INPUTTYPE_NUMBER, 0x00000002 | 0x00002000);
+    }
+#endif
+    SDL_StartTextInputWithProperties(window, props);
+    SDL_DestroyProperties(props);
 }
 
 void Window::set_text_input_area(Rectf area, i32 cursor) {

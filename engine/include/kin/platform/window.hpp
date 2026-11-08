@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/platform/text_input_kind.hpp>
 
 #include <array>
 #include <memory>
@@ -156,8 +157,11 @@ public:
     // nothing. Made again when the system gives the window a new surface.
     void hint_frame_rate(f32 fps);
 
-    void set_text_input_enabled(bool enabled);
+    // Started for `kind`: on a phone, the keyboard for it (started again
+    // when a field of another kind takes it).
+    void set_text_input_enabled(bool enabled, TextInputKind kind = TextInputKind::Text);
     bool text_input_enabled() const;
+    TextInputKind text_input_kind() const { return _text_input_kind; }
     // Where text is being typed, in window coordinates, so an input method
     // puts its candidate list beside it rather than in a corner. `cursor` is
     // the caret's x within `area`.
@@ -185,6 +189,7 @@ private:
     void* _handle = nullptr;
     bool _close_requested = false;
     Rectf _text_input_area{};
+    TextInputKind _text_input_kind = TextInputKind::Text;
     std::array<void*, 11> _cursors{}; // made on first use, one per SystemCursor
     std::unique_ptr<Chrome> _chrome; // read by the system's hit test, from the event thread
     void* _rate_surface = nullptr;   // the surface hint_frame_rate last told, at _rate

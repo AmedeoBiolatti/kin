@@ -852,6 +852,94 @@ void Context::layout_compose() {
         }
     }
 
+    // A finger dragged across a scroll box (ScrollBoxOptions::touch_drag)
+    // moves its content with it, once it has gone 8 units: the innermost box
+    // under where it went down that can move that way takes the drag, and the
+    // press it began is no click then. Let go with a flick, the box glides
+    // on, slowing down, until it stops or reaches an end.
+    {
+        TouchScroll& t = _touch_scroll;
+        const bool held = _input && _input->pointer_is_touch() && pointer_held(MouseButton::Left);
+        const auto scroll_node = [&](Id id) -> const ComposeNode* {
+            for (const ComposeNode& c : _compose) {
+                if (c.kind == ComposeKind::Scroll && c.id == id) {
+                    return &c;
+                }
+            }
+            return nullptr;
+        };
+        if (t.down && !held) {
+            if (!t.dragging || t.velocity.x * t.velocity.x + t.velocity.y * t.velocity.y < 40.0f * 40.0f) {
+                t.target = {};
+            }
+            t.down = t.dragging = false;
+        }
+        if (t.down && !t.dragging) {
+            const Vec2f d{pointer().x - t.origin.x, pointer().y - t.origin.y};
+            if (std::max(std::abs(d.x), std::abs(d.y)) > 8.0f) {
+                const i32 axis = std::abs(d.y) >= std::abs(d.x) ? 0 : 1;
+                const ComposeNode* target = nullptr;
+                for (const ComposeNode& c : _compose) {
+                    if (c.kind != ComposeKind::Scroll || !c.scroll.touch_drag || !(axis == 0 ? c.scroll.vertical : c.scroll.horizontal)) {
+                        continue;
+                    }
+                    const auto record = _compose_records.find(c.id.value);
+                    const ScrollRecord& scroll = _scroll_records[c.id.value];
+                    if (record != _compose_records.end() && contains(record->second.visible, t.origin) &&
+                        along(scroll.content, axis) > along(scroll.viewport, axis) + 0.5f && under_top(c, record->second)) {
+                        target = &c; // pre-order: later is deeper
+                    }
+                }
+                if (target) {
+                    const ScrollRecord& scroll = _scroll_records[target->id.value];
+                    t.dragging = true;
+                    t.target = target->id;
+                    t.grab = pointer();
+                    t.grab_offset = t.last_offset = scroll.offset;
+                    t.velocity = {};
+                    t.y = target->scroll.vertical;
+                    t.x = target->scroll.horizontal;
+                    _state.set_active(make_id(target->id, "touch_scroll"), MouseButton::Left); // the press is the drag's now
+                } else {
+                    t.down = false; // a drag no box takes: the widget under it has it (a slider's)
+                }
+            }
+        }
+        const ComposeNode* target = t.target ? scroll_node(t.target) : nullptr;
+        if (t.target && !target) {
+            t = {}; // the box is gone (another screen)
+        } else if (target && t.dragging) {
+            ScrollRecord& scroll = _scroll_records[t.target.value];
+            const Vec2f p = pointer();
+            Vec2f offset = scroll.offset;
+            if (t.x) offset.x = t.grab_offset.x - (p.x - t.grab.x);
+            if (t.y) offset.y = t.grab_offset.y - (p.y - t.grab.y);
+            if (_dt > 0.0f) {
+                const Vec2f now{(offset.x - t.last_offset.x) / _dt, (offset.y - t.last_offset.y) / _dt};
+                t.velocity = {t.velocity.x * 0.5f + now.x * 0.5f, t.velocity.y * 0.5f + now.y * 0.5f};
+            }
+            t.last_offset = offset;
+            scroll.offset = offset;
+            request_redraw();
+        } else if (target && !t.down) {
+            ScrollRecord& scroll = _scroll_records[t.target.value];
+            const f32 dt = std::min(_dt, 0.05f);
+            scroll.offset.x += t.velocity.x * dt;
+            scroll.offset.y += t.velocity.y * dt;
+            const f32 slow = std::exp(-3.0f * dt);
+            t.velocity = {t.velocity.x * slow, t.velocity.y * slow};
+            const Vec2f end{std::max(0.0f, scroll.content.x - scroll.viewport.x), std::max(0.0f, scroll.content.y - scroll.viewport.y)};
+            const bool at_end = (t.y && (scroll.offset.y <= 0.0f || scroll.offset.y >= end.y)) ||
+                                (t.x && (scroll.offset.x <= 0.0f || scroll.offset.x >= end.x));
+            if (at_end || t.velocity.x * t.velocity.x + t.velocity.y * t.velocity.y < 20.0f * 20.0f) {
+                t.target = {};
+                t.velocity = {};
+            } else {
+                request_redraw();
+            }
+        }
+    }
+
     // Clamp, then move each scroll box's content (outer boxes first, so nested
     // content is moved by both). One that sticks to its end and was there
     // stays there, unless it was scrolled this frame.
