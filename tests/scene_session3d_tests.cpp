@@ -1,4 +1,3 @@
-#include <kin/renderer/backend.hpp>
 #include "result3d_helpers.hpp"
 
 #include <algorithm>
@@ -14,6 +13,7 @@
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>

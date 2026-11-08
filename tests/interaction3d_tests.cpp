@@ -1,4 +1,3 @@
-#include <kin/renderer/backend.hpp>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -6,6 +5,7 @@
 #include <iostream>
 #include <kin/core/instrumentation.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/interaction3d.hpp>
 #include <limits>

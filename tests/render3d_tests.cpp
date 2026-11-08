@@ -1,4 +1,3 @@
-#include <kin/renderer/backend.hpp>
 #include "../engine/src/renderer/gpu/gpu_shadow_cull.hpp"
 #include "../engine/src/renderer/gpu/gpu_shadow_reach.hpp"
 #include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"
@@ -37,6 +36,7 @@
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 #include <limits>

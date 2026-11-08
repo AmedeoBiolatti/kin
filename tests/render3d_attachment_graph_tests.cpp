@@ -1,4 +1,3 @@
-#include <kin/renderer/backend.hpp>
 #include "attachment_graph_shaders.hpp"
 
 #include <array>
@@ -7,6 +6,7 @@
 #include <iostream>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/graph_resources.hpp>
 #include <kin/renderer/renderer2d.hpp>
 using namespace kin;

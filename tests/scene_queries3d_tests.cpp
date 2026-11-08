@@ -1,4 +1,3 @@
-#include <kin/renderer/backend.hpp>
 #include <array>
 #include <cassert>
 #include <chrono>
@@ -7,6 +6,7 @@
 #include <iostream>
 #include <kin/core/instrumentation.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/scene_session3d.hpp>
 #include <thread>

@@ -1,4 +1,3 @@
-#include <kin/renderer/backend.hpp>
 #include "result3d_helpers.hpp"
 #include "skin_fixtures.hpp"
 
@@ -11,6 +10,7 @@
 #include <kin/platform/log.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <stdexcept>
 
