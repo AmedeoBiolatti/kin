@@ -1,0 +1,4523 @@
+{
+  "base": "ac7b57e858a6807289143b960a8078f02235e10b",
+  "compiler": "Clang 21.1.8; libstdc++ 15",
+  "cmake": "4.2.3",
+  "ninja": "1.13.2",
+  "conditions": {
+    "build_type": "Release",
+    "optimization": "-O2",
+    "cpp_standard": 23,
+    "compiler_cache": false,
+    "lto": false,
+    "jobs": 4,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "linker": "GNU BFD 2.46; default linker",
+    "host": "Linux-7.0.0-42-generic-x86_64-with-glibc2.43",
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX"
+  },
+  "profiles": [
+    {
+      "file": "games/charts_demo/src/main.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 2021.89,
+        "Total Frontend": 1018.8,
+        "Total Backend": 979.85,
+        "Total Source": 624.76
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/ui2/charts.hpp",
+          "inclusive_ms": 311.24
+        },
+        {
+          "file": "engine/include/kin/ui2/context.hpp",
+          "inclusive_ms": 250.05
+        },
+        {
+          "file": "engine/include/kin/ui2/widgets.hpp",
+          "inclusive_ms": 237.9
+        },
+        {
+          "file": "engine/include/kin/ui2/hud.hpp",
+          "inclusive_ms": 80.39
+        },
+        {
+          "file": "engine/include/kin/dialogue/dialogue.hpp",
+          "inclusive_ms": 67.3
+        },
+        {
+          "file": "engine/include/kin/core/json.hpp",
+          "inclusive_ms": 63.47
+        },
+        {
+          "file": "engine/include/kin/ui2/layout.hpp",
+          "inclusive_ms": 28.86
+        },
+        {
+          "file": "engine/include/kin/ui2/theme.hpp",
+          "inclusive_ms": 25.25
+        }
+      ]
+    },
+    {
+      "file": "games/text_edit_demo/src/main.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 1524.34,
+        "Total Frontend": 864.21,
+        "Total Backend": 636.85,
+        "Total Source": 540.42
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/ui2/context.hpp",
+          "inclusive_ms": 476.94
+        },
+        {
+          "file": "engine/include/kin/ui2/theme.hpp",
+          "inclusive_ms": 222.03
+        },
+        {
+          "file": "engine/include/kin/ui2/widgets.hpp",
+          "inclusive_ms": 180.78
+        },
+        {
+          "file": "engine/include/kin/ui2/hud.hpp",
+          "inclusive_ms": 77.34
+        },
+        {
+          "file": "engine/include/kin/core/json.hpp",
+          "inclusive_ms": 63.48
+        },
+        {
+          "file": "engine/include/kin/dialogue/dialogue.hpp",
+          "inclusive_ms": 63.29
+        },
+        {
+          "file": "engine/include/kin/ui2/layout.hpp",
+          "inclusive_ms": 34.59
+        },
+        {
+          "file": "engine/include/kin/anim/value.hpp",
+          "inclusive_ms": 29.98
+        }
+      ]
+    },
+    {
+      "file": "games/lighting_demo/src/main.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 1053.75,
+        "Total Backend": 597.14,
+        "Total Frontend": 445.32,
+        "Total Source": 149.56
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/platform/window.hpp",
+          "inclusive_ms": 73.59
+        },
+        {
+          "file": "engine/include/kin/renderer/lighting.hpp",
+          "inclusive_ms": 47.62
+        },
+        {
+          "file": "engine/include/kin/ui2/text.hpp",
+          "inclusive_ms": 18.95
+        },
+        {
+          "file": "engine/include/kin/core/json.hpp",
+          "inclusive_ms": 9.41
+        },
+        {
+          "file": "engine/include/kin/core/bidi.hpp",
+          "inclusive_ms": 7.46
+        },
+        {
+          "file": "engine/include/kin/platform/text_input_kind.hpp",
+          "inclusive_ms": 1.55
+        }
+      ]
+    },
+    {
+      "file": "games/shapes_demo/src/main.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 2035.88,
+        "Total Frontend": 1443.25,
+        "Total Source": 844.59,
+        "Total Backend": 575.48
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/ecs/render.hpp",
+          "inclusive_ms": 754.45
+        },
+        {
+          "file": "engine/include/kin/ecs/component.hpp",
+          "inclusive_ms": 610.98
+        },
+        {
+          "file": "engine/include/kin/ecs/world.hpp",
+          "inclusive_ms": 277.08
+        },
+        {
+          "file": "/home/bamedeo/kin-module-build/prototype/_deps/flecs-src/include/flecs.h",
+          "inclusive_ms": 139.77
+        },
+        {
+          "file": "/home/bamedeo/kin-module-build/prototype/_deps/flecs-src/include/flecs/private/addons.h",
+          "inclusive_ms": 123.51
+        },
+        {
+          "file": "/home/bamedeo/kin-module-build/prototype/_deps/flecs-src/include/flecs/private/../addons/cpp/flecs.hpp",
+          "inclusive_ms": 112.93
+        },
+        {
+          "file": "engine/include/kin/platform/window.hpp",
+          "inclusive_ms": 71.04
+        },
+        {
+          "file": "engine/include/kin/renderer/sprite_catalog.hpp",
+          "inclusive_ms": 62.05
+        }
+      ]
+    },
+    {
+      "file": "games/isometric_demo/src/main.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 869.55,
+        "Total Backend": 520.17,
+        "Total Frontend": 339.6,
+        "Total Source": 68.24
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/platform/window.hpp",
+          "inclusive_ms": 67.2
+        },
+        {
+          "file": "engine/include/kin/platform/text_input_kind.hpp",
+          "inclusive_ms": 1.44
+        }
+      ]
+    },
+    {
+      "file": "games/ecs_parallel_bench/src/main.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 5218.77,
+        "Total Backend": 3236.22,
+        "Total Frontend": 1961.47,
+        "Total Source": 941.24
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/ecs/component.hpp",
+          "inclusive_ms": 592.34
+        },
+        {
+          "file": "engine/include/kin/ecs/world.hpp",
+          "inclusive_ms": 265.27
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/chrono",
+          "inclusive_ms": 159.03
+        },
+        {
+          "file": "engine/include/kin/ecs/system.hpp",
+          "inclusive_ms": 135.18
+        },
+        {
+          "file": "/home/bamedeo/kin-module-build/prototype/_deps/flecs-src/include/flecs.h",
+          "inclusive_ms": 132.29
+        },
+        {
+          "file": "/home/bamedeo/kin-module-build/prototype/_deps/flecs-src/include/flecs/private/addons.h",
+          "inclusive_ms": 117.23
+        },
+        {
+          "file": "/home/bamedeo/kin-module-build/prototype/_deps/flecs-src/include/flecs/private/../addons/cpp/flecs.hpp",
+          "inclusive_ms": 108.53
+        },
+        {
+          "file": "engine/include/kin/core/jobs.hpp",
+          "inclusive_ms": 90.96
+        }
+      ]
+    },
+    {
+      "file": "engine/src/renderer/renderer2d.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 3198.65,
+        "Total Frontend": 1858.04,
+        "Total Backend": 1311.23,
+        "Total Source": 1121.81
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/renderer/renderer2d.hpp",
+          "inclusive_ms": 692.26
+        },
+        {
+          "file": "engine/include/kin/renderer/color_grading.hpp",
+          "inclusive_ms": 345.87
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/filesystem",
+          "inclusive_ms": 319.58
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/bits/fs_path.h",
+          "inclusive_ms": 276.97
+        },
+        {
+          "file": "engine/src/renderer/gpu/gpu_renderer2d_backend.hpp",
+          "inclusive_ms": 243.41
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/iomanip",
+          "inclusive_ms": 194.29
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/bits/quoted_string.h",
+          "inclusive_ms": 191.55
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/sstream",
+          "inclusive_ms": 190.97
+        }
+      ]
+    },
+    {
+      "file": "engine/src/ui2/widgets_editor.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 2610.6,
+        "Total Frontend": 1643.16,
+        "Total Source": 1160.43,
+        "Total Backend": 953.98
+      },
+      "headers": [
+        {
+          "file": "engine/src/ui2/widget_chunk_preamble.hpp",
+          "inclusive_ms": 1160.43
+        },
+        {
+          "file": "engine/include/kin/ui2/widgets.hpp",
+          "inclusive_ms": 663.99
+        },
+        {
+          "file": "engine/include/kin/ui2/context.hpp",
+          "inclusive_ms": 489.41
+        },
+        {
+          "file": "engine/include/kin/ui2/state.hpp",
+          "inclusive_ms": 416.51
+        },
+        {
+          "file": "engine/include/kin/platform/input.hpp",
+          "inclusive_ms": 414.05
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/filesystem",
+          "inclusive_ms": 322.34
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/bits/fs_path.h",
+          "inclusive_ms": 280.75
+        },
+        {
+          "file": "engine/include/kin/renderer/renderer2d.hpp",
+          "inclusive_ms": 277.88
+        }
+      ]
+    },
+    {
+      "file": "engine/src/platform/services_catalog.cpp",
+      "totals_ms": {
+        "Total ExecuteCompiler": 1766.99,
+        "Total Frontend": 1014.75,
+        "Total Backend": 744.27,
+        "Total Source": 522.73
+      },
+      "headers": [
+        {
+          "file": "engine/include/kin/platform/services_catalog.hpp",
+          "inclusive_ms": 470.5
+        },
+        {
+          "file": "engine/include/kin/platform/services.hpp",
+          "inclusive_ms": 433.48
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/filesystem",
+          "inclusive_ms": 346.41
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/bits/fs_path.h",
+          "inclusive_ms": 298.2
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/iomanip",
+          "inclusive_ms": 207.33
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/bits/quoted_string.h",
+          "inclusive_ms": 204.64
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/sstream",
+          "inclusive_ms": 204.06
+        },
+        {
+          "file": "/usr/lib/gcc/x86_64-linux-gnu/15/../../../../include/c++/15/istream",
+          "inclusive_ms": 194.23
+        }
+      ]
+    }
+  ],
+  "engine": {
+    "affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "variants": {
+      "baseline": [],
+      "filesystem": [
+        "filesystem"
+      ],
+      "filesystem-chrono": [
+        "filesystem",
+        "chrono"
+      ]
+    },
+    "orders": [
+      [
+        "baseline",
+        "filesystem",
+        "filesystem-chrono"
+      ],
+      [
+        "filesystem",
+        "filesystem-chrono",
+        "baseline"
+      ],
+      [
+        "filesystem-chrono",
+        "baseline",
+        "filesystem"
+      ],
+      [
+        "baseline",
+        "filesystem-chrono",
+        "filesystem"
+      ],
+      [
+        "filesystem-chrono",
+        "filesystem",
+        "baseline"
+      ],
+      [
+        "filesystem",
+        "baseline",
+        "filesystem-chrono"
+      ]
+    ],
+    "scope": "real engine source to object; no final link; PCHs built separately with target compiler flags; no source or build inputs modified",
+    "preparation": [
+      {
+        "target": "/home/bamedeo/kin-module-build/prototype/engine/CMakeFiles/kin_engine.dir",
+        "variant": "baseline",
+        "name": "baseline-kin_engine.dir-prepare",
+        "wall_s": 1.2936021220084513,
+        "user_s": 1.2,
+        "system_s": 0.08,
+        "max_process_rss_kib": 207952
+      },
+      {
+        "target": "/home/bamedeo/kin-module-build/prototype/engine/CMakeFiles/kin_engine.dir",
+        "variant": "filesystem",
+        "name": "filesystem-kin_engine.dir-prepare",
+        "wall_s": 1.9380507559981197,
+        "user_s": 1.8,
+        "system_s": 0.13,
+        "max_process_rss_kib": 247192
+      },
+      {
+        "target": "/home/bamedeo/kin-module-build/prototype/engine/CMakeFiles/kin_engine.dir",
+        "variant": "filesystem-chrono",
+        "name": "filesystem-chrono-kin_engine.dir-prepare",
+        "wall_s": 2.4588411299919244,
+        "user_s": 2.3,
+        "system_s": 0.15,
+        "max_process_rss_kib": 263116
+      }
+    ],
+    "summary": {
+      "baseline": {
+        "renderer2d": {
+          "wall_s": 3.0793939545037574,
+          "cpu_s": 3.0650000000000004
+        },
+        "widgets_editor": {
+          "wall_s": 2.578014003505814,
+          "cpu_s": 2.545
+        },
+        "services_catalog": {
+          "wall_s": 1.8035016285066376,
+          "cpu_s": 1.795
+        }
+      },
+      "filesystem": {
+        "renderer2d": {
+          "wall_s": 2.7719642165029654,
+          "cpu_s": 2.76
+        },
+        "widgets_editor": {
+          "wall_s": 2.0929570574953686,
+          "cpu_s": 2.08
+        },
+        "services_catalog": {
+          "wall_s": 1.2688105220004218,
+          "cpu_s": 1.255
+        }
+      },
+      "filesystem-chrono": {
+        "renderer2d": {
+          "wall_s": 2.7235158375042374,
+          "cpu_s": 2.705
+        },
+        "widgets_editor": {
+          "wall_s": 2.107683171496319,
+          "cpu_s": 2.09
+        },
+        "services_catalog": {
+          "wall_s": 1.260916603001533,
+          "cpu_s": 1.25
+        }
+      }
+    },
+    "results": [
+      {
+        "name": "baseline-renderer2d-r0",
+        "wall_s": 3.3322098320059013,
+        "user_s": 3.2,
+        "system_s": 0.09,
+        "max_process_rss_kib": 268728
+      },
+      {
+        "name": "baseline-widgets_editor-r0",
+        "wall_s": 2.6485458760143956,
+        "user_s": 2.53,
+        "system_s": 0.07,
+        "max_process_rss_kib": 254524
+      },
+      {
+        "name": "baseline-services_catalog-r0",
+        "wall_s": 1.66664964199299,
+        "user_s": 1.6,
+        "system_s": 0.06,
+        "max_process_rss_kib": 194100
+      },
+      {
+        "name": "filesystem-renderer2d-r0",
+        "wall_s": 2.5873008479975397,
+        "user_s": 2.51,
+        "system_s": 0.07,
+        "max_process_rss_kib": 244428
+      },
+      {
+        "name": "filesystem-widgets_editor-r0",
+        "wall_s": 2.0875821270019514,
+        "user_s": 2.02,
+        "system_s": 0.05,
+        "max_process_rss_kib": 229576
+      },
+      {
+        "name": "filesystem-services_catalog-r0",
+        "wall_s": 1.139977620987338,
+        "user_s": 1.09,
+        "system_s": 0.03,
+        "max_process_rss_kib": 177008
+      },
+      {
+        "name": "filesystem-chrono-renderer2d-r0",
+        "wall_s": 2.6332523739984026,
+        "user_s": 2.56,
+        "system_s": 0.06,
+        "max_process_rss_kib": 247228
+      },
+      {
+        "name": "filesystem-chrono-widgets_editor-r0",
+        "wall_s": 2.0839498510031262,
+        "user_s": 2.01,
+        "system_s": 0.06,
+        "max_process_rss_kib": 231868
+      },
+      {
+        "name": "filesystem-chrono-services_catalog-r0",
+        "wall_s": 1.284038886995404,
+        "user_s": 1.25,
+        "system_s": 0.02,
+        "max_process_rss_kib": 179332
+      },
+      {
+        "name": "filesystem-renderer2d-r1",
+        "wall_s": 2.628634744003648,
+        "user_s": 2.54,
+        "system_s": 0.07,
+        "max_process_rss_kib": 244256
+      },
+      {
+        "name": "filesystem-widgets_editor-r1",
+        "wall_s": 2.059044007008197,
+        "user_s": 1.97,
+        "system_s": 0.07,
+        "max_process_rss_kib": 229608
+      },
+      {
+        "name": "filesystem-services_catalog-r1",
+        "wall_s": 1.2503547679953044,
+        "user_s": 1.2,
+        "system_s": 0.04,
+        "max_process_rss_kib": 176188
+      },
+      {
+        "name": "filesystem-chrono-renderer2d-r1",
+        "wall_s": 2.5812272949988255,
+        "user_s": 2.49,
+        "system_s": 0.08,
+        "max_process_rss_kib": 246992
+      },
+      {
+        "name": "filesystem-chrono-widgets_editor-r1",
+        "wall_s": 2.0530185810057446,
+        "user_s": 1.98,
+        "system_s": 0.06,
+        "max_process_rss_kib": 231600
+      },
+      {
+        "name": "filesystem-chrono-services_catalog-r1",
+        "wall_s": 1.2198685869952897,
+        "user_s": 1.18,
+        "system_s": 0.03,
+        "max_process_rss_kib": 179072
+      },
+      {
+        "name": "baseline-renderer2d-r1",
+        "wall_s": 2.89866325201001,
+        "user_s": 2.81,
+        "system_s": 0.08,
+        "max_process_rss_kib": 268432
+      },
+      {
+        "name": "baseline-widgets_editor-r1",
+        "wall_s": 2.319470005008043,
+        "user_s": 2.25,
+        "system_s": 0.06,
+        "max_process_rss_kib": 254984
+      },
+      {
+        "name": "baseline-services_catalog-r1",
+        "wall_s": 1.6071513510105433,
+        "user_s": 1.55,
+        "system_s": 0.05,
+        "max_process_rss_kib": 194132
+      },
+      {
+        "name": "filesystem-chrono-renderer2d-r2",
+        "wall_s": 2.6766490770096425,
+        "user_s": 2.59,
+        "system_s": 0.07,
+        "max_process_rss_kib": 247144
+      },
+      {
+        "name": "filesystem-chrono-widgets_editor-r2",
+        "wall_s": 2.0594308849977097,
+        "user_s": 1.98,
+        "system_s": 0.06,
+        "max_process_rss_kib": 231944
+      },
+      {
+        "name": "filesystem-chrono-services_catalog-r2",
+        "wall_s": 1.1630468560033478,
+        "user_s": 1.11,
+        "system_s": 0.04,
+        "max_process_rss_kib": 178808
+      },
+      {
+        "name": "baseline-renderer2d-r2",
+        "wall_s": 2.85318617100711,
+        "user_s": 2.75,
+        "system_s": 0.09,
+        "max_process_rss_kib": 268436
+      },
+      {
+        "name": "baseline-widgets_editor-r2",
+        "wall_s": 2.507482130997232,
+        "user_s": 2.41,
+        "system_s": 0.08,
+        "max_process_rss_kib": 254784
+      },
+      {
+        "name": "baseline-services_catalog-r2",
+        "wall_s": 1.7800917770073283,
+        "user_s": 1.72,
+        "system_s": 0.05,
+        "max_process_rss_kib": 194292
+      },
+      {
+        "name": "filesystem-renderer2d-r2",
+        "wall_s": 4.126285773993004,
+        "user_s": 3.97,
+        "system_s": 0.14,
+        "max_process_rss_kib": 244248
+      },
+      {
+        "name": "filesystem-widgets_editor-r2",
+        "wall_s": 2.0549567979905987,
+        "user_s": 1.98,
+        "system_s": 0.06,
+        "max_process_rss_kib": 228364
+      },
+      {
+        "name": "filesystem-services_catalog-r2",
+        "wall_s": 1.2381641090032645,
+        "user_s": 1.19,
+        "system_s": 0.03,
+        "max_process_rss_kib": 175824
+      },
+      {
+        "name": "baseline-renderer2d-r3",
+        "wall_s": 3.0682933620119,
+        "user_s": 2.97,
+        "system_s": 0.08,
+        "max_process_rss_kib": 267472
+      },
+      {
+        "name": "baseline-widgets_editor-r3",
+        "wall_s": 3.071405563998269,
+        "user_s": 2.94,
+        "system_s": 0.09,
+        "max_process_rss_kib": 254012
+      },
+      {
+        "name": "baseline-services_catalog-r3",
+        "wall_s": 3.0105193320050603,
+        "user_s": 2.89,
+        "system_s": 0.08,
+        "max_process_rss_kib": 192304
+      },
+      {
+        "name": "filesystem-chrono-renderer2d-r3",
+        "wall_s": 2.8918365810095565,
+        "user_s": 2.79,
+        "system_s": 0.09,
+        "max_process_rss_kib": 246500
+      },
+      {
+        "name": "filesystem-chrono-widgets_editor-r3",
+        "wall_s": 2.1527062259992817,
+        "user_s": 2.08,
+        "system_s": 0.06,
+        "max_process_rss_kib": 231364
+      },
+      {
+        "name": "filesystem-chrono-services_catalog-r3",
+        "wall_s": 1.307336033001775,
+        "user_s": 1.26,
+        "system_s": 0.04,
+        "max_process_rss_kib": 178464
+      },
+      {
+        "name": "filesystem-renderer2d-r3",
+        "wall_s": 2.9026649150036974,
+        "user_s": 2.81,
+        "system_s": 0.08,
+        "max_process_rss_kib": 243160
+      },
+      {
+        "name": "filesystem-widgets_editor-r3",
+        "wall_s": 2.2542718990007415,
+        "user_s": 2.17,
+        "system_s": 0.07,
+        "max_process_rss_kib": 227712
+      },
+      {
+        "name": "filesystem-services_catalog-r3",
+        "wall_s": 1.6940568730060477,
+        "user_s": 1.64,
+        "system_s": 0.04,
+        "max_process_rss_kib": 175668
+      },
+      {
+        "name": "filesystem-chrono-renderer2d-r4",
+        "wall_s": 3.1472380140039604,
+        "user_s": 3.04,
+        "system_s": 0.09,
+        "max_process_rss_kib": 246488
+      },
+      {
+        "name": "filesystem-chrono-widgets_editor-r4",
+        "wall_s": 2.2075817589939106,
+        "user_s": 2.12,
+        "system_s": 0.07,
+        "max_process_rss_kib": 230988
+      },
+      {
+        "name": "filesystem-chrono-services_catalog-r4",
+        "wall_s": 1.2846127070079092,
+        "user_s": 1.25,
+        "system_s": 0.03,
+        "max_process_rss_kib": 178464
+      },
+      {
+        "name": "filesystem-renderer2d-r4",
+        "wall_s": 2.6412635180022335,
+        "user_s": 2.56,
+        "system_s": 0.07,
+        "max_process_rss_kib": 242816
+      },
+      {
+        "name": "filesystem-widgets_editor-r4",
+        "wall_s": 2.098331987988786,
+        "user_s": 2.02,
+        "system_s": 0.07,
+        "max_process_rss_kib": 228276
+      },
+      {
+        "name": "filesystem-services_catalog-r4",
+        "wall_s": 1.380154461003258,
+        "user_s": 1.32,
+        "system_s": 0.04,
+        "max_process_rss_kib": 175304
+      },
+      {
+        "name": "baseline-renderer2d-r4",
+        "wall_s": 3.0904945469956147,
+        "user_s": 3.0,
+        "system_s": 0.08,
+        "max_process_rss_kib": 267652
+      },
+      {
+        "name": "baseline-widgets_editor-r4",
+        "wall_s": 2.5062710299971513,
+        "user_s": 2.41,
+        "system_s": 0.08,
+        "max_process_rss_kib": 253632
+      },
+      {
+        "name": "baseline-services_catalog-r4",
+        "wall_s": 1.8561019670014502,
+        "user_s": 1.76,
+        "system_s": 0.08,
+        "max_process_rss_kib": 192664
+      },
+      {
+        "name": "filesystem-renderer2d-r5",
+        "wall_s": 3.0213587829930475,
+        "user_s": 2.84,
+        "system_s": 0.13,
+        "max_process_rss_kib": 242568
+      },
+      {
+        "name": "filesystem-widgets_editor-r5",
+        "wall_s": 2.567909496006905,
+        "user_s": 2.3,
+        "system_s": 0.2,
+        "max_process_rss_kib": 227376
+      },
+      {
+        "name": "filesystem-services_catalog-r5",
+        "wall_s": 1.2872662760055391,
+        "user_s": 1.22,
+        "system_s": 0.05,
+        "max_process_rss_kib": 174740
+      },
+      {
+        "name": "baseline-renderer2d-r5",
+        "wall_s": 3.1220788190112216,
+        "user_s": 3.02,
+        "system_s": 0.08,
+        "max_process_rss_kib": 267268
+      },
+      {
+        "name": "baseline-widgets_editor-r5",
+        "wall_s": 2.881311552991974,
+        "user_s": 2.77,
+        "system_s": 0.09,
+        "max_process_rss_kib": 253544
+      },
+      {
+        "name": "baseline-services_catalog-r5",
+        "wall_s": 1.826911480005947,
+        "user_s": 1.75,
+        "system_s": 0.07,
+        "max_process_rss_kib": 192868
+      },
+      {
+        "name": "filesystem-chrono-renderer2d-r5",
+        "wall_s": 2.7703825979988324,
+        "user_s": 2.68,
+        "system_s": 0.07,
+        "max_process_rss_kib": 245224
+      },
+      {
+        "name": "filesystem-chrono-widgets_editor-r5",
+        "wall_s": 2.131416491989512,
+        "user_s": 2.05,
+        "system_s": 0.06,
+        "max_process_rss_kib": 229744
+      },
+      {
+        "name": "filesystem-chrono-services_catalog-r5",
+        "wall_s": 1.2377943190076621,
+        "user_s": 1.2,
+        "system_s": 0.03,
+        "max_process_rss_kib": 177016
+      }
+    ]
+  },
+  "games": {
+    "affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "api": {
+      "charts_demo": [
+        "kin/core/json.hpp",
+        "kin/platform/input.hpp",
+        "kin/renderer/renderer2d.hpp",
+        "kin/runtime/game_info.hpp",
+        "kin/runtime/scene_app.hpp",
+        "kin/scene/scene.hpp",
+        "kin/scene/scene_manager.hpp",
+        "kin/ui2/charts.hpp",
+        "kin/ui2/context.hpp",
+        "kin/ui2/text.hpp",
+        "kin/ui2/theme.hpp"
+      ],
+      "text_edit_demo": [
+        "kin/core/json.hpp",
+        "kin/platform/input.hpp",
+        "kin/renderer/renderer2d.hpp",
+        "kin/runtime/game_info.hpp",
+        "kin/runtime/scene_app.hpp",
+        "kin/scene/scene.hpp",
+        "kin/scene/scene_manager.hpp",
+        "kin/ui2/context.hpp",
+        "kin/ui2/text.hpp",
+        "kin/ui2/widgets.hpp"
+      ],
+      "shapes_demo": [
+        "kin/core/json.hpp",
+        "kin/ecs/render.hpp",
+        "kin/platform/input.hpp",
+        "kin/platform/window.hpp",
+        "kin/renderer/renderer2d.hpp",
+        "kin/renderer/svg.hpp",
+        "kin/runtime/game_info.hpp",
+        "kin/runtime/scene_app.hpp",
+        "kin/scene/scene.hpp",
+        "kin/scene/scene_manager.hpp",
+        "kin/ui2/text.hpp"
+      ],
+      "lighting_demo": [
+        "kin/core/json.hpp",
+        "kin/platform/input.hpp",
+        "kin/platform/window.hpp",
+        "kin/renderer/color_grading.hpp",
+        "kin/renderer/lighting.hpp",
+        "kin/renderer/renderer2d.hpp",
+        "kin/runtime/game_info.hpp",
+        "kin/runtime/scene_app.hpp",
+        "kin/scene/scene.hpp",
+        "kin/scene/scene_manager.hpp",
+        "kin/ui2/text.hpp"
+      ],
+      "ecs_parallel_bench": [
+        "kin/core/json.hpp",
+        "kin/ecs/component.hpp",
+        "kin/ecs/system.hpp"
+      ],
+      "isometric_demo": [
+        "kin/core/types.hpp",
+        "kin/platform/input.hpp",
+        "kin/platform/window.hpp",
+        "kin/renderer/color.hpp",
+        "kin/renderer/renderer2d.hpp",
+        "kin/renderer/shader.hpp",
+        "kin/runtime/game_info.hpp",
+        "kin/runtime/windowed_app.hpp"
+      ]
+    },
+    "standard": [
+      "algorithm",
+      "array",
+      "cmath",
+      "cstdint",
+      "functional",
+      "memory",
+      "optional",
+      "span",
+      "string",
+      "string_view",
+      "unordered_map",
+      "utility",
+      "vector"
+    ],
+    "summary": {
+      "baseline": {
+        "charts_demo": {
+          "warm": 2.8513509719923604,
+          "noop": 0.06261237599392189,
+          "cold": 4.596105910997721
+        },
+        "text_edit_demo": {
+          "warm": 2.0646372249975684,
+          "noop": 0.06187578949902672,
+          "cold": 3.9237994529976277
+        },
+        "shapes_demo": {
+          "warm": 2.609004031502991,
+          "noop": 0.06185364249540726,
+          "cold": 5.297877869990771
+        },
+        "lighting_demo": {
+          "warm": 1.567194045492215,
+          "noop": 0.05617346699727932,
+          "cold": 3.636414100008551
+        },
+        "ecs_parallel_bench": {
+          "warm": 5.779385927504336,
+          "noop": 0.059064519497042056,
+          "cold": 7.874762542996905
+        },
+        "isometric_demo": {
+          "warm": 1.1870154265052406,
+          "noop": 0.06196554650523467,
+          "cold": 3.802905764998286
+        }
+      },
+      "targeted": {
+        "charts_demo": {
+          "warm": 2.03854394100199,
+          "noop": 0.058325904996308964,
+          "cold": 4.674911519003217
+        },
+        "text_edit_demo": {
+          "warm": 1.4307597925071605,
+          "noop": 0.057989708497188985,
+          "cold": 4.596743433998199
+        },
+        "shapes_demo": {
+          "warm": 1.7001173014941742,
+          "noop": 0.06311657600599574,
+          "cold": 4.949316085010651
+        },
+        "lighting_demo": {
+          "warm": 1.4968855080005596,
+          "noop": 0.05703101849212544,
+          "cold": 3.764783386999625
+        },
+        "ecs_parallel_bench": {
+          "warm": 4.949905979003233,
+          "noop": 0.057549796998500824,
+          "cold": 8.059827634002431
+        },
+        "isometric_demo": {
+          "warm": 1.1650009185032104,
+          "noop": 0.06403503250476206,
+          "cold": 3.653914601993165
+        }
+      }
+    },
+    "results": [
+      {
+        "name": "baseline-charts_demo-warm-r0",
+        "wall_s": 2.8502872419921914,
+        "load_before": [
+          8.6640625,
+          6.06005859375,
+          4.4365234375
+        ],
+        "load_after": [
+          8.53076171875,
+          6.07568359375,
+          4.45068359375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.37,
+        "system_s": 0.31,
+        "max_process_rss_kib": 225392
+      },
+      {
+        "name": "baseline-charts_demo-noop-r0",
+        "wall_s": 0.06204523399355821,
+        "load_before": [
+          8.53076171875,
+          6.07568359375,
+          4.45068359375
+        ],
+        "load_after": [
+          8.53076171875,
+          6.07568359375,
+          4.45068359375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20512
+      },
+      {
+        "name": "baseline-charts_demo-cold-r0",
+        "wall_s": 4.596105910997721,
+        "load_before": [
+          8.53076171875,
+          6.07568359375,
+          4.45068359375
+        ],
+        "load_after": [
+          8.48779296875,
+          6.10791015625,
+          4.47021484375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.15,
+        "system_s": 0.41,
+        "max_process_rss_kib": 284464
+      },
+      {
+        "name": "baseline-text_edit_demo-warm-r0",
+        "wall_s": 2.113134914994589,
+        "load_before": [
+          8.48779296875,
+          6.10791015625,
+          4.47021484375
+        ],
+        "load_after": [
+          8.48779296875,
+          6.10791015625,
+          4.47021484375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.8,
+        "system_s": 0.24,
+        "max_process_rss_kib": 207204
+      },
+      {
+        "name": "baseline-text_edit_demo-noop-r0",
+        "wall_s": 0.05635162100952584,
+        "load_before": [
+          8.48779296875,
+          6.10791015625,
+          4.47021484375
+        ],
+        "load_after": [
+          8.48779296875,
+          6.10791015625,
+          4.47021484375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20236
+      },
+      {
+        "name": "baseline-text_edit_demo-cold-r0",
+        "wall_s": 3.8830450649984414,
+        "load_before": [
+          8.48779296875,
+          6.10791015625,
+          4.47021484375
+        ],
+        "load_after": [
+          8.44873046875,
+          6.1396484375,
+          4.4892578125
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.5,
+        "system_s": 0.37,
+        "max_process_rss_kib": 284808
+      },
+      {
+        "name": "baseline-shapes_demo-warm-r0",
+        "wall_s": 2.5737447480059927,
+        "load_before": [
+          8.44873046875,
+          6.1396484375,
+          4.4892578125
+        ],
+        "load_after": [
+          8.44873046875,
+          6.1396484375,
+          4.4892578125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.24,
+        "system_s": 0.27,
+        "max_process_rss_kib": 251684
+      },
+      {
+        "name": "baseline-shapes_demo-noop-r0",
+        "wall_s": 0.054188922003959306,
+        "load_before": [
+          8.44873046875,
+          6.1396484375,
+          4.4892578125
+        ],
+        "load_after": [
+          8.33251953125,
+          6.154296875,
+          4.5029296875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20472
+      },
+      {
+        "name": "baseline-shapes_demo-cold-r0",
+        "wall_s": 4.356030958995689,
+        "load_before": [
+          8.33251953125,
+          6.154296875,
+          4.5029296875
+        ],
+        "load_after": [
+          8.33251953125,
+          6.154296875,
+          4.5029296875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.92,
+        "system_s": 0.42,
+        "max_process_rss_kib": 284832
+      },
+      {
+        "name": "baseline-lighting_demo-warm-r0",
+        "wall_s": 1.5217017459945055,
+        "load_before": [
+          8.33251953125,
+          6.154296875,
+          4.5029296875
+        ],
+        "load_after": [
+          8.2255859375,
+          6.16845703125,
+          4.5166015625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.26,
+        "system_s": 0.2,
+        "max_process_rss_kib": 177552
+      },
+      {
+        "name": "baseline-lighting_demo-noop-r0",
+        "wall_s": 0.05507912200118881,
+        "load_before": [
+          8.2255859375,
+          6.16845703125,
+          4.5166015625
+        ],
+        "load_after": [
+          8.2255859375,
+          6.16845703125,
+          4.5166015625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20416
+      },
+      {
+        "name": "baseline-lighting_demo-cold-r0",
+        "wall_s": 3.636414100008551,
+        "load_before": [
+          8.2255859375,
+          6.16845703125,
+          4.5166015625
+        ],
+        "load_after": [
+          8.2255859375,
+          6.16845703125,
+          4.5166015625
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.22,
+        "system_s": 0.4,
+        "max_process_rss_kib": 284820
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-warm-r0",
+        "wall_s": 5.744312424998498,
+        "load_before": [
+          8.2255859375,
+          6.16845703125,
+          4.5166015625
+        ],
+        "load_after": [
+          8.037109375,
+          6.1962890625,
+          4.5439453125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 5.49,
+        "system_s": 0.19,
+        "max_process_rss_kib": 286764
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-noop-r0",
+        "wall_s": 0.058123292998061515,
+        "load_before": [
+          8.037109375,
+          6.1962890625,
+          4.5439453125
+        ],
+        "load_after": [
+          8.037109375,
+          6.1962890625,
+          4.5439453125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 19920
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-cold-r0",
+        "wall_s": 7.888080782999168,
+        "load_before": [
+          8.037109375,
+          6.1962890625,
+          4.5439453125
+        ],
+        "load_after": [
+          7.87353515625,
+          6.19287109375,
+          4.55224609375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 7.5,
+        "system_s": 0.35,
+        "max_process_rss_kib": 287852
+      },
+      {
+        "name": "baseline-isometric_demo-warm-r0",
+        "wall_s": 1.2441493200021796,
+        "load_before": [
+          7.87353515625,
+          6.19287109375,
+          4.55224609375
+        ],
+        "load_after": [
+          7.87353515625,
+          6.19287109375,
+          4.55224609375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.05,
+        "system_s": 0.14,
+        "max_process_rss_kib": 169044
+      },
+      {
+        "name": "baseline-isometric_demo-noop-r0",
+        "wall_s": 0.06268341699615121,
+        "load_before": [
+          7.87353515625,
+          6.19287109375,
+          4.55224609375
+        ],
+        "load_after": [
+          7.87353515625,
+          6.19287109375,
+          4.55224609375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20384
+      },
+      {
+        "name": "baseline-isometric_demo-cold-r0",
+        "wall_s": 4.23060718200577,
+        "load_before": [
+          7.87353515625,
+          6.19287109375,
+          4.55224609375
+        ],
+        "load_after": [
+          7.9638671875,
+          6.23974609375,
+          4.576171875
+        ],
+        "cpp_compiles": 4,
+        "links": 1,
+        "user_s": 4.21,
+        "system_s": 0.51,
+        "max_process_rss_kib": 283232
+      },
+      {
+        "name": "targeted-charts_demo-warm-r0",
+        "wall_s": 2.1101702129963087,
+        "load_before": [
+          10.828125,
+          7.05419921875,
+          4.88330078125
+        ],
+        "load_after": [
+          10.76171875,
+          7.103515625,
+          4.9111328125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.84,
+        "system_s": 0.24,
+        "max_process_rss_kib": 204284
+      },
+      {
+        "name": "targeted-charts_demo-noop-r0",
+        "wall_s": 0.0596779399929801,
+        "load_before": [
+          10.76171875,
+          7.103515625,
+          4.9111328125
+        ],
+        "load_after": [
+          10.76171875,
+          7.103515625,
+          4.9111328125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20124
+      },
+      {
+        "name": "targeted-charts_demo-cold-r0",
+        "wall_s": 4.7449365420034155,
+        "load_before": [
+          10.76171875,
+          7.103515625,
+          4.9111328125
+        ],
+        "load_after": [
+          10.38037109375,
+          7.0849609375,
+          4.9169921875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.33,
+        "system_s": 0.39,
+        "max_process_rss_kib": 349176
+      },
+      {
+        "name": "targeted-text_edit_demo-warm-r0",
+        "wall_s": 1.387670166004682,
+        "load_before": [
+          10.38037109375,
+          7.0849609375,
+          4.9169921875
+        ],
+        "load_after": [
+          10.38037109375,
+          7.0849609375,
+          4.9169921875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.13,
+        "system_s": 0.24,
+        "max_process_rss_kib": 190520
+      },
+      {
+        "name": "targeted-text_edit_demo-noop-r0",
+        "wall_s": 0.06263125900295563,
+        "load_before": [
+          10.38037109375,
+          7.0849609375,
+          4.9169921875
+        ],
+        "load_after": [
+          10.38037109375,
+          7.0849609375,
+          4.9169921875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20136
+      },
+      {
+        "name": "targeted-text_edit_demo-cold-r0",
+        "wall_s": 4.988569558001473,
+        "load_before": [
+          10.38037109375,
+          7.0849609375,
+          4.9169921875
+        ],
+        "load_after": [
+          10.029296875,
+          7.06689453125,
+          4.9228515625
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.26,
+        "system_s": 0.62,
+        "max_process_rss_kib": 346016
+      },
+      {
+        "name": "targeted-shapes_demo-warm-r0",
+        "wall_s": 1.694457274992601,
+        "load_before": [
+          10.029296875,
+          7.06689453125,
+          4.9228515625
+        ],
+        "load_after": [
+          9.70654296875,
+          7.048828125,
+          4.9287109375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.4,
+        "system_s": 0.26,
+        "max_process_rss_kib": 205840
+      },
+      {
+        "name": "targeted-shapes_demo-noop-r0",
+        "wall_s": 0.06326727800478693,
+        "load_before": [
+          9.70654296875,
+          7.048828125,
+          4.9287109375
+        ],
+        "load_after": [
+          9.70654296875,
+          7.048828125,
+          4.9287109375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20168
+      },
+      {
+        "name": "targeted-shapes_demo-cold-r0",
+        "wall_s": 4.949316085010651,
+        "load_before": [
+          9.70654296875,
+          7.048828125,
+          4.9287109375
+        ],
+        "load_after": [
+          9.40966796875,
+          7.03125,
+          4.9345703125
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.41,
+        "system_s": 0.48,
+        "max_process_rss_kib": 404308
+      },
+      {
+        "name": "targeted-lighting_demo-warm-r0",
+        "wall_s": 1.3443393180059502,
+        "load_before": [
+          9.40966796875,
+          7.03125,
+          4.9345703125
+        ],
+        "load_after": [
+          9.40966796875,
+          7.03125,
+          4.9345703125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.14,
+        "system_s": 0.19,
+        "max_process_rss_kib": 174804
+      },
+      {
+        "name": "targeted-lighting_demo-noop-r0",
+        "wall_s": 0.05475405999459326,
+        "load_before": [
+          9.40966796875,
+          7.03125,
+          4.9345703125
+        ],
+        "load_after": [
+          9.40966796875,
+          7.03125,
+          4.9345703125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20188
+      },
+      {
+        "name": "targeted-lighting_demo-cold-r0",
+        "wall_s": 3.5310957449983107,
+        "load_before": [
+          9.40966796875,
+          7.03125,
+          4.9345703125
+        ],
+        "load_after": [
+          9.37646484375,
+          7.06396484375,
+          4.95654296875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.1,
+        "system_s": 0.39,
+        "max_process_rss_kib": 294164
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-warm-r0",
+        "wall_s": 4.938385863992153,
+        "load_before": [
+          9.37646484375,
+          7.06396484375,
+          4.95654296875
+        ],
+        "load_after": [
+          9.37646484375,
+          7.06396484375,
+          4.95654296875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 4.78,
+        "system_s": 0.13,
+        "max_process_rss_kib": 250020
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-noop-r0",
+        "wall_s": 0.056279479002114385,
+        "load_before": [
+          9.37646484375,
+          7.06396484375,
+          4.95654296875
+        ],
+        "load_after": [
+          9.10595703125,
+          7.0458984375,
+          4.96240234375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20120
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-cold-r0",
+        "wall_s": 8.059827634002431,
+        "load_before": [
+          9.10595703125,
+          7.0458984375,
+          4.96240234375
+        ],
+        "load_after": [
+          8.77685546875,
+          7.01171875,
+          4.962890625
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 7.7,
+        "system_s": 0.33,
+        "max_process_rss_kib": 396752
+      },
+      {
+        "name": "targeted-isometric_demo-warm-r0",
+        "wall_s": 1.0478230110020377,
+        "load_before": [
+          8.77685546875,
+          7.01171875,
+          4.962890625
+        ],
+        "load_after": [
+          8.77685546875,
+          7.01171875,
+          4.962890625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 0.92,
+        "system_s": 0.12,
+        "max_process_rss_kib": 166528
+      },
+      {
+        "name": "targeted-isometric_demo-noop-r0",
+        "wall_s": 0.06470915900717955,
+        "load_before": [
+          8.77685546875,
+          7.01171875,
+          4.962890625
+        ],
+        "load_after": [
+          8.77685546875,
+          7.01171875,
+          4.962890625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20160
+      },
+      {
+        "name": "targeted-isometric_demo-cold-r0",
+        "wall_s": 3.7751350559992716,
+        "load_before": [
+          8.77685546875,
+          7.01171875,
+          4.962890625
+        ],
+        "load_after": [
+          8.71435546875,
+          7.0283203125,
+          4.9794921875
+        ],
+        "cpp_compiles": 4,
+        "links": 1,
+        "user_s": 3.88,
+        "system_s": 0.39,
+        "max_process_rss_kib": 289388
+      },
+      {
+        "name": "targeted-isometric_demo-warm-r1",
+        "wall_s": 2.0041648619953776,
+        "load_before": [
+          12.16357421875,
+          7.80615234375,
+          5.25390625
+        ],
+        "load_after": [
+          12.23095703125,
+          7.892578125,
+          5.2958984375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.62,
+        "system_s": 0.29,
+        "max_process_rss_kib": 165512
+      },
+      {
+        "name": "targeted-isometric_demo-noop-r1",
+        "wall_s": 0.073279422998894,
+        "load_before": [
+          12.23095703125,
+          7.892578125,
+          5.2958984375
+        ],
+        "load_after": [
+          12.23095703125,
+          7.892578125,
+          5.2958984375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-warm-r1",
+        "wall_s": 5.652014052000595,
+        "load_before": [
+          12.23095703125,
+          7.892578125,
+          5.2958984375
+        ],
+        "load_after": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 5.32,
+        "system_s": 0.23,
+        "max_process_rss_kib": 249384
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-noop-r1",
+        "wall_s": 0.06396426599530969,
+        "load_before": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "load_after": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20312
+      },
+      {
+        "name": "targeted-lighting_demo-warm-r1",
+        "wall_s": 1.8436391150025884,
+        "load_before": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "load_after": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.46,
+        "system_s": 0.29,
+        "max_process_rss_kib": 174280
+      },
+      {
+        "name": "targeted-lighting_demo-noop-r1",
+        "wall_s": 0.0599773800058756,
+        "load_before": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "load_after": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20144
+      },
+      {
+        "name": "targeted-shapes_demo-warm-r1",
+        "wall_s": 1.787615436987835,
+        "load_before": [
+          11.97216796875,
+          7.9111328125,
+          5.31591796875
+        ],
+        "load_after": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.41,
+        "system_s": 0.29,
+        "max_process_rss_kib": 202708
+      },
+      {
+        "name": "targeted-shapes_demo-noop-r1",
+        "wall_s": 0.08054164599161595,
+        "load_before": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "load_after": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20108
+      },
+      {
+        "name": "targeted-text_edit_demo-warm-r1",
+        "wall_s": 1.5913998280011583,
+        "load_before": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "load_after": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.25,
+        "system_s": 0.26,
+        "max_process_rss_kib": 188852
+      },
+      {
+        "name": "targeted-text_edit_demo-noop-r1",
+        "wall_s": 0.05844065599376336,
+        "load_before": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "load_after": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20124
+      },
+      {
+        "name": "targeted-charts_demo-warm-r1",
+        "wall_s": 2.026751655008411,
+        "load_before": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "load_after": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.72,
+        "system_s": 0.25,
+        "max_process_rss_kib": 203680
+      },
+      {
+        "name": "targeted-charts_demo-noop-r1",
+        "wall_s": 0.05350317098782398,
+        "load_before": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "load_after": [
+          12.775390625,
+          8.1455078125,
+          5.40576171875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20440
+      },
+      {
+        "name": "baseline-isometric_demo-warm-r1",
+        "wall_s": 1.0396526900003664,
+        "load_before": [
+          12.07177734375,
+          8.283203125,
+          5.509765625
+        ],
+        "load_after": [
+          12.07177734375,
+          8.283203125,
+          5.509765625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 0.91,
+        "system_s": 0.12,
+        "max_process_rss_kib": 168252
+      },
+      {
+        "name": "baseline-isometric_demo-noop-r1",
+        "wall_s": 0.05736416099534836,
+        "load_before": [
+          12.07177734375,
+          8.283203125,
+          5.509765625
+        ],
+        "load_after": [
+          12.07177734375,
+          8.283203125,
+          5.509765625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20120
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-warm-r1",
+        "wall_s": 5.738676859007683,
+        "load_before": [
+          12.07177734375,
+          8.283203125,
+          5.509765625
+        ],
+        "load_after": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 5.55,
+        "system_s": 0.18,
+        "max_process_rss_kib": 287308
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-noop-r1",
+        "wall_s": 0.05373362101090606,
+        "load_before": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "load_after": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20128
+      },
+      {
+        "name": "baseline-lighting_demo-warm-r1",
+        "wall_s": 1.553168916987488,
+        "load_before": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "load_after": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.29,
+        "system_s": 0.25,
+        "max_process_rss_kib": 177840
+      },
+      {
+        "name": "baseline-lighting_demo-noop-r1",
+        "wall_s": 0.053275105005013756,
+        "load_before": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "load_after": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20188
+      },
+      {
+        "name": "baseline-shapes_demo-warm-r1",
+        "wall_s": 2.6442633149999892,
+        "load_before": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "load_after": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.35,
+        "system_s": 0.29,
+        "max_process_rss_kib": 252948
+      },
+      {
+        "name": "baseline-shapes_demo-noop-r1",
+        "wall_s": 0.056469786999514326,
+        "load_before": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "load_after": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.01,
+        "max_process_rss_kib": 20140
+      },
+      {
+        "name": "baseline-text_edit_demo-warm-r1",
+        "wall_s": 2.0161395350005478,
+        "load_before": [
+          12.17626953125,
+          8.43701171875,
+          5.59033203125
+        ],
+        "load_after": [
+          11.76171875,
+          8.4130859375,
+          5.59814453125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.76,
+        "system_s": 0.24,
+        "max_process_rss_kib": 208264
+      },
+      {
+        "name": "baseline-text_edit_demo-noop-r1",
+        "wall_s": 0.06207566299417522,
+        "load_before": [
+          11.76171875,
+          8.4130859375,
+          5.59814453125
+        ],
+        "load_after": [
+          11.76171875,
+          8.4130859375,
+          5.59814453125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20188
+      },
+      {
+        "name": "baseline-charts_demo-warm-r1",
+        "wall_s": 2.6445015069912188,
+        "load_before": [
+          11.76171875,
+          8.4130859375,
+          5.59814453125
+        ],
+        "load_after": [
+          11.76171875,
+          8.4130859375,
+          5.59814453125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.34,
+        "system_s": 0.29,
+        "max_process_rss_kib": 225408
+      },
+      {
+        "name": "baseline-charts_demo-noop-r1",
+        "wall_s": 0.05811793998873327,
+        "load_before": [
+          11.76171875,
+          8.4130859375,
+          5.59814453125
+        ],
+        "load_after": [
+          11.76171875,
+          8.4130859375,
+          5.59814453125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20188
+      },
+      {
+        "name": "baseline-charts_demo-warm-r2",
+        "wall_s": 3.394670410998515,
+        "load_before": [
+          12.31103515625,
+          8.6318359375,
+          5.69970703125
+        ],
+        "load_after": [
+          12.31103515625,
+          8.6318359375,
+          5.69970703125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 3.04,
+        "system_s": 0.34,
+        "max_process_rss_kib": 225968
+      },
+      {
+        "name": "baseline-charts_demo-noop-r2",
+        "wall_s": 0.06743047499912791,
+        "load_before": [
+          12.31103515625,
+          8.6318359375,
+          5.69970703125
+        ],
+        "load_after": [
+          12.31103515625,
+          8.6318359375,
+          5.69970703125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20316
+      },
+      {
+        "name": "baseline-charts_demo-cold-r2",
+        "wall_s": 6.313793319000979,
+        "load_before": [
+          12.31103515625,
+          8.6318359375,
+          5.69970703125
+        ],
+        "load_after": [
+          13.71728515625,
+          9.04248046875,
+          5.86474609375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 5.69,
+        "system_s": 0.58,
+        "max_process_rss_kib": 284056
+      },
+      {
+        "name": "baseline-text_edit_demo-warm-r2",
+        "wall_s": 2.68984308000654,
+        "load_before": [
+          13.71728515625,
+          9.04248046875,
+          5.86474609375
+        ],
+        "load_after": [
+          13.71728515625,
+          9.04248046875,
+          5.86474609375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.36,
+        "system_s": 0.31,
+        "max_process_rss_kib": 208336
+      },
+      {
+        "name": "baseline-text_edit_demo-noop-r2",
+        "wall_s": 0.06167591600387823,
+        "load_before": [
+          13.71728515625,
+          9.04248046875,
+          5.86474609375
+        ],
+        "load_after": [
+          13.71728515625,
+          9.04248046875,
+          5.86474609375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20192
+      },
+      {
+        "name": "baseline-text_edit_demo-cold-r2",
+        "wall_s": 4.4823030609986745,
+        "load_before": [
+          13.71728515625,
+          9.04248046875,
+          5.86474609375
+        ],
+        "load_after": [
+          12.93896484375,
+          8.95849609375,
+          5.8544921875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.99,
+        "system_s": 0.48,
+        "max_process_rss_kib": 284448
+      },
+      {
+        "name": "baseline-shapes_demo-warm-r2",
+        "wall_s": 2.729237870997167,
+        "load_before": [
+          12.93896484375,
+          8.95849609375,
+          5.8544921875
+        ],
+        "load_after": [
+          12.54345703125,
+          8.9423828125,
+          5.8662109375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.43,
+        "system_s": 0.29,
+        "max_process_rss_kib": 252196
+      },
+      {
+        "name": "baseline-shapes_demo-noop-r2",
+        "wall_s": 0.07536742099910043,
+        "load_before": [
+          12.54345703125,
+          8.9423828125,
+          5.8662109375
+        ],
+        "load_after": [
+          12.54345703125,
+          8.9423828125,
+          5.8662109375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20140
+      },
+      {
+        "name": "baseline-shapes_demo-cold-r2",
+        "wall_s": 5.297877869990771,
+        "load_before": [
+          12.54345703125,
+          8.9423828125,
+          5.8662109375
+        ],
+        "load_after": [
+          12.900390625,
+          9.076171875,
+          5.92626953125
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.76,
+        "system_s": 0.47,
+        "max_process_rss_kib": 284204
+      },
+      {
+        "name": "baseline-lighting_demo-warm-r2",
+        "wall_s": 1.623718782007927,
+        "load_before": [
+          12.900390625,
+          9.076171875,
+          5.92626953125
+        ],
+        "load_after": [
+          12.900390625,
+          9.076171875,
+          5.92626953125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.35,
+        "system_s": 0.26,
+        "max_process_rss_kib": 177816
+      },
+      {
+        "name": "baseline-lighting_demo-noop-r2",
+        "wall_s": 0.06679290199826937,
+        "load_before": [
+          12.900390625,
+          9.076171875,
+          5.92626953125
+        ],
+        "load_after": [
+          12.900390625,
+          9.076171875,
+          5.92626953125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "baseline-lighting_demo-cold-r2",
+        "wall_s": 3.7201091229944723,
+        "load_before": [
+          12.900390625,
+          9.076171875,
+          5.92626953125
+        ],
+        "load_after": [
+          12.587890625,
+          9.07470703125,
+          5.94287109375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.26,
+        "system_s": 0.45,
+        "max_process_rss_kib": 283568
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-warm-r2",
+        "wall_s": 6.579817175996141,
+        "load_before": [
+          12.587890625,
+          9.07470703125,
+          5.94287109375
+        ],
+        "load_after": [
+          13.181640625,
+          9.25634765625,
+          6.0185546875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 6.31,
+        "system_s": 0.22,
+        "max_process_rss_kib": 287356
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-noop-r2",
+        "wall_s": 0.084051580997766,
+        "load_before": [
+          13.181640625,
+          9.25634765625,
+          6.0185546875
+        ],
+        "load_after": [
+          13.181640625,
+          9.25634765625,
+          6.0185546875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.04,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20072
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-cold-r2",
+        "wall_s": 7.874762542996905,
+        "load_before": [
+          13.181640625,
+          9.25634765625,
+          6.0185546875
+        ],
+        "load_after": [
+          11.9296875,
+          9.1162109375,
+          6.0068359375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 7.52,
+        "system_s": 0.34,
+        "max_process_rss_kib": 287928
+      },
+      {
+        "name": "baseline-isometric_demo-warm-r2",
+        "wall_s": 1.3185643489996437,
+        "load_before": [
+          11.9296875,
+          9.1162109375,
+          6.0068359375
+        ],
+        "load_after": [
+          11.9296875,
+          9.1162109375,
+          6.0068359375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.18,
+        "system_s": 0.12,
+        "max_process_rss_kib": 168552
+      },
+      {
+        "name": "baseline-isometric_demo-noop-r2",
+        "wall_s": 0.06997808499727398,
+        "load_before": [
+          11.9296875,
+          9.1162109375,
+          6.0068359375
+        ],
+        "load_after": [
+          11.9296875,
+          9.1162109375,
+          6.0068359375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "baseline-isometric_demo-cold-r2",
+        "wall_s": 3.802905764998286,
+        "load_before": [
+          11.9296875,
+          9.1162109375,
+          6.0068359375
+        ],
+        "load_after": [
+          11.69482421875,
+          9.1142578125,
+          6.02294921875
+        ],
+        "cpp_compiles": 4,
+        "links": 1,
+        "user_s": 4.02,
+        "system_s": 0.35,
+        "max_process_rss_kib": 283196
+      },
+      {
+        "name": "targeted-charts_demo-warm-r2",
+        "wall_s": 1.6886031750036636,
+        "load_before": [
+          12.39404296875,
+          9.45849609375,
+          6.20263671875
+        ],
+        "load_after": [
+          12.39404296875,
+          9.45849609375,
+          6.20263671875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.49,
+        "system_s": 0.19,
+        "max_process_rss_kib": 205852
+      },
+      {
+        "name": "targeted-charts_demo-noop-r2",
+        "wall_s": 0.04752758800168522,
+        "load_before": [
+          12.39404296875,
+          9.45849609375,
+          6.20263671875
+        ],
+        "load_after": [
+          12.39404296875,
+          9.45849609375,
+          6.20263671875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20184
+      },
+      {
+        "name": "targeted-charts_demo-cold-r2",
+        "wall_s": 3.8539046319929184,
+        "load_before": [
+          12.39404296875,
+          9.45849609375,
+          6.20263671875
+        ],
+        "load_after": [
+          11.5615234375,
+          9.33447265625,
+          6.1796875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.51,
+        "system_s": 0.33,
+        "max_process_rss_kib": 348788
+      },
+      {
+        "name": "targeted-text_edit_demo-warm-r2",
+        "wall_s": 1.2336488099972485,
+        "load_before": [
+          11.5615234375,
+          9.33447265625,
+          6.1796875
+        ],
+        "load_after": [
+          11.5615234375,
+          9.33447265625,
+          6.1796875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.04,
+        "system_s": 0.18,
+        "max_process_rss_kib": 191416
+      },
+      {
+        "name": "targeted-text_edit_demo-noop-r2",
+        "wall_s": 0.047683034994406626,
+        "load_before": [
+          11.5615234375,
+          9.33447265625,
+          6.1796875
+        ],
+        "load_after": [
+          11.5615234375,
+          9.33447265625,
+          6.1796875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.01,
+        "max_process_rss_kib": 20320
+      },
+      {
+        "name": "targeted-text_edit_demo-cold-r2",
+        "wall_s": 4.596743433998199,
+        "load_before": [
+          11.5615234375,
+          9.33447265625,
+          6.1796875
+        ],
+        "load_after": [
+          11.11572265625,
+          9.27880859375,
+          6.1787109375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.03,
+        "system_s": 0.52,
+        "max_process_rss_kib": 345260
+      },
+      {
+        "name": "targeted-shapes_demo-warm-r2",
+        "wall_s": 1.9923264240060234,
+        "load_before": [
+          11.11572265625,
+          9.27880859375,
+          6.1787109375
+        ],
+        "load_after": [
+          11.11572265625,
+          9.27880859375,
+          6.1787109375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.54,
+        "system_s": 0.33,
+        "max_process_rss_kib": 203116
+      },
+      {
+        "name": "targeted-shapes_demo-noop-r2",
+        "wall_s": 0.06927291100146249,
+        "load_before": [
+          11.11572265625,
+          9.27880859375,
+          6.1787109375
+        ],
+        "load_after": [
+          11.11572265625,
+          9.27880859375,
+          6.1787109375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20176
+      },
+      {
+        "name": "targeted-shapes_demo-cold-r2",
+        "wall_s": 5.25483493199863,
+        "load_before": [
+          11.11572265625,
+          9.27880859375,
+          6.1787109375
+        ],
+        "load_after": [
+          10.7060546875,
+          9.22412109375,
+          6.177734375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.67,
+        "system_s": 0.5,
+        "max_process_rss_kib": 403308
+      },
+      {
+        "name": "targeted-lighting_demo-warm-r2",
+        "wall_s": 1.5258985079999547,
+        "load_before": [
+          10.7060546875,
+          9.22412109375,
+          6.177734375
+        ],
+        "load_after": [
+          10.2490234375,
+          9.15380859375,
+          6.17138671875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.26,
+        "system_s": 0.22,
+        "max_process_rss_kib": 174412
+      },
+      {
+        "name": "targeted-lighting_demo-noop-r2",
+        "wall_s": 0.05410955900151748,
+        "load_before": [
+          10.2490234375,
+          9.15380859375,
+          6.17138671875
+        ],
+        "load_after": [
+          10.2490234375,
+          9.15380859375,
+          6.17138671875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20084
+      },
+      {
+        "name": "targeted-lighting_demo-cold-r2",
+        "wall_s": 3.769319514001836,
+        "load_before": [
+          10.2490234375,
+          9.15380859375,
+          6.17138671875
+        ],
+        "load_after": [
+          10.2490234375,
+          9.15380859375,
+          6.17138671875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.4,
+        "system_s": 0.36,
+        "max_process_rss_kib": 293700
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-warm-r2",
+        "wall_s": 4.946980938999332,
+        "load_before": [
+          10.2490234375,
+          9.15380859375,
+          6.17138671875
+        ],
+        "load_after": [
+          9.82861328125,
+          9.08447265625,
+          6.1650390625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 4.72,
+        "system_s": 0.16,
+        "max_process_rss_kib": 249492
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-noop-r2",
+        "wall_s": 0.05793742899550125,
+        "load_before": [
+          9.82861328125,
+          9.08447265625,
+          6.1650390625
+        ],
+        "load_after": [
+          9.82861328125,
+          9.08447265625,
+          6.1650390625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.01,
+        "max_process_rss_kib": 20424
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-cold-r2",
+        "wall_s": 7.820442576994537,
+        "load_before": [
+          9.82861328125,
+          9.08447265625,
+          6.1650390625
+        ],
+        "load_after": [
+          10.20751953125,
+          9.1826171875,
+          6.22802734375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 7.43,
+        "system_s": 0.37,
+        "max_process_rss_kib": 396340
+      },
+      {
+        "name": "targeted-isometric_demo-warm-r2",
+        "wall_s": 1.2499512029899051,
+        "load_before": [
+          10.20751953125,
+          9.1826171875,
+          6.22802734375
+        ],
+        "load_after": [
+          10.20751953125,
+          9.1826171875,
+          6.22802734375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.06,
+        "system_s": 0.14,
+        "max_process_rss_kib": 165468
+      },
+      {
+        "name": "targeted-isometric_demo-noop-r2",
+        "wall_s": 0.0636340850032866,
+        "load_before": [
+          10.20751953125,
+          9.1826171875,
+          6.22802734375
+        ],
+        "load_after": [
+          10.20751953125,
+          9.1826171875,
+          6.22802734375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "targeted-isometric_demo-cold-r2",
+        "wall_s": 3.3794248850026634,
+        "load_before": [
+          10.20751953125,
+          9.1826171875,
+          6.22802734375
+        ],
+        "load_after": [
+          9.8701171875,
+          9.12939453125,
+          6.2265625
+        ],
+        "cpp_compiles": 4,
+        "links": 1,
+        "user_s": 3.58,
+        "system_s": 0.29,
+        "max_process_rss_kib": 288836
+      },
+      {
+        "name": "targeted-isometric_demo-warm-r3",
+        "wall_s": 1.1534495770029025,
+        "load_before": [
+          9.56005859375,
+          9.0771484375,
+          6.22509765625
+        ],
+        "load_after": [
+          9.56005859375,
+          9.0771484375,
+          6.22509765625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.03,
+        "system_s": 0.11,
+        "max_process_rss_kib": 167584
+      },
+      {
+        "name": "targeted-isometric_demo-noop-r3",
+        "wall_s": 0.05905158200766891,
+        "load_before": [
+          9.56005859375,
+          9.0771484375,
+          6.22509765625
+        ],
+        "load_after": [
+          9.56005859375,
+          9.0771484375,
+          6.22509765625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20120
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-warm-r3",
+        "wall_s": 4.68630466000468,
+        "load_before": [
+          9.56005859375,
+          9.0771484375,
+          6.22509765625
+        ],
+        "load_after": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 4.53,
+        "system_s": 0.15,
+        "max_process_rss_kib": 252752
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-noop-r3",
+        "wall_s": 0.0571621650015004,
+        "load_before": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "load_after": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "targeted-lighting_demo-warm-r3",
+        "wall_s": 1.4130028130020946,
+        "load_before": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "load_after": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.18,
+        "system_s": 0.22,
+        "max_process_rss_kib": 175892
+      },
+      {
+        "name": "targeted-lighting_demo-noop-r3",
+        "wall_s": 0.05378681900037918,
+        "load_before": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "load_after": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20248
+      },
+      {
+        "name": "targeted-shapes_demo-warm-r3",
+        "wall_s": 1.574807395998505,
+        "load_before": [
+          9.51513671875,
+          9.07568359375,
+          6.240234375
+        ],
+        "load_after": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.34,
+        "system_s": 0.22,
+        "max_process_rss_kib": 206456
+      },
+      {
+        "name": "targeted-shapes_demo-noop-r3",
+        "wall_s": 0.057144145990605466,
+        "load_before": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "load_after": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.01,
+        "max_process_rss_kib": 20164
+      },
+      {
+        "name": "targeted-text_edit_demo-warm-r3",
+        "wall_s": 1.4260480970115168,
+        "load_before": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "load_after": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.13,
+        "system_s": 0.24,
+        "max_process_rss_kib": 188412
+      },
+      {
+        "name": "targeted-text_edit_demo-noop-r3",
+        "wall_s": 0.05753876100061461,
+        "load_before": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "load_after": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20112
+      },
+      {
+        "name": "targeted-charts_demo-warm-r3",
+        "wall_s": 1.9125609990005614,
+        "load_before": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "load_after": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.61,
+        "system_s": 0.24,
+        "max_process_rss_kib": 204000
+      },
+      {
+        "name": "targeted-charts_demo-noop-r3",
+        "wall_s": 0.05901210599404294,
+        "load_before": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "load_after": [
+          9.1533203125,
+          9.0078125,
+          6.2333984375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20208
+      },
+      {
+        "name": "baseline-isometric_demo-warm-r3",
+        "wall_s": 1.1673079870088259,
+        "load_before": [
+          8.748046875,
+          8.9130859375,
+          6.26123046875
+        ],
+        "load_after": [
+          8.748046875,
+          8.9130859375,
+          6.26123046875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.04,
+        "system_s": 0.12,
+        "max_process_rss_kib": 170052
+      },
+      {
+        "name": "baseline-isometric_demo-noop-r3",
+        "wall_s": 0.058982663991628215,
+        "load_before": [
+          8.748046875,
+          8.9130859375,
+          6.26123046875
+        ],
+        "load_after": [
+          8.748046875,
+          8.9130859375,
+          6.26123046875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-warm-r3",
+        "wall_s": 6.7235745360085275,
+        "load_before": [
+          8.748046875,
+          8.9130859375,
+          6.26123046875
+        ],
+        "load_after": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 6.49,
+        "system_s": 0.21,
+        "max_process_rss_kib": 286724
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-noop-r3",
+        "wall_s": 0.07329509299597703,
+        "load_before": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "load_after": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20136
+      },
+      {
+        "name": "baseline-lighting_demo-warm-r3",
+        "wall_s": 1.942506349994801,
+        "load_before": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "load_after": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.58,
+        "system_s": 0.31,
+        "max_process_rss_kib": 178544
+      },
+      {
+        "name": "baseline-lighting_demo-noop-r3",
+        "wall_s": 0.09524841599341016,
+        "load_before": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "load_after": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.04,
+        "max_process_rss_kib": 19928
+      },
+      {
+        "name": "baseline-shapes_demo-warm-r3",
+        "wall_s": 3.284185370997875,
+        "load_before": [
+          9.92724609375,
+          9.14892578125,
+          6.3662109375
+        ],
+        "load_after": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.83,
+        "system_s": 0.34,
+        "max_process_rss_kib": 250568
+      },
+      {
+        "name": "baseline-shapes_demo-noop-r3",
+        "wall_s": 0.06654462299775332,
+        "load_before": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "load_after": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "baseline-text_edit_demo-warm-r3",
+        "wall_s": 2.5789160010026535,
+        "load_before": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "load_after": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.19,
+        "system_s": 0.34,
+        "max_process_rss_kib": 206616
+      },
+      {
+        "name": "baseline-text_edit_demo-noop-r3",
+        "wall_s": 0.07874398599960841,
+        "load_before": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "load_after": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.04,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20112
+      },
+      {
+        "name": "baseline-charts_demo-warm-r3",
+        "wall_s": 3.092311719999998,
+        "load_before": [
+          10.01318359375,
+          9.1796875,
+          6.39111328125
+        ],
+        "load_after": [
+          10.25244140625,
+          9.2431640625,
+          6.4267578125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.75,
+        "system_s": 0.3,
+        "max_process_rss_kib": 225400
+      },
+      {
+        "name": "baseline-charts_demo-noop-r3",
+        "wall_s": 0.06328317899897229,
+        "load_before": [
+          10.25244140625,
+          9.2431640625,
+          6.4267578125
+        ],
+        "load_after": [
+          10.25244140625,
+          9.2431640625,
+          6.4267578125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20212
+      },
+      {
+        "name": "baseline-charts_demo-warm-r4",
+        "wall_s": 2.4907910710026044,
+        "load_before": [
+          10.07177734375,
+          9.22216796875,
+          6.435546875
+        ],
+        "load_after": [
+          9.82568359375,
+          9.18505859375,
+          6.43896484375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.21,
+        "system_s": 0.26,
+        "max_process_rss_kib": 225812
+      },
+      {
+        "name": "baseline-charts_demo-noop-r4",
+        "wall_s": 0.0603403950080974,
+        "load_before": [
+          9.82568359375,
+          9.18505859375,
+          6.43896484375
+        ],
+        "load_after": [
+          9.82568359375,
+          9.18505859375,
+          6.43896484375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20108
+      },
+      {
+        "name": "baseline-charts_demo-cold-r4",
+        "wall_s": 4.540865795992431,
+        "load_before": [
+          9.82568359375,
+          9.18505859375,
+          6.43896484375
+        ],
+        "load_after": [
+          9.43896484375,
+          9.115234375,
+          6.43115234375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.11,
+        "system_s": 0.4,
+        "max_process_rss_kib": 284508
+      },
+      {
+        "name": "baseline-text_edit_demo-warm-r4",
+        "wall_s": 1.7715404310001759,
+        "load_before": [
+          9.43896484375,
+          9.115234375,
+          6.43115234375
+        ],
+        "load_after": [
+          9.43896484375,
+          9.115234375,
+          6.43115234375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.52,
+        "system_s": 0.23,
+        "max_process_rss_kib": 207388
+      },
+      {
+        "name": "baseline-text_edit_demo-noop-r4",
+        "wall_s": 0.055955627001821995,
+        "load_before": [
+          9.43896484375,
+          9.115234375,
+          6.43115234375
+        ],
+        "load_after": [
+          9.43896484375,
+          9.115234375,
+          6.43115234375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20260
+      },
+      {
+        "name": "baseline-text_edit_demo-cold-r4",
+        "wall_s": 3.9237994529976277,
+        "load_before": [
+          9.43896484375,
+          9.115234375,
+          6.43115234375
+        ],
+        "load_after": [
+          9.00341796875,
+          9.0302734375,
+          6.41796875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.55,
+        "system_s": 0.36,
+        "max_process_rss_kib": 283664
+      },
+      {
+        "name": "baseline-shapes_demo-warm-r4",
+        "wall_s": 2.531051137993927,
+        "load_before": [
+          9.00341796875,
+          9.0302734375,
+          6.41796875
+        ],
+        "load_after": [
+          9.00341796875,
+          9.0302734375,
+          6.41796875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.2,
+        "system_s": 0.3,
+        "max_process_rss_kib": 251300
+      },
+      {
+        "name": "baseline-shapes_demo-noop-r4",
+        "wall_s": 0.06670912700064946,
+        "load_before": [
+          9.00341796875,
+          9.0302734375,
+          6.41796875
+        ],
+        "load_after": [
+          9.00341796875,
+          9.0302734375,
+          6.41796875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20212
+      },
+      {
+        "name": "baseline-shapes_demo-cold-r4",
+        "wall_s": 5.6344880660035415,
+        "load_before": [
+          9.00341796875,
+          9.0302734375,
+          6.41796875
+        ],
+        "load_after": [
+          8.92236328125,
+          9.01220703125,
+          6.44091796875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.8,
+        "system_s": 0.67,
+        "max_process_rss_kib": 283992
+      },
+      {
+        "name": "baseline-lighting_demo-warm-r4",
+        "wall_s": 1.5812191739969421,
+        "load_before": [
+          8.92236328125,
+          9.01220703125,
+          6.44091796875
+        ],
+        "load_after": [
+          8.92236328125,
+          9.01220703125,
+          6.44091796875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.32,
+        "system_s": 0.24,
+        "max_process_rss_kib": 178004
+      },
+      {
+        "name": "baseline-lighting_demo-noop-r4",
+        "wall_s": 0.05664006998995319,
+        "load_before": [
+          8.92236328125,
+          9.01220703125,
+          6.44091796875
+        ],
+        "load_after": [
+          8.92236328125,
+          9.01220703125,
+          6.44091796875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20220
+      },
+      {
+        "name": "baseline-lighting_demo-cold-r4",
+        "wall_s": 3.6219288909924217,
+        "load_before": [
+          8.92236328125,
+          9.01220703125,
+          6.44091796875
+        ],
+        "load_after": [
+          8.52783203125,
+          8.9287109375,
+          6.427734375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.21,
+        "system_s": 0.35,
+        "max_process_rss_kib": 284280
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-warm-r4",
+        "wall_s": 5.509956694004359,
+        "load_before": [
+          8.52783203125,
+          8.9287109375,
+          6.427734375
+        ],
+        "load_after": [
+          9.52685546875,
+          9.12939453125,
+          6.50634765625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 5.25,
+        "system_s": 0.18,
+        "max_process_rss_kib": 285532
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-noop-r4",
+        "wall_s": 0.0600057459960226,
+        "load_before": [
+          9.52685546875,
+          9.12939453125,
+          6.50634765625
+        ],
+        "load_after": [
+          9.52685546875,
+          9.12939453125,
+          6.50634765625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20252
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-cold-r4",
+        "wall_s": 7.573906347999582,
+        "load_before": [
+          9.52685546875,
+          9.12939453125,
+          6.50634765625
+        ],
+        "load_after": [
+          8.923828125,
+          9.0107421875,
+          6.48193359375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 7.25,
+        "system_s": 0.3,
+        "max_process_rss_kib": 288056
+      },
+      {
+        "name": "baseline-isometric_demo-warm-r4",
+        "wall_s": 1.1953515030036215,
+        "load_before": [
+          8.923828125,
+          9.0107421875,
+          6.48193359375
+        ],
+        "load_after": [
+          8.923828125,
+          9.0107421875,
+          6.48193359375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.03,
+        "system_s": 0.12,
+        "max_process_rss_kib": 168468
+      },
+      {
+        "name": "baseline-isometric_demo-noop-r4",
+        "wall_s": 0.06138472000020556,
+        "load_before": [
+          8.923828125,
+          9.0107421875,
+          6.48193359375
+        ],
+        "load_after": [
+          8.923828125,
+          9.0107421875,
+          6.48193359375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20260
+      },
+      {
+        "name": "baseline-isometric_demo-cold-r4",
+        "wall_s": 3.4548415699973702,
+        "load_before": [
+          8.923828125,
+          9.0107421875,
+          6.48193359375
+        ],
+        "load_after": [
+          8.529296875,
+          8.92724609375,
+          6.46826171875
+        ],
+        "cpp_compiles": 4,
+        "links": 1,
+        "user_s": 3.8,
+        "system_s": 0.26,
+        "max_process_rss_kib": 283516
+      },
+      {
+        "name": "targeted-charts_demo-warm-r4",
+        "wall_s": 2.282739665999543,
+        "load_before": [
+          9.28466796875,
+          9.064453125,
+          6.56591796875
+        ],
+        "load_after": [
+          9.28466796875,
+          9.064453125,
+          6.56591796875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.98,
+        "system_s": 0.26,
+        "max_process_rss_kib": 204040
+      },
+      {
+        "name": "targeted-charts_demo-noop-r4",
+        "wall_s": 0.06111593400419224,
+        "load_before": [
+          9.28466796875,
+          9.064453125,
+          6.56591796875
+        ],
+        "load_after": [
+          9.28466796875,
+          9.064453125,
+          6.56591796875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20208
+      },
+      {
+        "name": "targeted-charts_demo-cold-r4",
+        "wall_s": 4.674911519003217,
+        "load_before": [
+          9.1015625,
+          9.02978515625,
+          6.568359375
+        ],
+        "load_after": [
+          9.1015625,
+          9.02978515625,
+          6.568359375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.2,
+        "system_s": 0.45,
+        "max_process_rss_kib": 348756
+      },
+      {
+        "name": "targeted-text_edit_demo-warm-r4",
+        "wall_s": 1.435471488002804,
+        "load_before": [
+          9.1015625,
+          9.02978515625,
+          6.568359375
+        ],
+        "load_after": [
+          8.85302734375,
+          8.97900390625,
+          6.56494140625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.17,
+        "system_s": 0.23,
+        "max_process_rss_kib": 189500
+      },
+      {
+        "name": "targeted-text_edit_demo-noop-r4",
+        "wall_s": 0.05337297100049909,
+        "load_before": [
+          8.85302734375,
+          8.97900390625,
+          6.56494140625
+        ],
+        "load_after": [
+          8.85302734375,
+          8.97900390625,
+          6.56494140625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20200
+      },
+      {
+        "name": "targeted-text_edit_demo-cold-r4",
+        "wall_s": 4.05952853699273,
+        "load_before": [
+          8.85302734375,
+          8.97900390625,
+          6.56494140625
+        ],
+        "load_after": [
+          8.54443359375,
+          8.91259765625,
+          6.55615234375
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.66,
+        "system_s": 0.39,
+        "max_process_rss_kib": 345860
+      },
+      {
+        "name": "targeted-shapes_demo-warm-r4",
+        "wall_s": 1.6057445309998002,
+        "load_before": [
+          8.54443359375,
+          8.91259765625,
+          6.55615234375
+        ],
+        "load_after": [
+          8.54443359375,
+          8.91259765625,
+          6.55615234375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.33,
+        "system_s": 0.23,
+        "max_process_rss_kib": 203476
+      },
+      {
+        "name": "targeted-shapes_demo-noop-r4",
+        "wall_s": 0.055603682005312294,
+        "load_before": [
+          8.54443359375,
+          8.91259765625,
+          6.55615234375
+        ],
+        "load_after": [
+          8.54443359375,
+          8.91259765625,
+          6.55615234375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20160
+      },
+      {
+        "name": "targeted-shapes_demo-cold-r4",
+        "wall_s": 4.874969609998516,
+        "load_before": [
+          8.54443359375,
+          8.91259765625,
+          6.55615234375
+        ],
+        "load_after": [
+          8.18017578125,
+          8.83056640625,
+          6.5419921875
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 4.41,
+        "system_s": 0.43,
+        "max_process_rss_kib": 403768
+      },
+      {
+        "name": "targeted-lighting_demo-warm-r4",
+        "wall_s": 1.4678725080011645,
+        "load_before": [
+          8.18017578125,
+          8.83056640625,
+          6.5419921875
+        ],
+        "load_after": [
+          8.18017578125,
+          8.83056640625,
+          6.5419921875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.23,
+        "system_s": 0.23,
+        "max_process_rss_kib": 175496
+      },
+      {
+        "name": "targeted-lighting_demo-noop-r4",
+        "wall_s": 0.06037724499765318,
+        "load_before": [
+          8.18017578125,
+          8.83056640625,
+          6.5419921875
+        ],
+        "load_after": [
+          8.18017578125,
+          8.83056640625,
+          6.5419921875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20432
+      },
+      {
+        "name": "targeted-lighting_demo-cold-r4",
+        "wall_s": 3.764783386999625,
+        "load_before": [
+          8.18017578125,
+          8.83056640625,
+          6.5419921875
+        ],
+        "load_after": [
+          7.84521484375,
+          8.75,
+          6.5283203125
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 3.37,
+        "system_s": 0.36,
+        "max_process_rss_kib": 293952
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-warm-r4",
+        "wall_s": 5.227242923006997,
+        "load_before": [
+          7.84521484375,
+          8.75,
+          6.5283203125
+        ],
+        "load_after": [
+          7.697265625,
+          8.7041015625,
+          6.525390625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 5.05,
+        "system_s": 0.15,
+        "max_process_rss_kib": 249292
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-noop-r4",
+        "wall_s": 0.06621145700046327,
+        "load_before": [
+          7.697265625,
+          8.7041015625,
+          6.525390625
+        ],
+        "load_after": [
+          7.697265625,
+          8.7041015625,
+          6.525390625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20212
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-cold-r4",
+        "wall_s": 8.47022175800521,
+        "load_before": [
+          7.697265625,
+          8.7041015625,
+          6.525390625
+        ],
+        "load_after": [
+          8.0703125,
+          8.748046875,
+          6.5634765625
+        ],
+        "cpp_compiles": 2,
+        "links": 1,
+        "user_s": 8.1,
+        "system_s": 0.34,
+        "max_process_rss_kib": 396340
+      },
+      {
+        "name": "targeted-isometric_demo-warm-r4",
+        "wall_s": 1.1465650780010037,
+        "load_before": [
+          8.0703125,
+          8.748046875,
+          6.5634765625
+        ],
+        "load_after": [
+          8.0703125,
+          8.748046875,
+          6.5634765625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.0,
+        "system_s": 0.12,
+        "max_process_rss_kib": 166084
+      },
+      {
+        "name": "targeted-isometric_demo-noop-r4",
+        "wall_s": 0.06443598000623751,
+        "load_before": [
+          8.0703125,
+          8.748046875,
+          6.5634765625
+        ],
+        "load_after": [
+          8.0703125,
+          8.748046875,
+          6.5634765625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20276
+      },
+      {
+        "name": "targeted-isometric_demo-cold-r4",
+        "wall_s": 3.653914601993165,
+        "load_before": [
+          8.0703125,
+          8.748046875,
+          6.5634765625
+        ],
+        "load_after": [
+          7.984375,
+          8.71875,
+          6.56591796875
+        ],
+        "cpp_compiles": 4,
+        "links": 1,
+        "user_s": 3.84,
+        "system_s": 0.33,
+        "max_process_rss_kib": 289204
+      },
+      {
+        "name": "targeted-isometric_demo-warm-r5",
+        "wall_s": 1.1765522600035183,
+        "load_before": [
+          8.54638671875,
+          8.8232421875,
+          6.611328125
+        ],
+        "load_after": [
+          8.54638671875,
+          8.8232421875,
+          6.611328125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.05,
+        "system_s": 0.11,
+        "max_process_rss_kib": 167696
+      },
+      {
+        "name": "targeted-isometric_demo-noop-r5",
+        "wall_s": 0.05683394199877512,
+        "load_before": [
+          8.54638671875,
+          8.8232421875,
+          6.611328125
+        ],
+        "load_after": [
+          8.54638671875,
+          8.8232421875,
+          6.611328125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20368
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-warm-r5",
+        "wall_s": 4.952831019007135,
+        "load_before": [
+          8.54638671875,
+          8.8232421875,
+          6.611328125
+        ],
+        "load_after": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 4.8,
+        "system_s": 0.13,
+        "max_process_rss_kib": 252800
+      },
+      {
+        "name": "targeted-ecs_parallel_bench-noop-r5",
+        "wall_s": 0.05627970599744003,
+        "load_before": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "load_after": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20396
+      },
+      {
+        "name": "targeted-lighting_demo-warm-r5",
+        "wall_s": 1.5766741120023653,
+        "load_before": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "load_after": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.29,
+        "system_s": 0.24,
+        "max_process_rss_kib": 174828
+      },
+      {
+        "name": "targeted-lighting_demo-noop-r5",
+        "wall_s": 0.05930797698965762,
+        "load_before": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "load_after": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20368
+      },
+      {
+        "name": "targeted-shapes_demo-warm-r5",
+        "wall_s": 1.7057773279957473,
+        "load_before": [
+          8.26220703125,
+          8.759765625,
+          6.6025390625
+        ],
+        "load_after": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.35,
+        "system_s": 0.3,
+        "max_process_rss_kib": 203328
+      },
+      {
+        "name": "targeted-shapes_demo-noop-r5",
+        "wall_s": 0.06296587400720455,
+        "load_before": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "load_after": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20240
+      },
+      {
+        "name": "targeted-text_edit_demo-warm-r5",
+        "wall_s": 1.6717705259943614,
+        "load_before": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "load_after": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.34,
+        "system_s": 0.28,
+        "max_process_rss_kib": 188736
+      },
+      {
+        "name": "targeted-text_edit_demo-noop-r5",
+        "wall_s": 0.06065142899751663,
+        "load_before": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "load_after": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20220
+      },
+      {
+        "name": "targeted-charts_demo-warm-r5",
+        "wall_s": 2.0503362269955687,
+        "load_before": [
+          8.00048828125,
+          8.697265625,
+          6.59375
+        ],
+        "load_after": [
+          7.6796875,
+          8.619140625,
+          6.57958984375
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.76,
+        "system_s": 0.23,
+        "max_process_rss_kib": 203280
+      },
+      {
+        "name": "targeted-charts_demo-noop-r5",
+        "wall_s": 0.05763970399857499,
+        "load_before": [
+          7.6796875,
+          8.619140625,
+          6.57958984375
+        ],
+        "load_after": [
+          7.6796875,
+          8.619140625,
+          6.57958984375
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20204
+      },
+      {
+        "name": "baseline-isometric_demo-warm-r5",
+        "wall_s": 1.1786793500068597,
+        "load_before": [
+          9.14306640625,
+          8.89892578125,
+          6.7041015625
+        ],
+        "load_after": [
+          9.05126953125,
+          8.8837890625,
+          6.71142578125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.05,
+        "system_s": 0.12,
+        "max_process_rss_kib": 169920
+      },
+      {
+        "name": "baseline-isometric_demo-noop-r5",
+        "wall_s": 0.06254637301026378,
+        "load_before": [
+          9.05126953125,
+          8.8837890625,
+          6.71142578125
+        ],
+        "load_after": [
+          9.05126953125,
+          8.8837890625,
+          6.71142578125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20116
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-warm-r5",
+        "wall_s": 5.814459430010174,
+        "load_before": [
+          9.05126953125,
+          8.8837890625,
+          6.71142578125
+        ],
+        "load_after": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 5.61,
+        "system_s": 0.18,
+        "max_process_rss_kib": 287532
+      },
+      {
+        "name": "baseline-ecs_parallel_bench-noop-r5",
+        "wall_s": 0.05488883100042585,
+        "load_before": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "load_after": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20064
+      },
+      {
+        "name": "baseline-lighting_demo-warm-r5",
+        "wall_s": 1.5095831479993649,
+        "load_before": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "load_after": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.28,
+        "system_s": 0.22,
+        "max_process_rss_kib": 178356
+      },
+      {
+        "name": "baseline-lighting_demo-noop-r5",
+        "wall_s": 0.05570686400460545,
+        "load_before": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "load_after": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.01,
+        "max_process_rss_kib": 20112
+      },
+      {
+        "name": "baseline-shapes_demo-warm-r5",
+        "wall_s": 2.453189490013756,
+        "load_before": [
+          9.12744140625,
+          8.90234375,
+          6.7294921875
+        ],
+        "load_after": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.18,
+        "system_s": 0.27,
+        "max_process_rss_kib": 253152
+      },
+      {
+        "name": "baseline-shapes_demo-noop-r5",
+        "wall_s": 0.05716266199306119,
+        "load_before": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "load_after": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.02,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20176
+      },
+      {
+        "name": "baseline-text_edit_demo-warm-r5",
+        "wall_s": 1.9271110129920999,
+        "load_before": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "load_after": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 1.67,
+        "system_s": 0.25,
+        "max_process_rss_kib": 207444
+      },
+      {
+        "name": "baseline-text_edit_demo-noop-r5",
+        "wall_s": 0.06629380398953799,
+        "load_before": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "load_after": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20200
+      },
+      {
+        "name": "baseline-charts_demo-warm-r5",
+        "wall_s": 2.8524147019925294,
+        "load_before": [
+          8.876953125,
+          8.85400390625,
+          6.72509765625
+        ],
+        "load_after": [
+          9.60791015625,
+          9.005859375,
+          6.7861328125
+        ],
+        "cpp_compiles": 1,
+        "links": 1,
+        "user_s": 2.58,
+        "system_s": 0.26,
+        "max_process_rss_kib": 226968
+      },
+      {
+        "name": "baseline-charts_demo-noop-r5",
+        "wall_s": 0.06317951799428556,
+        "load_before": [
+          9.60791015625,
+          9.005859375,
+          6.7861328125
+        ],
+        "load_after": [
+          9.60791015625,
+          9.005859375,
+          6.7861328125
+        ],
+        "cpp_compiles": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20128
+      }
+    ]
+  },
+  "retained_game_headers": {
+    "charts_demo": [
+      "kin/core/json.hpp",
+      "kin/ui2/charts.hpp",
+      "kin/ui2/context.hpp",
+      "kin/ui2/text.hpp",
+      "kin/ui2/theme.hpp"
+    ],
+    "text_edit_demo": [
+      "kin/core/json.hpp",
+      "kin/ui2/context.hpp",
+      "kin/ui2/text.hpp",
+      "kin/ui2/widgets.hpp"
+    ],
+    "shapes_demo": [
+      "kin/core/json.hpp",
+      "kin/ecs/render.hpp",
+      "kin/platform/window.hpp",
+      "kin/renderer/svg.hpp",
+      "kin/ui2/text.hpp"
+    ],
+    "ecs_parallel_bench": [
+      "kin/core/json.hpp",
+      "kin/ecs/component.hpp",
+      "kin/ecs/system.hpp"
+    ]
+  },
+  "limitations": [
+    "One native Linux host and Clang toolchain; background load and CPU frequency varied.",
+    "Engine timings are source-to-object with separately prepared PCHs, not executable links or full clean engine builds.",
+    "Game timings are one source edit through executable link; cold means game PCH/objects/link, with engine/dependencies built.",
+    "Maximum RSS is the largest single process, not aggregate concurrent memory.",
+    "Published reproducers add output/clean-worktree guards and normalize the engine control by removing explicit filesystem/chrono includes; measured baseline had neither include.",
+    "Failed harness setup collected no samples and is excluded; original build artifacts were restored before valid measurements."
+  ],
+  "reproducer_sha256": {
+    "bench_engine.py": "be176391b53806658f432d4fd2f2873dcb9b43a013f3797c1539150ab692be78",
+    "bench_games.py": "e042e353f928fbf9932dbeae5f02e4d7d1180bdb331a621e2fc12c3ae43f2d67"
+  },
+  "validation": {
+    "paired_game_trials": {
+      "registered_checks_passed": 60,
+      "isometric_smoke_runs_passed": 12
+    },
+    "final_clang_native_2d_suite": {
+      "registered": 120,
+      "passed": 118,
+      "failed": 0,
+      "skipped": [
+        "kin-normal-lighting2d-gpu",
+        "kin-gpu-memory"
+      ]
+    },
+    "gcc15_smoke": {
+      "real_sources_compiled": 7,
+      "target_pchs_created": 5,
+      "pch_use_confirmed": "-H reports valid .gch; -Werror=invalid-pch",
+      "scope": "compile-only; no GCC performance or runtime claim"
+    }
+  }
+}

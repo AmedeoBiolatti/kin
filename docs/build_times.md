@@ -1684,3 +1684,84 @@ new bindings. CMake's [module documentation](https://cmake.org/cmake/help/v4.2/m
 and Clang's [standard module documentation](https://clang.llvm.org/docs/StandardCPlusPlusModules.html)
 cover the build graph and compiler constraints; this pilot does not establish
 support on other platforms.
+
+
+## Broader standard-library and game PCHs
+
+Starting from merged `main` at `ac7b57e`, Clang traces showed repeated
+`filesystem` parsing in engine sources and UI/ECS API parsing in game sources.
+The common standard-library PCH now includes `filesystem`. Engine PCHs still
+exclude Kin headers, so this adds no engine-API invalidation dependencies.
+Charts, Text Edit, Shapes and ECS Parallel also precompile their own stable
+engine APIs. Game logic stays outside the PCH, and the normal header includes
+remain in each source. All changes apply only with `KIN_ENABLE_PCH=ON`.
+
+The native Linux measurements used Clang 21.1.8, libstdc++ 15, CMake 4.2.3,
+Ninja 1.13.2, Release `-O2`, four available CPUs, four build workers, the default
+GNU linker, no LTO and no compiler cache. The engine probe prepared matching
+private PCHs outside the normal build and rotated all six case orderings.
+Median **source-to-object** times, six samples per case:
+
+| Engine source | Previous standard PCH | With filesystem | Reduction |
+|---|---:|---:|---:|
+| renderer2d.cpp | 3.079 s | 2.772 s | 10.0% |
+| widgets_editor.cpp | 2.578 s | 2.093 s | 18.8% |
+| services_catalog.cpp | 1.804 s | 1.269 s | 29.6% |
+
+These exclude executable linking and do not measure a full clean engine build.
+PCH generation was recorded separately, once per target/case, in the raw data.
+Adding `chrono` as well gave little further benefit in these files and was not
+retained. Clang traces locate the repeated filesystem parse at roughly 0.3 s
+in each source; inclusive nested trace spans must not be summed.
+
+The real game comparison includes the final executable link. It alternates
+before/after order and reverses game order on alternating rounds, with six
+warm edits and no-ops per game/case. Median **edit-to-link** times:
+
+| Game | Common game PCH | Broader API PCH | Reduction | Retained |
+|---|---:|---:|---:|---|
+| Charts | 2.851 s | 2.039 s | 28.5% | Yes |
+| Text Edit | 2.065 s | 1.431 s | 30.7% | Yes |
+| Shapes | 2.609 s | 1.700 s | 34.8% | Yes |
+| ECS Parallel | 5.779 s | 4.950 s | 14.4% | Yes |
+| Lighting | 1.567 s | 1.497 s | 4.5% | No |
+| Isometric | 1.187 s | 1.165 s | 1.9% | No |
+
+The four retained cases improved in all six paired rounds. Paired median
+reductions were 27.0%, 27.7%, 33.3% and 14.4%, respectively. Lighting and
+Isometric had small, inconsistent gains, so their API coverage stays as before.
+No-op builds stayed around 0.06 s. Engine and external libraries were already
+built during the game timings; unchanged source flags and optimization apply
+to both cases.
+
+Broader PCHs also have a preparation and memory cost. Recreating the **game
+PCH, objects and executable**, with engine/dependencies built, gave these
+medians over three cold samples per case:
+
+| Retained game | Common game PCH | Broader API PCH |
+|---|---:|---:|
+| Charts | 4.596 s | 4.675 s |
+| Text Edit | 3.924 s | 4.597 s |
+| Shapes | 5.298 s | 4.949 s |
+| ECS Parallel | 7.875 s | 8.060 s |
+
+Cold time did not improve consistently; Text Edit's preparation was about 17%
+slower. PCH creation can also use more memory even when warm source compilation
+uses less. Editing a precompiled engine API header invalidates the affected
+game PCH. Choose stable APIs used during a game's edit loop rather than adding
+all available headers. Existing custom PCHs and PCH-off builds keep their
+configuration; no compiler or CMake requirement changed.
+
+The [raw samples, profiles and metadata](build_broader_pch_2026-11-08.json)
+and [reproduction scripts](../experimental/pch/README.md) distinguish these
+scopes and the rejected variants. All 60 registered game checks and twelve
+Isometric smoke runs passed during the comparison. Final configuration omits
+engine headers already covered transitively by the common game PCH.
+Background host load and CPU frequency varied, so these are one-host Clang
+measurements rather than predicted gains on every compiler or game.
+
+Final validation rebuilt the normal native Clang/PCH configuration and passed
+its 120-test 2D suite (118 executed, two GPU checks skipped under SDL dummy).
+GCC 15 compiled the seven real sampled sources using five final PCHs, with
+PCH use confirmed and invalid-PCH warnings treated as errors. That is a compile
+smoke check, not a GCC performance benchmark.

@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Development PCHs include the standard filesystem API; Charts, Text Edit, Shapes and
+  ECS Parallel precompile more of their stable engine APIs. See the
+  [broader PCH measurements](build_times.md#broader-standard-library-and-game-pchs)
+  for warm-edit gains and cold-build costs.
+
 - Hex Demo precompiles five more stable engine headers when development PCHs are enabled.
   An isolated C++ module pilot records the comparison and rebuild tradeoffs; see
   [measurements](build_times.md#cpp-modules-pilot).

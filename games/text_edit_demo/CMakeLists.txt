@@ -8,6 +8,15 @@ target_link_libraries(text_edit_demo PRIVATE
 
 kin_game(text_edit_demo TITLE "Text Edit Demo")
 
+# Stable engine APIs used while editing this game's own sources.
+if(KIN_ENABLE_PCH)
+    target_precompile_headers(text_edit_demo PRIVATE
+        <kin/core/json.hpp>
+        <kin/ui2/context.hpp>
+        <kin/ui2/text.hpp>
+        <kin/ui2/widgets.hpp>)
+endif()
+
 target_compile_options(text_edit_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
