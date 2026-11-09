@@ -120,6 +120,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/floor.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -143,6 +146,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/sandstone.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -170,6 +176,66 @@
    }
   },
   {
+   "id": "wall_west_solid_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.8,
+      3,
+      -5
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      6
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_west_solid_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.8,
+      3,
+      7
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      4
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_west_solid_lintel",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.8,
+      4.6,
+      2
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      1.4,
+      1
+     ]
+    }
+   }
+  },
+  {
    "id": "wall_east",
    "components": {
     "Transform3D": {
@@ -193,6 +259,86 @@
    }
   },
   {
+   "id": "wall_east_solid_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.8,
+      3,
+      -5
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      6
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_east_solid_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.8,
+      3,
+      7
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      4
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_east_solid_lintel",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.8,
+      4.6,
+      2
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      1.4,
+      1
+     ]
+    }
+   }
+  },
+  {
+   "id": "bound_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      3,
+      11.3
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      12,
+      3,
+      0.3
+     ]
+    }
+   }
+  },
+  {
    "id": "band_north",
    "components": {
     "Transform3D": {
@@ -212,6 +358,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -235,6 +384,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -258,6 +410,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -281,6 +436,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -304,6 +462,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -327,6 +488,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -350,6 +514,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -373,6 +540,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -397,6 +572,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -420,6 +598,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -443,6 +624,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -467,6 +656,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -490,6 +682,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -513,6 +708,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -537,6 +740,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -560,6 +766,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -583,6 +792,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -607,6 +824,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -630,6 +850,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -653,6 +876,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -677,6 +908,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -700,6 +934,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -723,6 +960,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -747,6 +992,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -770,6 +1018,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -793,6 +1044,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -817,6 +1076,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -840,6 +1102,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -863,6 +1128,14 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
     }
    }
   },
@@ -887,6 +1160,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -911,6 +1187,9 @@
     "ModelMaterials3D": {
      "asset": "materials/brass.kinmaterials",
      "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -952,6 +1231,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -975,6 +1257,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -998,6 +1283,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -1021,6 +1309,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -1097,6 +1388,9 @@
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials",
      "variant": "dark"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -1143,6 +1437,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -1166,6 +1463,10 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "sphere",
+     "radius": 0.5
     }
    }
   },
@@ -1189,6 +1490,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -1225,6 +1529,10 @@
      "hide_self": true,
      "resolution": 64,
      "priority": 1
+    },
+    "Collider3D": {
+     "kind": "sphere",
+     "radius": 0.5
     }
    }
   },
@@ -1248,6 +1556,9 @@
     },
     "ModelMaterials3D": {
      "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    }
   },
@@ -1333,6 +1644,9 @@
     "ModelMaterials3D": {
      "asset": "materials/portal_trim.kinmaterials",
      "variant": "teal"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    },
    "parent": "west_portal"
@@ -1358,6 +1672,9 @@
     "ModelMaterials3D": {
      "asset": "materials/portal_trim.kinmaterials",
      "variant": "teal"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    },
    "parent": "west_portal"
@@ -1383,6 +1700,9 @@
     "ModelMaterials3D": {
      "asset": "materials/portal_trim.kinmaterials",
      "variant": "teal"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    },
    "parent": "west_portal"
@@ -1462,6 +1782,9 @@
     "ModelMaterials3D": {
      "asset": "materials/portal_trim.kinmaterials",
      "variant": "rose"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    },
    "parent": "east_portal"
@@ -1487,6 +1810,9 @@
     "ModelMaterials3D": {
      "asset": "materials/portal_trim.kinmaterials",
      "variant": "rose"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    },
    "parent": "east_portal"
@@ -1512,6 +1838,9 @@
     "ModelMaterials3D": {
      "asset": "materials/portal_trim.kinmaterials",
      "variant": "rose"
+    },
+    "Collider3D": {
+     "kind": "box"
     }
    },
    "parent": "east_portal"
@@ -1575,27 +1904,46 @@
    "components": {
     "Transform3D": {
      "position": [
-      9.0,
-      0.0,
-      2.0
+      6.0,
+      0.05,
+      7.5
      ],
      "rotation": [
       0,
-      -0.7071068,
+      1,
       0,
-      0.7071068
+      0
      ]
     },
     "SkinnedMeshRenderer": {
      "asset": "models/kenney-survivor/survivor.glb"
     },
     "Animator3D": {
-     "clip": "Walk",
+     "clip": "Idle",
      "speed": 1,
      "loop": true,
      "playing": true,
      "fade_seconds": 0.15,
      "remove_root_motion": true
+    },
+    "AnimatorAsset3D": {
+     "asset": "animations/survivor.kinanimator"
+    },
+    "CharacterController3D": {
+     "radius": 0.24,
+     "height": 1.8,
+     "crouch_height": 1.0,
+     "walk_speed": 2.5,
+     "sprint_speed": 5.0,
+     "jump_speed": 4.5,
+     "max_step_height": 0.3,
+     "coyote_seconds": 0.1,
+     "jump_buffer_seconds": 0.1,
+     "apply_facing": true
+    },
+    "CharacterAnimationLink3D": {},
+    "PortalTraveller3D": {
+     "height": 1.0
     }
    }
   }

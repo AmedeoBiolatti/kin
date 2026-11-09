@@ -1,24 +1,26 @@
--- The atrium's motion: the brass ring turning over the pool, the orb flying through the portals, and the camera.
--- Things go through a portal by scene3d.portal_step: a step that goes into one comes out of the other, and its
--- velocity and facing turn as the portals turn it.
+-- The atrium's motion: the brass ring turning over the pool, the orb flying through the portals, the survivor, and the
+-- camera. Things go through a portal by scene3d.portal_step (the orb, the walking camera) or, with a body, by physics
+-- (the survivor: a CharacterController3D with a PortalTraveller3D, carried through with its velocity turned).
 --
 -- The host sets `atrium_camera` (planar_atrium --camera): 6 plays (the survivor is yours: the host binds "forward",
--- "back", "left", "right" and "run"; seen from behind, the camera following it through the portals), 0 orbits the
--- atrium, 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the portals, round and round,
--- 5 watches the survivor walk its round into the west portal (and out of the east one, in its picture).
---
--- The survivor (an animated character: its walk) goes round the pool's south side and into the west portal, out of
--- the east one, and round again. Its steps go through a portal at its waist (the openings start above the floor).
+-- "back", "left", "right", "jump" and "sprint", and gives the mouse's motion in `atrium_look_x`, `atrium_look_y`;
+-- seen from behind, the camera orbiting it with the mouse and following it through the portals), 0 orbits the atrium,
+-- 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the portals, round and round, 5 watches
+-- the survivor walk its round (by itself, through the same physics) into the west portal.
 
 local world
 local time = 0
 local orb = {position = {x = 6, y = 1.0, z = 2.7}, velocity = {x = -3, y = 0, z = 0}}
 local walker = {position = {x = -2, y = 1.75, z = 2.3}, velocity = {x = -1.6, y = 0, z = 0},
                 facing = {x = 0, y = 0.7071068, z = 0, w = 0.7071068}} -- looking west (-X)
--- The survivor's way (x, z): from the east portal's front round the pool's south side to the west portal's, then on
--- west, into it.
-local survivor = {position = {x = 9.0, y = 0.0, z = 2.0}, next = 1, speed = 1.3, yaw = -90, clip = "Walk"}
-local route = {{x = 8.0, z = 7.0}, {x = -8.0, z = 7.0}, {x = -9.0, z = 2.0}, {x = -14.0, z = 2.0}}
+-- The survivor: the way it faces (degrees about +Y; the model looks down +Z), its place the step before (to see it go
+-- through a portal), the point of its round it walks to next and where it starts (and starts again if it ever falls);
+-- its round when it walks by itself (x, z: south of the pool, into the west portal; out of the east one it starts
+-- again).
+local survivor = {face = 0, last = nil, next = 1, spawn = {x = 6.0, y = 0.05, z = 7.5}}
+local route = {{x = 6.0, z = 7.5}, {x = -8.0, z = 7.5}, {x = -9.5, z = 2.0}, {x = -14.0, z = 2.0}}
+-- The play camera: its yaw (degrees: it looks along (sin, cos)) and pitch round the survivor, and how far back.
+local cam = {yaw = 180, pitch = -14, distance = 3.4}
 
 local function quat(x, y, z, degrees)
     local half = math.rad(degrees) / 2
@@ -66,105 +68,112 @@ function on_load(scene)
     world = scene
 end
 
--- A step of the survivor toward its next point; through a portal at its waist (out of the exit, its way turned). Out of
--- the east portal it starts its round again.
-local function walk(dt)
-    local p, goal = survivor.position, route[survivor.next]
-    local dx, dz = goal.x - p.x, goal.z - p.z
-    local d = math.sqrt(dx * dx + dz * dz)
-    if d < 0.05 then
-        survivor.next = math.min(survivor.next + 1, #route)
-        return
+local function horizontal(yaw)
+    local r = math.rad(yaw)
+    return {x = math.sin(r), y = 0, z = math.cos(r)}
+end
+local function yaw_of(v)
+    return math.deg(math.atan(v.x, v.z))
+end
+local function wrap(degrees)
+    return (degrees + 180) % 360 - 180
+end
+-- The survivor's yaw from its rotation (the way its +Z faces).
+local function rotation_yaw(q)
+    return yaw_of(rotate(q, {x = 0, y = 0, z = 1}))
+end
+
+-- What the survivor's controller is told this step: `move` (x right, y ahead) in the frame of `forward`, and turning
+-- its facing toward the way it goes (at most 540 degrees a second).
+local function command(dt, move, forward, jump, sprint)
+    local player = scene3d.entity("survivor")
+    if not player then return end
+    if move.x ~= 0 or move.y ~= 0 then
+        local right = {x = -forward.z, y = 0, z = forward.x}
+        local way = {x = forward.x * move.y + right.x * move.x, y = 0, z = forward.z * move.y + right.z * move.x}
+        local want = yaw_of(way)
+        local turn = wrap(want - survivor.face)
+        local most = 540 * dt
+        survivor.face = survivor.face + math.max(-most, math.min(most, turn))
     end
-    local s = math.min(survivor.speed * dt, d)
-    local vx, vz = dx / d, dz / d
-    local waist = 1.0
-    local from = {x = p.x, y = p.y + waist, z = p.z}
-    local to = {x = p.x + vx * s, y = p.y + waist, z = p.z + vz * s}
-    local through = scene3d.portal_step(from, to)
-    if through then
-        survivor.position = {x = through.position.x, y = through.position.y - waist, z = through.position.z}
-        survivor.next = 1
+    scene3d.character_input(player, {move = move, forward = forward, jump = jump, sprint = sprint,
+                                     facing = quat(0, 1, 0, survivor.face)})
+end
+
+-- Where the survivor is (its feet), and how far physics turned it since the step before (degrees): its rotation is the
+-- facing it was given unless a portal carried it through, which turns it (the facing and the play camera turn with it).
+-- Also whether it went through (a jump in its place: its round starts again).
+local function where()
+    local player = scene3d.entity("survivor")
+    local state = player and scene3d.character_state(player)
+    local transform = world:authored("survivor"):get("Transform3D")
+    if not state or not transform then return nil, 0, false end
+    local p, yaw = state.position, rotation_yaw(transform.rotation)
+    -- Fallen off somewhere (there should be nowhere): back where it started (moving its Transform3D teleports it).
+    if p.y < -4 then
+        world:authored("survivor"):patch("Transform3D", {position = survivor.spawn})
+        survivor.last = nil
+        return nil, 0, false
+    end
+    local turn, through = 0, false
+    if survivor.last then
+        turn = wrap(yaw - survivor.face)
+        if math.abs(turn) < 0.5 then turn = 0 end
+        local dx, dz = p.x - survivor.last.x, p.z - survivor.last.z
+        through = dx * dx + dz * dz > 4
     else
-        survivor.position = {x = to.x, y = p.y, z = to.z}
+        survivor.face = yaw
     end
-    -- Facing its way (the model looks down +Z).
-    survivor.yaw = math.deg(math.atan(vx, vz))
-    survivor.facing = quat(0, 1, 0, survivor.yaw)
+    survivor.last = {x = p.x, y = p.y, z = p.z}
+    return p, turn, through
 end
 
--- What the survivor cannot walk through (x0, z0, x1, z1): the pool's rim, the plinths, the columns' bases; and the
--- atrium's walls, but for the portals' openings (z 1 to 3), where it walks on through.
-local radius = 0.35
-local blocks = {{-4.45, -0.9, 4.45, 4.9}, {-7.05, 4.95, -5.95, 6.05}, {5.95, 4.95, 7.05, 6.05},
-                {-6.8, -6.1, -5.6, -4.9}}
-for _, c in ipairs({{-8, -8.4}, {-4.5, -8.4}, {4.5, -8.4}, {8, -8.4}, {-9.6, -2.5}, {-9.6, 6.5}, {9.6, -2.5},
-                    {9.6, 6.5}}) do
-    blocks[#blocks + 1] = {c[1] - 0.65, c[2] - 0.65, c[1] + 0.65, c[2] + 0.65}
-end
-local function keep_out(p)
-    local through_portal = math.abs(p.z - 2.0) < 0.75
-    local wall = through_portal and 12.5 or 11.0
-    p.x = math.max(-wall, math.min(wall, p.x))
-    p.z = math.max(-9.5, math.min(10.6, p.z))
-    for _, b in ipairs(blocks) do
-        local x0, z0, x1, z1 = b[1] - radius, b[2] - radius, b[3] + radius, b[4] + radius
-        if p.x > x0 and p.x < x1 and p.z > z0 and p.z < z1 then
-            -- Out by the nearest side.
-            local left, right, near, far = p.x - x0, x1 - p.x, p.z - z0, z1 - p.z
-            local least = math.min(left, right, near, far)
-            if least == left then p.x = x0 elseif least == right then p.x = x1
-            elseif least == near then p.z = z0 else p.z = z1 end
-        end
+-- The survivor's round by itself: toward its next point, walking; out of the east portal it starts again.
+local function autopilot(dt, p, through)
+    if through then survivor.next = 1 end
+    local goal = route[survivor.next]
+    local dx, dz = goal.x - p.x, goal.z - p.z
+    if dx * dx + dz * dz < 0.25 then
+        survivor.next = math.min(survivor.next + 1, #route)
+        goal = route[survivor.next]
+        dx, dz = goal.x - p.x, goal.z - p.z
     end
+    local d = math.sqrt(dx * dx + dz * dz)
+    command(dt, {x = 0, y = 1}, {x = dx / d, y = 0, z = dz / d}, false, false)
 end
 
--- The player's step: turning by left and right, walking (running with "run") by forward and back; through a portal at
--- its waist, its yaw turned as the portals turn it. Its animation follows: idle, walking or running.
+-- The player's step: moving in the camera's frame (WASD, the arrows), jumping, sprinting; the mouse turns the camera.
 local function play(ctx, dt)
     local input = ctx.input
-    local turn = (input:held("left") and 1 or 0) - (input:held("right") and 1 or 0)
-    local ahead = (input:held("forward") and 1 or 0) - (input:held("back") and 1 or 0)
-    local running = input:held("run") and ahead > 0
-    survivor.yaw = survivor.yaw + turn * 150 * dt
-    local speed = ahead * (running and 4.0 or 1.6)
-    local yaw = math.rad(survivor.yaw)
-    local vx, vz = math.sin(yaw) * speed, math.cos(yaw) * speed
-    local p = survivor.position
-    local waist = 1.0
-    local from = {x = p.x, y = p.y + waist, z = p.z}
-    local to = {x = p.x + vx * dt, y = p.y + waist, z = p.z + vz * dt}
-    local through = scene3d.portal_step(from, to)
-    if through then
-        survivor.position = {x = through.position.x, y = through.position.y - waist, z = through.position.z}
-        -- The yaw turned as the portal turns its way.
-        local way = rotate(through.turn, {x = math.sin(yaw), y = 0, z = math.cos(yaw)})
-        survivor.yaw = math.deg(math.atan(way.x, way.z))
-    else
-        survivor.position = {x = to.x, y = p.y, z = to.z}
-        keep_out(survivor.position)
-    end
-    survivor.facing = quat(0, 1, 0, survivor.yaw)
-    local clip = speed == 0 and "Idle" or (running and "Run" or "Walk")
-    if clip ~= survivor.clip then
-        survivor.clip = clip
-        world:authored("survivor"):patch("Animator3D", {clip = clip})
-    end
+    local function held(action) return input:held(action) and 1 or 0 end
+    cam.yaw = cam.yaw - (atrium_look_x or 0) * 0.15
+    cam.pitch = math.max(-70, math.min(35, cam.pitch - (atrium_look_y or 0) * 0.15))
+    atrium_look_x, atrium_look_y = 0, 0
+    local move = {x = held("right") - held("left"), y = held("forward") - held("back")}
+    command(dt, move, horizontal(cam.yaw), input:held("jump"), input:held("sprint"))
 end
 
--- The camera behind the survivor, a little above, looking at its head. Where the line from its head back to the camera
--- goes into a portal (the survivor just came out of one), the camera is where that line comes out, turned with it: it
--- sees the survivor through the other portal, as one would.
-local function follow()
-    local p = survivor.position
-    local yaw = math.rad(survivor.yaw)
-    local head = {x = p.x, y = p.y + 1.6, z = p.z}
-    local back = 3.2
-    local eye = {x = head.x - math.sin(yaw) * back, y = head.y + 0.7, z = head.z - math.cos(yaw) * back}
-    local looking = look(eye, {x = head.x, y = head.y - 0.2, z = head.z})
+-- The play camera: behind the survivor's head along the camera's yaw and pitch, pulled in where something is in the
+-- way (a ray from the head); where the line back from the head goes into a portal, it is where the line comes out,
+-- turned with it (it sees the survivor through the other portal, as one would).
+local function follow(p)
+    local head = {x = p.x, y = p.y + 1.55, z = p.z}
+    local yaw, pitch = math.rad(cam.yaw), math.rad(cam.pitch)
+    local back = {x = -math.sin(yaw) * math.cos(pitch), y = -math.sin(pitch), z = -math.cos(yaw) * math.cos(pitch)}
+    local eye = {x = head.x + back.x * cam.distance, y = head.y + back.y * cam.distance,
+                 z = head.z + back.z * cam.distance}
+    local looking = look(eye, head)
     local through = scene3d.portal_step(head, eye)
     if through then
         return through.position, normalized(mul(through.turn, looking))
+    end
+    -- (From just outside the survivor's capsule, so the ray does not find it.)
+    local from = {x = head.x + back.x * 0.35, y = head.y + back.y * 0.35, z = head.z + back.z * 0.35}
+    local hit = scene3d.raycast(from, eye)
+    if hit and hit.position then
+        local hx, hy, hz = hit.position.x - head.x, hit.position.y - head.y, hit.position.z - head.z
+        local reach = math.max(0.4, math.sqrt(hx * hx + hy * hy + hz * hz) - 0.2)
+        eye = {x = head.x + back.x * reach, y = head.y + back.y * reach, z = head.z + back.z * reach}
     end
     return eye, looking
 end
@@ -174,19 +183,20 @@ function update(ctx)
     time = time + dt
     fly(orb, dt)
     fly(walker, dt)
-    local mode = atrium_camera or 0
-    if mode == 6 then
-        play(ctx, dt)
-    else
-        walk(dt)
-        if survivor.clip ~= "Walk" then
-            survivor.clip = "Walk"
-            world:authored("survivor"):patch("Animator3D", {clip = "Walk"})
-        end
-    end
-    world:authored("survivor"):patch("Transform3D", {position = survivor.position, rotation = survivor.facing})
     world:authored("orb"):patch("Transform3D", {position = orb.position})
     world:authored("ring"):patch("Transform3D", {rotation = normalized(mul(quat(0, 1, 0, time * 25), quat(1, 0, 0, 68)))})
+
+    local mode = atrium_camera or 0
+    local p, turned, through = where()
+    if p then
+        survivor.face = survivor.face + turned
+        if mode == 6 then
+            cam.yaw = cam.yaw + turned
+            play(ctx, dt)
+        else
+            autopilot(dt, p, through)
+        end
+    end
 
     local position, target
     if mode == 1 then
@@ -199,8 +209,8 @@ function update(ctx)
         position, target = {x = -6.0, y = 1.7, z = 5.5}, {x = -11.45, y = 1.1, z = 2.0}
     end
     local rotation
-    if mode == 6 then
-        position, rotation = follow()
+    if mode == 6 and p then
+        position, rotation = follow(p)
     elseif mode == 4 then
         position, rotation = walker.position, walker.facing
     elseif position then
