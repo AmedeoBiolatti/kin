@@ -313,6 +313,37 @@ void test_draw_clip(Gpu& g) {
 }
 
 // A mirror floor under a red box: the floor shows the reflection view's picture (the box, and its blue background).
+// Scene3D::draw_again (a copy drawn again elsewhere: what is half-way through a portal, at its exit): a skinned copy
+// keeps its pose (its joint moves it 1 along X: drawn at x = -2 it shows at -1, again at +1 it shows at +2, not +1); a
+// batch's copy is drawn again as a plain one; a copy out of range is refused.
+void test_draw_again(Gpu& g) {
+    auto skin = meshes::box({0.6f, 0.6f, 0.6f});
+    skin.skin.resize(skin.vertices.size());
+    const Mesh3D skinned = g.r3d.create_mesh(skin).value_or({});
+    assert(skinned);
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({0, 0, 8}, {0, 0, 0});
+    const std::array<Mat4f, 1> pose{Mat4f::translation({1, 0, 0})};
+    assert(scene.draw_skinned(skinned, pose, Mat4f::translation({-2, 0, 0}), unlit(Color::rgb(230, 20, 20))));
+    auto batch = InstanceBatch3D::create(g.box, {MeshInstance3D{.transform = Mat4f::translation({0, 2, 0})}});
+    assert(batch);
+    assert(scene.draw_instanced(*batch, unlit(Color::rgb(20, 230, 20))));
+    assert(scene.draws().size() == 2);
+    assert(scene.draw_again(0, 0, Mat4f::translation({1, 0, 0})));
+    assert(scene.draw_again(1, 0, Mat4f::translation({0, -2, 0}), DrawClip3D::whole));
+    assert(!scene.draw_again(1, 1, Mat4f::identity()) && !scene.draw_again(9, 0, Mat4f::identity()));
+    assert(scene.draws().size() == 4 && scene.draws()[2].skinned && !scene.draws()[3].batch &&
+           scene.draws()[3].clip == DrawClip3D::whole);
+    g.frame(scene);
+    const auto red = [](Rgb c) { return c.r > 200 && c.g < 60; };
+    const auto green = [](Rgb c) { return c.g > 200 && c.r < 60; };
+    assert(red(g.at(scene.camera, {-1, 0, 0.3f})));   // the copy, posed
+    assert(red(g.at(scene.camera, {2, 0, 0.3f})));    // again, posed alike
+    assert(!red(g.at(scene.camera, {1, 0, 0.3f})));   // (not unposed)
+    assert(green(g.at(scene.camera, {0, -2, 0.5f}))); // the batch's copy, again
+    std::cout << "planar: draw again\n";
+}
+
 void test_mirror(Gpu& g, const SurfaceShader3D& reflection) {
     const Camera3D eye = Camera3D::look_at({0, 2, 6}, {0, 0, 0});
     const PlanarView3D mirror = mirror_view(eye, plane_through({0, 0, 0}, {0, 1, 0}), aspect);
@@ -436,6 +467,7 @@ int main() {
     assert(g.main && g.other && g.box && g.floor && g.quad);
     test_clip_plane(g);
     test_draw_clip(g);
+    test_draw_again(g);
     test_mirror(g, reflection);
     test_portal(g, portal);
 }

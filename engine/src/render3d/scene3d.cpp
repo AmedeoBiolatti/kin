@@ -628,6 +628,36 @@ Status3D Scene3D::draw(const Mesh3D& mesh, const Mat4f& transform, const Materia
     return status3d(accepted, _errors);
 }
 
+Status3D Scene3D::draw_again(std::size_t draw, u32 copy, const Mat4f& transform, DrawClip3D clip, u64 history_id) {
+    if (draw >= _draws.size() || copy >= _draws[draw].count) {
+        Diagnostics3D errors;
+        errors.push_back("draw_again: copy " + std::to_string(copy) + " of draw " + std::to_string(draw) + " of " +
+                         std::to_string(_draws.size()));
+        return status3d(false, std::move(errors));
+    }
+    if (!_errors.empty())
+        return status3d(false, _errors);
+    // (Copies: adding moves the draws' and instances' storage.)
+    const Draw source = _draws[draw];
+    const MeshInstance3D original =
+        source.batch ? source.batch.instances()[source.first + copy] : _instances[source.first + copy];
+    const MeshInstance3D again{transform, original.tint, original.id, history_id};
+    if (source.skinned) {
+        // The same pose: its first joint matrix, for a copy of its own.
+        const u32 first_joint = _skin_offsets[source.skin_first + copy];
+        const u32 first_copy = static_cast<u32>(_skin_offsets.size());
+        _skin_offsets.push_back(first_joint);
+        const auto room = add_instances(source.mesh, 1, source.material, true, first_copy, clip);
+        if (room.size() == 1)
+            room[0] = again;
+    } else {
+        const auto room = add_instances(source.mesh, 1, source.material, false, 0, clip);
+        if (room.size() == 1)
+            room[0] = again;
+    }
+    return status3d(_errors.empty(), _errors);
+}
+
 Status3D Scene3D::set_draw_material(std::size_t draw, const Material3D& material) {
     if (draw >= _draws.size()) {
         Diagnostics3D errors;

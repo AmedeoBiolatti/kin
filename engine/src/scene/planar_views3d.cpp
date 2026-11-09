@@ -273,10 +273,12 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     };
 
     // What is half-way through a portal, drawn at the exit too (portal_straddle): every copy of the scene's draws whose
-    // bounds straddle an enabled portal's opening (not batches' or skinned copies'), with the copy's id, so pick names
-    // it. Neither half is cut by the pictures' clip planes (DrawClip3D): cut, a half would show its hollow rim where
-    // the two meet. The image is drawn whole; the copy itself is drawn again, whole, by the pictures only (an opaque
-    // one: a see-through one would show twice), the cut one staying as it is.
+    // bounds straddle an enabled portal's opening, plain, skinned (a character walking through: its pose as it is) or a
+    // batch's, with the copy's id, so pick names it (Scene3D::draw_again). Neither half is cut by the pictures' clip
+    // planes (DrawClip3D): cut, a half would show its hollow rim where the two meet. The image is drawn whole; the copy
+    // itself is drawn again, whole, by the pictures only (an opaque one: a see-through one would show twice), the cut
+    // one staying as it is. A skinned copy's bounds are its mesh's at rest (a character's T-pose: its widest); a
+    // batch's groups far from every opening are passed over whole.
     {
         std::vector<std::pair<PortalPose3D, PortalPose3D>> pairs;
         world.each([&](flecs::entity entity, const Portal3D& c) {
@@ -284,43 +286,67 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 if (auto poses = portal_poses(EcsEntity{entity}))
                     pairs.push_back(*poses);
         });
+        // Whether a sphere comes near any opening (inside its slab, within its size and the radius round it).
+        const auto near_any = [&](Vec3f centre, f32 radius) {
+            for (const auto& [entry, exit] : pairs) {
+                const Vec3f local = entry.rotation.conjugate().rotate(centre - entry.position);
+                if (std::abs(local.z) < radius + 0.01f &&
+                    (entry.size.x <= 0.0f || std::abs(local.x) < entry.size.x * 0.5f + radius) &&
+                    (entry.size.y <= 0.0f || std::abs(local.y) < entry.size.y * 0.5f + radius))
+                    return true;
+            }
+            return false;
+        };
         struct Image {
-            Mesh3D mesh;
-            Material3D material;
-            MeshInstance3D copy;
+            std::size_t draw;
+            u32 copy;
+            Mat4f transform;
             DrawClip3D clip;
+            u64 history_id;
         };
         std::vector<Image> images;
-        if (!pairs.empty())
-            for (const Scene3D::Draw& draw : scene.draws()) {
-                if (draw.batch || draw.skinned)
-                    continue;
-                const Bounds3D& b = draw.mesh.bounds();
-                for (u32 i = draw.first; i < draw.first + draw.count; ++i) {
-                    const MeshInstance3D& copy = scene.instances()[i];
-                    const Mat4f& m = copy.transform;
-                    const f32 stretch =
-                        std::max({length(Vec3f{m.m[0], m.m[1], m.m[2]}), length(Vec3f{m.m[4], m.m[5], m.m[6]}),
-                                  length(Vec3f{m.m[8], m.m[9], m.m[10]})});
-                    const Vec3f centre = m.apply(b.center());
-                    for (const auto& [entry, exit] : pairs)
-                        if (const auto through = portal_straddle(entry, exit, centre, b.radius() * stretch)) {
-                            MeshInstance3D image = copy;
-                            image.transform = *through * m;
-                            image.history_id = copy.history_id ? copy.history_id ^ 0x9e3779b97f4a7c15ull : 0;
-                            images.push_back({draw.mesh, draw.material, image, DrawClip3D::whole});
-                            if (draw.clip == DrawClip3D::camera &&
-                                (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask)) {
-                                MeshInstance3D again = copy;
-                                again.history_id = copy.history_id ? copy.history_id ^ 0x632be59bd9b4e019ull : 0;
-                                images.push_back({draw.mesh, draw.material, again, DrawClip3D::whole_if_cut});
-                            }
-                        }
+        const auto& draws = scene.draws();
+        for (std::size_t d = 0; !pairs.empty() && d < draws.size(); ++d) {
+            const Scene3D::Draw& draw = draws[d];
+            const std::span<const MeshInstance3D> copies = draw.batch
+                                                               ? draw.batch.instances().subspan(draw.first, draw.count)
+                                                               : scene.instances().subspan(draw.first, draw.count);
+            const Bounds3D& b = draw.mesh.bounds();
+            const auto consider = [&](u32 i) {
+                const MeshInstance3D& copy = copies[i];
+                const Mat4f& m = copy.transform;
+                const f32 stretch =
+                    std::max({length(Vec3f{m.m[0], m.m[1], m.m[2]}), length(Vec3f{m.m[4], m.m[5], m.m[6]}),
+                              length(Vec3f{m.m[8], m.m[9], m.m[10]})});
+                const Vec3f centre = m.apply(b.center());
+                for (const auto& [entry, exit] : pairs)
+                    if (const auto through = portal_straddle(entry, exit, centre, b.radius() * stretch)) {
+                        images.push_back({d, i, *through * m, DrawClip3D::whole,
+                                          copy.history_id ? copy.history_id ^ 0x9e3779b97f4a7c15ull : 0});
+                        if (draw.clip == DrawClip3D::camera &&
+                            (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask))
+                            images.push_back({d, i, m, DrawClip3D::whole_if_cut,
+                                              copy.history_id ? copy.history_id ^ 0x632be59bd9b4e019ull : 0});
+                    }
+            };
+            const auto groups = draw.batch ? draw.batch.groups() : std::span<const InstanceGroup3D>{};
+            if (!groups.empty()) {
+                for (const InstanceGroup3D& g : groups) {
+                    const Bounds3D& w = g.world_bounds;
+                    const bool bounded =
+                        w.min.x <= w.max.x && w.min.y <= w.max.y && w.min.z <= w.max.z && std::isfinite(w.radius());
+                    if (bounded && !near_any(w.center(), w.radius()))
+                        continue;
+                    for (u32 i = g.first; i < g.first + g.count && i < copies.size(); ++i)
+                        consider(i);
                 }
+            } else {
+                for (u32 i = 0; i < copies.size(); ++i)
+                    consider(i);
             }
+        }
         for (const Image& image : images)
-            if (!scene.draw_instanced(image.mesh, std::span<const MeshInstance3D>(&image.copy, 1), image.material,
-                                      image.clip))
+            if (!scene.draw_again(image.draw, image.copy, image.transform, image.clip, image.history_id))
                 errors.emplace_back("planar views: an image through a portal was refused");
     }
 

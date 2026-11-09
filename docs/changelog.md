@@ -56,6 +56,10 @@ releases may change APIs.
 - Reflection probes lit by global illumination: `ReflectionCaptureOptions3D::global_illumination` lends a capture a
   view's GI (its probes, read, not moved; `Renderer3D::global_illumination_lit`), and sessions' probes borrow their
   view's, captured once more when it has settled (`ReflectionProbes3D::gi_settle`).
+- Characters and instance batches go through portals whole: `Scene3D::draw_again` (a copy drawn again elsewhere, a
+  skinned one in its pose, a batch's as a plain one) and PlanarViews3D drawing every kind of copy half-way through;
+  `portal_straddle` takes things up to the opening's diagonal (a character's T-pose bounds). The atrium has a walking
+  survivor (Kenney, CC0) and `--camera 5`.
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds

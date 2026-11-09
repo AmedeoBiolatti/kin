@@ -137,10 +137,10 @@ std::optional<f32> portal_crossing(PortalPose3D entry, Vec3f from, Vec3f to) {
 
 std::optional<Mat4f> portal_straddle(PortalPose3D entry, PortalPose3D exit, Vec3f centre, f32 radius, f32 offset) {
     const Vec3f local = local_to(entry, centre);
-    // Only what could go through: its centre within the opening, its bounds no larger than the opening (not the wall
-    // the portal is in, nor the floor under it).
-    const bool fits =
-        entry.size.x <= 0.0f || entry.size.y <= 0.0f || radius <= 0.5f * std::hypot(entry.size.x, entry.size.y);
+    // Only what could go through: its centre within the opening, its bounds no larger than the opening's diagonal (not
+    // the wall the portal is in, nor the floor under it; a character's bounds at rest, arms out, are wider than it
+    // walks).
+    const bool fits = entry.size.x <= 0.0f || entry.size.y <= 0.0f || radius <= std::hypot(entry.size.x, entry.size.y);
     if (!(std::abs(local.z) < radius + std::max(offset, 0.0f)) || !in_opening(entry, local) || !fits) {
         return std::nullopt;
     }

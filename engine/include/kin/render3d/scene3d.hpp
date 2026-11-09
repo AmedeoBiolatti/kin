@@ -912,6 +912,12 @@ public:
     // mirror's surface drawn as a stand-in in another mirror's picture, then as itself). Failed for a draw out of
     // range.
     Status3D set_draw_material(std::size_t draw, const Material3D& material);
+    // Copy `copy` (0 to its count) of draws()[draw] drawn again, at `transform`: its mesh, material, tint and pick id,
+    // a skinned copy's pose (the same joint matrices), a batch's copy as a plain one; met by clip planes as `clip` says
+    // (a draw of its own unless the one before says the same) and with `history_id` for its temporal history (0: by
+    // order). What is half-way through a portal, at the exit too (PlanarViews3D). Failed out of range.
+    Status3D draw_again(std::size_t draw, u32 copy, const Mat4f& transform, DrawClip3D clip = DrawClip3D::camera,
+                        u64 history_id = 0);
 
     struct Draw {
         Mesh3D mesh;
