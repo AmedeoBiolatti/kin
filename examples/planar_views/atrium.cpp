@@ -17,8 +17,9 @@
 // material graphs with glslc (some seconds). --autoplay plays mode 6 headless for SECONDS through the real input (a bot
 // pressing W, Space and Shift and moving the mouse: laps of the atrium, through both portals, a jump through one, into
 // the open south edge) and reports what a player would meet: falls, escapes from the room, getting stuck, missed
-// portals, the frame times (CPU and GPU, after a warm-up), pipelines made late, the memory growth; it fails (exit 2)
-// on any of the first four. Esc: quit.
+// portals, the frame times (CPU and GPU, after a warm-up), pipelines made late, the memory every 10 seconds; it fails
+// (exit 2) on any of the first four, and on memory still growing over the second half of a run of 4 minutes or more.
+// Esc: quit.
 #include "planar_surfaces.hpp"
 
 #include <algorithm>
@@ -342,6 +343,20 @@ private:
     void report() {
         const AtriumBot& bot = *_bot;
         const f64 resident = resident_mib();
+        // Memory still growing: over the second half of a run of four minutes or more, more than 32 MiB (the caches
+        // fill in the first minutes; a run that keeps going leaks).
+        std::string memory_finding;
+        if (_resident.size() >= 24) {
+            const f64 half = _resident[_resident.size() / 2], grown = resident - half;
+            if (grown > 32.0) {
+                _memory_growing = true;
+                char line[160];
+                std::snprintf(line, sizeof line,
+                              "memory still growing: %.0f MiB more over the second half (%.0f to %.0f)", grown, half,
+                              resident);
+                memory_finding = line;
+            }
+        }
         std::ostringstream text;
         text << "{\n  \"seconds\": " << _o.autoplay << ",\n  \"laps\": " << bot.laps
              << ",\n  \"portal_crossings\": " << bot.crossings << ",\n  \"portals_taken\": " << bot.portals
@@ -374,14 +389,17 @@ private:
         for (size_t i = 0; i < bot.findings.size(); ++i)
             text << (i ? "," : "") << "\n    {\"time\": " << bot.findings[i].time << ", \"what\": \""
                  << bot.findings[i].what << "\"}";
-        text << (bot.findings.empty() ? "" : "\n  ") << "]\n}\n";
+        if (!memory_finding.empty())
+            text << (bot.findings.empty() ? "" : ",") << "\n    {\"time\": " << _o.autoplay << ", \"what\": \""
+                 << memory_finding << "\"}";
+        text << (bot.findings.empty() && memory_finding.empty() ? "" : "\n  ") << "]\n}\n";
         std::cout << "planar_atrium autoplay:\n" << text.str();
         if (!_o.autoplay_report.empty()) {
             if (_o.autoplay_report.has_parent_path())
                 std::filesystem::create_directories(_o.autoplay_report.parent_path());
             std::ofstream(_o.autoplay_report) << text.str();
         }
-        failed = !bot.findings.empty() || bot.portals == 0;
+        failed = !bot.findings.empty() || bot.portals == 0 || _memory_growing;
     }
 
 public:
@@ -412,6 +430,7 @@ private:
     u64 _gpu_sampled = 0, _pipelines = 0, _pipelines_start = 0;
     f64 _resident_start = 0.0;
     std::vector<f64> _resident;
+    bool _memory_growing = false;
     struct Slow {
         f64 gpu_ms;
         f32 time;
