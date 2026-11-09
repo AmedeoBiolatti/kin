@@ -11,15 +11,17 @@
 #include <fstream>
 #include <iostream>
 #include <kin/assets/image.hpp>
-#include <kin/ecs/scene3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/animation3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <vector>
+#if KIN_ENABLE_PHYSICS3D // (the ECS's 3D components and scene loading are built with it)
+#include <kin/ecs/scene3d.hpp>
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scene/scene_loader3d.hpp>
-#include <vector>
+#endif
 
 using namespace kin;
 namespace {
@@ -156,6 +158,7 @@ void player_morphs() {
     std::cout << "surface details: the player blends morph weights through fades and layers\n";
 }
 
+#if KIN_ENABLE_PHYSICS3D
 // MorphWeights3D's authored form and the components in the registry.
 void registry() {
     const auto parsed = parse_morph_weights3d(" smile = 0.5, blink=1 ");
@@ -180,6 +183,7 @@ void registry() {
     assert(d.get<DecalRenderer3D>()->size.z == 3 && d.get<DecalRenderer3D>()->decal.normal_fade == 0.5f);
     std::cout << "surface details: morph weights and decals in the component registry\n";
 }
+#endif
 
 struct Fixture {
     Renderer2D& r;
@@ -489,6 +493,7 @@ void morphs(Fixture& f) {
 }
 } // namespace
 
+#if KIN_ENABLE_PHYSICS3D
 // The ECS: a decal entity, a mesh that does not receive decals, entities with weights of their own, and an authored
 // decal from a scene file.
 void ecs(Fixture& f) {
@@ -595,11 +600,14 @@ void ecs(Fixture& f) {
     }
     std::cout << "surface details: decal and morph components, receives_decals, per-entity copies, scene files\n";
 }
+#endif
 
 int main() {
     cpu_morphs();
     player_morphs();
+#if KIN_ENABLE_PHYSICS3D
     registry();
+#endif
     App app;
     auto& window =
         app.create_window({.title = "surface details", .width = extent.x, .height = extent.y, .hidden = true});
@@ -611,5 +619,7 @@ int main() {
     auto_exposure(f);
     decals(f);
     morphs(f);
+#if KIN_ENABLE_PHYSICS3D
     ecs(f);
+#endif
 }
