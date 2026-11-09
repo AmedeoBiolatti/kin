@@ -465,7 +465,8 @@ if(KIN_EXPERIMENTAL_3D)
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/material_graph3d.cpp src/render3d/material_import3d.cpp src/render3d/material_import_unity3d.cpp src/render3d/material_import_unreal3d.cpp src/render3d/image_decode3d.cpp src/render3d/import_decode.c src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
     target_sources(kin_engine PRIVATE
-        src/render3d/camera3d.cpp src/render3d/frame_graph3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
+        src/render3d/camera3d.cpp src/render3d/frame_graph3d.cpp src/render3d/reflection_probes3d.cpp src/render3d/mesh.cpp
+        src/render3d/renderer3d.cpp
         src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
         src/render3d/environment.cpp src/render3d/hdr_decode.c)
@@ -487,6 +488,7 @@ if(KIN_EXPERIMENTAL_3D)
             src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/ecs/surface_details3d.cpp
             src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp
             src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/scene/planar_views3d.cpp
+            src/scene/reflection_probes3d.cpp
             src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp)
     endif()
     option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)

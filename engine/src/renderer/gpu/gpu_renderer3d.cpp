@@ -265,6 +265,14 @@ void put_clip(f32 (&clip)[4], const Camera3D& camera) {
     clip[2] = camera.clip_plane.z;
     clip[3] = camera.clip_plane.w;
 }
+// A camera pass's hidden copy into a draw's uniforms (the third of `first`: its pick id plus one, as the instances hold
+// theirs; 0: none).
+void put_hidden(u32 (&first)[4], const Camera3D& camera) {
+    first[2] = camera.hidden_id ? camera.hidden_id + 1 : 0;
+}
+void put_hidden(u32 (&first)[4], const Scene3D* scene) {
+    first[2] = scene && scene->camera.hidden_id ? scene->camera.hidden_id + 1 : 0;
+}
 void put_clip(f32 (&clip)[4], const Scene3D* scene) {
     if (scene) {
         put_clip(clip, scene->camera);
@@ -300,8 +308,10 @@ struct FrameUniforms {
     f32 grid_size[4]; // x, y: tiles across and down, z: slices, w: cells (where the lists start)
     f32 time[4];      // x: Scene3D::time (seconds), for materials that move (a graph's time); y: 1 without
                       // Scene3D::specular_multiscatter
+    f32 probes[4];    // x: the reflection probes this pass reads, y: their last level
+    f32 probe[max_reflection_probes3d * 6 * 4]; // six vec4s a probe (prepare_reflections)
 };
-static_assert(sizeof(FrameUniforms) == 1184);
+static_assert(sizeof(FrameUniforms) == 2736);
 // A light of the light grid (as gi_light.comp's): place and reach, colour and the square of the size, a spot's way and
 // the cosine of its outer angle (a point light: -2), 1 / (cos inner - cos outer) and its shadow's layer (a point
 // light's cube's first; -1: none).
@@ -1612,6 +1622,13 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
                                          SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
             _filter_pipeline = make_compute(handle, "env_filter.comp.spv", {.samplers = 1});
+            if (SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE) &&
+                SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                             SDL_GPU_TEXTURETYPE_2D_ARRAY,
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE))
+                _panorama_pipeline = make_compute(handle, "probe_panorama.comp.spv", {.samplers = 1});
         }
     }
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
@@ -1711,6 +1728,7 @@ GpuRenderer3D::~GpuRenderer3D() {
         SDL_ReleaseGPUSampler(_device->handle(), _environment_sampler);
     }
     for (SDL_GPUComputePipeline* compute : {_filter_pipeline,
+                                            _panorama_pipeline,
                                             _ao_blur_chain_pipeline,
                                             _ao_blur_both_chain_pipeline,
                                             _gtao_pipeline,
@@ -3184,6 +3202,133 @@ void GpuRenderer3D::filter_environment(SDL_GPUCommandBuffer* commands, GpuEnviro
     }
     filter(environment.irradiance, 0, 2, 1.0f, irradiance_samples);
     environment.filtered = true;
+    ++environment.generation;
+}
+
+namespace {
+// A float texture of `layers` (an array when more than one) and `levels`, for the reflections.
+GpuTexture reflection_texture(GpuDevice& device, u32 w, u32 h, u32 layers, u32 levels, SDL_GPUTextureUsageFlags usage) {
+    constexpr SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    SDL_GPUTextureCreateInfo info{};
+    info.type = layers > 1 ? SDL_GPU_TEXTURETYPE_2D_ARRAY : SDL_GPU_TEXTURETYPE_2D;
+    info.format = format;
+    info.usage = usage;
+    info.width = w;
+    info.height = h;
+    info.layer_count_or_depth = layers;
+    info.num_levels = levels;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = tracked_create_texture(device.handle(), &info);
+    if (!texture)
+        throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
+    device.poison_texture(texture, format, w, h, layers, levels, usage);
+    return GpuTexture{device.shared(), texture, w, h, format};
+}
+} // namespace
+
+std::shared_ptr<IReflectionCaptureBackend3D> GpuRenderer3D::create_reflection_capture(u32 side) {
+    if (!_panorama_pipeline || !_filter_pipeline || !_environment_sampler || !_lights_available)
+        return {};
+    try {
+        auto capture = std::make_shared<GpuReflectionCapture3D>();
+        capture->side = side;
+        ViewOptions3D options;
+        options.samples = 1;
+        options.hdr = true;
+        options.background = colors::black;
+        capture->view = create_view({static_cast<i32>(side), static_cast<i32>(side)}, options);
+        if (!capture->view)
+            return {};
+        capture->faces = reflection_texture(*_device, side, side, 6, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        const u32 w = 4 * side, h = 2 * side;
+        capture->source = reflection_texture(*_device, w, h, 1, GpuDevice::complete_mip_levels(w, h),
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        return capture;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: reflection capture not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3D& scene, Vec3f position,
+                                       const ReflectionCaptureOptions3D& options, RenderDebugStats3D& stats) {
+    auto* capture = dynamic_cast<GpuReflectionCapture3D*>(&base);
+    auto* view = capture ? dynamic_cast<GpuView3D*>(capture->view.get()) : nullptr;
+    if (!view)
+        return false;
+    // Six square views, 90 degrees each, without the overlay, temporal anti-aliasing (each face would be one jittered
+    // frame) or global illumination (its light is a view's own and settles over frames).
+    const Camera3D camera = scene.camera;
+    const bool overlay = scene.show_overlay;
+    const bool taa = scene.taa.enabled;
+    const bool gi = scene.global_illumination.enabled;
+    scene.show_overlay = false;
+    scene.taa.enabled = false;
+    scene.global_illumination.enabled = false;
+    struct Face {
+        Vec3f forward, up;
+    };
+    static constexpr std::array<Face, 6> faces{{{{1, 0, 0}, {0, 1, 0}},
+                                                {{-1, 0, 0}, {0, 1, 0}},
+                                                {{0, 1, 0}, {0, 0, 1}},
+                                                {{0, -1, 0}, {0, 0, -1}},
+                                                {{0, 0, 1}, {0, 1, 0}},
+                                                {{0, 0, -1}, {0, 1, 0}}}};
+    struct Params {
+        f32 size[4];
+        f32 right[6][4], up[6][4], forward[6][4];
+    } params{};
+    const u32 side = capture->side;
+    params.size[0] = static_cast<f32>(capture->source.width());
+    params.size[1] = static_cast<f32>(capture->source.height());
+    bool ok = true;
+    for (u32 f = 0; f < 6 && ok; ++f) {
+        Camera3D eye = Camera3D::look_at(position, position + faces[f].forward, 90.0f, faces[f].up);
+        eye.z_near = options.z_near;
+        eye.z_far = options.z_far > 0.0f ? options.z_far : camera.z_far;
+        eye.hidden_id = options.hidden_id;
+        put(params.right[f], eye.right(), 0.0f);
+        put(params.up[f], eye.up(), 0.0f);
+        put(params.forward[f], eye.forward(), 0.0f);
+        scene.camera = eye;
+        ok = render(*view, scene, stats) && view->_scene;
+        if (!ok)
+            break;
+        _owner->ensure_frame();
+        _owner->flush_to_frame();
+        SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUTextureLocation from{.texture = view->_scene.handle()};
+            const SDL_GPUTextureLocation to{.texture = capture->faces.handle(), .layer = f};
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, side, side, 1, false);
+            SDL_EndGPUCopyPass(copy);
+        } else {
+            ok = false;
+        }
+    }
+    scene.camera = camera;
+    scene.show_overlay = overlay;
+    scene.taa.enabled = taa;
+    scene.global_illumination.enabled = gi;
+    if (!ok)
+        return false;
+    // The faces into the panorama, then its mips (the filter reads them as an environment's).
+    SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+    const SDL_GPUStorageTextureReadWriteBinding output{.texture = capture->source.handle()};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+    if (!pass)
+        return false;
+    SDL_BindGPUComputePipeline(pass, _panorama_pipeline);
+    const SDL_GPUTextureSamplerBinding source{capture->faces.handle(), _owner->_sampler_linear};
+    SDL_BindGPUComputeSamplers(pass, 0, &source, 1);
+    SDL_PushGPUComputeUniformData(commands, 0, &params, sizeof(params));
+    SDL_DispatchGPUCompute(pass, (capture->source.width() + 7) / 8, (capture->source.height() + 7) / 8, 1);
+    SDL_EndGPUComputePass(pass);
+    SDL_GenerateMipmapsForGPUTexture(commands, capture->source.handle());
+    ++capture->captured;
+    ++stats.reflection_captures;
+    return true;
 }
 
 bool GpuRenderer3D::make_targets(GpuView3D& view) {
@@ -4524,6 +4669,10 @@ struct GpuRenderer3D::FrameCtx {
     u32 joint_total = 0;
     std::array<u32, 2> joint_base{};
     GpuEnvironment3D* environment = nullptr; // null: the hemisphere ambient
+    // The reflection array (prepare_reflections; null: none) and the probes' records the light variants read.
+    const GpuTexture* reflections = nullptr;
+    u32 probe_count = 0;
+    std::array<f32, max_reflection_probes3d * 24> probe_records{};
     bool sky_env_used =
         false; // `environment` is the sky's own (Lights3D::sky_lights_scene): in world space, no rotation
     // The sky and the fog (P3a): asked for and possible; `sky_pass` once the image sky's environment is known to be
@@ -10246,6 +10395,7 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
             put_clip(u.clip, ctx.scenes[0]); // (what is behind a mirror hides nothing in its reflection)
+            put_hidden(u.first, ctx.scenes[0]);
             // the shadow vertex shaders' second buffer is a list this does not use; a skinned copy's also read the
             // joints
             const std::array<SDL_GPUBuffer*, 4> buffers{storage, storage, ctx.joints, ctx.joint_offsets};
@@ -11187,6 +11337,12 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         const f32 size = std::max(ctx.chosen[i].second->size, 0.01f);
         put_color(f.lights + i * 8 + 4, ctx.chosen[i].second->color, size * size);
     }
+    // The reflection probes too (prepare_reflections).
+    if (s == 0 && ctx.probe_count > 0) {
+        f.probes[0] = static_cast<f32>(ctx.probe_count);
+        f.probes[1] = static_cast<f32>(_reflection_levels - 1);
+        std::memcpy(f.probe, ctx.probe_records.data(), std::size_t(ctx.probe_count) * 24 * sizeof(f32));
+    }
     // The probes are in the scene's world: the overlay keeps the sky's light.
     if (ctx.gi_resolved && s == 0) {
         f.gi[0] = 1.0f;
@@ -11196,6 +11352,160 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     }
 
     SDL_PushGPUFragmentUniformData(ctx.commands, slot, &f, sizeof(f));
+}
+
+void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
+    ctx.probe_count = 0;
+    ctx.reflections = nullptr;
+    const Lights3D& lights = ctx.scene.lights;
+    if (!_lights_available || !_filter_pipeline || ctx.surface_only)
+        return;
+    // The probes that reach the view, with a capture made here: by priority, then the nearest; at most the array's.
+    struct Chosen {
+        const ReflectionProbeSource3D* probe;
+        std::shared_ptr<IReflectionCaptureBackend3D> capture;
+        f32 distance, volume;
+    };
+    std::vector<Chosen> chosen;
+    const GpuView3D* view = ctx.view;
+    const f32 aspect = static_cast<f32>(view->_size.x) / static_cast<f32>(std::max(view->_size.y, 1));
+    const GpuFrustum frustum = frustum_of(ctx.scene.camera.view_projection(aspect));
+    for (const ReflectionProbeSource3D& probe : lights.reflection_probes) {
+        const auto& backend = probe.capture.backend();
+        const auto* capture = dynamic_cast<const GpuReflectionCapture3D*>(backend.get());
+        if (!capture || capture->captured == 0 || !(probe.intensity > 0.0f) ||
+            !(probe.extent.x > 0.0f && probe.extent.y > 0.0f && probe.extent.z > 0.0f))
+            continue;
+        const Vec3f centre = probe.position + probe.box_offset;
+        if (ctx.scene.cull && !sphere_in(frustum, centre, length(probe.extent)))
+            continue;
+        chosen.push_back({&probe, backend, length(centre - ctx.scene.camera.position),
+                          probe.extent.x * probe.extent.y * probe.extent.z});
+    }
+    std::stable_sort(chosen.begin(), chosen.end(), [](const Chosen& a, const Chosen& b) {
+        return a.probe->priority != b.probe->priority ? a.probe->priority > b.probe->priority : a.distance < b.distance;
+    });
+    if (chosen.size() > max_reflection_probes3d)
+        chosen.resize(max_reflection_probes3d);
+    // Blended in that order on the GPU: the higher priority, then the smaller box, first.
+    std::stable_sort(chosen.begin(), chosen.end(), [](const Chosen& a, const Chosen& b) {
+        return a.probe->priority != b.probe->priority ? a.probe->priority > b.probe->priority : a.volume < b.volume;
+    });
+    if (!ctx.environment && chosen.empty())
+        return;
+    try {
+        // The array: the environment's specular size and levels (256 x 128 without one); made again when they change.
+        const u32 w = ctx.environment ? ctx.environment->specular.width() : 256u;
+        const u32 levels = ctx.environment ? ctx.environment->levels : 5u;
+        if (!_reflections || _reflections.width() != w || _reflection_levels != levels) {
+            _reflections =
+                reflection_texture(*_device, w, w / 2, 1 + max_reflection_probes3d, levels,
+                                   SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+            _reflection_levels = levels;
+            _reflection_environment = nullptr;
+            _reflection_layers = {};
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: reflection array not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return;
+    }
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const u32 w = _reflections.width(), h = _reflections.height();
+    // Layer 0: the environment's specular, copied when it was filtered again.
+    if (ctx.environment && (_reflection_environment != ctx.environment ||
+                            _reflection_environment_generation != ctx.environment->generation)) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            for (u32 level = 0; level < _reflection_levels; ++level) {
+                const SDL_GPUTextureLocation from{.texture = ctx.environment->specular.handle(), .mip_level = level};
+                const SDL_GPUTextureLocation to{.texture = _reflections.handle(), .mip_level = level};
+                SDL_CopyGPUTextureToTexture(copy, &from, &to, std::max(1u, w >> level), std::max(1u, h >> level), 1,
+                                            false);
+            }
+            SDL_EndGPUCopyPass(copy);
+            _reflection_environment = ctx.environment;
+            _reflection_environment_generation = ctx.environment->generation;
+        }
+    }
+    // A layer each probe: the one its capture is in, else a free one, else the one read longest ago (not this render).
+    ++_reflection_renders;
+    const auto same = [](const std::weak_ptr<IReflectionCaptureBackend3D>& a,
+                         const std::shared_ptr<IReflectionCaptureBackend3D>& b) {
+        return !a.owner_before(b) && !b.owner_before(a);
+    };
+    for (const Chosen& c : chosen) {
+        u32 layer = max_reflection_probes3d;
+        for (u32 i = 0; i < max_reflection_probes3d && layer == max_reflection_probes3d; ++i)
+            if (same(_reflection_layers[i].capture, c.capture) && !_reflection_layers[i].capture.expired())
+                layer = i;
+        if (layer == max_reflection_probes3d) {
+            u64 oldest = ~u64{0};
+            for (u32 i = 0; i < max_reflection_probes3d; ++i) {
+                const ReflectionLayer& l = _reflection_layers[i];
+                const u64 age = l.capture.expired() ? 0 : l.used;
+                if (l.used != _reflection_renders && age < oldest) {
+                    oldest = age;
+                    layer = i;
+                }
+            }
+            _reflection_layers[layer] = {c.capture, 0, 0};
+        }
+        ReflectionLayer& slot = _reflection_layers[layer];
+        slot.used = _reflection_renders;
+        const auto& capture = static_cast<const GpuReflectionCapture3D&>(*c.capture);
+        if (slot.generation != capture.captured) {
+            // Filtered into the array's layer as an environment's levels are.
+            for (u32 level = 0; level < _reflection_levels; ++level) {
+                const SDL_GPUStorageTextureReadWriteBinding output{
+                    .texture = _reflections.handle(), .mip_level = level, .layer = 1 + layer};
+                SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+                if (!pass)
+                    return;
+                SDL_BindGPUComputePipeline(pass, _filter_pipeline);
+                const SDL_GPUTextureSamplerBinding source{capture.source.handle(), _environment_sampler};
+                SDL_BindGPUComputeSamplers(pass, 0, &source, 1);
+                const u32 lw = std::max(1u, w >> level), lh = std::max(1u, h >> level);
+                const f32 roughness =
+                    _reflection_levels > 1 ? static_cast<f32>(level) / static_cast<f32>(_reflection_levels - 1) : 0.0f;
+                const f32 params[8] = {static_cast<f32>(lw),
+                                       static_cast<f32>(lh),
+                                       roughness,
+                                       level == 0 ? 0.0f : 1.0f,
+                                       static_cast<f32>(capture.source.width()),
+                                       static_cast<f32>(capture.source.height()),
+                                       static_cast<f32>(environment_samples),
+                                       0.0f};
+                SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+                SDL_DispatchGPUCompute(pass, (lw + 7) / 8, (lh + 7) / 8, 1);
+                SDL_EndGPUComputePass(pass);
+            }
+            slot.generation = capture.captured;
+            ++ctx.stats.reflection_filters;
+        }
+        // Its record (kin_probe_reflection): the boxes' world-to-local rows and centre, the influence box and blend,
+        // the parallax box (0: none) and intensity, where it was captured and its layer.
+        const ReflectionProbeSource3D& probe = *c.probe;
+        const Vec3f centre = probe.position + probe.box_offset;
+        // (the rows of the matrix that turns world into local are where the rotation turns the axes)
+        const Vec3f row_x = probe.rotation.rotate({1, 0, 0}), row_y = probe.rotation.rotate({0, 1, 0}),
+                    row_z = probe.rotation.rotate({0, 0, 1});
+        const Vec3f parallax =
+            !probe.parallax ? Vec3f{}
+            : (probe.parallax_extent.x > 0.0f && probe.parallax_extent.y > 0.0f && probe.parallax_extent.z > 0.0f)
+                ? probe.parallax_extent
+                : probe.extent;
+        f32* r = ctx.probe_records.data() + std::size_t(ctx.probe_count) * 24;
+        put(r, row_x, centre.x);
+        put(r + 4, row_y, centre.y);
+        put(r + 8, row_z, centre.z);
+        put(r + 12, probe.extent, std::max(probe.blend, 0.0f));
+        put(r + 16, parallax, probe.intensity);
+        put(r + 20, probe.position, static_cast<f32>(1 + layer));
+        ++ctx.probe_count;
+    }
+    ctx.reflections = &_reflections;
+    if (ctx.probe_count > 0)
+        ctx.lights_variant = true;
+    ctx.stats.reflection_probes = ctx.probe_count;
 }
 
 void GpuRenderer3D::sky_environment(FrameCtx& ctx) {
@@ -11362,6 +11672,7 @@ void GpuRenderer3D::begin_commands(FrameCtx& ctx) {
         filter_environment(commands, *ctx.environment);
         ++stats.environment_prefilters;
     }
+    prepare_reflections(ctx);
 
     // Without shadows the shader still samples a map: one that is all far.
     if ((!ctx.shadows || ctx.lights_variant) && _no_shadow && !_no_shadow_cleared) {
@@ -11809,6 +12120,7 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     VelocityUniforms u{};
     std::memcpy(u.view_projection, ctx.drawn[which].m, sizeof(u.view_projection));
     put_clip(u.clip, ctx.scenes[which]);
+    put_hidden(u.first, ctx.scenes[which]);
     std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
     std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[which].m, sizeof(u.prior));
     // A skinned copy's shader also reads the joints (the frame's, each copy's first), and those of the frame before
@@ -11947,6 +12259,7 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
         VelocityUniforms u{};
         std::memcpy(u.view_projection, ctx.drawn[which].m, sizeof(u.view_projection));
         put_clip(u.clip, ctx.scenes[which]);
+        put_hidden(u.first, ctx.scenes[which]);
         std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
         std::memcpy(u.prior, view->_taa_prior[which].m, sizeof(u.prior));
         for (const auto index : _order) {
@@ -12037,6 +12350,7 @@ bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL
     DrawUniforms u{};
     std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
     put_clip(u.clip, ctx.scenes[0]);
+    put_hidden(u.first, ctx.scenes[0]);
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{prepass};
     _phase = !ctx.occlusion ? Phase::All : second ? Phase::Second : Phase::First;
@@ -12568,6 +12882,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     const auto fill_uniforms = [&](auto& u, u32 s) {
         std::memcpy(u.view_projection, ctx.drawn[s].m, sizeof(u.view_projection));
         put_clip(u.clip, ctx.scenes[s]);
+        put_hidden(u.first, ctx.scenes[s]);
         if constexpr (std::is_same_v<std::decay_t<decltype(u)>, VelocityUniforms>) {
             std::memcpy(u.current, ctx.view_projections[s].m, sizeof(u.current));
             std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[s].m, sizeof(u.prior));
@@ -12578,6 +12893,11 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
         ctx.environment ? SDL_GPUTextureSamplerBinding{ctx.environment->irradiance.handle(), _environment_sampler}
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear}};
+    // The stock light variants read the reflection array there instead (layer 0 the environment's; a white one where
+    // there is neither environment nor probe: never read then).
+    const SDL_GPUTextureSamplerBinding reflection_binding =
+        ctx.reflections ? SDL_GPUTextureSamplerBinding{ctx.reflections->handle(), _environment_sampler}
+                        : texture_binding(_white_maps, Wrap3D::Repeat, Wrap3D::Repeat, TextureSampler3D{});
     // Prefer the depth/normal-aware reconstruction of half-size AO. Without
     // that optional pipeline the original linear upscale remains available.
     const SDL_GPUTextureSamplerBinding occlusion_binding{
@@ -12773,7 +13093,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                         material.texture_samplers[3]),
                         texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v,
                                         material.texture_samplers[4]),
-                        environment_bindings[0],
+                        lit_variant && !custom ? reflection_binding : environment_bindings[0],
                         environment_bindings[1],
                         occlusion_binding,
                         contact_binding,
@@ -13488,6 +13808,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
             put_clip(u.clip, ctx.scenes[0]);
+            put_hidden(u.first, ctx.scenes[0]);
             SDL_GPUBuffer* cluster_index = cluster_index_buffer();
             DrawBinder binder{picking};
             for (const u32 index : _order) {
@@ -13621,6 +13942,7 @@ bool GpuRenderer3D::render_visibility(const VisibilityTargets3D& targets, IPrepa
         DrawUniforms u{};
         std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
         put_clip(u.clip, ctx.scene.camera);
+        put_hidden(u.first, ctx.scene.camera);
         const u32 ids[4] = {options.target_id, options.ignored_id.value_or(0), options.ignored_id ? 1u : 0u, 0};
         SDL_PushGPUFragmentUniformData(commands, 1, ids, sizeof(ids));
         DrawBinder binder{picking};

@@ -96,7 +96,7 @@ vec3 kin_graph_world_to_view(vec3 v) {
 vec3 kin_graph_environment(vec3 d) {
     d = normalize(d);
     if (frame.environment.w > 0.5) {
-        return textureLod(uEnvSpecular, environment_uv(d), 0.0).rgb * frame.environment.x;
+        return kin_env_specular(environment_uv(d), 0.0).rgb * frame.environment.x;
     }
     return mix(frame.ground_ambient.rgb, frame.ambient.rgb, d.y * 0.5 + 0.5);
 }

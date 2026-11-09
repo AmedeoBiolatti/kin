@@ -207,6 +207,29 @@ struct Portal3D {
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the
 // rest pose without one). Not MeshRenderer3D: a mesh renderer's entities are instances of one mesh and merge into one
 // draw, and a character is a model of several parts with a skeleton and a pose of its own.
+// A reflection probe (kin/render3d/reflection_probes3d.hpp): the scene seen all round from the entity's place, which
+// the glossy surfaces inside its box reflect, parallax-corrected, in place of the environment. Its boxes are round the
+// entity (plus `box_offset`), turned and scaled as it is. Captured when it first shows, when it moves, when `recapture`
+// changes, every `interval` seconds (0: not on a clock) or every frame (`every_frame`: a shiny thing's own probe, with
+// `hide_self`, the entity's own copies left out of its picture). SceneSession3D captures and places them
+// (ReflectionProbes3D, kin/scene/reflection_probes3d.hpp).
+struct ReflectionProbe3D {
+    bool enabled = true;
+    Vec3f extent{5.0f, 5.0f, 5.0f};
+    Vec3f box_offset{};
+    f32 blend = 0.5f;
+    bool parallax = true;
+    Vec3f parallax_extent{};
+    f32 intensity = 1.0f;
+    i32 priority = 0;
+    u32 resolution = 128;
+    f32 interval = 0.0f;
+    bool every_frame = false;
+    bool hide_self = false;
+    f32 z_near = 0.05f;
+    u32 recapture = 0;
+};
+
 struct SkinnedMeshRenderer3D {
     // Its parts, skeleton and clips. Shared: the entity keeps it alive (the animator points into it).
     std::shared_ptr<const Model3D> model;

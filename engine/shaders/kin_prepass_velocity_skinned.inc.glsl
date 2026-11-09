@@ -52,7 +52,7 @@ void main() {
     const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
-    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w);
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
     vCurrent = (draw.current * world).xyw;
 #ifdef KIN_MORPH_PREVIOUS
     const uint was = uint(gl_VertexIndex) * 9u;

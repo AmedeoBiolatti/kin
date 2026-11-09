@@ -41,7 +41,19 @@ layout(set = 2, binding = 2) uniform sampler2D uMetalRough;   // G roughness, B 
 layout(set = 2, binding = 3) uniform sampler2D uNormalMap;    // tangent space; any without (see maps.x)
 layout(set = 2, binding = 4) uniform sampler2D uOcclusion;    // R: white without
 layout(set = 2, binding = 5) uniform sampler2D uEmissive;     // any without (see maps.y)
+#ifdef KIN_LIGHT_GRID
+// The stock light variants': layer 0 the environment's, a level a roughness (with frame.environment.w); the layers
+// after it the reflection probes' (frame.probe), panoramas the same size, in world space.
+layout(set = 2, binding = 6) uniform sampler2DArray uEnvSpecular;
+vec4 kin_env_specular(vec2 uv, float lod) {
+    return textureLod(uEnvSpecular, vec3(uv, 0.0), lod);
+}
+#else
 layout(set = 2, binding = 6) uniform sampler2D uEnvSpecular;   // the environment's, a level a roughness (with frame.environment.w)
+vec4 kin_env_specular(vec2 uv, float lod) {
+    return textureLod(uEnvSpecular, uv, lod);
+}
+#endif
 layout(set = 2, binding = 7) uniform sampler2D uEnvIrradiance; // and what a diffuse surface facing each way receives, over pi
 layout(set = 2, binding = 8) uniform sampler2D uAmbientOcclusion; // R: the share of ambient light that reaches the view's pixels (white without)
 layout(set = 2, binding = 9) uniform sampler2D uContactShadow;    // R: the share of the sun that gets through a short march toward it (white without)
@@ -188,6 +200,50 @@ vec2 environment_uv(vec3 d) {
     d = mat3(frame.environment_matrix) * d;
     return vec2(0.5 + atan(d.z, d.x) / (2.0 * PI), 0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI);
 }
+
+#ifdef KIN_LIGHT_GRID
+// The reflection probes' light at `p` along `r` (unit), at the level `lod`: every probe whose influence box holds `p`, in
+// the renderer's order (by priority, then the smaller), each taking its weight of what the ones before left; .a the
+// share they took (the rest is the environment's). A probe with a parallax box is read toward where the ray leaves it,
+// from where it was captured (reflection_probe_direction in reflection_probes3d.cpp does the same on the CPU).
+vec4 kin_probe_reflection(vec3 p, vec3 r, float lod) {
+    vec3 sum = vec3(0.0);
+    float share = 0.0;
+    const int count = int(frame.probes.x);
+    for (int i = 0; i < count && share < 0.999; ++i) {
+        const vec4 a0 = frame.probe[i * 6], a1 = frame.probe[i * 6 + 1], a2 = frame.probe[i * 6 + 2];
+        const vec4 a3 = frame.probe[i * 6 + 3], a4 = frame.probe[i * 6 + 4], a5 = frame.probe[i * 6 + 5];
+        const vec3 centre = vec3(a0.w, a1.w, a2.w);
+        const vec3 q = p - centre;
+        const vec3 local = vec3(dot(a0.xyz, q), dot(a1.xyz, q), dot(a2.xyz, q));
+        const vec3 room = a3.xyz - abs(local);
+        const float inside = min(min(room.x, room.y), room.z);
+        if (inside <= 0.0)
+            continue;
+        const float weight = a3.w > 0.0 ? min(inside / a3.w, 1.0) : 1.0;
+        vec3 way = r;
+        const vec3 half_box = a4.xyz;
+        if (half_box.x > 0.0 && all(lessThanEqual(abs(local), half_box))) {
+            const vec3 d = vec3(dot(a0.xyz, r), dot(a1.xyz, r), dot(a2.xyz, r));
+            // Where the ray leaves the box: the nearest of the faces it heads for.
+            const vec3 face = mix(-half_box, half_box, step(0.0, d));
+            vec3 leave = vec3(1e30);
+            for (int k = 0; k < 3; ++k)
+                if (abs(d[k]) > 1e-8)
+                    leave[k] = (face[k] - local[k]) / d[k];
+            const float t = min(min(leave.x, leave.y), leave.z);
+            const vec3 hit = centre + mat3(a0.xyz, a1.xyz, a2.xyz) * (local + d * t);
+            const vec3 toward = hit - a5.xyz;
+            way = dot(toward, toward) > 1e-12 ? normalize(toward) : r;
+        }
+        const vec2 uv = vec2(0.5 + atan(way.z, way.x) / (2.0 * PI), 0.5 - asin(clamp(way.y, -1.0, 1.0)) / PI);
+        const float take = weight * (1.0 - share);
+        sum += textureLod(uEnvSpecular, vec3(uv, a5.w), lod).rgb * a4.w * take;
+        share += take;
+    }
+    return vec4(sum, share);
+}
+#endif
 
 // Where a fragment reads the material's maps: its UV times the material's scale, plus its offset (one for all the maps,
 // as glTF's KHR_texture_transform has it when they agree; identity: the UV as it is, exactly).
@@ -841,10 +897,10 @@ vec3 kin_lit_surface(KinSurface surface) {
             behind = textureLod(uEnvIrradiance, environment_uv(-n), 0.0).rgb * frame.environment.x;
         }
         if (coat > 0.0) {
-            coat_above = textureLod(uEnvSpecular, environment_uv(reflect(-v, n)), coat_roughness * frame.environment.y).rgb *
+            coat_above = kin_env_specular(environment_uv(reflect(-v, n)), coat_roughness * frame.environment.y).rgb *
                          frame.environment.x;
         }
-        above = textureLod(uEnvSpecular, environment_uv(reflect(-v, n)), roughness * frame.environment.y).rgb * frame.environment.x;
+        above = kin_env_specular(environment_uv(reflect(-v, n)), roughness * frame.environment.y).rgb * frame.environment.x;
     } else {
         const vec3 reflected = normalize(mix(reflect(-v, n), n, s.alpha));
         around = mix(frame.ground_ambient.rgb, frame.ambient.rgb, n.y * 0.5 + 0.5);
@@ -877,6 +933,18 @@ vec3 kin_lit_surface(KinSurface surface) {
             above = mix(above, mix(traced, above * seen, smooth_share), coverage);
             const float coat_smooth = (1.0 - coat_roughness) * (1.0 - coat_roughness);
             coat_above = mix(coat_above, mix(traced, coat_above * seen, coat_smooth), coverage);
+        }
+    }
+#endif
+#ifdef KIN_LIGHT_GRID
+    // The reflection probes', in place of the environment's (and the GI's) where their boxes reach.
+    if (frame.probes.x > 0.5) {
+        const vec3 r = reflect(-v, n);
+        const vec4 probed = kin_probe_reflection(vWorld, r, roughness * frame.probes.y);
+        above = probed.rgb + above * (1.0 - probed.a);
+        if (coat > 0.0) {
+            const vec4 coat_probed = kin_probe_reflection(vWorld, r, coat_roughness * frame.probes.y);
+            coat_above = coat_probed.rgb + coat_above * (1.0 - coat_probed.a);
         }
     }
 #endif

@@ -153,6 +153,14 @@ public:
     // One from a Radiance .hdr file, read through the content folder or pack.
     // A failed result explains why it could not be read.
     Result3D<Environment3D> load_environment(const std::filesystem::path& path);
+    // A reflection probe's picture (render3d/reflection_probes3d.hpp), `side` pixels a face of its six (16 to 1024),
+    // empty until captured; empty where 3D or compute isn't available.
+    Result3D<ReflectionCapture3D> create_reflection_capture(u32 side = 128);
+    // Renders `scene` all round from `position` into `capture` (six views, as render() draws them: before the 2D drawn
+    // after, its sky, lights, fog and GI too, without temporal anti-aliasing or the overlay; `scene.camera` is put back
+    // after). The renders that use it then filter it, once a capture. Cost: six renders at the capture's side.
+    Status3D capture_reflection(ReflectionCapture3D& capture, Scene3D& scene, Vec3f position,
+                                const ReflectionCaptureOptions3D& options = {});
     // A fragment shader for materials (Material3D::shader), from SPIR-V
     // compiled against kin_material.inc.glsl (docs/rendering_3d.md, Custom
     // shaders). Empty where 3D isn't available or the shader is refused.

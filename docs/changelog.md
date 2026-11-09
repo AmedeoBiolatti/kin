@@ -75,6 +75,14 @@ releases may change APIs.
   pictures' clip planes, so no rim shows where they meet (`DrawClip3D`, `Scene3D::draw_instanced(..., clip)`). Planar pictures cover only where
   their surface shows (`Camera3D::window`, `crop_planar_view`, `planar_picture`), as sharp as the view and with its
   samples (`resolution` 1 by default).
+- Reflection probes: `Renderer3D::create_reflection_capture` / `capture_reflection` (the scene all round from a
+  point, six renders into a panorama) and `Lights3D::reflection_probes` (`ReflectionProbeSource3D`: influence box,
+  blend, parallax box, intensity, priority), read by the stock lit shaders, material graphs and surfaces in place of
+  the environment, parallax-corrected (`reflection_probe_weight`, `reflection_probe_direction`). As entities: the
+  `ReflectionProbe3D` component, captured and placed by `ReflectionProbes3D` (`kin/scene/reflection_probes3d.hpp`) and
+  `SceneSession3D` (once, on an interval, or every frame; `hide_self`). Curved mirrors: a live probe at a shiny thing's
+  centre, the thing left out by `Camera3D::hidden_id`. The light variants' binding 6 is now a 2D array (layer 0 the
+  environment's specular); custom material shaders keep the 2D environment.
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds

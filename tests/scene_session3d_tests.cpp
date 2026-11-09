@@ -1158,6 +1158,63 @@ void gpu_planar(Renderer2D& renderer) {
           "the mirror shows what kin's metal shows");
     std::cout << "planar session: portals, portal_step, mirror\n";
 }
+// Reflection probes as entities (ReflectionProbe3D): placed in the scene's lights each frame, captured when first shown
+// (filtered by the render that reads it), not again until it moves or `recapture` changes; a shiny sphere's own probe,
+// every frame, leaves the sphere out of its picture (hide_self).
+void gpu_probes(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
+    write(scratch.path / "probes.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,0.5,0]},"ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"room","components":{"Transform3D":{"position":[0,1,0]},
+        "ReflectionProbe3D":{"extent":[6,3,6],"resolution":32}}},
+      {"id":"shiny","components":{"Transform3D":{"position":[2,1,0]},
+        "ReflectionProbe3D":{"extent":[1,1,1],"parallax":false,"every_frame":true,"hide_self":true,
+          "resolution":16,"priority":1}}}]})");
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("probes.kinscene"), "probes scene failed");
+    const auto frame = [&] {
+        renderer.clear();
+        if (!session.render())
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        renderer.present();
+        return r3d.debug_stats();
+    };
+    const auto first = frame();
+    const auto& placed = session.scene()->lights.reflection_probes;
+    check(placed.size() == 2, "the probes were not placed");
+    const auto probe = [&](Vec3f at) {
+        const auto found = std::find_if(placed.begin(), placed.end(),
+                                        [&](const ReflectionProbeSource3D& p) { return p.position == at; });
+        check(found != placed.end() && found->capture, "a probe is not where its entity is");
+        return *found;
+    };
+    // Captures so far, each probe's.
+    const auto captures = [&](Vec3f at) { return probe(at).capture.backend()->generation(); };
+    check(probe({0, 1, 0}).extent == Vec3f{6, 3, 6}, "the room's probe's box is not its entity's");
+    check(first.reflection_probes == 2, "the render did not read both probes");
+    check(captures({0, 1, 0}) == 1 && captures({2, 1, 0}) == 1, "the probes were not captured once");
+    // The room's again only when asked or moved; the shiny one's every frame.
+    frame();
+    check(captures({0, 1, 0}) == 1 && captures({2, 1, 0}) == 2, "the probes were captured at the wrong times");
+    session.entity("room").get_mut<ReflectionProbe3D>()->recapture = 1;
+    frame();
+    check(captures({0, 1, 0}) == 2, "recapture did not capture the room's probe again");
+    session.entity("room").get_mut<Transform3D>()->position = {0, 1.5f, 0};
+    frame();
+    check(captures({0, 1.5f, 0}) == 3, "moving the room's probe did not capture it again");
+    std::cout << "probe session: placed, captured when needed\n";
+}
+
 // The same over a game-owned world (SceneFrame3D::collect, no session): the authored SceneEnvironment3D sets the
 // picture (samples) and the game's `pick` survives it, so a view made from the collected options can be picked.
 void gpu_frame_pick(Renderer2D& renderer) {
@@ -1334,6 +1391,7 @@ int main(int argc, char** argv) {
         gpu_prepared_requests(renderer);
         gpu_pick(renderer);
         gpu_planar(renderer);
+        gpu_probes(renderer);
         gpu_frame_pick(renderer);
         gpu_frame_cost(renderer);
         std::cout << "Transactional scene lifecycle, reload, budgets and ownership checks passed\n";

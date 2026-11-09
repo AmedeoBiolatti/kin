@@ -849,6 +849,7 @@ void Scene3D::clear() {
     _decals.clear();
     lights.points.clear();
     lights.spots.clear();
+    lights.reflection_probes.clear();
     if (_overlay) {
         _overlay->clear();
     }

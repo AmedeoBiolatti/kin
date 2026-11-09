@@ -599,6 +599,10 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     target_compile_definitions(kin_render3d_planar_tests PRIVATE
         KIN_ENGINE_SHADERS="${PROJECT_SOURCE_DIR}/engine/shaders")
     set_tests_properties(kin-render3d-planar PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+    # Reflection probes: weights and box projection, and a capture read by a mirror floor.
+    kin_add_test(kin_render3d_reflection_probe_tests kin-render3d-reflection-probes
+                 SOURCES render3d_reflection_probe_tests.cpp)
+    set_tests_properties(kin-render3d-reflection-probes PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     # Area lights' hierarchy and emitters (GlobalIllumination3D::area_lights), on the CPU.
     kin_add_test(kin_render3d_area_lights_tests kin-render3d-area-lights SOURCES render3d_area_lights_tests.cpp)
     target_include_directories(kin_render3d_area_lights_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/renderer/gpu)

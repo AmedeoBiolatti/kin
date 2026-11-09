@@ -49,6 +49,7 @@ struct Options {
     f32 scale = 1.0f;
     int bench = 0;      // frames to time (0: none)
     bool planar = true; // render the planar views
+    bool probes = true; // the reflection probes: the courtyard's, and the chrome ball's own
     u32 depth = 3;      // a portal's levels: portals seen through portals
 };
 
@@ -228,6 +229,20 @@ public:
         };
         const std::array<const Material3D*, 2> stand_in_portals{&_portals[0].stand_in, &_portals[1].stand_in};
         compose(_mirror.stand_in, _water.stand_in, stand_in_portals);
+        // The probes, of the scene with the planar surfaces as their stand-ins: the courtyard's once, the ball's every
+        // frame (six renders at 64 pixels a face), each seeing the other as last captured.
+        if (_o.probes) {
+            const auto scope = ctx.renderer.gpu_scope("probes");
+            if (!_court_probe)
+                _court_probe = _r->create_reflection_capture(128).value_or({});
+            if (!_ball_probe)
+                _ball_probe = _r->create_reflection_capture(64).value_or({});
+            if (_court_probe && !_court_captured)
+                _court_captured = bool(_r->capture_reflection(_court_probe, _scene, {0, 1.5f, 0}));
+            if (_ball_probe)
+                _ball_captured = bool(_r->capture_reflection(_ball_probe, _scene, ball_centre, {.hidden_id = ball_id}));
+            compose(_mirror.stand_in, _water.stand_in, stand_in_portals); // (now with the probes placed)
+        }
         for (Mirror* m : {&_mirror, &_water})
             if (m->shown && !picture(m->view, m->seen.camera, m == &_mirror ? "mirror" : "water"))
                 return fail(ctx, "a mirror's render failed");
@@ -467,8 +482,10 @@ private:
             const Vec3f at{4.5f + 2.2f * std::cos(a), 0.5f, 4.5f + 2.2f * std::sin(a)};
             box(at, {0.8f, 1.0f + f32(i) * 0.4f, 0.8f}, {.color = colours[size_t(i)], .roughness = 0.5f});
         }
-        draw(_sphere, Mat4f::trs({-2.5f, 0.5f, -3}, {}, {1, 1, 1}),
-             {.color = Color::rgb(230, 230, 235), .metallic = 1, .roughness = 0.15f});
+        // The chrome ball: with its own probe, a curved mirror (it is left out of its own picture by its id).
+        (void)_scene.draw(_sphere, Mat4f::trs(ball_centre, {}, {1, 1, 1}),
+                          {.color = Color::rgb(230, 230, 235), .metallic = 1, .roughness = 0.05f}, colors::white,
+                          ball_id);
         draw(_torus,
              Mat4f::trs(basin + Vec3f{0, 1.6f, 0},
                         Quatf::axis_angle({0, 1, 0}, _time * 30) * Quatf::axis_angle({1, 0, 0}, 70)),
@@ -487,6 +504,25 @@ private:
                 (void)_scene.draw_instanced(_sphere, std::span(&image, 1), glow, DrawClip3D::whole);
                 (void)_scene.draw_instanced(_sphere, std::span(&again, 1), glow, DrawClip3D::whole_if_cut);
             }
+        place_probes();
+    }
+
+    // The probes into the scene's lights (compose's last step; a capture not yet made is left out).
+    void place_probes() {
+        if (_court_captured)
+            _scene.lights.reflection_probes.push_back({.position = {0, 1.5f, 0},
+                                                       .box_offset = {0, 0.5f, 0},
+                                                       .extent = {9.25f, 2.5f, 8.5f},
+                                                       .blend = 1.0f,
+                                                       .parallax_extent = {9.25f, 2.0f, 8.0f},
+                                                       .capture = _court_probe});
+        if (_ball_captured)
+            _scene.lights.reflection_probes.push_back({.position = ball_centre,
+                                                       .extent = {0.55f, 0.55f, 0.55f},
+                                                       .blend = 0.0f,
+                                                       .parallax = false,
+                                                       .priority = 1,
+                                                       .capture = _ball_probe});
     }
 
     Options _o;
@@ -499,6 +535,13 @@ private:
     Mirror _mirror, _water;
     std::array<Portal, 2> _portals;
     Mover _orb, _walker;
+    // The reflection probes (--probes): the courtyard's, captured once (its parallax box its walls, floor and the top
+    // of the walls), and the chrome ball's own, captured every frame from its centre without the ball, read as if
+    // infinitely far: a curved mirror.
+    static constexpr Vec3f ball_centre{-2.5f, 0.5f, -3};
+    static constexpr u32 ball_id = 4242;
+    ReflectionCapture3D _court_probe, _ball_probe;
+    bool _court_captured = false, _ball_captured = false;
     int _camera = 0, _frame = 0;
     u64 _views_rendered = 0;
     std::map<std::string, Timing> _timing;
@@ -532,6 +575,8 @@ int main(int argc, char** argv) {
                 o.bench = std::max(31, std::stoi(value()));
             else if (a == "--planar")
                 o.planar = value() != "off";
+            else if (a == "--probes")
+                o.probes = value() != "off";
             else if (a == "--depth")
                 o.depth = u32(std::clamp(std::stoi(value()), 1, 8));
             else

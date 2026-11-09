@@ -17,6 +17,7 @@
 #include <kin/render3d/environment3d.hpp>
 #include <kin/render3d/mesh3d.hpp>
 #include <kin/render3d/particles3d.hpp>
+#include <kin/render3d/reflection_probes3d.hpp>
 #include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/data_buffer.hpp>
@@ -467,6 +468,10 @@ struct Lights3D {
     // Spot lights (P3b): at most 16 a frame, chosen as the points are (the cone's bounding sphere reaches the view, the
     // strongest and nearest first). Cleared with the draws.
     std::vector<SpotLightSource3D> spots;
+    // Reflection probes (kin/render3d/reflection_probes3d.hpp): glossy surfaces inside a probe's box reflect its
+    // picture, parallax-corrected, in place of the environment. At most max_reflection_probes3d a render (those that
+    // reach the view, by priority, then the nearest). Cleared with the draws.
+    std::vector<ReflectionProbeSource3D> reflection_probes;
     // Shadows of lights that are not the sun (P3b), all opt-in (a light's `shadow.enabled`; `fill_shadow.enabled`) and
     // off, the picture and the cost are what they were. Of the lights that ask, the most important this many a frame
     // have a map (importance: intensity x reach x the share of the view it covers, with a hysteresis in favour of the
@@ -928,7 +933,7 @@ public:
     std::span<const Decal3D> decals() const { return _decals; }
     void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLightSource3D& light) { lights.spots.push_back(light); }
-    // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
+    // Takes the draws, point and spot lights, reflection probes and particles away, the overlay's too (cameras, the
     // sun and the ambient light and the weather stay), keeping their room.
     void clear();
     // The copies of draws()[draw] drawn with `material` from the next render on, their mesh and placing as they are (a

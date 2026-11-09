@@ -69,6 +69,37 @@
    }
   },
   {
+   "id": "probe_atrium",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      2,
+      0
+     ]
+    },
+    "ReflectionProbe3D": {
+     "extent": [
+      11.5,
+      3.5,
+      10.5
+     ],
+     "box_offset": [
+      0,
+      1,
+      0.5
+     ],
+     "blend": 1.0,
+     "parallax_extent": [
+      11.5,
+      3,
+      10.5
+     ],
+     "resolution": 128
+    }
+   }
+  },
+  {
    "id": "floor",
    "components": {
     "Transform3D": {
@@ -1124,8 +1155,20 @@
      "asset": "models/sphere.glb"
     },
     "ModelMaterials3D": {
-     "asset": "materials/marble.kinmaterials",
-     "variant": "dark"
+     "asset": "materials/chrome.kinmaterials"
+    },
+    "ReflectionProbe3D": {
+     "extent": [
+      0.6,
+      0.6,
+      0.6
+     ],
+     "blend": 0,
+     "parallax": false,
+     "every_frame": true,
+     "hide_self": true,
+     "resolution": 64,
+     "priority": 1
     }
    }
   },
