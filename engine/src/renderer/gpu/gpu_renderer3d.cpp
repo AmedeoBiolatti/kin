@@ -1494,6 +1494,13 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                              /*uniform_buffers=*/4, /*samplers=*/15, /*storage_buffers=*/4);
             }
             _lights_available = true;
+            // The light variants' binding 6 is a 2D array (the reflection array): where there is neither environment
+            // nor probe they read a one-layer white one, never a 2D texture.
+            if (!_white_maps) {
+                static constexpr u8 white[4] = {255, 255, 255, 255};
+                const u8* const layer = white;
+                _white_maps = create_map_array({1, 1}, {&layer, 1});
+            }
             _capabilities.local_shadows = true;
             _capabilities.max_point_lights = _capabilities.max_spot_lights = max_grid_lights;
         } catch (const std::exception& e) {
