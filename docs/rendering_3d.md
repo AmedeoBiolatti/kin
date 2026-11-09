@@ -2855,6 +2855,10 @@ scene.lights.reflection_probes.push_back({.position = {0, 1.5f, 0}, // where it 
   place of the environment's or the hemisphere's ambient light. Global illumination's probes still win where they have
   light. `diffuse = false` keeps a probe to reflections (a shiny thing's own probe, say, where the room's light should
   stay the room's).
+- **Baked.** `save_reflection_capture(capture, file)` writes a capture's panorama as a Radiance `.hdr` picture (2:1,
+  linear, the layout environments use) and `load_reflection_capture(path)` makes a capture of one, through the content
+  folder or pack: a scene ships its probes' pictures instead of capturing them at load (six renders each). Any 2:1
+  panorama will do (a room rendered elsewhere). A loaded capture can be captured again.
 - **Curved mirrors.** A shiny ball, a vase, a helmet: a probe at its centre captured every frame, without parallax (the
   centre is the right point to see the world from), with the thing left out of its own picture (`{.hidden_id = id}`,
   its copies' `MeshInstance3D::id`: `Camera3D::hidden_id`), a small box round it and a higher priority than the room's.
@@ -2875,7 +2879,10 @@ captured from its place, its boxes round it (plus `box_offset`), turned and scal
 and places them (`ReflectionProbes3D`, `kin/scene/reflection_probes3d.hpp`, for a game that renders `scene()` itself),
 before the mirrors' and portals' pictures, which reflect them too. A probe is captured when it first shows, when it
 moves, when `recapture` changes, every `interval` seconds (of `Scene3D::time`) or `every_frame`; `hide_self` leaves the
-entity's own copies out of its picture (a shiny statue's own probe):
+entity's own copies out of its picture (a shiny statue's own probe). With `baked` (a picture in the content) it is loaded
+from there instead and captured only when `recapture` changes; `ReflectionProbes3D::bake(world, scene, content)` captures
+every probe, writes `probes/<authored id>.hdr` and sets their `baked` (save the scene to keep it; `planar_atrium
+--bake-probes` does it for the atrium):
 
 ```json
 {"id": "hall_probe", "components": {"Transform3D": {"position": [0, 2, 0]},

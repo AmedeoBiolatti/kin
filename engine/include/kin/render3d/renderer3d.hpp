@@ -161,6 +161,11 @@ public:
     // after). The renders that use it then filter it, once a capture. Cost: six renders at the capture's side.
     Status3D capture_reflection(ReflectionCapture3D& capture, Scene3D& scene, Vec3f position,
                                 const ReflectionCaptureOptions3D& options = {});
+    // A capture baked: its panorama written to `file` (a Radiance .hdr picture, 2:1, linear: what load_environment and
+    // load_reflection_capture read), and one loaded from such a picture through the content folder or pack (a baked
+    // probe, or any panorama: a room painted or rendered elsewhere). A loaded capture can be captured again.
+    Status3D save_reflection_capture(const ReflectionCapture3D& capture, const std::filesystem::path& file);
+    Result3D<ReflectionCapture3D> load_reflection_capture(const std::filesystem::path& path);
     // A fragment shader for materials (Material3D::shader), from SPIR-V
     // compiled against kin_material.inc.glsl (docs/rendering_3d.md, Custom
     // shaders). Empty where 3D isn't available or the shader is refused.

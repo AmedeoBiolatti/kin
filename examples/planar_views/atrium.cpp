@@ -3,11 +3,13 @@
 // brushed brass with verdigris, a checkered marble floor, terrazzo, sandstone, glowing portal trim) and its motion a
 // Lua script (content/scripts/atrium.lua: an orb flying through the portals by scene3d.portal_step).
 //
-//   planar_atrium [--camera N] [--shot picture.png] [--frames N] [--content folder]
+//   planar_atrium [--camera N] [--shot picture.png] [--frames N] [--content folder] [--bake-probes]
 //
 // --camera: 0 orbits the atrium, 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the
 // portals (the keys 0-4 too). --shot renders headless and writes a picture after --frames frames (with
-// KIN_RENDER_BACKEND=gpu). The first run compiles the material graphs with glslc (some seconds). Esc: quit.
+// KIN_RENDER_BACKEND=gpu). --bake-probes captures the scene's reflection probes after a few frames and writes them to
+// the content's probes/ folder (Radiance .hdr panoramas; name them in a probe's "baked" to load them instead of
+// capturing at run time), then quits. The first run compiles the material graphs with glslc (some seconds). Esc: quit.
 #include "planar_surfaces.hpp"
 
 #include <algorithm>
@@ -17,6 +19,7 @@
 #include <kin/render3d/assets3d.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <kin/scene/planar_views3d.hpp>
+#include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
 #include <memory>
 #include <sol/sol.hpp>
@@ -31,6 +34,7 @@ struct Options {
     std::filesystem::path content = ATRIUM_CONTENT, shot;
     int camera = 0;
     int frames = 90;
+    bool bake = false;
 };
 
 class Atrium final : public Scene {
@@ -85,6 +89,14 @@ public:
             require(_session->diagnostics());
         ctx.renderer.clear();
         ctx.renderer.draw_texture(_session->view()->texture(), {0, 0, f32(size.x), f32(size.y)});
+        if (_o.bake && ++_baked == 3) { // (a few frames in: the scene and its probes as they stand)
+            ReflectionProbes3D baker{*_renderer, _o.content};
+            if (!baker.bake(*_session->world(), *_session->scene(), _o.content))
+                require(_renderer->diagnostics());
+            std::cout << "planar_atrium: baked the reflection probes into " << (_o.content / "probes").string() << '\n';
+            ctx.app.quit();
+            return;
+        }
         if (!_o.shot.empty() && ++_frame == _o.frames) {
             Image image;
             if (!ctx.renderer.read_rgba({0, 0, f32(size.x), f32(size.y)}, image.rgba, image.size) ||
@@ -119,7 +131,7 @@ private:
     std::unique_ptr<SceneSession3D> _session;
     sol::state* _lua = nullptr;
     Vec2i _size{};
-    int _camera = 0, _frame = 0;
+    int _camera = 0, _frame = 0, _baked = 0;
 };
 
 } // namespace
@@ -143,14 +155,16 @@ int main(int argc, char** argv) {
                 o.camera = std::clamp(std::stoi(value()), 0, 4);
             else if (a == "--frames")
                 o.frames = std::max(1, std::stoi(value()));
+            else if (a == "--bake-probes")
+                o.bake = true;
             else
                 runtime.push_back(argv[i]);
         }
         auto headless = parse_headless_options(int(runtime.size()), runtime.data());
-        if (!o.shot.empty()) {
+        if (!o.shot.empty() || o.bake) {
             headless.enabled = true;
             headless.render = true; // on the GPU
-            headless.frames = o.frames + 1;
+            headless.frames = o.bake ? 4 : o.frames + 1;
         }
         SceneManager scenes;
         scenes.push(std::make_unique<Atrium>(o));

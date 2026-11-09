@@ -79,6 +79,108 @@ Environment3D Renderer3D::load_environment_operation(const std::filesystem::path
     return environment;
 }
 
+namespace {
+// A Radiance .hdr picture (RGBE, 2:1 panoramas: what kin_hdr_load reads): the header, a "-Y h +X w" size, then each
+// scanline in the new run-length coding (its four components apart, each in literal runs of up to 128: a flat scanline
+// whose first texel began 2, 2 would read as a coded one).
+std::string encode_hdr(Vec2i size, std::span<const f32> rgb) {
+    const auto w = static_cast<std::size_t>(size.x), h = static_cast<std::size_t>(size.y);
+    std::string out =
+        "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y " + std::to_string(h) + " +X " + std::to_string(w) + "\n";
+    std::vector<u8> texel(w * 4);
+    for (std::size_t y = 0; y < h; ++y) {
+        for (std::size_t x = 0; x < w; ++x) {
+            const f32* c = &rgb[(y * w + x) * 3];
+            const f32 r = std::isfinite(c[0]) ? std::max(c[0], 0.0f) : 0.0f;
+            const f32 g = std::isfinite(c[1]) ? std::max(c[1], 0.0f) : 0.0f;
+            const f32 b = std::isfinite(c[2]) ? std::max(c[2], 0.0f) : 0.0f;
+            const f32 m = std::max({r, g, b});
+            u8* t = &texel[x * 4];
+            if (m < 1e-32f) {
+                t[0] = t[1] = t[2] = t[3] = 0;
+            } else {
+                int e = 0;
+                const f32 scale = std::frexp(m, &e) * 256.0f / m;
+                t[0] = static_cast<u8>(std::min(r * scale, 255.0f));
+                t[1] = static_cast<u8>(std::min(g * scale, 255.0f));
+                t[2] = static_cast<u8>(std::min(b * scale, 255.0f));
+                t[3] = static_cast<u8>(e + 128);
+            }
+        }
+        if (w < 8 || w >= 32768) { // (the coding's limits: flat)
+            out.append(reinterpret_cast<const char*>(texel.data()), texel.size());
+            continue;
+        }
+        out += static_cast<char>(2);
+        out += static_cast<char>(2);
+        out += static_cast<char>(w >> 8);
+        out += static_cast<char>(w & 0xFF);
+        for (std::size_t c = 0; c < 4; ++c)
+            for (std::size_t x = 0; x < w;) {
+                const std::size_t n = std::min<std::size_t>(128, w - x);
+                out += static_cast<char>(n);
+                for (std::size_t k = 0; k < n; ++k)
+                    out += static_cast<char>(texel[(x + k) * 4 + c]);
+                x += n;
+            }
+    }
+    return out;
+}
+} // namespace
+
+Status3D Renderer3D::save_reflection_capture(const ReflectionCapture3D& capture, const std::filesystem::path& file) {
+    _errors.clear();
+    const auto fail = [&](const std::string& why) {
+        fail3d(_errors, "Renderer3D::save_reflection_capture(" + file.string() + ")", why);
+        return status3d(false, _errors);
+    };
+    if (!capture || !_backend)
+        return fail("an empty capture");
+    if (capture.backend()->generation() == 0)
+        return fail("not captured yet");
+    std::vector<f32> rgb;
+    Vec2i size{};
+    if (!_backend->read_reflection_capture(*capture.backend(), rgb, size) || size.x <= 0 || size.y <= 0 ||
+        rgb.size() != static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 3)
+        return fail("its picture could not be read back");
+    std::error_code error;
+    if (file.has_parent_path())
+        std::filesystem::create_directories(file.parent_path(), error);
+    std::ofstream out(file, std::ios::binary);
+    const std::string bytes = encode_hdr(size, rgb);
+    if (!out || !out.write(bytes.data(), static_cast<std::streamsize>(bytes.size())))
+        return fail("cannot write it");
+    return status3d(true, _errors);
+}
+
+Result3D<ReflectionCapture3D> Renderer3D::load_reflection_capture(const std::filesystem::path& path) {
+    _errors.clear();
+    const auto fail = [&](const std::string& why) {
+        fail3d(_errors, "Renderer3D::load_reflection_capture(" + path.string() + ")", why);
+        return result3d(ReflectionCapture3D{}, _errors);
+    };
+    if (!_backend)
+        return fail("3D is not available");
+    const std::optional<std::string> bytes = read_content_file(path);
+    if (!bytes)
+        return fail("cannot read it");
+    int w = 0, h = 0;
+    float* pixels =
+        kin_hdr_load(reinterpret_cast<const unsigned char*>(bytes->data()), static_cast<int>(bytes->size()), &w, &h);
+    if (!pixels)
+        return fail("not a Radiance .hdr picture");
+    std::shared_ptr<IReflectionCaptureBackend3D> backend;
+    if (w >= 16 && w == 2 * h)
+        backend = _backend->create_reflection_capture_from(
+            {w, h}, {pixels, static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3});
+    kin_hdr_free(pixels);
+    if (!(w >= 16 && w == 2 * h))
+        return fail("a panorama must be 2:1 and at least 16 wide");
+    if (!backend)
+        return fail("not supported here (needs the GPU renderer and compute)");
+    return result3d(ReflectionCapture3D{std::move(backend)}, _errors);
+}
+
 Result3D<ReflectionCapture3D> Renderer3D::create_reflection_capture(u32 side) {
     _errors.clear();
     const auto fail = [&](const std::string& why) {

@@ -580,6 +580,9 @@ public:
     std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32 side) override;
     bool capture_reflection(IReflectionCaptureBackend3D& capture, Scene3D& scene, Vec3f position,
                             const ReflectionCaptureOptions3D& options, RenderDebugStats3D& stats) override;
+    bool read_reflection_capture(IReflectionCaptureBackend3D& capture, std::vector<f32>& rgb, Vec2i& size) override;
+    std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i size,
+                                                                                std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<ISurfaceShaderBackend3D>
     create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) override;
