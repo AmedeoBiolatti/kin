@@ -131,6 +131,8 @@ void register_render3d_components(EcsWorld& world) {
             .units("m")
             .description("The parallax box's half extents (a room's walls); zero: the influence box's.")
             .field("intensity", &ReflectionProbe3D::intensity)
+            .field("diffuse", &ReflectionProbe3D::diffuse)
+            .description("Lights what is inside its box too (the light it saw all round); off: reflections only.")
             .field("priority", &ReflectionProbe3D::priority)
             .description("Where boxes overlap, the higher first (equal: the smaller box first).")
             .field("resolution", &ReflectionProbe3D::resolution)

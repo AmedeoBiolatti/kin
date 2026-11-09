@@ -241,9 +241,36 @@ vec4 kin_probe_reflection(vec3 p, vec3 r, float lod, out float own) {
         }
         const vec2 uv = vec2(0.5 + atan(way.z, way.x) / (2.0 * PI), 0.5 - asin(clamp(way.y, -1.0, 1.0)) / PI);
         const float take = weight * (1.0 - share);
-        sum += textureLod(uEnvSpecular, vec3(uv, a5.w), lod).rgb * a4.w * take;
+        sum += textureLod(uEnvSpecular, vec3(uv, abs(a5.w)), lod).rgb * a4.w * take;
         share += take;
         own += half_box.x > 0.0 ? 0.0 : take;
+    }
+    return vec4(sum, share);
+}
+
+// The reflection probes' diffuse light for a surface at `p` facing `n` (what one facing that way receives, over pi: the
+// level after their specular ones), blended by their boxes as kin_probe_reflection blends; .a their share. Only the
+// probes that give it (a positive layer: ReflectionProbeSource3D::diffuse), read as if infinitely far (diffuse light
+// barely moves with the parallax).
+vec4 kin_probe_irradiance(vec3 p, vec3 n) {
+    vec3 sum = vec3(0.0);
+    float share = 0.0;
+    const int count = int(frame.probes.x);
+    const vec2 uv = vec2(0.5 + atan(n.z, n.x) / (2.0 * PI), 0.5 - asin(clamp(n.y, -1.0, 1.0)) / PI);
+    for (int i = 0; i < count && share < 0.999; ++i) {
+        const vec4 a5 = frame.probe[i * 6 + 5];
+        if (a5.w < 0.0)
+            continue;
+        const vec4 a0 = frame.probe[i * 6], a1 = frame.probe[i * 6 + 1], a2 = frame.probe[i * 6 + 2];
+        const vec4 a3 = frame.probe[i * 6 + 3];
+        const vec3 q = p - vec3(a0.w, a1.w, a2.w);
+        const vec3 room = a3.xyz - abs(vec3(dot(a0.xyz, q), dot(a1.xyz, q), dot(a2.xyz, q)));
+        const float inside = min(min(room.x, room.y), room.z);
+        if (inside <= 0.0)
+            continue;
+        const float take = (a3.w > 0.0 ? min(inside / a3.w, 1.0) : 1.0) * (1.0 - share);
+        sum += textureLod(uEnvSpecular, vec3(uv, a5.w), frame.probes.y + 1.0).rgb * frame.probe[i * 6 + 4].w * take;
+        share += take;
     }
     return vec4(sum, share);
 }
@@ -998,6 +1025,18 @@ vec3 kin_lit_surface(KinSurface surface) {
         coat_above = mix(frame.ground_ambient.rgb, frame.ambient.rgb, coat_reflected.y * 0.5 + 0.5);
         above = mix(frame.ground_ambient.rgb, frame.ambient.rgb, reflected.y * 0.5 + 0.5);
     }
+#ifdef KIN_LIGHT_GRID
+    // The reflection probes' diffuse light, in place of the environment's or the hemisphere's where their boxes reach
+    // (global illumination's probes, after, still win where they have light).
+    if (frame.probes.x > 0.5) {
+        const vec4 lit = kin_probe_irradiance(vWorld, n);
+        around = lit.rgb + around * (1.0 - lit.a);
+        if (backlit || wrap > 0.5) {
+            const vec4 lit_behind = kin_probe_irradiance(vWorld, -n);
+            behind = lit_behind.rgb + behind * (1.0 - lit_behind.a);
+        }
+    }
+#endif
 #ifdef KIN_GI
     vec3 area_light = vec3(0.0); // the area lights' (frame.gi.y), a direct light's: not occluded, not the probes'
     // With global illumination's probes the diffuse is theirs: the sky's light where they see it, the light of every

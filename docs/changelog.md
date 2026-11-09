@@ -88,6 +88,9 @@ releases may change APIs.
   into the previous frame's picture, kept as a blur pyramid, read as wide as the reflection's lobe (glossy surfaces get
   blurred reflections, up to `max_roughness`); in place of the probes' or the environment's where it finds something;
   fades by the screen's edges, curvature and steep normal maps, and leaves a thing's own probe alone. The light variants' last storage buffer (older compiled surfaces simply do not read it).
+- Reflection probes light what is inside their boxes too (`ReflectionProbeSource3D::diffuse`, the component's
+  `diffuse`, on by default): the probe's irradiance, a level more in its layer, in place of the environment's or the
+  hemisphere's ambient light (global illumination's probes still win where they reach).
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds

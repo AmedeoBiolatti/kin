@@ -11566,7 +11566,7 @@ void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
         const u32 levels = ctx.environment ? ctx.environment->levels : 5u;
         if (!_reflections || _reflections.width() != w || _reflection_levels != levels) {
             _reflections =
-                reflection_texture(*_device, w, w / 2, 1 + max_reflection_probes3d, levels,
+                reflection_texture(*_device, w, w / 2, 1 + max_reflection_probes3d, levels + 1,
                                    SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
             _reflection_levels = levels;
             _reflection_environment = nullptr;
@@ -11620,8 +11620,11 @@ void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
         slot.used = _reflection_renders;
         const auto& capture = static_cast<const GpuReflectionCapture3D&>(*c.capture);
         if (slot.generation != capture.captured) {
-            // Filtered into the array's layer as an environment's levels are.
-            for (u32 level = 0; level < _reflection_levels; ++level) {
+            // Filtered into the array's layer as an environment's levels are, and one level more: what a diffuse
+            // surface facing each way receives (over pi), as an environment's irradiance (8 x 4 at the sky's size: it
+            // is smooth).
+            for (u32 level = 0; level <= _reflection_levels; ++level) {
+                const bool diffuse = level == _reflection_levels;
                 const SDL_GPUStorageTextureReadWriteBinding output{
                     .texture = _reflections.handle(), .mip_level = level, .layer = 1 + layer};
                 SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
@@ -11635,11 +11638,13 @@ void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
                     _reflection_levels > 1 ? static_cast<f32>(level) / static_cast<f32>(_reflection_levels - 1) : 0.0f;
                 const f32 params[8] = {static_cast<f32>(lw),
                                        static_cast<f32>(lh),
-                                       roughness,
-                                       level == 0 ? 0.0f : 1.0f,
+                                       diffuse ? 1.0f : roughness,
+                                       diffuse      ? 2.0f
+                                       : level == 0 ? 0.0f
+                                                    : 1.0f,
                                        static_cast<f32>(capture.source.width()),
                                        static_cast<f32>(capture.source.height()),
-                                       static_cast<f32>(environment_samples),
+                                       static_cast<f32>(diffuse ? irradiance_samples : environment_samples),
                                        0.0f};
                 SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
                 SDL_DispatchGPUCompute(pass, (lw + 7) / 8, (lh + 7) / 8, 1);
@@ -11649,7 +11654,8 @@ void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
             ++ctx.stats.reflection_filters;
         }
         // Its record (kin_probe_reflection): the boxes' world-to-local rows and centre, the influence box and blend,
-        // the parallax box (0: none) and intensity, where it was captured and its layer.
+        // the parallax box (0: none) and intensity, where it was captured and its layer (negative: it gives no diffuse
+        // light, ReflectionProbeSource3D::diffuse).
         const ReflectionProbeSource3D& probe = *c.probe;
         const Vec3f centre = probe.position + probe.box_offset;
         // (the rows of the matrix that turns world into local are where the rotation turns the axes)
@@ -11666,7 +11672,7 @@ void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
         put(r + 8, row_z, centre.z);
         put(r + 12, probe.extent, std::max(probe.blend, 0.0f));
         put(r + 16, parallax, probe.intensity);
-        put(r + 20, probe.position, static_cast<f32>(1 + layer));
+        put(r + 20, probe.position, static_cast<f32>(1 + layer) * (probe.diffuse ? 1.0f : -1.0f));
         ++ctx.probe_count;
     }
     ctx.reflections = &_reflections;

@@ -10430,5 +10430,7 @@ filters stay 2D; `env_filter.comp` gets an octahedral mode). Probes are captured
   same buffer, read as wide as the lobe (glossy up to max_roughness 0.8). The buffer is the lit shaders' last storage
   buffer, not a sampler (none left), with each texel's traced depth for a depth-aware upsample; jitter only with TAA.
   About 0.2 ms at 720p.
+- **Gaps, round 1 (2026-11-09).** Probes' diffuse light (an irradiance level per layer), then probes baked to disk,
+  water refraction and depth fade, GI in captures (borrowing the main view's GI), in that order.
 - **R4 — later.** Probes baked to disk as assets (and a bake button in kin-studio), probe gizmos, normalising probes by
   the GI's light, water refraction and depth fade on SSR's colour.

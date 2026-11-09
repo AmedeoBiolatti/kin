@@ -66,6 +66,10 @@ struct ReflectionProbeSource3D {
     Vec3f parallax_extent{};
     bool parallax = true;
     f32 intensity = 1.0f;
+    // Diffuse light too: the surfaces inside the box are lit by what the probe saw all round (its picture's irradiance,
+    // as an environment's), in place of the environment's or the hemisphere's ambient light; global illumination's
+    // probes still win where they reach. Off: reflections only.
+    bool diffuse = true;
     // Where boxes overlap, the higher first; equal, the smaller first.
     i32 priority = 0;
     ReflectionCapture3D capture;

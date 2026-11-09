@@ -221,6 +221,7 @@ struct ReflectionProbe3D {
     bool parallax = true;
     Vec3f parallax_extent{};
     f32 intensity = 1.0f;
+    bool diffuse = true;
     i32 priority = 0;
     u32 resolution = 128;
     f32 interval = 0.0f;
