@@ -167,15 +167,14 @@ struct PlanarViews3D::Data {
         if (auto it = entries.find(id); it != entries.end())
             it->second.frame = frame;
     }
-    // The entity's `k`th view for a picture `size` (at most `limit`), with `options`; made again with its options. A
-    // picture's window maps onto the whole of its view, so a view larger than the picture is only sharper. As the eye
-    // moves, a picture changes size (in steps of 64) many times a second, and each resize makes all the view's targets
-    // again: the atrium walked through made hundreds of textures a second, and the process's memory grew without end
-    // (the driver's allocations churned through the heap). So a view grows at once when its picture outgrows it, an
-    // eighth (or 64 pixels) more than it, and
-    // shrinks only after three seconds of being larger than any picture it showed in them by more than a quarter (or
-    // 128 pixels), to the largest of them and 64 pixels: about a tenth of the resizes, for pictures a little larger.
-    View3D* view(EcsId id, u32 k, Vec2i size, Vec2i limit, const ViewOptions3D& options) {
+    // The entity's `k`th view for a picture `size` (at most `limit`), with `options`, to render `scene` (made again
+    // with other options). As the eye moves, a picture changes size (in steps of 64) many times a second; resizing a
+    // view makes all its targets again (the atrium walked through made hundreds of textures a second, and memory grew
+    // with them). Where the renderer can render part of a view (Renderer3D::can_render_part), a view's targets only
+    // grow, to the largest picture it has shown (an eighth or 64 pixels more; smaller only after ten seconds of all its
+    // pictures under half of it), and each render fills its picture's own size (View3D::set_render_size; the surface
+    // reads that part: part_of). Where it cannot (temporal anti-aliasing, GI, ...), the view is the picture's size.
+    View3D* view(EcsId id, u32 k, Vec2i size, Vec2i limit, const ViewOptions3D& options, const Scene3D& scene) {
         Entry& e = entries[id];
         e.frame = frame;
         if (e.options.hdr != options.hdr || e.options.samples != options.samples ||
@@ -188,9 +187,8 @@ struct PlanarViews3D::Data {
             return std::clamp((want + std::max(want / 8, 64) + 63) / 64 * 64, want, std::max(most, want));
         };
         const auto fitted = [&](int want, int most) { return std::clamp(want + 64, want, std::max(most, want)); };
-        const auto roomy = [](int want, int have) { return have > want + std::max(want / 4, 128); };
         while (e.views.size() <= k) {
-            auto made = renderer.create_view({grown(size.x, limit.x), grown(size.y, limit.y)}, options);
+            auto made = renderer.create_view(size, options);
             if (!made)
                 return nullptr;
             e.views.push_back(std::move(*made));
@@ -199,22 +197,32 @@ struct PlanarViews3D::Data {
         View3D& v = e.views[k];
         Room& room = e.room[k];
         const Vec2i have = v.texture().size();
-        room.peak = {std::max(room.peak.x, size.x), std::max(room.peak.y, size.y)};
-        if (!(roomy(room.peak.x, have.x) || roomy(room.peak.y, have.y)))
-            room = {frame, size};
-        Vec2i want = have;
-        if (have.x < size.x || have.y < size.y) {
-            want = {have.x >= size.x ? have.x : grown(size.x, limit.x),
-                    have.y >= size.y ? have.y : grown(size.y, limit.y)};
-            room = {frame, size};
-        } else if (frame - room.since >= 180) {
-            want = {roomy(room.peak.x, have.x) ? fitted(room.peak.x, limit.x) : have.x,
-                    roomy(room.peak.y, have.y) ? fitted(room.peak.y, limit.y) : have.y};
-            room = {frame, size};
+        Vec2i want = size;
+        if (renderer.can_render_part(v, scene)) {
+            const auto roomy = [](int peak, int at) { return at > 2 * peak + 128; };
+            room.peak = {std::max(room.peak.x, size.x), std::max(room.peak.y, size.y)};
+            if (!(roomy(room.peak.x, have.x) || roomy(room.peak.y, have.y)))
+                room = {frame, size};
+            want = have;
+            if (have.x < size.x || have.y < size.y) {
+                want = {have.x >= size.x ? have.x : grown(size.x, limit.x),
+                        have.y >= size.y ? have.y : grown(size.y, limit.y)};
+                room = {frame, size};
+            } else if (frame - room.since >= 600) {
+                want = {roomy(room.peak.x, have.x) ? fitted(room.peak.x, limit.x) : have.x,
+                        roomy(room.peak.y, have.y) ? fitted(room.peak.y, limit.y) : have.y};
+                room = {frame, size};
+            }
         }
-        if (v.texture().size() != want && !renderer.resize(v, want))
+        if (have != want && !renderer.resize(v, want))
             return nullptr;
+        v.set_render_size(want == size ? Vec2i{} : size);
         return &v;
+    }
+    // How much of `view`'s texture its picture fills, from the top-left (planar_view_params' `share`).
+    static Vec2f part_of(const View3D& view) {
+        const Vec2i whole = view.size(), part = view.render_size();
+        return {whole.x > 0 ? f32(part.x) / f32(whole.x) : 1.0f, whole.y > 0 ? f32(part.y) / f32(whole.y) : 1.0f};
     }
 };
 
@@ -409,25 +417,25 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         if (bounds && d.surfaces.reflection) {
             // Only where the mirror shows (its ripples read a little round it: the margin), as sharp as the view.
             const PlanarPicture3D picture = planar_picture(*bounds, frame_size(c.resolution));
-            m.view = d.view(m.id, 0, picture.size, frame_size(c.resolution), options);
+            m.view = d.view(m.id, 0, picture.size, frame_size(c.resolution), options, scene);
             if (m.view) {
                 m.seen = mirror_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
                 crop_planar_view(m.seen, picture.window, f32(picture.size.x) / f32(picture.size.y), true);
                 m.real.surface = d.surfaces.reflection;
                 m.real.emissive_texture = m.view->texture();
                 planar_view_params(m.real.shader_params, m.seen.projector, c.distortion,
-                                   std::clamp(c.strength, 0.0f, 1.0f));
+                                   std::clamp(c.strength, 0.0f, 1.0f), Data::part_of(*m.view));
                 // Water you see into: what is below the surface, in a picture of the same place, in its base colour
                 // map. Its murk is a height fog thickening fast under the surface (level water: its base height the
                 // surface's), about two thirds gone looking straight down `murk_depth` deep.
                 if (c.refraction > 0.0f && c.metallic < 1.0f)
-                    m.below_view = d.view(m.id, 1, picture.size, frame_size(c.resolution), options);
+                    m.below_view = d.view(m.id, 1, picture.size, frame_size(c.resolution), options, scene);
                 if (m.below_view) {
                     m.below = refraction_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
                     crop_planar_view(m.below, picture.window, f32(picture.size.x) / f32(picture.size.y), false);
                     m.real.texture = m.below_view->texture();
                     planar_refraction_params(m.real.shader_params, m.below.projector, c.refraction_distortion,
-                                             std::clamp(c.refraction, 0.0f, 1.0f));
+                                             std::clamp(c.refraction, 0.0f, 1.0f), Data::part_of(*m.below_view));
                     const f32 k = 3.0f / std::max(c.murk_depth, 0.01f);
                     m.murk = Fog3D{.enabled = true,
                                    .height_density = k / (std::exp(3.0f) - 1.0f),
@@ -469,7 +477,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 if (!seen)
                     break;
                 const PlanarPicture3D picture = planar_picture(*seen, frame);
-                View3D* view = d.view(p.id, p.shown, picture.size, frame, options);
+                View3D* view = d.view(p.id, p.shown, picture.size, frame, options, scene);
                 if (!view)
                     break;
                 PlanarView3D& level = p.chain[p.shown];
@@ -487,7 +495,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
             level.color = colors::white;
             level.surface = d.surfaces.window;
             level.emissive_texture = p.views[k]->texture();
-            planar_view_params(level.shader_params, p.chain[k].projector);
+            planar_view_params(level.shader_params, p.chain[k].projector, 0.0f, 1.0f, Data::part_of(*p.views[k]));
             p.levels.push_back(std::move(level));
         }
         // A box behind the opening, so that a camera a little way into it still sees through.

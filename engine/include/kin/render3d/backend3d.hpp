@@ -271,6 +271,10 @@ public:
     // Forgets the temporal anti-aliasing's history, so the next frame starts
     // afresh (a camera cut, a scene change).
     virtual void reset_history() {}
+    // The part of the picture renders fill, from its top-left corner (View3D::set_render_size): the whole unless the
+    // backend renders parts and was asked to.
+    virtual Vec2i render_size() const { return size(); }
+    virtual bool set_render_size(Vec2i) { return false; }
 };
 
 // Backend-owned frame preparation. Source lifetime/edits and frame boundaries
@@ -340,6 +344,8 @@ public:
     }
     virtual std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) = 0;
     virtual bool resize_view(IViewBackend3D& view, Vec2i size) = 0;
+    // Whether a render of `scene` into `view` can fill only part of it (IViewBackend3D::set_render_size).
+    virtual bool renders_part(const IViewBackend3D&, const Scene3D&) const { return false; }
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
     virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;

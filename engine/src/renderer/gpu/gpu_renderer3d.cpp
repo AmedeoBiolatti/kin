@@ -271,14 +271,25 @@ void put_clip(f32 (&clip)[4], const Camera3D& camera) {
 struct SsrLayout {
     u32 w = 1, h = 1, levels = 0, pyramid_word = 0, words = 0;
 };
-SsrLayout ssr_layout(Vec2i view) {
+// The reflections' buffer for a view `size` rendering `part` of it (View3D::set_render_size): the trace's half-size
+// grid and the pyramid's levels are the part's, where they sit and the buffer's words the whole's, so that a pyramid
+// kept one frame is where the next reads it whatever part that one renders (it reads it at the grid it was kept at).
+SsrLayout ssr_layout(Vec2i size, Vec2i part) {
+    const auto half = [](i32 v) { return std::max(1u, (static_cast<u32>(v) + 1) / 2); };
     SsrLayout l;
-    l.w = std::max(1u, (static_cast<u32>(view.x) + 1) / 2);
-    l.h = std::max(1u, (static_cast<u32>(view.y) + 1) / 2);
-    l.pyramid_word = l.w * l.h * 3;
+    l.w = half(std::min(part.x, size.x));
+    l.h = half(std::min(part.y, size.y));
+    const u32 whole_w = half(size.x), whole_h = half(size.y);
+    l.pyramid_word = whole_w * whole_h * 3;
     l.words = l.pyramid_word;
-    for (u32 w = l.w, h = l.h; l.levels < 6;) {
+    for (u32 w = whole_w, h = whole_h, levels = 0; levels < 6; ++levels) {
         l.words += w * h * 2;
+        if (w == 1 && h == 1)
+            break;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    for (u32 w = l.w, h = l.h; l.levels < 6;) {
         ++l.levels;
         if (w == 1 && h == 1)
             break;
@@ -333,7 +344,8 @@ struct FrameUniforms {
     f32 probes[4];    // x: the reflection probes this pass reads, y: their last level
     f32 probe[max_reflection_probes3d * 6 * 4]; // six vec4s a probe (prepare_reflections)
     f32 ssr[4]; // x: 1 when this pass reads screen-space reflections, yz: their grid's size, w: their roughness limit
-    f32 ssr_pyramid[4];   // x: the previous picture's levels, y: its projection's [1][1], z: level 0's first word
+    f32 ssr_pyramid[4]; // x: the previous picture's levels, y: its projection's [1][1], z: level 0's first word, w: its
+                        // grid (x + 4096 y)
     f32 ssr_previous[16]; // world to the previous frame's clip space
 };
 static_assert(sizeof(FrameUniforms) == 2832);
@@ -908,7 +920,8 @@ void set_viewport(SDL_GPURenderPass* pass, u32 width, u32 height, f32 min_depth 
 // One compute pass over `target`'s texels in groups of 8 x 8: `inputs` sampled, the uniforms pushed.
 // False if the pass could not begin (nothing was recorded).
 bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeline, const GpuTexture& target,
-                  std::span<const SDL_GPUTextureSamplerBinding> inputs, const void* uniforms, u32 bytes) {
+                  std::span<const SDL_GPUTextureSamplerBinding> inputs, const void* uniforms, u32 bytes,
+                  Vec2i part = {}) { // (`part`: only so much of it, from the top-left)
     const SDL_GPUStorageTextureReadWriteBinding output{
         .texture = target.handle(), .mip_level = 0, .layer = 0, .cycle = false};
     SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
@@ -918,7 +931,9 @@ bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeli
     SDL_BindGPUComputePipeline(pass, pipeline);
     SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), static_cast<u32>(inputs.size()));
     SDL_PushGPUComputeUniformData(commands, 0, uniforms, bytes);
-    SDL_DispatchGPUCompute(pass, (target.width() + 7) / 8, (target.height() + 7) / 8, 1);
+    const u32 w = part.x > 0 ? static_cast<u32>(part.x) : target.width(),
+              h = part.y > 0 ? static_cast<u32>(part.y) : target.height();
+    SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
     SDL_EndGPUComputePass(pass);
     return true;
 }
@@ -926,7 +941,7 @@ bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeli
 // The same into two textures of one size (ao_blur_both.comp).
 bool compute_pass_two(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeline, const GpuTexture& first,
                       const GpuTexture& second, std::span<const SDL_GPUTextureSamplerBinding> inputs,
-                      const void* uniforms, u32 bytes) {
+                      const void* uniforms, u32 bytes, Vec2i part = {}) {
     const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> outputs{
         SDL_GPUStorageTextureReadWriteBinding{.texture = first.handle(), .mip_level = 0, .layer = 0, .cycle = false},
         SDL_GPUStorageTextureReadWriteBinding{.texture = second.handle(), .mip_level = 0, .layer = 0, .cycle = false}};
@@ -937,7 +952,9 @@ bool compute_pass_two(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pi
     SDL_BindGPUComputePipeline(pass, pipeline);
     SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), static_cast<u32>(inputs.size()));
     SDL_PushGPUComputeUniformData(commands, 0, uniforms, bytes);
-    SDL_DispatchGPUCompute(pass, (first.width() + 7) / 8, (first.height() + 7) / 8, 1);
+    const u32 w = part.x > 0 ? static_cast<u32>(part.x) : first.width(),
+              h = part.y > 0 ? static_cast<u32>(part.y) : first.height();
+    SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
     SDL_EndGPUComputePass(pass);
     return true;
 }
@@ -3538,7 +3555,22 @@ bool GpuRenderer3D::resize_view(IViewBackend3D& base, Vec2i size) {
         view->_size = old;
         return false;
     }
+    view->_extent = {};      // (the whole again)
+    view->_ssr_seen = false; // (its pyramid's place moved with the size)
     return true;
+}
+
+// The passes that render a part of a view (its extent, from the top-left of its targets): the pre-pass, the ambient
+// occlusion, the light grid, the main pass with its sky and fog, the screen-space reflections. The others read and
+// write whole targets (the temporal resolve's history, the HDR output and bloom, GI's screen probes, the fog's sun
+// shafts, the occlusion pyramid, picking, the contact shadows, the overlay's velocity).
+bool GpuRenderer3D::renders_part(const IViewBackend3D& base, const Scene3D& scene) const {
+    const auto* view = dynamic_cast<const GpuView3D*>(&base);
+    if (!view || view->_hdr || view->_options.pick)
+        return false;
+    const Scene3D* overlay = scene.overlay_if_any();
+    return !scene.taa.enabled && !scene.global_illumination.enabled && !(scene.fog.enabled && scene.fog.sun_shadows) &&
+           !scene.lod.occlusion.enabled && !scene.contact_shadows.enabled && !(overlay && !overlay->draws().empty());
 }
 
 u32 GpuRenderer3D::ensure_shadow_map(u32 resolution, u32 layers) {
@@ -3683,11 +3715,13 @@ bool GpuRenderer3D::build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& vi
     if (!_gtao_chain_pipeline || !_ao_chain_pipeline) {
         return false;
     }
-    const u32 w = view._ao_depth.width(), h = view._ao_depth.height();
-    if (!view._ao_chain || view._ao_chain.width() != w || view._ao_chain.height() != h) {
+    // (Made the targets' size; built over the part renders fill.)
+    const u32 tw = view._ao_depth.width(), th = view._ao_depth.height();
+    const u32 w = std::min(tw, static_cast<u32>(view.extent().x)), h = std::min(th, static_cast<u32>(view.extent().y));
+    if (!view._ao_chain || view._ao_chain.width() != tw || view._ao_chain.height() != th) {
         try {
             view._ao_chain = _device->create_target(
-                w, h, hiz_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE,
+                tw, th, hiz_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE,
                 SDL_GPU_SAMPLECOUNT_1, ao_chain_levels);
         } catch (const std::exception& e) {
             KIN_LOG_WARN_F("render", "3D: the occlusion's depth chain not made",
@@ -3732,15 +3766,20 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     const PassMarker marker{commands, _gpu_markers, "kin3d.ao"};
     view._ao_upsampled_ready = false;
     const Unprojection unproject = unproject_coefficients(projection);
-    const f32 w = static_cast<f32>(view._ao_raw.width()), h = static_cast<f32>(view._ao_raw.height());
-    const f32 depth_w = static_cast<f32>(view._ao_depth.width()), depth_h = static_cast<f32>(view._ao_depth.height());
+    // Over the part renders fill (the view's extent; half of it at half resolution), in targets the view's size.
+    const bool half =
+        view._ao_raw.width() != view._ao_depth.width() || view._ao_raw.height() != view._ao_depth.height();
+    const Vec2i full = view.extent();
+    const Vec2i part = half ? Vec2i{std::max(1, (full.x + 1) / 2), std::max(1, (full.y + 1) / 2)} : full;
+    const f32 w = static_cast<f32>(part.x), h = static_cast<f32>(part.y);
+    const f32 depth_w = static_cast<f32>(full.x), depth_h = static_cast<f32>(full.y);
     _chain_ready = false;
     SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler};
     const auto dispatch = [&](SDL_GPUComputePipeline* pipeline, const GpuTexture& target, const GpuTexture& second,
                               const void* uniforms, u32 bytes) {
         const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
             depth, SDL_GPUTextureSamplerBinding{second.handle(), _point_sampler}};
-        if (compute_pass(commands, pipeline, target, inputs, uniforms, bytes)) {
+        if (compute_pass(commands, pipeline, target, inputs, uniforms, bytes, part)) {
             ++stats.ao_dispatches;
         }
     };
@@ -3762,7 +3801,7 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
         const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
             SDL_GPUTextureSamplerBinding{view._ao_chain.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler}};
-        if (compute_pass(commands, _gtao_chain_pipeline, view._ao_raw, inputs, &u, sizeof(u))) {
+        if (compute_pass(commands, _gtao_chain_pipeline, view._ao_raw, inputs, &u, sizeof(u), part)) {
             ++stats.ao_dispatches;
             stats.ao_chain_built = 1;
             // The blurs (this one's, the contact shadows', the merged) read the chain's first level instead of the
@@ -3795,14 +3834,14 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
         const PassMarker blur_marker{commands, _gpu_markers, "kin3d.ao_blur_y"};
         dispatch(blur_pipeline, view._ao_raw, view._ao_across, &blur, sizeof(blur));
     }
-    if (_ao_upsample_pipeline && view._ao_upsampled && (w != depth_w || h != depth_h)) {
+    if (_ao_upsample_pipeline && view._ao_upsampled && half) {
         const PassMarker upsample_marker{commands, _gpu_markers, "kin3d.ao_upsample"};
         const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
             SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{view._ao_raw.handle(), _point_sampler}};
         view._ao_upsampled_ready =
-            compute_pass(commands, _ao_upsample_pipeline, view._ao_upsampled, inputs, &u, sizeof(u));
+            compute_pass(commands, _ao_upsample_pipeline, view._ao_upsampled, inputs, &u, sizeof(u), full);
         if (view._ao_upsampled_ready)
             ++stats.ao_dispatches;
     }
@@ -6458,7 +6497,7 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
-    ctx.aspect = static_cast<f32>(view->_size.x) / static_cast<f32>(view->_size.y);
+    ctx.aspect = static_cast<f32>(view->extent().x) / static_cast<f32>(view->extent().y);
     const Scene3D* overlay = scene.overlay_if_any();
     ctx.scenes = {&scene, !ctx.geometry_only && overlay && !overlay->draws().empty() ? overlay : nullptr};
     for (u32 s = 0; s < 2; ++s) {
@@ -6563,10 +6602,10 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
         ctx.jitter = {raw.x * taa_settings.jitter_scale, raw.y * taa_settings.jitter_scale};
         for (u32 s = 0; s < 2; ++s) {
             if (ctx.scenes[s]) {
-                ctx.drawn[s] = jitter_projection(ctx.view_projections[s], ctx.jitter, view->_size);
+                ctx.drawn[s] = jitter_projection(ctx.view_projections[s], ctx.jitter, view->extent());
             }
         }
-        ctx.main_projection = jitter_projection(scene.camera.projection_matrix(ctx.aspect), ctx.jitter, view->_size);
+        ctx.main_projection = jitter_projection(scene.camera.projection_matrix(ctx.aspect), ctx.jitter, view->extent());
         // The history is of no use after a resize, a cut, or a change of the kind of camera
         // (its pixels no longer line up).
         const bool ortho = scene.camera.projection == Projection3D::Orthographic;
@@ -7280,7 +7319,7 @@ void GpuRenderer3D::build_light_grid(FrameCtx& ctx) {
     // sphere: the tiles its corners fall in (with the jittered matrix the pass draws with, a pixel more each way; all
     // of them when a corner is behind the camera) by the slices its depth spans. The lists are filled in the lights'
     // order.
-    const Vec2i size = ctx.view->_size;
+    const Vec2i size = ctx.view->extent();
     const u32 across = (static_cast<u32>(std::max(size.x, 1)) + grid_tile - 1) / grid_tile;
     const u32 down = (static_cast<u32>(std::max(size.y, 1)) + grid_tile - 1) / grid_tile;
     const u32 cells = across * down * grid_slices;
@@ -9095,7 +9134,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s] && ctx.scenes[s]->lod.enabled) {
             lod[s] = lod_view_of(ctx.scenes[s]->lod, ctx.scenes[s]->debug, ctx.scenes[s]->camera,
-                                 static_cast<f32>(view->_size.y));
+                                 static_cast<f32>(view->extent().y));
         }
     }
     static_assert(max_local_shadow_layers + max_shadow_cascades + 1 <= 64); // CullGroup's masks
@@ -11450,13 +11489,15 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     // Screen-space reflections, the scene's own pass only (ssr_trace).
     if (s == 0 && ctx.ssr) {
         f.ssr[0] = 1.0f;
-        f.ssr[1] = static_cast<f32>(std::max(1, (view->_size.x + 1) / 2));
-        f.ssr[2] = static_cast<f32>(std::max(1, (view->_size.y + 1) / 2));
+        const SsrLayout layout = ssr_layout(view->_size, view->extent());
+        f.ssr[1] = static_cast<f32>(layout.w);
+        f.ssr[2] = static_cast<f32>(layout.h);
         f.ssr[3] = std::clamp(ctx.scene.ssr.max_roughness, 0.0f, 1.0f);
-        const SsrLayout layout = ssr_layout(view->_size);
-        f.ssr_pyramid[0] = static_cast<f32>(layout.levels);
+        // The pyramid as the frame before kept it: its levels and its grid (x + 4096 y).
+        f.ssr_pyramid[0] = static_cast<f32>(view->_ssr_prior_levels);
         f.ssr_pyramid[1] = view->_ssr_prior_y;
         f.ssr_pyramid[2] = static_cast<f32>(layout.pyramid_word);
+        f.ssr_pyramid[3] = static_cast<f32>(view->_ssr_prior_grid.x + 4096 * view->_ssr_prior_grid.y);
         std::memcpy(f.ssr_previous, view->_ssr_prior.m, sizeof(f.ssr_previous));
     }
     // The reflection probes too (prepare_reflections).
@@ -11480,7 +11521,7 @@ bool GpuRenderer3D::ssr_trace(FrameCtx& ctx) {
     GpuView3D& view = *ctx.view;
     const Scene3D& scene = ctx.scene;
     const ScreenSpaceReflections3D& settings = scene.ssr;
-    const SsrLayout layout = ssr_layout(view._size);
+    const SsrLayout layout = ssr_layout(view._size, view.extent());
     try {
         ensure_buffer(view._ssr_buffer, layout.words * 4, 64,
                       SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
@@ -11506,8 +11547,8 @@ bool GpuRenderer3D::ssr_trace(FrameCtx& ctx) {
     std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
     u.sizes[0] = static_cast<f32>(layout.w);
     u.sizes[1] = static_cast<f32>(layout.h);
-    u.sizes[2] = static_cast<f32>(view._size.x);
-    u.sizes[3] = static_cast<f32>(view._size.y);
+    u.sizes[2] = static_cast<f32>(view.extent().x);
+    u.sizes[3] = static_cast<f32>(view.extent().y);
     u.shape[0] = std::max(settings.thickness, 1e-3f);
     u.shape[1] = std::max(settings.max_distance, 0.1f);
     u.shape[2] = static_cast<f32>(std::clamp(settings.steps, 8u, 128u));
@@ -11547,9 +11588,12 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     }
     if (!source)
         return;
-    const SsrLayout layout = ssr_layout(view._size);
+    const SsrLayout layout = ssr_layout(view._size, view.extent());
     if (view._ssr_buffer->size() < layout.words * 4)
         return;
+    // Level 0 reads the part of the picture this render filled.
+    const f32 share_x = static_cast<f32>(view.extent().x) / static_cast<f32>(std::max(view._size.x, 1)),
+              share_y = static_cast<f32>(view.extent().y) / static_cast<f32>(std::max(view._size.y, 1));
     SDL_GPUCommandBuffer* commands = ctx.commands;
     const PassMarker marker{commands, _gpu_markers, "kin3d.ssr_picture"};
     // Level 0 from the picture, each level after from the one before: a pass each (each reads the one before's writes).
@@ -11562,9 +11606,18 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
         SDL_BindGPUComputePipeline(pass, _ssr_pyramid_pipeline);
         const SDL_GPUTextureSamplerBinding picture{source, _owner->_sampler_linear};
         SDL_BindGPUComputeSamplers(pass, 0, &picture, 1);
-        const f32 params[8] = {static_cast<f32>(w),      static_cast<f32>(h),     static_cast<f32>(bw),
-                               static_cast<f32>(bh),     static_cast<f32>(first), static_cast<f32>(before),
-                               level == 0 ? 1.0f : 0.0f, encoded ? 1.0f : 0.0f};
+        const f32 params[12] = {static_cast<f32>(w),
+                                static_cast<f32>(h),
+                                static_cast<f32>(bw),
+                                static_cast<f32>(bh),
+                                static_cast<f32>(first),
+                                static_cast<f32>(before),
+                                level == 0 ? 1.0f : 0.0f,
+                                encoded ? 1.0f : 0.0f,
+                                share_x,
+                                share_y,
+                                0.0f,
+                                0.0f};
         SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
         SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
         SDL_EndGPUComputePass(pass);
@@ -11577,6 +11630,8 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     }
     view._ssr_prior = ctx.view_projections[0];
     view._ssr_prior_y = ctx.scene.camera.projection_matrix(ctx.aspect).at(1, 1);
+    view._ssr_prior_grid = {static_cast<i32>(layout.w), static_cast<i32>(layout.h)};
+    view._ssr_prior_levels = layout.levels;
     view._ssr_seen = true;
 }
 
@@ -11647,7 +11702,7 @@ void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
     };
     std::vector<Chosen> chosen;
     const GpuView3D* view = ctx.view;
-    const f32 aspect = static_cast<f32>(view->_size.x) / static_cast<f32>(std::max(view->_size.y, 1));
+    const f32 aspect = static_cast<f32>(view->extent().x) / static_cast<f32>(std::max(view->extent().y, 1));
     const GpuFrustum frustum = frustum_of(ctx.scene.camera.view_projection(aspect));
     for (const ReflectionProbeSource3D& probe : lights.reflection_probes) {
         const auto& backend = probe.capture.backend();
@@ -11900,7 +11955,7 @@ void GpuRenderer3D::draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode) {
     std::memcpy(u.prior_view_projection, (ctx.taa_reset || !ctx.taa ? ctx.view_projections : view->_taa_prior)[0].m,
                 sizeof(u.prior_view_projection));
     const bool panorama = sky.mode == SkyMode3D::Image && ctx.environment;
-    put(u.target, {static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), panorama ? 1.0f : 0.0f},
+    put(u.target, {static_cast<f32>(view->extent().x), static_cast<f32>(view->extent().y), panorama ? 1.0f : 0.0f},
         orthographic ? 1.0f : 0.0f);
     put(u.camera, scene.camera.position, 1.0f);
     put(u.forward, scene.camera.forward(), 0.0f);
@@ -12631,7 +12686,7 @@ bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL
     auto* storage = ctx.storage;
     bool complete = true;
     const u32 draws_before = stats.ao_draws, instances_before = stats.ao_instances;
-    set_viewport(prepass, view->_size.x, view->_size.y);
+    set_viewport(prepass, view->extent().x, view->extent().y);
     DrawUniforms u{};
     std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
     put_clip(u.clip, ctx.scenes[0]);
@@ -13160,7 +13215,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     bool custom_lights_bound = false;
     const auto begin_scene = [&](u32 s) {
         const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && ctx.overlaid ? overlay_split : 1.0f;
-        set_viewport(pass, view->_size.x, view->_size.y, lo, hi);
+        set_viewport(pass, view->extent().x, view->extent().y, lo, hi);
         push_frame_uniforms(ctx, s);
         fog_bound = false;
         lights_bound = false;

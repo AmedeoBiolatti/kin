@@ -2713,8 +2713,10 @@ r3d.render(view, scene);       // then the view that sees the mirror
   metal all of it; past a roughness of 0.4 it gives way, by 0.7, to the environment's, blurred on the way) and
   `planar_window.surface.glsl` (a portal or a screen: the picture is the colour of an `unlit` material). Each reads its
   picture from the material's emissive map and its parameters from `shader_params` (`planar_view_params(params,
-  projector, distortion, strength)`: the projector's 16 floats, then `distortion`, world units the read moves with the
-  normal map's bend, 0.25 for rippled water, and `strength`). They are not in the engine (a surface's variants are about
+  projector, distortion, strength, share)`: the projector's 16 floats, then `distortion`, world units the read moves
+  with the normal map's bend, 0.25 for rippled water, `strength`, and `share`, how much of its texture the picture fills
+  from the top-left, a view rendering part of itself: `render_size() / size()`, the reads kept in it). Water's
+  refraction picture rides in the base colour map: the surface's own colour is the material's, not the map's. They are not in the engine (a surface's variants are about
   a megabyte): a game builds the ones it uses, `kin_compile_surface_shader(spv OUTPUT_DIR <dir> SOURCE
   ${KIN_SHADER_INCLUDE_DIR}/planar_reflection.surface.glsl)`, embeds them and makes them with
   `create_surface_shader`, as the example does, or compiles them at run time with `compile_surface_shader`
@@ -2810,9 +2812,10 @@ view_size, view_options)` draws the surfaces into the collected scene and render
 - **`Portal3D`**: `exit` (an entity: the portal it opens onto, or any entity, whose placing is the exit's), `depth`
   (levels of portals in portals), `resolution`, and `stand_in` (an unlit colour: its deepest level, and what it shows in
   other planar views' pictures, and everywhere without the planar surfaces).
-- **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64; its
-  view grows with a little room, an eighth or 64 pixels, and shrinks only after three seconds of being a quarter larger
-  than its pictures, so that a moving eye resizes views, all their targets made again, a tenth as often); a portal's levels while the level before sees it, each of
+- **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64;
+  where the renderer can render part of a view, each picture at its own size into a view that only grows, to the
+  largest picture it has shown, so that a moving eye does not resize views, all their targets made again, every few
+  frames; otherwise the view is the picture's size); a portal's levels while the level before sees it, each of
   where it shows within the level before, deepest first; each with the other planar surfaces as stand-ins (a mirror as kin's own metal) and without the scene's overlay
   (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). Views are kept from frame to frame and
   dropped with their entities. `PlanarViews3D::views_rendered()` and `views_skipped()` count them. Whatever is
@@ -2973,6 +2976,15 @@ read-back. Ask once per pixel per picture (a studio keeps the answer under a
 still pointer), not every pixel every frame. A view that has not been rendered
 since it was made or resized has nothing to ask: `pick` says no `hit` until the
 next `render`.
+
+A view can render a part of itself: `view.set_render_size(size)` makes renders fill only `size` pixels, from its
+top-left corner (at most its size; `{}`, or a resize, the whole), where `Renderer3D::can_render_part(view, scene)`
+says they can: the GPU backend's, for a view that is not HDR and has no `pick`, and a scene without temporal
+anti-aliasing, global illumination, the fog's sun shafts, occlusion culling, contact shadows or an overlay. A picture
+whose size changes from frame to frame (a mirror's: where it shows) is then drawn at its own size into a view kept as
+large as the largest, without resizing the view (making all its targets again) every few frames; it is the picture a
+view of that size would show. Whoever draws `view.texture()` reads the picture from UV (0, 0) to
+`render_size() / size()` (the planar surfaces do: `planar_view_params`' `share`).
 
 `hdr` draws into a float picture that keeps light past white, then exposes
 and tonemaps it (ACES: brights roll off, the darkest tones darken a little)

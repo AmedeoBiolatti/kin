@@ -60,6 +60,13 @@ public:
         return s.y > 0 ? static_cast<f32>(s.x) / static_cast<f32>(s.y) : 1.0f;
     }
     IViewBackend3D* backend() const { return _backend.get(); }
+    // Renders fill only `size` pixels of the picture, from its top-left corner (at most size(); none or {}: the
+    // whole), where Renderer3D::can_render_part says they can: a picture whose size changes from frame to frame (a
+    // mirror's: where it shows) drawn at its own size into a view kept larger, without the view resized (all its
+    // targets made again). False where the backend cannot. Whoever draws texture() reads the picture from its UV
+    // (0, 0) to render_size() / size(). A resize renders the whole again.
+    bool set_render_size(Vec2i size) { return _backend && _backend->set_render_size(size); }
+    Vec2i render_size() const { return _backend ? _backend->render_size() : Vec2i{}; }
     // Drops the history Scene3D::taa blends in, so that the next frame does
     // not show the one before: call it when the camera cuts to somewhere
     // else, or the scene is replaced. (A resize does it by itself.)
@@ -203,6 +210,10 @@ public:
                                                       std::span<const DataBuffer> buffers = {});
     // Gives `view` a new size (its texture changes); false when it can't.
     Status3D resize(View3D& view, Vec2i size);
+    // Whether a render of `scene` into `view` can fill only part of it (View3D::set_render_size): the GPU backend's,
+    // for a view that is not HDR and a scene without temporal anti-aliasing, global illumination, the fog's sun shafts,
+    // occlusion culling, contact shadows or an overlay; and a view without picking. Otherwise renders fill the whole.
+    bool can_render_part(const View3D& view, const Scene3D& scene) const;
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     Status3D render(View3D& view, const Scene3D& scene);

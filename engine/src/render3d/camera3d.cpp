@@ -247,17 +247,32 @@ PlanarPicture3D planar_picture(Rectf bounds, Vec2i frame) {
     return p;
 }
 
-void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength) {
+namespace {
+// The projector into `share` of its picture's texture, from the top-left: kin_planar_uv's (0.5 + 0.5 x, 0.5 - 0.5 y) of
+// the clip space after it is `share` times that of the clip space before.
+Mat4f into_part(const Mat4f& projector, Vec2f share) {
+    const f32 sx = std::clamp(share.x, 1e-4f, 1.0f), sy = std::clamp(share.y, 1e-4f, 1.0f);
+    Mat4f part;
+    part.m[0] = sx;
+    part.m[5] = sy;
+    part.m[12] = sx - 1.0f;
+    part.m[13] = 1.0f - sy;
+    return part * projector;
+}
+} // namespace
+
+void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength, Vec2f share) {
     if (params.size() < 20) {
         return;
     }
+    const Mat4f into = into_part(projector, share);
     for (std::size_t i = 0; i < 16; ++i) {
-        params[i] = projector.m[i];
+        params[i] = into.m[i];
     }
     params[16] = distortion;
     params[17] = strength;
-    params[18] = 0.0f;
-    params[19] = 0.0f;
+    params[18] = std::clamp(share.x, 1e-4f, 1.0f);
+    params[19] = std::clamp(share.y, 1e-4f, 1.0f);
 }
 
 PlanarView3D refraction_view(const Camera3D& camera, Vec4f plane, f32 aspect, f32 offset) {
@@ -271,17 +286,19 @@ PlanarView3D refraction_view(const Camera3D& camera, Vec4f plane, f32 aspect, f3
     return view;
 }
 
-void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength) {
+void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength,
+                              Vec2f share) {
     if (params.size() < 40) {
         return;
     }
+    const Mat4f into = into_part(projector, share);
     for (std::size_t i = 0; i < 16; ++i) {
-        params[20 + i] = projector.m[i];
+        params[20 + i] = into.m[i];
     }
     params[36] = strength;
     params[37] = distortion;
-    params[38] = 0.0f;
-    params[39] = 0.0f;
+    params[38] = std::clamp(share.x, 1e-4f, 1.0f);
+    params[39] = std::clamp(share.y, 1e-4f, 1.0f);
 }
 
 std::optional<Vec3f> hit_plane_y(const Ray3& ray, f32 y) {

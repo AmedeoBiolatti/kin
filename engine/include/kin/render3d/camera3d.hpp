@@ -164,8 +164,11 @@ std::optional<Rectf> planar_on_screen(const Camera3D& camera, f32 aspect, Vec3f 
 // kin_planar_reflection and kin_planar_window read them): the projector's 16, then `distortion` (world units: how far
 // the point the picture is read at moves with the bend of the surface's normal map, so that the picture wavers with its
 // ripples: 0.25 for water, 0 for a flat mirror) and `strength` (how much of the reflection the picture is, or of a
-// window's colour: 1 all). `params` must hold 20 at least.
-void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 distortion = 0.0f, f32 strength = 1.0f);
+// window's colour: 1 all). `params` must hold 20 at least. `share`: how much of its texture the picture fills, from the
+// top-left (a View3D rendering part of itself: render_size() / size()); the projector reads that part, and the reads
+// stay in it.
+void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 distortion = 0.0f, f32 strength = 1.0f,
+                        Vec2f share = {1.0f, 1.0f});
 
 // Water you see into: what is below `plane` (the side its normal does not face, from `offset` under it, so that the
 // surface itself is not in the picture), seen by `camera` itself, and the projector to read it where each point of the
@@ -176,8 +179,8 @@ PlanarView3D refraction_view(const Camera3D& camera, Vec4f plane, f32 aspect, f3
 // Its picture's projector and how it is read into a planar surface's parameters (after planar_view_params' 20: the
 // projector, then `strength` (0: none) and `distortion`, world units the ripples move where it is read, as a
 // reflection's).
-void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion = 0.1f,
-                              f32 strength = 1.0f);
+void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion = 0.1f, f32 strength = 1.0f,
+                              Vec2f share = {1.0f, 1.0f});
 
 // A planar view cut down to `window` of its frame (Camera3D::window: where its surface shows, planar_on_screen's bounds
 // for a portal, the same turned left to right for a mirror, whose camera sees its frame flipped), for a picture
