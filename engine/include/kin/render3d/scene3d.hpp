@@ -347,6 +347,8 @@ struct PointLightSource3D {
     // the light spreads over a body that big (a flash, a fireball, a bulb).
     // At least 0.01.
     f32 size = 0.01f;
+    // Times its light in the fog's air (Fog3D::volumetric): 0 lights no fog, more a thicker glow.
+    f32 volumetric = 1.0f;
     // A shadow (P3b): drawn into a cube of six faces, at most Lights3D::max_shadowed_points a frame, chosen by
     // importance.
     bool shadow_enabled = false;
@@ -375,6 +377,7 @@ struct SpotLightSource3D {
     f32 size = 0.01f;
     f32 inner_angle = 20.0f; // degrees from the axis (at least 0)
     f32 outer_angle = 30.0f; // degrees; below 90, above `inner_angle` (clamped to 0.1 degrees beyond it)
+    f32 volumetric = 1.0f;   // times its light in the fog's air (Fog3D::volumetric): 0 lights no fog
     // A perspective shadow map over the cone, at most Lights3D::max_shadowed_spots a frame (the most important ones).
     bool shadow_enabled = false;
     u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
@@ -460,9 +463,9 @@ struct Lights3D {
     // Shadows of lights that are not the sun (P3b), all opt-in (a light's `shadow.enabled`; `fill_shadow.enabled`) and
     // off, the picture and the cost are what they were. Of the lights that ask, the most important this many a frame
     // have a map (importance: intensity x reach x the share of the view it covers, with a hysteresis in favour of the
-    // lights that had one, so the choice does not flip between frames): up to 8 spots, up to 2 point lights (six
+    // lights that had one, so the choice does not flip between frames): up to 8 spots, up to 8 point lights (six
     // faces each). Their maps share one array of depth textures of `local_shadow_resolution` (a light may ask for
-    // less).
+    // less: its maps are rounded up to a power of two and packed, so sixteen 256-texel faces share a 1024 layer).
     u32 max_shadowed_spots = 4;
     u32 max_shadowed_points = 2;
     u32 local_shadow_resolution = 1024;

@@ -79,16 +79,16 @@ float sunlight(vec3 n) {
 }
 
 #ifdef KIN_LIGHTS
-// The share of a local light's shadow map that lets this surface point's light through (a spot's layer, or a face of a
-// point light's cube): nine comparisons in the layer's corner of the array, from a point pushed a little off the surface,
+// The share of a local light's shadow map that lets this surface point's light through (a spot's map, or a face of a
+// point light's cube; `layer` is the map's index, locals.local_c its place in the array): nine comparisons in the layer's corner of the array, from a point pushed a little off the surface,
 // the reference moved toward the light by a bias of texels that grows with the surface's slope to it. Reverse Z, a
 // perspective depth: depth(d) = near (far / d - 1) / (far - near). -1 where the point is outside the map's view.
 // `offset_normal` is shadow_offset_normal's: the push and the slope are the mesh's own, not a normal map's.
 float local_light(int layer, vec3 offset_normal, vec3 l) {
-    const vec4 a = locals.local_a[layer];
-    const vec4 b = locals.local_b[layer];
-    const float texel_world = (locals.local_matrix[layer] * vec4(vWorld, 1.0)).w * a.y;
-    const vec4 clip = locals.local_matrix[layer] * vec4(vWorld + offset_normal * (b.y * texel_world), 1.0);
+    const vec4 a = locals.local_a[kin_local_light(layer)];
+    const vec4 b = locals.local_b[kin_local_light(layer)];
+    const float texel_world = kin_local_clip(layer, vWorld).w * a.y;
+    const vec4 clip = kin_local_clip(layer, vWorld + offset_normal * (b.y * texel_world));
     if (clip.w <= a.z) {
         return -1.0;
     }
@@ -102,13 +102,15 @@ float local_light(int layer, vec3 offset_normal, vec3 l) {
     const float d = max(clip.w - texel_world * b.x * (1.0 + slope), a.z);
     const float ref = a.z * (a.w / d - 1.0) / (a.w - a.z);
     const float texel = locals.local.x;
-    const vec2 base = uv * a.x;
-    const vec2 lo = vec2(0.5 * texel), hi = vec2(a.x - 0.5 * texel);
+    // (The map is a square of its layer from c.xy, a.x of its side: the taps are kept inside it.)
+    const vec4 c = locals.local_c[layer];
+    const vec2 base = c.xy + uv * a.x;
+    const vec2 lo = c.xy + vec2(0.5 * texel), hi = c.xy + vec2(a.x - 0.5 * texel);
     float lit = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             const vec2 q = clamp(base + vec2(x, y) * (b.z * texel), lo, hi);
-            lit += texture(uLocalShadow, vec4(q, float(layer), ref));
+            lit += texture(uLocalShadow, vec4(q, c.z, ref));
         }
     }
     return lit / 9.0;
@@ -120,7 +122,7 @@ float local_shadow(int layer, vec3 offset_normal, vec3 l, float distance) {
     if (lit < 0.0) {
         return 1.0;
     }
-    const float end = locals.local_b[layer].w;
+    const float end = locals.local_b[kin_local_light(layer)].w;
     return mix(lit, 1.0, smoothstep(0.8 * end, end, distance));
 }
 

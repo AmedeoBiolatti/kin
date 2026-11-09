@@ -78,9 +78,26 @@ layout(set = 2, binding = 12) uniform sampler2DArray uGraphMaps;
 #else
 layout(set = 2, binding = 10) uniform sampler2DArray uGraphMaps;
 #endif
-#define KIN_STORAGE_SHIFT 1
+#define KIN_SURFACE_SHIFT 1
 #else
-#define KIN_STORAGE_SHIFT 0
+#define KIN_SURFACE_SHIFT 0
+#endif
+#if defined(KIN_FOG) && !defined(KIN_CUSTOM_MATERIAL) && !(defined(KIN_GI) && defined(KIN_SURFACE))
+// The light of the fog's air summed along the view's rays (Fog3D::volumetric; fog_volume_integrate.comp's, a dummy
+// without it), the variant's last sampler, after the graph maps: what a surface drawn after the opaque ones (blended)
+// adds of the air in front of it (kin_fog_apply). Its storage buffers bind one later again. (Not in a surface's light
+// variants: their graph maps are SDL_GPU's sixteenth sampler, its most.)
+#define KIN_FOG_VOLUME
+#if defined(KIN_GI)
+layout(set = 2, binding = 15 + KIN_SURFACE_SHIFT) uniform sampler3D uFogVolume;
+#elif defined(KIN_LIGHTS)
+layout(set = 2, binding = 12 + KIN_SURFACE_SHIFT) uniform sampler3D uFogVolume;
+#else
+layout(set = 2, binding = 10 + KIN_SURFACE_SHIFT) uniform sampler3D uFogVolume;
+#endif
+#define KIN_STORAGE_SHIFT (KIN_SURFACE_SHIFT + 1)
+#else
+#define KIN_STORAGE_SHIFT KIN_SURFACE_SHIFT
 #endif
 #ifdef KIN_LIGHT_GRID
 // The light grid (the stock light variants, with KIN_LIGHTS): every point and spot light in view, and for each cell of
@@ -881,7 +898,27 @@ vec3 kin_fog_apply(vec3 colour) {
     const vec3 sun = fog_params.fog.view.z > 0.5
                          ? vec3(0.0)
                          : kin_fog_sun_light(fog_params.fog, dir, frame.sun_direction.xyz, frame.sun_color.rgb);
-    return mix(colour, fog_colour + sun, opacity);
+    vec3 fogged = mix(colour, fog_colour + sun, opacity);
+#ifdef KIN_FOG_VOLUME
+    // Drawn after the volume's light was added (fog.view.w: its depth, negative when it holds the sun's): the air's in
+    // front of this surface, as fog_volume_apply.frag reads it for what the pre-pass drew.
+    if (fog_params.fog.view.w != 0.0) {
+        const float depth = abs(fog_params.fog.view.w);
+        const float slices = float(textureSize(uFogVolume, 0).z);
+        const float w = min(sqrt(max(dot(to, frame.cascade_forward.xyz), 0.0) / depth), 1.0);
+        const vec2 uv = gl_FragCoord.xy * frame.occlusion.zw;
+        const float near = clamp(w * slices, 0.0, 1.0);
+        const vec4 sum = textureLod(uFogVolume, vec3(uv, max(w - 0.5 / slices, 0.5 / slices)), 0.0);
+        fogged += sum.rgb * near;
+        if (fog_params.fog.view.w < 0.0) {
+            // (The sun's past the volume, unshadowed: the main pass leaves it out.)
+            const float inside = 1.0 - mix(1.0, sum.a, near);
+            fogged += kin_fog_sun_light(fog_params.fog, dir, frame.sun_direction.xyz, frame.sun_color.rgb) *
+                      max(opacity - inside, 0.0);
+        }
+    }
+#endif
+    return fogged;
 }
 #endif
 

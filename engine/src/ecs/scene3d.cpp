@@ -118,6 +118,7 @@ void register_render3d_components(EcsWorld& world) {
         scalar("shadow_near_plane", &T::shadow_near_plane, true);
         scalar("shadow_distance", &T::shadow_distance);
         scalar("shadow_softness", &T::shadow_softness);
+        scalar("volumetric", &T::volumetric);
         if constexpr (std::is_same_v<T, SpotLight3D>) {
             b.field("inner_angle", &T::inner_angle)
                 .units("degrees")

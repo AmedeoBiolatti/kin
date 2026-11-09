@@ -1233,6 +1233,47 @@ in-scattering stays unshadowed. About 0.45 ms at 2404 x 1352 on the RTX 4080 Lap
 adding 0.15). Light shafts where shadows cross the air come with it. `debug_stats().fog_sun_shadowed`; authored as
 `SceneEnvironment3D`'s `fog_sun_shadows`.
 
+**Lights in the fog** (`Fog3D::volumetric`, `VolumetricFog3D`, off by default): the light of the point and spot lights
+that the fog's air scatters toward the camera: a lamp's glow in the mist, a torch's beam, cut by the lights' shadow maps
+where they have them (a beam through a doorway, the bars of a window). The view's near `distance` (40 m) is cut into a
+volume of cells, tiles of `tile` pixels by `slices` (64) of its depth, the slice edges at `distance * (i / slices)^2`
+(thin near the camera, where a cell spans the most of the picture). `tile` 0 (the default) is the view's height over 90,
+at least 8: cells of one angle at any size (8 pixels at 720p, 16 at 1440p, 24 at 2160p), about 0.9 million of them at
+16:9, so the cost and the memory (three volumes of 8 bytes a cell, 22 MB) stay those of 720p. At 2560 x 1440 in A Lovely
+Night of Terror its pictures differ from 8-pixel tiles' by a level or two of 255 (at most 4 for 99.9% of the pixels, near
+a torch held at the camera). `fog_volume_depth.comp` first finds each column's farthest surface (the pre-pass's depth
+over its tile, then the farthest of the 3 x 3 tiles round it, which the adding pass's bilinear reads reach), and
+`fog_volume.comp` leaves the cells behind it unlit (a whole block at once where none of its cells is in front): no ray
+reaches them; a mark keeps the next frame from taking them for history. The picture is the same as lighting them all
+(`RenderDebugOptions3D::fog_volume_cull = false`); the integration stops there too. `fog_volume.comp` lights each cell at one point in it,
+moved within the cell per cell and per frame and blended with the last frame's volume where the cell was then (`history`,
+0.9 of it kept; without a history, the cells' middles): every light the frame chose whose sphere meets the cell's block
+(the block's threads gather them into a list of up to 128 first), by the stock shader's falloff (the windowed inverse
+square, no brighter than at the light's `size`, a spot's cone), through its shadow map (one filtered comparison; the
+frames average the rest), times a Henyey-Greenstein lobe of `anisotropy` (0.3) over 4 pi. The air is the fog's own
+(`density` from `start`, `height_density`), and scatters all it takes out, times `intensity` and each light's own
+`volumetric` (`PointLightSource3D`, `SpotLightSource3D` and their ECS components; 0 leaves a light out of the fog).
+`fog_volume_integrate.comp` sums each column front to back (each slice's light over its length in closed form, times the
+share that gets through the air before it, held at no less than `1 - max_opacity`), and after the main pass
+`fog_volume_apply.frag` adds the sum at the depth the pre-pass (which it turns on) drew at each pixel (the whole
+volume's for the sky). The main pass's fog dims what is behind the air by the same density, so the two agree. A light without a shadow map
+lights the air on both sides of a wall, as it lights surfaces: give the lights that matter shadows (up to 8 point lights' cubes
+and 8 spots' maps a frame), or `volumetric = 0`. With `sun_and_moon` (on) the sun and the fill light (the moon) scatter in the
+volume too, through their shadows (the sun's cascades, the fill's `DirectionalShadow3D`), at the main pass's fog's strength
+(`sun_scatter` times a lobe of `sun_anisotropy`: none at a `sun_scatter` of 0): shafts through windows and between trees. The main
+pass, the sky and the particles then leave the sun out of their fog; the fog past the volume takes it unshadowed in the adding
+pass (its share: the ray's opacity less the volume's), and `sun_shadows`' walk is not made. The fill light, which the main pass's
+fog has not, scatters within the volume only. The light is added inside the main pass, after the opaque meshes and the sky and
+before the blended ones, the particles and the overlay: a blended surface dims the air's light behind it as it dims the surface
+behind it (dark glass at 90% leaves a tenth of a lamp's glow), and adds the air's in front of it for its own share: the stock
+fog variants read the volume's sums (`uFogVolume`, their last sampler, after a surface's graph maps) at the fragment's depth
+once the light is in (the fog block's `view.w`), so a greenhouse in a lamp-lit mist is as misted as the lawn before it.
+Particles, custom material shaders and a surface shader's light variants do not (SDL_GPU's 16 samplers a shader are the
+stock light layout's and the graph maps there); a surface shader made before this has no such sampler, and adds none. Needs a float picture (an HDR view or temporal
+anti-aliasing), a perspective camera and SDL_GPU. `debug_stats().fog_volume`, `fog_volume_lights`, `fog_volume_cells`;
+authored as `SceneEnvironment3D`'s `fog_volumetric`, `fog_volumetric_intensity`, `_anisotropy`, `_distance`, `_tile`,
+`_slices`, `_history`, `_sun_and_moon`.
+
 **Time of day** (`TimeOfDay3D`): `hours` (solar time), `day_of_year`, `latitude`, `axial_tilt`, `moon_phase`, `speed` (game seconds a
 second for `advance(day, dt)`; the clock is summed exactly behind the f32 `hours`, so an hour of frames is an hour at any frame rate,
 and setting `hours` yourself is noticed and continued from). `evaluate()` is a pure function of them (and the sky's haze and sun intensity): sun and moon
@@ -1275,7 +1316,7 @@ lamp.shadow_enabled = true;                                            // a cube
 scene.add_point_light(lamp);
 
 scene.lights.max_shadowed_spots = 4;       // up to 8; of the lights that ask, the most important this many a frame get a map
-scene.lights.max_shadowed_points = 2;      // up to 2 cubes
+scene.lights.max_shadowed_points = 2;      // up to 8 cubes
 scene.lights.fill_shadow = {.enabled = true, .cascades = 2};           // the fill light (the moon) casts: its own cascades, over shadow_area
 ```
 
@@ -1300,8 +1341,12 @@ at Normal and 3.4 ms at High, drawing every light where the loops drew 16 of eac
 **Shadows.** A light's `shadow.enabled` asks for a map; of the spots in view that ask, the `max_shadowed_spots` most important have one,
 and of the point lights the `max_shadowed_points`. A map is a perspective depth map over the cone (a point light's: six 90-degree faces
 with a guard band, only those a visible surface can fall in drawn), in one array whose side is the largest `resolution` of the lights
-given a map this render (default `Lights3D::local_shadow_resolution`, 1024; a light that asks for less draws into a corner of it); it
-grows at once and shrinks only after a smaller side has done for 120 renders in a row. Importance is
+given a map this render (default `Lights3D::local_shadow_resolution`, 1024); it grows at once and shrinks only after a smaller side has
+done for 120 renders in a row. Each map is rounded up to a power of two and packed: the largest first, each layer filled in Z order by
+squares of the map's side, so a lamp's 256-texel cube takes six sixteenths of a 1024 layer (six lamps and a torch: four layers, 16 MB,
+not 37). A packed map is cleared alone (a depth-only triangle over its square) and kept by the shadow cache like any other. The shader
+block stays under SDL_GPU's 4 KiB a uniform block: a spot's map keeps its matrix, a cube's six faces are derived from the light's
+position (`kin_local_clip`), and each map has its place in the array (`local_c`). Importance is
 intensity times reach times the share of the view the light fills, and a light that had a map last frame counts 1.5 times over, so the
 choice does not flip between frames; name a light with `id` (else its index in the list) to keep that across frames. Filtering is
 3x3 comparisons as the sun's, `bias` (texels, times 1 + the surface's slope to the light) and `normal_offset` (texels) in the light's

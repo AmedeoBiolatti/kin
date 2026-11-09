@@ -160,6 +160,14 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("fog_sun_scatter", fog.sun_scatter);
         SETTING("fog_sun_anisotropy", fog.sun_anisotropy);
         SETTING("fog_sun_shadows", fog.sun_shadows);
+        SETTING("fog_volumetric", fog.volumetric.enabled);
+        SETTING("fog_volumetric_intensity", fog.volumetric.intensity);
+        SETTING("fog_volumetric_anisotropy", fog.volumetric.anisotropy);
+        SETTING("fog_volumetric_distance", fog.volumetric.distance);
+        SETTING("fog_volumetric_tile", fog.volumetric.tile);
+        SETTING("fog_volumetric_slices", fog.volumetric.slices);
+        SETTING("fog_volumetric_history", fog.volumetric.history);
+        SETTING("fog_volumetric_sun_and_moon", fog.volumetric.sun_and_moon);
         SETTING("ao_enabled", ambient_occlusion.enabled);
         SETTING("ao_radius", ambient_occlusion.radius);
         SETTING("ao_intensity", ambient_occlusion.intensity);
