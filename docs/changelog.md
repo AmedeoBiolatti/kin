@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- A minimal native 2D [starter](../games/starter/README.md) runs inside Kin or as a
+  standalone project. The [project workflow](project_workflow.md) documents reuse,
+  incremental structure and current starting points for native and Lua games.
 - Development presets build tools, games and tests on demand and use
   `out/build/<preset>/`. `KIN_BUILD_ON_DEMAND` defaults off for other builds;
   focused testing and output conventions are documented in [testing](testing.md)

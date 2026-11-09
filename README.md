@@ -153,6 +153,10 @@ cmake --build --preset dev --target ecs_systems_demo
 
 ## Using kin in a game
 
+Start with the [minimal runnable game](games/starter/README.md) and the
+[project workflow](docs/project_workflow.md) for layout, current examples and
+growth conventions. Existing projects should keep their established structure.
+
 A game is its own project that adds kin's source tree with `add_subdirectory`.
 As a subproject kin builds only its engine: its demos, examples, benchmarks and
 tests default to on only when kin is the top-level project.
@@ -180,8 +184,9 @@ The game finds that content with
 `kin::find_content_root(KIN_GAME_CONTENT, argc, argv)`. While it is made, the
 content is read from the source folder. Once it ships, it is read from one
 `.kinpak` beside the executable.
-`cmake --preset ship && cmake --build --preset ship --target my_game_package`
-makes the archive players get ([shipping](docs/shipping.md)).
+The `my_game_package` target makes the archive players get from an optimized
+build; see [shipping](docs/shipping.md) for configuration. The `ship` preset is
+provided by the Kin repository; standalone games configure their own build.
 
 Or with a local checkout beside the game:
 
@@ -200,7 +205,7 @@ Kin installs games, not itself, so `find_package(kin)` is not supported.
 | ECS | [entities](docs/ecs_entities.md), [components](docs/ecs_components.md), [data components](docs/ecs_data_components.md), [systems](docs/ecs_systems.md), [events](docs/ecs_events.md), [prefabs](docs/ecs_prefabs.md), [inspection](docs/ecs_inspection.md), [editor workflow](docs/ecs_editor_workflow.md) |
 | Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [localization](docs/localization.md), [input](docs/input.md), [dialogue](docs/dialogue.md), [scripting](docs/scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [hex grids](docs/hex_grids.md) |
 | Experimental 3D | [3D rendering](docs/rendering_3d.md), [render graphs](docs/render_graph.md), [build and validation guide](docs/rendering_validation.md), [scene evaluation](tools/eval/README.md) |
-| Project | [shipping a game](docs/shipping.md), [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
+| Project | [starting and growing a project](docs/project_workflow.md), [shipping a game](docs/shipping.md), [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing
 

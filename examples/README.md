@@ -1,7 +1,13 @@
 # Interactive performance examples
 
+For a minimal native 2D game, use [the starter](../games/starter/README.md).
+The [project workflow](../docs/project_workflow.md) maps other requirements to
+current examples; reuse the parts the game needs.
+
 For a new 3D game, start from `camp_walk` or `projectile_range`: both use `SceneSession3D` for loading, frame stages,
-physics and rendering. Configure with `cmake --preset 3d`, build in `build-3d`, and run binaries from `build-3d/bin`. The renderer viewers and timing workloads in this directory
+physics and rendering. Configure with `cmake --preset dev-3d -DKIN_BUILD_EXAMPLES=ON`,
+build the chosen target with `cmake --build --preset dev-3d --target camp_walk`
+(or `projectile_range`), and run it from `out/build/dev-3d/bin`. The renderer viewers and timing workloads in this directory
 use the direct APIs so that they can isolate rendering costs; Summit integrates its existing simulation with the frame
 stages. See [the 3D guide](../docs/rendering_3d.md#owning-a-3d-scene-session) for the normal session lifecycle.
 For Lua gameplay, start from [Lua 3D range](#lua-3d-range), which uses the same session and frame stages.

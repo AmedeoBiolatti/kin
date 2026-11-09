@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.22)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(starter LANGUAGES C CXX)
+    set(KIN_DIR "" CACHE PATH "Path to a local Kin checkout")
+    if(NOT EXISTS "${KIN_DIR}/engine/include/kin/runtime/scene_app.hpp")
+        message(FATAL_ERROR "Set KIN_DIR to a Kin checkout: -DKIN_DIR=/path/to/kin")
+    endif()
+    add_subdirectory("${KIN_DIR}" kin)
+    include(CTest)
+endif()
+
+add_executable(starter src/main.cpp)
+target_link_libraries(starter PRIVATE kin::engine)
+kin_game(starter TITLE "Kin Starter" NO_CONTENT)
+
+if(BUILD_TESTING)
+    add_test(NAME starter-smoke COMMAND starter --headless --render --frames=10 --seed=7 --report=-)
+    set_tests_properties(starter-smoke PROPERTIES TIMEOUT 30)
+endif()

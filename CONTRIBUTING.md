@@ -10,6 +10,8 @@ are all welcome.
   describes its scope and non-goals.
 - Check the [docs](docs/) for the subsystem you're touching; they describe the
   intended APIs and workflows.
+- Follow the [project workflow](docs/project_workflow.md): reuse the closest
+  implementation, keep branch scope explicit, and add structure for present needs.
 
 ## Building and testing
 

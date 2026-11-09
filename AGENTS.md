@@ -3,13 +3,40 @@
 Keep changes, validation and generated output proportional to the task. Read the
 relevant subsystem documentation before changing its contracts.
 
+## Scope and structure
+
+- Before implementation, identify the closest existing code/example, what can be
+  reused, the smallest change that meets the request, and how to verify it. State
+  the outcome and completion conditions briefly in the task update; small tasks
+  do not need a planning document. Keep discovery targeted to relevant code and
+  existing guidance; avoid repeating a whole-repository audit for a local task.
+- Follow the current project's layout and dependencies. For a new game, use
+  `games/starter` and `docs/project_workflow.md`. Start with one executable and
+  `src/main.cpp`; create content, test and feature directories as they gain real
+  contents. Larger projects grow from the same structure.
+- Use direct functions and concrete types first. Add an abstraction, dependency,
+  executable, configuration switch or architectural layer to solve a present
+  problem; name that problem in the update or PR description. Extract shared
+  behavior when actual callers benefit. Keep game-specific logic in the game.
+- Split files around responsibilities that have become hard to understand or
+  change. Avoid speculative managers, plugin systems, public-header trees and
+  generic frameworks for imagined future requirements.
+- Keep unrelated refactors, extra platforms and additional samples out of the
+  branch unless required by the task. Once the requested behavior and relevant
+  checks are complete, finish. Report unrelated findings without expanding scope.
+- When branches overlap, record ownership in the existing task/PR description
+  and coordinate shared interfaces before implementing competing helpers. Check
+  existing work before starting a second implementation.
+- Use the project guide's current references for implementation. Historical plans
+  and measurements explain decisions but do not override current APIs or guides.
+
 ## Builds and output
 
 - Start work without creating a build directory. Documentation and content-only
   tasks often need no compilation; reuse existing tools when suitable.
 - Inspect existing build directories and their configuration before configuring.
-  Reuse one compatible directory per worktree. Use `cmake --preset dev` (or the
-  appropriate existing development preset) for a new build; these use
+  Reuse one compatible directory per worktree. For a new build of this repository,
+  use `cmake --preset dev` (or the appropriate existing development preset); these use
   `out/build/<preset>/`. Do not duplicate a build for each sample or test.
 - Request explicit targets: `cmake --build --preset dev --target hex_demo`.
   Development presets build tools, samples and tests on demand. Enable examples
