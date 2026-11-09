@@ -1,6 +1,10 @@
 #include <cassert>
 #include <iostream>
+#include <array>
+#include <kin/core/json.hpp>
+#include <kin/core/json_value.hpp>
 #include <kin/renderer/resource_graph.hpp>
+#include <sstream>
 using namespace kin;
 namespace {
 ResourceGraphDesc versions() {
@@ -193,10 +197,49 @@ void attachment_versions() {
     std::cout << "attachments: version handoffs, branches, pinned/imported/sample preservation, depth access, failure "
                  "admission and 300 reference graphs\n";
 }
+// What a tool reads of a compiled graph: passes in definition order with their place in the run (culled: -1), reads
+// and writes by name (an attachment's loaded version read, its new one written), the run's order and the times given.
+void described() {
+    ResourceGraphDesc g = versions();
+    g.resources.push_back({.name = "spare", .kind = GraphResourceKind::ColorTarget, .size = {8, 8}});
+    g.passes.push_back({.name = "spare", .writes = {3}});
+    ResourceGraphCompiler compiler;
+    const auto& plan = compiler.compile(g, attachment_features);
+    assert(plan && plan.culled_passes == 1);
+    const std::array<f64, 4> ms{0.25, 0.5, 0.75, 1.0};
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    write_resource_graph_json(json, plan, ms);
+    const auto parsed = parse_json(out.str());
+    assert(parsed.ok());
+    const JsonValue& doc = *parsed.value;
+    assert(doc.string_at("schema") == "kin.render-graph/1" && doc.int_at("culled") == 1);
+    const auto& resources = doc.find("resources")->items();
+    assert(resources.size() == 4 && resources[2].string_at("kind") == "render_attachment");
+    assert(resources[2].bool_at("exported") && resources[3].find("size")->items()[0].as_number() == 8);
+    const auto& passes = doc.find("passes")->items();
+    assert(passes.size() == 4);
+    const JsonValue& transparent = passes[1];
+    assert(transparent.string_at("name") == "transparent" && transparent.int_at("order") == 1);
+    assert(transparent.find("reads")->items().size() == 1 && transparent.find("reads")->items()[0].as_string() == "opaque");
+    assert(transparent.find("writes")->items()[0].as_string() == "transparent");
+    assert(transparent.find("ms")->as_number() == 0.5);
+    assert(passes[3].string_at("name") == "spare" && passes[3].int_at("order") == -1);
+    const auto& order = doc.find("order")->items();
+    assert(order.size() == 3 && order[0].as_string() == "opaque" && order[2].as_string() == "final");
+    assert(doc.find("diagnostics")->items().empty());
+    // Without times: no "ms".
+    std::ostringstream bare_out;
+    JsonWriter bare(bare_out, false);
+    write_resource_graph_json(bare, plan);
+    const auto bare_parsed = parse_json(bare_out.str());
+    assert(bare_parsed.ok() && !bare_parsed.value->find("passes")->items()[0].contains("ms"));
+}
 } // namespace
 
 int main() {
     attachment_versions();
+    described();
     ResourceGraphDesc graph;
     for (auto name : {"a", "b", "c", "output", "unused"})
         graph.resources.push_back({.name = name, .kind = GraphResourceKind::ColorTarget, .size = {64, 32}});

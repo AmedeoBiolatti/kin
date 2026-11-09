@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Render graphs for tools: `write_resource_graph_json` writes a compiled graph (`kin.render-graph/1`: resources,
+  passes with their reads and writes by name, the run's order, culled passes, times); the stock 3D frame's recipe is
+  public as `stock_frame_graph3d()`, `RenderDebugStats3D::graph_pass_ms` times each of its passes, and the game server's
+  `render.graph` method (inspect mode too) answers the frame's graph with the last render's times.
 - Lights in the fog (`Fog3D::volumetric`, off by default): the point and spot lights' light scattered by the fog's
   air, through their shadow maps (beams, a lamp's glow), lit in a volume of cells over the view's near distance with a
   history, summed along the rays and added after the main pass. Each light's `volumetric` scales its share (0: none).

@@ -465,7 +465,7 @@ if(KIN_EXPERIMENTAL_3D)
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/material_graph3d.cpp src/render3d/material_import3d.cpp src/render3d/material_import_unity3d.cpp src/render3d/material_import_unreal3d.cpp src/render3d/image_decode3d.cpp src/render3d/import_decode.c src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
     target_sources(kin_engine PRIVATE
-        src/render3d/camera3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
+        src/render3d/camera3d.cpp src/render3d/frame_graph3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
         src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
         src/render3d/environment.cpp src/render3d/hdr_decode.c)

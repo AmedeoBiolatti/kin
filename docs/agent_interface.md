@@ -169,6 +169,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `input.pad` | `{player?, button?, mode?, left_x?, left_y?, right_x?, right_y?, left_trigger?, right_trigger?, connected?}` | Drive a player's game controller (`player` 0 to 7, default 0) as a real one: a `button` (`a`, `start`, `dpad_left`, ...) with `mode` `press`, `hold` or `release`, and sticks (-1 to 1, y up) and triggers (0 to 1), kept until changed. The game reads it as that player's controller (`Input::player_gamepad`), and the first player's (else the lowest driven) as `Input::gamepad()`. Driven once, it is plugged in until `connected: false` (or `sim.reset`). |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
 | `frame.timing` | `{since?, reset?}` | Update, render and present wall time over the last 600 ticks (or frames drawn, inspected): `last`, `mean` and `max`, in ms. With `since` (a frame number; -1 for all kept), `history` lists each frame after it, oldest first: `frame`, `update_ms`, `render_ms`, `present_ms`, `interval_ms` (since the frame before began; 0 when ticked). `reset` clears the history after reporting. |
+| `render.graph` | none | The stock 3D frame's graph (`kin.render-graph/1`, [render graphs](render_graph.md#showing-a-graph)) as the renderer compiles and runs it: `available` (false without a 3D renderer), `rendered` (the last render ran it), `record_ms`, `compile_ms`, and `graph`: resources, passes (reads and writes by name, `order` in the run, `ms`: the last render's CPU recording time) and the run's `order`. |
 | `ping` | none | `{"pong": true}`. |
 | `server.shutdown` | none | `{"bye": true}` and stop the server. |
 
@@ -194,7 +195,8 @@ game --inspect
 
 It answers what reads the game (`game.info`, `scene.stack`, `scene.current`,
 `scene.actions`, `world.snapshot`, `ui.snapshot`, `animation.diagnostics`, `ping`),
-`frame.timing` for the frames it draws (a profiler asks with `since`), and
+`frame.timing` for the frames it draws (a profiler asks with `since`),
+`render.graph` for how its 3D frame is made, and
 `server.status` with `paused`. Three methods hold its updates while it keeps
 drawing:
 

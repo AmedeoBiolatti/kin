@@ -2,6 +2,7 @@
 
 #include <array>
 #include <kin/core/math3d.hpp>
+#include <kin/render3d/frame_graph3d.hpp>
 #include <kin/render3d/mesh_lod3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/stats3d.hpp>
@@ -19,6 +20,8 @@ struct RenderDebugStats3D : RenderStats3D {
     u64 shared_records = 0, shared_instance_bytes = 0, shared_joint_bytes = 0;
     u64 joint_upload_bytes = 0, preparation_scratch_bytes = 0;
     u32 shared_uploads = 0, shared_joint_uploads = 0;
+    // Each stock frame pass's CPU recording time, by its index in stock_frame_graph3d() (0: not run this render).
+    std::array<f64, frame_graph_passes3d> graph_pass_ms{};
     bool graph_reused = false;
     u32 graph_passes = 0, graph_culled_passes = 0;
     f64 graph_compile_ms = 0, graph_record_ms = 0; // CPU, never GPU timestamps

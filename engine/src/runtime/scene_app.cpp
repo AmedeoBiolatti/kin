@@ -1180,6 +1180,7 @@ struct SceneAppSession::Impl {
                             window.fixed_dt > 0.0f ? window.fixed_dt : default_fixed_dt, false,
                             config.asset_server, scene_renderer3d);
                     }
+                    inspector_context->set_renderer3d(scene_renderer3d); // made after the context, or made again
                     inspector->poll(*inspector_context, config.game);
                     if (ctx.app.waits_for_events() && !inspector->finished()) {
                         ctx.app.request_redraw(0.1f); // requests come without events

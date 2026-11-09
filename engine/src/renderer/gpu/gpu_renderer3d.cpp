@@ -19,6 +19,7 @@
 #include <functional>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/render3d/frame_graph3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/renderer/color.hpp>
@@ -13799,32 +13800,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     ctx.sun_shadow_cached = ctx.shadows && shadow_unchanged(ctx);
     upload_particle_casts(ctx);
     begin_commands(ctx);
-    // Coarse stock operations use the public compiler. Tokens cover backend-owned
-    // resources; their existing allocation/history ownership stays explicit. Inner
-    // prepass/main subpasses remain atomic operations in this first migration.
-    static const ResourceGraphDesc recipe = [] {
-        ResourceGraphDesc graph;
-        for (const auto* name :
-             {"geometry", "clusters", "local_shadows", "gi_attributes", "gi_probes", "sun_shadow", "prepass",
-              "occlusion", "overlay_velocity", "colour", "fog_colour", "resolved", "pick", "output"})
-            graph.resources.push_back({.name = name});
-        graph.resources[0].imported = true;
-        graph.resources[13].exported = true;
-        graph.passes = {{.name = "clusters", .reads = {0}, .writes = {1}},
-                        {.name = "local_shadows", .reads = {0, 1}, .writes = {2}},
-                        {.name = "gi_scene", .reads = {0, 2}, .writes = {3}},
-                        {.name = "gi_probes", .reads = {3}, .writes = {4}},
-                        {.name = "sun_shadow", .reads = {0, 1}, .writes = {5}},
-                        {.name = "prepass", .reads = {1, 4, 5}, .writes = {6}},
-                        {.name = "occluders", .reads = {6}, .writes = {7}},
-                        {.name = "overlay_velocity", .reads = {6, 7}, .writes = {8}},
-                        {.name = "main", .reads = {1, 2, 4, 5, 6, 7, 8}, .writes = {9}},
-                        {.name = "fog_sun", .reads = {9, 5}, .writes = {10}},
-                        {.name = "temporal_resolve", .reads = {10, 8}, .writes = {11}},
-                        {.name = "picking", .reads = {0, 1}, .writes = {12}, .after = {"temporal_resolve"}},
-                        {.name = "output", .reads = {11, 12}, .writes = {13}}};
-        return graph;
-    }();
+    const ResourceGraphDesc& recipe = stock_frame_graph3d(); // also what tools show
     auto& compiler = view->_graph_compiler;
     const auto before = compiler.stats().compilations;
     const auto& plan = compiler.compile(recipe, ~u64{0});
@@ -13834,7 +13810,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     stats.graph_compile_ms = stats.graph_reused ? 0 : compiler.stats().last_compile_ms;
     stats.graph_passes = static_cast<u32>(plan.order.size());
     stats.graph_culled_passes = plan.culled_passes;
-    const std::array<std::function<bool()>, 13> operations{
+    const std::array<std::function<bool()>, frame_graph_passes3d> operations{
         {[&] {
              cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
              return true;
@@ -13898,7 +13874,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
                                     stats);
              return true;
          }}};
-    static constexpr std::array<const char*, 13> markers{
+    static constexpr std::array<const char*, frame_graph_passes3d> markers{
         {"kin3d.clusters", "kin3d.local_shadows", "kin3d.gi_scene", "kin3d.gi_probes", "kin3d.sun_shadow",
          "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.main", "kin3d.fog_sun",
          "kin3d.temporal_resolve", "kin3d.picking", "kin3d.output"}};
@@ -13906,7 +13882,11 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     for (u32 i = 0; i < plan.order.size(); ++i) {
         const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
         const PassMarker marker{ctx.commands, _gpu_markers, markers[pass]};
-        if (!operations[pass]()) {
+        const auto pass_start = std::chrono::steady_clock::now();
+        const bool recorded = operations[pass]();
+        stats.graph_pass_ms[pass] =
+            std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - pass_start).count();
+        if (!recorded) {
             resume_2d();
             return false;
         }
