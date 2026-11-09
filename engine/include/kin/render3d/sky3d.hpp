@@ -70,6 +70,44 @@ struct Sky3D {
     u32 light_interval = 4;
 };
 
+// The light of the point and spot lights that the fog's air scatters toward the camera (Fog3D::volumetric): a lamp's
+// glow in the mist, a torch's beam, cut by the lights' shadow maps where they have them (a beam through a door, the
+// bars of a window). The view's near `distance` is cut into a volume of cells (tiles of `tile` pixels across, `slices`
+// of its depth, thinner near the camera), each lit by the lights whose reach holds it at a point moved within the cell
+// every frame and blended with the frames before (`history`), then summed along each ray and added once a pixel after
+// the main pass, at the depth the pre-pass drew there (which this turns on). The air is the fog's own (`density`,
+// `height_density`, from `start`) and scatters all the light it takes out, so the main pass's fog, which dims what is
+// behind the air, and this, which adds the lights' share, agree. The fog's colour (the sky's) stays the main pass's;
+// the sun and the fill light are scattered in the volume through their shadows (`sun_and_moon`). Off by default;
+// needs the fog on, a float picture
+// (ViewOptions3D::hdr or temporal anti-aliasing), a perspective camera and SDL_GPU. A blended surface takes the light
+// of the ray to what is behind it.
+struct VolumetricFog3D {
+    bool enabled = false;
+    // Times the lights' scattered light: 1 is the air's own (all it takes out of their light, spread by the lobe
+    // below); more for a thicker glow without darker distances. Each light's own `volumetric` multiplies it.
+    f32 intensity = 1.0f;
+    // The Henyey-Greenstein lobe: 0 even all round, toward 1 forward (a lamp looked at glows more than one seen from
+    // the side; a beam seen from behind its lamp shows less). -0.9 to 0.9.
+    f32 anisotropy = 0.3f;
+    f32 distance = 40.0f; // how far from the camera the volume reaches (view depth, units): past it lights add nothing
+    // Pixels across a cell (4 to 64); 0: the view's height over 90, at least 8 (8 at 720p, 16 at 1440p: cells of the
+    // same angle whatever the size, about 0.9 million of them at 16:9 with 64 slices).
+    u32 tile = 0;
+    u32 slices = 64; // cells along the depth (8 to 256)
+    // The share of the frames before kept each frame (0 to 0.98): more is smoother and slower to follow a moving light.
+    // Dropped after View3D::reset_history() and when the camera jumps (more than distance / 20, or 30 degrees, in a
+    // frame); the first frame after is drawn from the cells' middles.
+    f32 history = 0.9f;
+    // The sun and the fill light (the moon) in the volume too, through their shadows (the sun's cascades, the fill's
+    // DirectionalShadow3D): each scatters as the main pass's fog scatters the sun (Fog3D::sun_scatter, sun_anisotropy:
+    // nothing at a sun_scatter of 0), so the sun's shafts and the moon's come through windows and between trees. The
+    // main pass then leaves the sun out of its fog, and the fog past the volume takes it unshadowed (as without the
+    // volume; Fog3D::sun_shadows' walk is not needed and not made); the fill light, which the main pass's fog has not,
+    // scatters within the volume only.
+    bool sun_and_moon = true;
+};
+
 // Distance and height fog of the main pass: opaque, cut-out, skinned, instanced and clustered meshes, blended and
 // additive ones too (a particle pass shares kin_fog.inc.glsl). The optical depth along a view ray from the eye to a
 // point `s` away is
@@ -104,6 +142,8 @@ struct Fog3D {
     // needs the sun's shadows, a float picture (ViewOptions3D::hdr or temporal anti-aliasing), a perspective camera and
     // SDL_GPU (elsewhere the sun's in-scattering stays unshadowed). About 0.45 ms at 2404 x 1352 (RTX 4080 Laptop).
     bool sun_shadows = false;
+    // The point and spot lights' light in the fog's air (VolumetricFog3D). Off by default.
+    VolumetricFog3D volumetric{};
 };
 
 namespace sky_model {

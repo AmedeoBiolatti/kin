@@ -247,8 +247,11 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
     info.target_info = target_info;
     if (key.depth != GpuDepthTest::None && key.depth_stencil != SDL_GPU_TEXTUREFORMAT_INVALID) {
         info.depth_stencil_state.enable_depth_test = true;
-        info.depth_stencil_state.enable_depth_write = key.depth == GpuDepthTest::TestWrite;
-        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL; // reverse Z
+        info.depth_stencil_state.enable_depth_write =
+            key.depth == GpuDepthTest::TestWrite || key.depth == GpuDepthTest::Overwrite;
+        info.depth_stencil_state.compare_op = key.depth == GpuDepthTest::Overwrite
+                                                  ? SDL_GPU_COMPAREOP_ALWAYS
+                                                  : SDL_GPU_COMPAREOP_GREATER_OR_EQUAL; // reverse Z
     }
     if (stencil != GpuStencilOp::None) {
         // Where the stencil holds the reference: draw, or count one clip in or out there.

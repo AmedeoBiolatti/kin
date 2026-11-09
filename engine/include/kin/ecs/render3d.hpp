@@ -120,6 +120,7 @@ struct PointLight3D {
     LinearRgb color{1.0f, 1.0f, 1.0f}; // linear; as PointLightSource3D::color
     f32 radius = 5.0f;
     f32 size = 0.01f;
+    f32 volumetric = 1.0f; // times its light in the fog's air (Fog3D::volumetric); 0: none
     bool shadow_enabled = false;
     u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
     f32 shadow_bias = 1.0f;          // map texels
@@ -138,6 +139,7 @@ struct SpotLight3D {
     f32 size = 0.01f;
     f32 inner_angle = 20.0f; // degrees; see SpotLightSource3D
     f32 outer_angle = 30.0f;
+    f32 volumetric = 1.0f; // times its light in the fog's air (Fog3D::volumetric); 0: none
     bool shadow_enabled = false;
     u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
     f32 shadow_bias = 1.0f;          // map texels
