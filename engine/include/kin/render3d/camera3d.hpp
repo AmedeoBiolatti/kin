@@ -119,14 +119,14 @@ Quatf portal_rotation(PortalPose3D entry, PortalPose3D exit);
 std::optional<f32> portal_crossing(PortalPose3D entry, Vec3f from, Vec3f to);
 
 // Something half-way through: while a thing whose bounds are the sphere `centre`, `radius` straddles the entry (closer
-// to its plane than its radius and the views' clip `offset` (portal_view's), its centre within the opening, and no
-// larger than the opening's half diagonal: not the wall the portal is in, nor the floor under it), the transform that
-// takes it to its image at the exit (times its own placing: through * transform). Draw it there too, as well as where
-// it is: the part that has gone through shows beyond the exit, and the part that has not still shows before the entry.
-// Draw neither cut by the pictures' clip planes: the image with DrawClip3D::whole, and the thing itself again with
-// DrawClip3D::whole_if_cut (a closed mesh cut open shows its inside, which is not drawn: a rim where the halves meet, a
-// hole). Before the thing is moved through (portal_crossing) and after, from either portal of a pair. Nothing when it
-// does not straddle it.
+// to its plane than its radius and the views' clip `offset` (portal_view's), its centre within the opening, and its
+// radius no larger than the opening's diagonal: not the wall the portal is in, nor the floor under it), the transform
+// that takes it to its image at the exit (times its own placing: through * transform). Draw it there too, as well as
+// where it is: the part that has gone through shows beyond the exit, and the part that has not still shows before the
+// entry. Draw neither cut by the pictures' clip planes: the image with DrawClip3D::whole, and the thing itself again
+// with DrawClip3D::whole_if_cut (a closed mesh cut open shows its inside, which is not drawn: a rim where the halves
+// meet, a hole). Before the thing is moved through (portal_crossing) and after, from either portal of a pair. Nothing
+// when it does not straddle it.
 std::optional<Mat4f> portal_straddle(PortalPose3D entry, PortalPose3D exit, Vec3f centre, f32 radius,
                                      f32 offset = 0.005f);
 

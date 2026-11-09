@@ -2737,8 +2737,8 @@ r3d.render(view, scene);       // then the view that sees the mirror
   and the velocity (the example's orb and its walking camera, `--camera 5`). `ray_through_portal(ray, entry, exit)`
   continues an aim, a bullet or a line of sight out of the exit (again for each portal it meets).
   `portal_straddle(entry, exit, centre, radius)`: while a thing is half-way through (its bounds closer to the entry's
-  plane than its radius and the views' clip offset, its centre within the opening and its bounds no larger than the
-  opening: not the wall or the floor round it), the transform to its image at the exit; draw
+  plane than its radius and the views' clip offset, its centre within the opening and its radius no larger than the
+  opening's diagonal: not the wall or the floor round it), the transform to its image at the exit; draw
   it there too, before it is moved through and after. The part that has gone through then shows beyond the exit, and
   the part that has not still shows before the entry. Draw neither cut by the pictures' clip planes, or a closed mesh
   cut open shows the rim of its inside where the halves meet (a crescent, a thin ring, a small hole as it leaves): the
@@ -2815,9 +2815,10 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   where it shows within the level before, deepest first; each with the other planar surfaces as stand-ins (a mirror as kin's own metal) and without the scene's overlay
   (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). Views are kept from frame to frame and
   dropped with their entities. `PlanarViews3D::views_rendered()` and `views_skipped()` count them. Whatever is
-  half-way through a portal is drawn at its exit too (`portal_straddle`): every copy of the scene's draws whose bounds
-  straddle an opening, with its id (not instance batches' or skinned copies'), whole, and an opaque one again where it
-  is, whole, in the pictures only (`DrawClip3D`).
+  half-way through a portal is drawn at its exit too (`portal_straddle`, `Scene3D::draw_again`): every copy of the
+  scene's draws whose bounds straddle an opening, plain, skinned (a character walking through: its pose as it is) or an
+  instance batch's, with its id, whole, and an opaque one again where it is, whole, in the pictures only (`DrawClip3D`).
+  The atrium's survivor (Kenney's, CC0) walks through its portals (`planar_atrium --camera 5`).
 - **Going through.** `portal_step(world, from, to)` (Lua `scene3d.portal_step(from, to)`) tests a step against every
   enabled portal: where it ends, out of the exit, and the turn to give its facing and velocity (`turn`, a quaternion),
   or nothing (nil). `portal_poses(entity)` gives an entity's portal and its exit as the camera3d.hpp helpers take them.
