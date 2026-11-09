@@ -265,6 +265,28 @@ void put_clip(f32 (&clip)[4], const Camera3D& camera) {
     clip[2] = camera.clip_plane.z;
     clip[3] = camera.clip_plane.w;
 }
+// Where the screen-space reflections' buffer keeps what: the trace's grid (half the view's size, three words a texel),
+// then the previous frame's picture as a pyramid from the grid's size down (each level half the one before, at most
+// six), two words a texel.
+struct SsrLayout {
+    u32 w = 1, h = 1, levels = 0, pyramid_word = 0, words = 0;
+};
+SsrLayout ssr_layout(Vec2i view) {
+    SsrLayout l;
+    l.w = std::max(1u, (static_cast<u32>(view.x) + 1) / 2);
+    l.h = std::max(1u, (static_cast<u32>(view.y) + 1) / 2);
+    l.pyramid_word = l.w * l.h * 3;
+    l.words = l.pyramid_word;
+    for (u32 w = l.w, h = l.h; l.levels < 6;) {
+        l.words += w * h * 2;
+        ++l.levels;
+        if (w == 1 && h == 1)
+            break;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    return l;
+}
 // A camera pass's hidden copy into a draw's uniforms (the third of `first`: its pick id plus one, as the instances hold
 // theirs; 0: none).
 void put_hidden(u32 (&first)[4], const Camera3D& camera) {
@@ -311,8 +333,10 @@ struct FrameUniforms {
     f32 probes[4];    // x: the reflection probes this pass reads, y: their last level
     f32 probe[max_reflection_probes3d * 6 * 4]; // six vec4s a probe (prepare_reflections)
     f32 ssr[4]; // x: 1 when this pass reads screen-space reflections, yz: their grid's size, w: their roughness limit
+    f32 ssr_pyramid[4];   // x: the previous picture's levels, y: its projection's [1][1], z: level 0's first word
+    f32 ssr_previous[16]; // world to the previous frame's clip space
 };
-static_assert(sizeof(FrameUniforms) == 2752);
+static_assert(sizeof(FrameUniforms) == 2832);
 // A light of the light grid (as gi_light.comp's): place and reach, colour and the square of the size, a spot's way and
 // the cosine of its outer angle (a point light: -2), 1 / (cos inner - cos outer) and its shadow's layer (a point
 // light's cube's first; -1: none).
@@ -1632,7 +1656,9 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                 _panorama_pipeline = make_compute(handle, "probe_panorama.comp.spv", {.samplers = 1});
         }
         _ssr_pipeline = make_compute(handle, "ssr_trace.comp.spv",
-                                     {.samplers = 3, .readwrite_buffers = 1, .readwrite_textures = 0});
+                                     {.samplers = 2, .readwrite_buffers = 1, .readwrite_textures = 0});
+        _ssr_pyramid_pipeline = make_compute(handle, "ssr_pyramid.comp.spv",
+                                             {.samplers = 1, .readwrite_buffers = 1, .readwrite_textures = 0});
     }
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
         // Bilinear comparisons: each tap is itself four, softening the edge.
@@ -1742,6 +1768,7 @@ GpuRenderer3D::~GpuRenderer3D() {
     for (SDL_GPUComputePipeline* compute : {_filter_pipeline,
                                             _panorama_pipeline,
                                             _ssr_pipeline,
+                                            _ssr_pyramid_pipeline,
                                             _ao_blur_chain_pipeline,
                                             _ao_blur_both_chain_pipeline,
                                             _gtao_pipeline,
@@ -6453,9 +6480,8 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     // Screen-space reflections trace through what the pre-pass drew, for the light variants (as the probes').
     ctx.ssr_wanted = scene.ssr.enabled && _ssr_pipeline && _ssr_dummy && _ao_available && _lights_available &&
                      scene.camera.projection == Projection3D::Perspective;
-    if (!ctx.ssr_wanted && (view->_ssr_buffer || view->_ssr_colour)) {
+    if (!ctx.ssr_wanted && view->_ssr_buffer) {
         view->_ssr_buffer.reset();
-        view->_ssr_colour = {};
         view->_ssr_seen = false;
     }
     const bool needs_prepass = scene.ambient_occlusion.enabled || ctx.contact_wanted || scene.lod.occlusion.enabled ||
@@ -11368,6 +11394,11 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         f.ssr[1] = static_cast<f32>(std::max(1, (view->_size.x + 1) / 2));
         f.ssr[2] = static_cast<f32>(std::max(1, (view->_size.y + 1) / 2));
         f.ssr[3] = std::clamp(ctx.scene.ssr.max_roughness, 0.0f, 1.0f);
+        const SsrLayout layout = ssr_layout(view->_size);
+        f.ssr_pyramid[0] = static_cast<f32>(layout.levels);
+        f.ssr_pyramid[1] = view->_ssr_prior_y;
+        f.ssr_pyramid[2] = static_cast<f32>(layout.pyramid_word);
+        std::memcpy(f.ssr_previous, view->_ssr_prior.m, sizeof(f.ssr_previous));
     }
     // The reflection probes too (prepare_reflections).
     if (s == 0 && ctx.probe_count > 0) {
@@ -11390,42 +11421,38 @@ bool GpuRenderer3D::ssr_trace(FrameCtx& ctx) {
     GpuView3D& view = *ctx.view;
     const Scene3D& scene = ctx.scene;
     const ScreenSpaceReflections3D& settings = scene.ssr;
-    const u32 w = std::max(1u, (static_cast<u32>(view._size.x) + 1) / 2);
-    const u32 h = std::max(1u, (static_cast<u32>(view._size.y) + 1) / 2);
+    const SsrLayout layout = ssr_layout(view._size);
     try {
-        ensure_buffer(view._ssr_buffer, w * h * 12, 64,
-                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+        ensure_buffer(view._ssr_buffer, layout.words * 4, 64,
+                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                          SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: screen-space reflections' buffer not made",
                        (LogFields{{.name = "reason", .value = e.what()}}));
         return false;
     }
     // The first frame has no picture to read: nothing this time (the end of the frame keeps one).
-    if (!view._ssr_seen || !view._ssr_colour || !view._ao_depth || !view._ao_normals)
+    if (!view._ssr_seen || !view._ao_depth || !view._ao_normals)
         return false;
     struct Uniforms {
-        f32 view[16], projection[16], to_previous[16];
+        f32 view[16], projection[16];
         f32 unproject_xy[4], unproject_zw[4];
         f32 sizes[4], shape[4], colour[4];
     } u{};
     const Mat4f camera_view = scene.camera.view();
     std::memcpy(u.view, camera_view.m, sizeof(u.view));
     std::memcpy(u.projection, ctx.main_projection.m, sizeof(u.projection));
-    const Mat4f to_previous = view._ssr_prior * camera_view.inverse();
-    std::memcpy(u.to_previous, to_previous.m, sizeof(u.to_previous));
     const Unprojection unproject = unproject_coefficients(ctx.main_projection);
     std::memcpy(u.unproject_xy, unproject.xy, sizeof(u.unproject_xy));
     std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
-    u.sizes[0] = static_cast<f32>(w);
-    u.sizes[1] = static_cast<f32>(h);
+    u.sizes[0] = static_cast<f32>(layout.w);
+    u.sizes[1] = static_cast<f32>(layout.h);
     u.sizes[2] = static_cast<f32>(view._size.x);
     u.sizes[3] = static_cast<f32>(view._size.y);
     u.shape[0] = std::max(settings.thickness, 1e-3f);
     u.shape[1] = std::max(settings.max_distance, 0.1f);
     u.shape[2] = static_cast<f32>(std::clamp(settings.steps, 8u, 128u));
     u.shape[3] = std::clamp(settings.intensity, 0.0f, 1.0f);
-    u.colour[0] = view._ssr_encoded ? 1.0f : 0.0f;
-    u.colour[1] = 1.0f;
     u.colour[2] = ctx.taa ? 1.0f : 0.0f;
     SDL_GPUCommandBuffer* commands = ctx.commands;
     const PassMarker marker{commands, _gpu_markers, "kin3d.ssr"};
@@ -11434,18 +11461,19 @@ bool GpuRenderer3D::ssr_trace(FrameCtx& ctx) {
     if (!pass)
         return false;
     SDL_BindGPUComputePipeline(pass, _ssr_pipeline);
-    const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{{{view._ao_depth.handle(), _point_sampler},
-                                                              {view._ao_normals.handle(), _point_sampler},
-                                                              {view._ssr_colour.handle(), _owner->_sampler_linear}}};
+    const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+        {{view._ao_depth.handle(), _point_sampler}, {view._ao_normals.handle(), _point_sampler}}};
     SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), static_cast<u32>(inputs.size()));
     SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
-    SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
+    SDL_DispatchGPUCompute(pass, (layout.w + 7) / 8, (layout.h + 7) / 8, 1);
     SDL_EndGPUComputePass(pass);
     return true;
 }
 
 void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     GpuView3D& view = *ctx.view;
+    if (!view._ssr_buffer || !_ssr_pyramid_pipeline)
+        return;
     // The frame's lit picture, linear where there is one: the temporal resolve's, the HDR view's, else the view's own
     // output (sRGB-encoded where the shader encoded it).
     SDL_GPUTexture* source = nullptr;
@@ -11460,32 +11488,37 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     }
     if (!source)
         return;
-    const u32 w = std::max(1u, (static_cast<u32>(view._size.x) + 1) / 2);
-    const u32 h = std::max(1u, (static_cast<u32>(view._size.y) + 1) / 2);
-    try {
-        if (!view._ssr_colour || view._ssr_colour.width() != w || view._ssr_colour.height() != h) {
-            view._ssr_colour = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
-                                                      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
-            view._ssr_seen = false;
-        }
-    } catch (const std::exception& e) {
-        KIN_LOG_WARN_F("render", "3D: screen-space reflections' picture not made",
-                       (LogFields{{.name = "reason", .value = e.what()}}));
+    const SsrLayout layout = ssr_layout(view._size);
+    if (view._ssr_buffer->size() < layout.words * 4)
         return;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const PassMarker marker{commands, _gpu_markers, "kin3d.ssr_picture"};
+    // Level 0 from the picture, each level after from the one before: a pass each (each reads the one before's writes).
+    u32 w = layout.w, h = layout.h, first = layout.pyramid_word, before = first, bw = w, bh = h;
+    for (u32 level = 0; level < layout.levels; ++level) {
+        const SDL_GPUStorageBufferReadWriteBinding output{.buffer = view._ssr_buffer->handle()};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &output, 1);
+        if (!pass)
+            return;
+        SDL_BindGPUComputePipeline(pass, _ssr_pyramid_pipeline);
+        const SDL_GPUTextureSamplerBinding picture{source, _owner->_sampler_linear};
+        SDL_BindGPUComputeSamplers(pass, 0, &picture, 1);
+        const f32 params[8] = {static_cast<f32>(w),      static_cast<f32>(h),     static_cast<f32>(bw),
+                               static_cast<f32>(bh),     static_cast<f32>(first), static_cast<f32>(before),
+                               level == 0 ? 1.0f : 0.0f, encoded ? 1.0f : 0.0f};
+        SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+        before = first;
+        bw = w;
+        bh = h;
+        first += w * h * 2;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
     }
-    SDL_GPUBlitInfo blit{};
-    blit.source.texture = source;
-    blit.source.w = static_cast<u32>(view._size.x);
-    blit.source.h = static_cast<u32>(view._size.y);
-    blit.destination.texture = view._ssr_colour.handle();
-    blit.destination.w = w;
-    blit.destination.h = h;
-    blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
-    blit.filter = SDL_GPU_FILTER_LINEAR;
-    SDL_BlitGPUTexture(ctx.commands, &blit);
     view._ssr_prior = ctx.view_projections[0];
+    view._ssr_prior_y = ctx.scene.camera.projection_matrix(ctx.aspect).at(1, 1);
     view._ssr_seen = true;
-    view._ssr_encoded = encoded;
 }
 
 void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {

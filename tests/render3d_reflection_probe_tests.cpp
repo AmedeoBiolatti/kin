@@ -185,14 +185,15 @@ void test_ssr(Renderer2D& r, Renderer3D& r3d) {
     for (const bool hdr : {false, true}) {
         View3D view = r3d.create_view(extent, {.samples = 1, .background = colors::black, .hdr = hdr}).value_or({});
         assert(view);
-        const auto frame = [&](bool ssr) {
+        std::vector<Rgb> extra; // the pixels at `probe_points` of the last frame
+        std::vector<Vec3f> probe_points;
+        const auto frame = [&](bool ssr, Material3D floor = {.color = colors::white, .metallic = 1, .roughness = 0}) {
             Scene3D scene;
             scene.camera = Camera3D::look_at({0, 1, 4}, floor_point, 60);
             scene.lights.sun.color = {};
             scene.lights.ambient = {0.05f, 0.05f, 0.05f};
             scene.ssr.enabled = ssr;
-            assert(scene.draw(plane, Mat4f::trs({0, 0, 0}, {}, {20, 1, 20}),
-                              {.color = colors::white, .metallic = 1, .roughness = 0}));
+            assert(scene.draw(plane, Mat4f::trs({0, 0, 0}, {}, {20, 1, 20}), floor));
             assert(
                 scene.draw(box, Mat4f::translation({0, 0.5f, 0}), {.color = Color::rgb(240, 20, 20), .unlit = true}));
             r.clear(colors::black);
@@ -203,16 +204,65 @@ void test_ssr(Renderer2D& r, Renderer3D& r3d) {
             Vec2i size;
             assert(r.read_rgba(rect, pixels, size) && size == extent);
             r.present();
-            const auto at = scene.camera.project(floor_point, rect);
-            assert(at);
-            const u8* c = &pixels[(std::size_t(at->pos.y) * std::size_t(extent.x) + std::size_t(at->pos.x)) * 4];
-            return std::pair{Rgb{c[0], c[1], c[2]}, traces};
+            const auto pixel = [&](Vec3f p) {
+                const auto at = scene.camera.project(p, rect);
+                assert(at);
+                const u8* c = &pixels[(std::size_t(at->pos.y) * std::size_t(extent.x) + std::size_t(at->pos.x)) * 4];
+                return Rgb{c[0], c[1], c[2]};
+            };
+            extra.clear();
+            for (const Vec3f p : probe_points)
+                extra.push_back(pixel(p));
+            return std::pair{pixel(floor_point), traces};
         };
         const auto [first, first_traces] = frame(true);
         assert(first_traces == 0); // nothing to read yet
         const auto [seen, traces] = frame(true);
         std::cerr << "ssr (" << (hdr ? "hdr" : "ldr") << "): " << seen.r << " " << seen.g << " " << seen.b << "\n";
         assert(traces == 1 && seen.r > 120 && seen.g < 60);
+        // A glossy floor (roughness 0.4, under max_roughness): the red, blurred (a level of the picture's pyramid as
+        // wide as the lobe), not the grey.
+        const Material3D glossy{.color = colors::white, .metallic = 1, .roughness = 0.4f};
+        (void)frame(true, glossy);
+        const auto [blurred, glossy_traces] = frame(true, glossy);
+        std::cerr << "ssr glossy (" << (hdr ? "hdr" : "ldr") << "): " << blurred.r << " " << blurred.g << " "
+                  << blurred.b << "\n";
+        assert(glossy_traces == 1 && blurred.r > blurred.g + 40);
+        // A floor whose normal map turns every normal far toward +X: its reflection there goes past the box (it follows
+        // the mapped normal, not the pre-pass's flat one), so the red is gone from that spot.
+        const u8 bent[]{230, 128, 204, 255};
+        const Texture tilt = r.create_texture({1, 1}, TextureFormat::Rgba8, bent);
+        assert(tilt);
+        const Material3D mapped{.color = colors::white, .metallic = 1, .roughness = 0, .normal = tilt};
+        (void)frame(true, mapped);
+        const auto [turned, turned_traces] = frame(true, mapped);
+        std::cerr << "ssr normal map (" << (hdr ? "hdr" : "ldr") << "): " << turned.r << " " << turned.g << " "
+                  << turned.b << "\n";
+        assert(turned_traces == 1 && turned.r < turned.g + 40);
+        // A mild one (8 degrees toward the tangent): the reflection turns about 16 and its hit, about 1.3 away, moves
+        // about 0.36. The floor's points whose flat reflections meet the box's face 0.05 in from its sides, top and
+        // bottom (the face's points mirrored under the floor, the lines to them from the eye crossing it): flat, all
+        // red; bumped, some now pass beside, over or under the box (which, by the tangent's way).
+        probe_points = {{-0.3f, 0, 5.0f / 3.0f}, {0.3f, 0, 5.0f / 3.0f}, {0, 0, 2.205f}, {0, 0, 0.667f}};
+        const auto red = [](Rgb c) { return c.r > c.g + 80; };
+        (void)frame(true);
+        (void)frame(true);
+        for (const Rgb& c : extra)
+            assert(red(c));
+        const u8 mild_bent[]{146, 128, 254, 255};
+        const Texture mild = r.create_texture({1, 1}, TextureFormat::Rgba8, mild_bent);
+        const Material3D bumped{.color = colors::white, .metallic = 1, .roughness = 0, .normal = mild};
+        (void)frame(true, bumped);
+        (void)frame(true, bumped);
+        std::cerr << "ssr mild normal map:";
+        u32 lost = 0;
+        for (const Rgb& c : extra) {
+            std::cerr << " " << c.r << "," << c.g;
+            lost += red(c) ? 0 : 1;
+        }
+        std::cerr << "\n";
+        assert(lost >= 1);
+        probe_points.clear();
         const auto [plain, none] = frame(false);
         std::cerr << "no ssr (" << (hdr ? "hdr" : "ldr") << "): " << plain.r << " " << plain.g << " " << plain.b
                   << " traces " << none << "\n";

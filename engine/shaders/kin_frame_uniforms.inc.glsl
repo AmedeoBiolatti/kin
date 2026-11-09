@@ -39,4 +39,7 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 probe[16 * 6];
     vec4 ssr;           // screen-space reflections (Scene3D::ssr): x: 1 when this pass reads them, yz: their grid's
                         // size (half the view's), w: the roughness past which there are none
+    vec4 ssr_pyramid;   // the previous frame's picture in their buffer (ssr_pyramid.comp): x: levels, y: the previous
+                        // projection's [1][1], z: level 0's first word
+    mat4 ssr_previous;  // world to the previous frame's clip space (unjittered)
 } frame;

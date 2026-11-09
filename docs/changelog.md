@@ -83,10 +83,11 @@ releases may change APIs.
   `SceneSession3D` (once, on an interval, or every frame; `hide_self`). Curved mirrors: a live probe at a shiny thing's
   centre, the thing left out by `Camera3D::hidden_id`. The light variants' binding 6 is now a 2D array (layer 0 the
   environment's specular); custom material shaders keep the 2D environment.
-- Screen-space reflections (`Scene3D::ssr`; authored `ssr_*` in `SceneEnvironment3D`): each pixel's mirror reflection
-  traced through the depth pre-pass at half size and read from the previous frame's picture, in place of the probes'
-  or the environment's where it finds something; fades by the screen's edges, roughness and curvature, and leaves a
-  thing's own probe alone. The light variants' last storage buffer (older compiled surfaces simply do not read it).
+- Screen-space reflections (`Scene3D::ssr`; authored `ssr_*` in `SceneEnvironment3D`): each pixel's reflection hit
+  traced through the depth pre-pass at half size; the lit shaders follow their own (normal-mapped) reflection that far
+  into the previous frame's picture, kept as a blur pyramid, read as wide as the reflection's lobe (glossy surfaces get
+  blurred reflections, up to `max_roughness`); in place of the probes' or the environment's where it finds something;
+  fades by the screen's edges, curvature and steep normal maps, and leaves a thing's own probe alone. The light variants' last storage buffer (older compiled surfaces simply do not read it).
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds

@@ -342,13 +342,13 @@ private:
     GpuTexture _colour; // multisampled; empty with one sample (drawn into the resolved one)
     GpuTexture _depth;
     GpuTexture _scene; // HDR: the resolved float picture
-    // Screen-space reflections (ssr_trace): the half-size grid's results (three words a texel), the previous frame's
-    // picture (half size, linear, mipmapped) and the camera it was seen with (unjittered); `_ssr_seen` when it holds
-    // one.
+    // Screen-space reflections (ssr_trace): the half-size grid's results (three words a texel), then the previous
+    // frame's picture as a pyramid (ssr_keep_picture: two words a texel, half size down), and the camera it was seen
+    // with (unjittered); `_ssr_seen` when the pyramid holds one.
     std::shared_ptr<GpuBuffer> _ssr_buffer;
-    GpuTexture _ssr_colour;
     Mat4f _ssr_prior{};
-    bool _ssr_seen = false, _ssr_encoded = false;
+    f32 _ssr_prior_y = 1.0f; // its projection's [1][1] (how wide a world unit shows at a depth)
+    bool _ssr_seen = false;
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
     // ViewOptions3D::auto_exposure: the histogram and the adapted exposure (exposure_histogram/adapt.comp), whether it
     // holds a metered exposure yet, and the clocks the time between renders is measured with.
@@ -1234,13 +1234,14 @@ private:
     bool shadow_unchanged(FrameCtx& ctx);
     void shadow_drawn(FrameCtx& ctx, bool complete);
     bool _chain_ready = false; // the occlusion built the linear depth chain this render: the blurs read it
-    SDL_GPUSampler* _point_sampler = nullptr;             // texel by texel, for compute
-    SDL_GPUSampler* _compare_sampler = nullptr;           // the shadow map's
-    SDL_GPUSampler* _environment_sampler = nullptr;       // wraps round, clamps at the poles, mipmapped
-    SDL_GPUComputePipeline* _filter_pipeline = nullptr;   // env_filter.comp
-    SDL_GPUComputePipeline* _panorama_pipeline = nullptr; // probe_panorama.comp
-    SDL_GPUComputePipeline* _ssr_pipeline = nullptr;      // ssr_trace.comp
-    std::shared_ptr<GpuBuffer> _ssr_dummy;                // bound where a light variant reads no reflections
+    SDL_GPUSampler* _point_sampler = nullptr;                // texel by texel, for compute
+    SDL_GPUSampler* _compare_sampler = nullptr;              // the shadow map's
+    SDL_GPUSampler* _environment_sampler = nullptr;          // wraps round, clamps at the poles, mipmapped
+    SDL_GPUComputePipeline* _filter_pipeline = nullptr;      // env_filter.comp
+    SDL_GPUComputePipeline* _panorama_pipeline = nullptr;    // probe_panorama.comp
+    SDL_GPUComputePipeline* _ssr_pipeline = nullptr;         // ssr_trace.comp
+    SDL_GPUComputePipeline* _ssr_pyramid_pipeline = nullptr; // ssr_pyramid.comp
+    std::shared_ptr<GpuBuffer> _ssr_dummy;                   // bound where a light variant reads no reflections
     // The reflection array (prepare_reflections): equirectangular layers the environment's specular size (or 256 x
     // 128 without one), a level a roughness; layer 0 the environment's, then one a probe. What each holds.
     GpuTexture _reflections;
