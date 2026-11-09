@@ -165,6 +165,12 @@ public:
     i32 node_skeleton = -1;
 };
 
+// The morph target weights `clip` gives at `time` (looped or held as sample_clip does), set on the parts of `model`
+// they move (AnimClip3D::morphs, Renderer3D::set_morph_weights), clamped to [-1, 1]. Parts made with a different
+// number of targets are skipped. A clip without morph channels does nothing.
+Status3D apply_clip_morphs(Renderer3D& renderer, const Model3D& model, const AnimClip3D& clip, f32 time,
+                           bool loop = true);
+
 struct ModelBatchOptions3D {
     // World-space cell size. Zero: per-copy culling, no spatial groups.
     // Positive: group by the model transforms' world origins. Negative/non-finite is invalid.

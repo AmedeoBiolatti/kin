@@ -11,6 +11,7 @@
 
 #include <SDL3/SDL.h>
 #include <array>
+#include <chrono>
 #include <kin/render3d/backend3d.hpp>
 #include <kin/render3d/local_lights3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
@@ -133,6 +134,11 @@ public:
     std::shared_ptr<GpuClusterChunk> chunk;
     u32 table_first = 0;
     u64 serial = 0; // unique for the renderer's life: the shadow cache's name for the mesh (a pointer can be reused)
+    // A mesh with morph targets (MeshData3D::morph_targets): its own vertex buffer, rewritten by update_mesh_vertices,
+    // and how many times it has been (the shadow caches' key for its shape).
+    bool dynamic = false;
+    u32 vertex_count = 0;
+    u64 content = 0;
     // Where global illumination can be had: the box of each run of gi_run_triangles of level 0's triangles (the mesh's
     // space, at rest), so that the GI scene's voxelizer takes only the runs that reach where it changed.
     std::vector<Bounds3D> gi_runs;
@@ -257,6 +263,7 @@ public:
     void reset_history() override {
         _taa_reset_asked = true;
         _occ_reset = true;
+        _exposure_valid = false;
     }
 
 private:
@@ -278,6 +285,13 @@ private:
     GpuTexture _depth;
     GpuTexture _scene;             // HDR: the resolved float picture
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
+    // ViewOptions3D::auto_exposure: the histogram and the adapted exposure (exposure_histogram/adapt.comp), whether it
+    // holds a metered exposure yet, and the clocks the time between renders is measured with.
+    std::shared_ptr<GpuBuffer> _exposure;
+    bool _exposure_valid = false;
+    bool _exposure_time_seen = false;
+    f32 _exposure_time = 0.0f;
+    std::chrono::steady_clock::time_point _exposure_wall{};
     GpuTexture _pick, _pick_depth; // with ViewOptions3D::pick: position and id a pixel
     bool _pick_valid =
         false; // a render has written _pick since it was made (a new target holds whatever the memory did)
@@ -476,6 +490,7 @@ public:
     RendererCapabilities3D capabilities() const override { return _capabilities; }
     std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
+    bool update_mesh_vertices(IMeshBackend3D& mesh, std::span<const MeshVertex3D> vertices) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<ISurfaceShaderBackend3D>
@@ -632,14 +647,20 @@ private:
     // `plain` is an 8-bit view's resolved picture (temporal anti-aliasing), which only needs encoding.
     // `dither`: the output shader with a dither of an 8-bit step (a view with a sky; falls back to the plain one
     // without it).
+    // `time` is Scene3D::time (auto exposure's step between renders).
     bool finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither,
-                     RenderDebugStats3D&);
+                     f32 time, RenderDebugStats3D&);
+    // ViewOptions3D::auto_exposure: meters `source` into the view's exposure buffer and adapts it; false (the view is
+    // output with its plain exposure) where it can't.
+    bool meter_exposure(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, f32 time,
+                        RenderDebugStats3D&);
     bool post_pass(SDL_GPUCommandBuffer*, const GpuTexture&, SDL_GPUShader*, std::span<const SDL_GPUTexture* const>,
-                   const std::array<f32, 4>&);
+                   const std::array<f32, 4>&, SDL_GPUBuffer* storage = nullptr);
     bool record_bloom(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& result,
                       const GpuTexture& scratch, f32 threshold, RenderDebugStats3D&);
     bool record_output(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& target,
-                       const GpuTexture* bloom, const OutputOptions3D&, RenderDebugStats3D&);
+                       const GpuTexture* bloom, const OutputOptions3D&, RenderDebugStats3D&,
+                       SDL_GPUBuffer* exposure = nullptr);
     const GpuTextureBackend* post_texture(const Texture&, bool attachment) const;
     // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
     bool ensure_taa_targets(GpuView3D& view, bool sharpen);
@@ -820,6 +841,10 @@ private:
     GpuTexture _area_cache_none; // 1 x 1 x 1: gi_light.comp's cache binding without area lights
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
+    // Scene3D::decals, in the main pass after the scene's opaque meshes (decal.vert/frag). `shared` is the custom
+    // material layout's twelve samplers as the pass binds them (the shadow maps, environment, occlusion); each decal
+    // puts its own picture and normal map in their places.
+    void draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass, std::array<SDL_GPUTextureSamplerBinding, 12> shared);
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to
     // the instance buffer; draw_particles() then records them into the main pass.
     struct ParticleSource {
@@ -918,6 +943,16 @@ private:
     GpuShader _sky_velocity_only_shader; // sky_velocity_only.frag
     GpuShader _sky_env_shader;           // sky_env.frag
     GpuShader _output_dither_shader; // view_output_dither.frag: view_output.frag with a dither, for a view with a sky
+    // ViewOptions3D::auto_exposure: the output's variants that read the adapted exposure, and the metering.
+    GpuShader _output_auto_shader;                                  // view_output_auto.frag
+    GpuShader _output_dither_auto_shader;                           // view_output_dither_auto.frag
+    SDL_GPUComputePipeline* _exposure_histogram_pipeline = nullptr; // exposure_histogram.comp
+    SDL_GPUComputePipeline* _exposure_adapt_pipeline = nullptr;     // exposure_adapt.comp
+    bool _auto_exposure_warned = false;
+    // Scene3D::decals: the box's vertex shader and the lit projection (decal.vert, decal.frag).
+    GpuShader _decal_vertex_shader;
+    GpuShader _decal_shader;
+    bool _decals_warned = false;
     // P3c: particles (the billboards' vertex shader, the fragment shader and its soft-particle variant).
     GpuShader _particle_vertex_shader; // particle.vert
     GpuShader _particle_shader;        // particle.frag

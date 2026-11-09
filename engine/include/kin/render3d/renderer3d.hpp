@@ -122,6 +122,13 @@ public:
     // is `data` itself, so the picture without Scene3D::lod is the same. Takes
     // time to build (about a second for a million triangles).
     Result3D<Mesh3D> create_mesh(const MeshData3D& data, const MeshOptions3D& options);
+    // Morph targets (MeshData3D::morph_targets; docs/rendering_3d.md, Morph targets): the weights `mesh` shows from the
+    // next render on, one for each target (Mesh3D::morph_target_count), each within [-1, 1]. Blended on the CPU and
+    // uploaded (skipped when they are what it shows); a skinned mesh is blended, then skinned. Every copy drawn of the
+    // mesh shows the same weights: copy_mesh() makes one that can show others.
+    Status3D set_morph_weights(const Mesh3D& mesh, std::span<const f32> weights);
+    // A mesh with morph targets again, its own weights starting at `mesh`'s (the same targets, a GPU copy of its own).
+    Result3D<Mesh3D> copy_mesh(const Mesh3D& mesh);
     // Where create_mesh keeps what it builds for levels of detail and clusters (kin/assets/bake_cache.hpp), and
     // reads it back on a later run instead of building again: the same bytes, so the same mesh and pictures. Keyed by
     // the mesh's bytes and the options the build reads (mesh_clusters_bake_key, mesh_levels_bake_key); meshes too

@@ -7,6 +7,16 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 3D auto exposure, decals and morph targets (native renderers; WebGL2 has morph targets only).
+  `ViewOptions3D::auto_exposure` (`AutoExposure3D`) meters an HDR view on the GPU (a log-luminance histogram with
+  the darkest and brightest shares left out) and adapts its exposure over time, faster toward light than toward dark,
+  with no read-back. `Scene3D::draw_decal(Decal3D)` projects a picture (and optionally a normal map) through a box
+  onto the opaque surfaces in it, lit with them, fading on surfaces that turn away; scenes with decals always run the
+  pre-pass. `MeshData3D::morph_targets` and `Renderer3D::set_morph_weights` blend meshes between shapes (before
+  skinning; `copy_mesh` for a copy with its own weights); glTF morph targets, target names, default weights and weight
+  animations now load (`AnimClip3D::morphs`, `apply_clip_morphs`) instead of rejecting the model. New capabilities
+  `auto_exposure`, `decals`, `morph_targets`; new example `bunker_exit`.
+
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
   with a private six-file cache. It stays off by default because cold/private-header
   rebuilds cost more; see [measurements](build_times.md#private-widget-implementation-pch).

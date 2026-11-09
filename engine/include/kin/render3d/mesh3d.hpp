@@ -9,7 +9,9 @@
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace kin {
@@ -48,6 +50,18 @@ struct MeshSkinVertex3D {
 // the first.
 std::array<u8, 4> quantise_skin_weights(const std::array<f32, 4>& weights);
 
+// A shape a mesh can blend toward (glTF's morph targets, Blender's shape keys): for each vertex, how far it moves and
+// how its normal turns at full weight. A mesh drawn with weights w shows each vertex at position + sum(w[t] *
+// positions[t]), its normal normalize(normal + sum(w[t] * normals[t])) (docs/rendering_3d.md, Morph targets).
+struct MorphTarget3D {
+    std::string name;
+    std::vector<Vec3f> positions; // one for each vertex
+    std::vector<Vec3f> normals;   // one for each vertex, or none (the normals do not change)
+};
+
+// The most morph targets a mesh can have.
+constexpr u32 max_morph_targets = 256;
+
 struct MeshData3D {
     std::vector<MeshVertex3D> vertices;
     // Three a triangle, counter-clockwise seen from its front (where its
@@ -56,8 +70,14 @@ struct MeshData3D {
     // Optional: one entry for each vertex, or none (a mesh that is not skinned). A skinned mesh is drawn with
     // Scene3D::draw_skinned and the joint matrices of its pose; it cannot have levels of detail or clusters.
     std::vector<MeshSkinVertex3D> skin;
+    // Optional: shapes to blend toward (Renderer3D::set_morph_weights), and the weights the mesh starts with (one for
+    // each target, or none: all 0). A mesh with targets keeps its vertices on the CPU too, cannot have levels of detail
+    // or clusters, and is blended before it is skinned.
+    std::vector<MorphTarget3D> morph_targets;
+    std::vector<f32> morph_weights;
 
     bool skinned() const { return !skin.empty(); }
+    bool morphed() const { return !morph_targets.empty(); }
     // The joints the skin uses: one more than the highest index with a weight above zero (0 for an unskinned mesh).
     u32 skin_joint_count() const;
     std::size_t triangle_count() const { return (indices.empty() ? vertices.size() : indices.size()) / 3; }
@@ -70,6 +90,12 @@ struct MeshData3D {
     // joint 0 (the joints themselves are kept as they are, not renumbered).
     void append(const MeshData3D& other, const Mat4f& transform = Mat4f::identity());
 };
+
+// The vertices of `data` blended by `weights` (one for each of its morph targets; missing ones count as 0), into `out`
+// (resized to the vertex count). Targets of weight 0 cost nothing.
+void blend_morph_targets(const MeshData3D& data, std::span<const f32> weights, std::vector<MeshVertex3D>& out);
+// A box that holds every vertex of `data` at any weights within [-1, 1].
+Bounds3D morph_bounds(const MeshData3D& data);
 
 // The most levels of detail a mesh can have (level 0, the mesh itself, included).
 constexpr u32 max_mesh_levels = 8;
@@ -129,6 +155,14 @@ struct MeshLevelInfo3D {
     f32 error = 0.0f;
 };
 
+// What a mesh made with morph targets keeps on the CPU (Renderer3D::set_morph_weights blends from it): the mesh as made
+// (its targets' names and offsets included) and the weights it shows now.
+struct MeshMorphs3D {
+    MeshData3D data;
+    std::vector<f32> weights;
+    std::vector<MeshVertex3D> scratch; // the blended vertices, kept between calls
+};
+
 // The backend's copy of a mesh (Renderer3D::create_mesh).
 class IMeshBackend3D {
 public:
@@ -142,9 +176,11 @@ public:
     Mesh3D() = default;
     Mesh3D(std::shared_ptr<IMeshBackend3D> backend, u32 vertex_count, u32 index_count, Bounds3D bounds,
            std::shared_ptr<const std::vector<MeshLevelInfo3D>> levels = {},
-           std::shared_ptr<const MeshClusterInfo3D> clusters = {}, u32 skin_joints = 0)
+           std::shared_ptr<const MeshClusterInfo3D> clusters = {}, u32 skin_joints = 0,
+           std::shared_ptr<MeshMorphs3D> morphs = {})
         : _backend(std::move(backend)), _vertex_count(vertex_count), _index_count(index_count), _bounds(bounds),
-          _levels(std::move(levels)), _clusters(std::move(clusters)), _skin_joints(skin_joints) {}
+          _levels(std::move(levels)), _clusters(std::move(clusters)), _skin_joints(skin_joints),
+          _morphs(std::move(morphs)) {}
 
     bool valid() const { return _backend != nullptr; }
     explicit operator bool() const { return valid(); }
@@ -172,6 +208,21 @@ public:
     bool skinned() const { return _skin_joints > 0; }
     u32 skin_joint_count() const { return _skin_joints; }
     const Bounds3D& bounds() const { return _bounds; }
+    // Morph targets (MeshData3D::morph_targets): how many, their names, and the weights the mesh shows now
+    // (Renderer3D::set_morph_weights). Copies of a Mesh3D share them: Renderer3D::copy_mesh makes one with its own.
+    // `bounds()` of such a mesh holds it at any weights within [-1, 1].
+    u32 morph_target_count() const { return _morphs ? static_cast<u32>(_morphs->data.morph_targets.size()) : 0u; }
+    std::string_view morph_target_name(u32 target) const {
+        return _morphs && target < _morphs->data.morph_targets.size()
+                   ? std::string_view{_morphs->data.morph_targets[target].name}
+                   : std::string_view{};
+    }
+    // The target named `name`, or -1.
+    i32 find_morph_target(std::string_view name) const;
+    std::span<const f32> morph_weights() const {
+        return _morphs ? std::span<const f32>{_morphs->weights} : std::span<const f32>{};
+    }
+    const std::shared_ptr<MeshMorphs3D>& morphs() const { return _morphs; }
     const std::shared_ptr<IMeshBackend3D>& backend() const { return _backend; }
 
     friend bool operator==(const Mesh3D& a, const Mesh3D& b) { return a._backend == b._backend; }
@@ -184,6 +235,7 @@ private:
     std::shared_ptr<const std::vector<MeshLevelInfo3D>> _levels; // null: one level
     std::shared_ptr<const MeshClusterInfo3D> _clusters;          // null: no clusters
     u32 _skin_joints = 0;                                        // 0: not skinned
+    std::shared_ptr<MeshMorphs3D> _morphs;                       // null: no morph targets
 };
 
 // Shapes made in code, centred on the origin (a plane and a box's base on

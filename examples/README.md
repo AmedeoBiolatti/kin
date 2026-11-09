@@ -752,6 +752,23 @@ settings file. Its CPU mapper tests cover rebinding/edge semantics,
 and GPU gameplay tests drive identical routes with scripted, keyboard and synthetic
 pad commands through the same systems.
 
+## Bunker exit
+
+`bunker_exit` (3D builds) shows auto exposure, decals and morph targets in one small scene: the camera walks from a
+dark concrete bunker out into the afternoon sun and back, and the view's exposure follows (too bright for a moment
+outside, slower to open up again inside). Scorch marks, painted arrows, hazard stripes and bullet holes with a
+normal map are decals, lit with the floor and walls they lie on; two jelly sentinels (a sphere with "squash",
+"spikes" and "breathe" morph targets, the second a `copy_mesh` with weights of its own) bounce, breathe and bristle
+when the camera comes near. Every picture is made in code: no content files.
+
+```sh
+bunker_exit
+KIN_RENDER_BACKEND=gpu bunker_exit --shot inside.png --frames 90 --start 0    # a picture, headless
+KIN_RENDER_BACKEND=gpu bunker_exit --shot outside.png --frames 90 --start 8
+```
+
+E turns auto exposure on and off (off: a fixed exposure), D the decals, Space pauses the walk.
+
 ## Material gallery
 
 `material_gallery` (3D builds) puts materials imported from another engine by `kin_import_material --graphs` on a

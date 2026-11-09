@@ -220,6 +220,16 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("exposure", view.exposure);
         SETTING("bloom", view.bloom);
         SETTING("bloom_threshold", view.bloom_threshold);
+        SETTING("auto_exposure", view.auto_exposure.enabled);
+        SETTING("auto_exposure_key", view.auto_exposure.key);
+        SETTING("auto_exposure_min_ev", view.auto_exposure.min_ev);
+        SETTING("auto_exposure_max_ev", view.auto_exposure.max_ev);
+        SETTING("auto_exposure_compensation", view.auto_exposure.compensation_ev);
+        SETTING("auto_exposure_speed_up", view.auto_exposure.speed_up);
+        SETTING("auto_exposure_speed_down", view.auto_exposure.speed_down);
+        SETTING("auto_exposure_low", view.auto_exposure.low);
+        SETTING("auto_exposure_high", view.auto_exposure.high);
+        SETTING("auto_exposure_centre_weight", view.auto_exposure.centre_weight);
 #undef SETTING
 #undef RGB_SETTING
     }
@@ -323,12 +333,19 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.lights.fill_shadow.distance >= 0 && settings.lod.error_pixels > 0 && settings.lod.bias > 0 &&
                  settings.lod.max_cluster_triangles > 0 && settings.lod.occlusion.depth_margin >= 0 &&
                  settings.view.exposure >= 0 && settings.view.bloom >= 0 && settings.view.bloom_threshold >= 0 &&
-                 settings.ambient_occlusion.radius > 0 && settings.ambient_occlusion.intensity >= 0 &&
-                 settings.contact_shadows.distance >= 0 && settings.contact_shadows.thickness > 0 &&
-                 settings.contact_shadows.intensity >= 0 && settings.taa.blend >= 0 && settings.taa.blend <= .98f &&
-                 settings.taa.still_blend >= 0 && settings.taa.still_blend <= .98f && settings.taa.sharpness >= 0 &&
-                 settings.taa.sharpness <= 1 && settings.anisotropy >= 1 && settings.anisotropy <= 16 &&
-                 std::abs(settings.texture_lod_bias) <= 2 && settings.specular_aa >= 0 && settings.specular_aa <= 1 &&
+                 settings.view.auto_exposure.key > 0 &&
+                 settings.view.auto_exposure.min_ev <= settings.view.auto_exposure.max_ev &&
+                 settings.view.auto_exposure.speed_up >= 0 && settings.view.auto_exposure.speed_down >= 0 &&
+                 settings.view.auto_exposure.low >= 0 &&
+                 settings.view.auto_exposure.low <= settings.view.auto_exposure.high &&
+                 settings.view.auto_exposure.high <= 1 && settings.view.auto_exposure.centre_weight >= 0 &&
+                 settings.view.auto_exposure.centre_weight <= 1 && settings.ambient_occlusion.radius > 0 &&
+                 settings.ambient_occlusion.intensity >= 0 && settings.contact_shadows.distance >= 0 &&
+                 settings.contact_shadows.thickness > 0 && settings.contact_shadows.intensity >= 0 &&
+                 settings.taa.blend >= 0 && settings.taa.blend <= .98f && settings.taa.still_blend >= 0 &&
+                 settings.taa.still_blend <= .98f && settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 &&
+                 settings.anisotropy >= 1 && settings.anisotropy <= 16 && std::abs(settings.texture_lod_bias) <= 2 &&
+                 settings.specular_aa >= 0 && settings.specular_aa <= 1 &&
                  std::isfinite(settings.global_illumination.cell) && settings.global_illumination.cell > 0 &&
                  settings.global_illumination.levels >= 1 && settings.global_illumination.levels <= max_gi_levels &&
                  settings.global_illumination.side >= 32 && settings.global_illumination.side <= max_gi_side &&

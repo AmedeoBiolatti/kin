@@ -727,6 +727,30 @@ private:
     std::shared_ptr<Data> _data;
 };
 
+// A decal (Scene3D::draw_decal; docs/rendering_3d.md, Decals): a picture projected onto the opaque surfaces inside a
+// box (scorch marks, paint, dirt, footprints, posters), lit with them. The box is the unit cube [-0.5, 0.5]^3 placed by
+// `transform`: the picture lies on its X/Z sides (u along +X, v along +Z, the picture's top at -Z) and is projected
+// along -Y, from its top face down through its depth. Drawn after the opaque meshes and before the blended ones, in
+// the order given; reads the pre-pass's depth and normals (RendererCapabilities3D::decals; the pre-pass runs whenever
+// a scene has decals). Lands on what the pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not
+// custom-shader, blended or unlit ones, nor the overlay.
+struct Decal3D {
+    Mat4f transform{};
+    Texture texture;             // colour (sRGB, as mesh textures) and coverage (alpha); white without
+    Texture normal;              // optional tangent-space normal map (green up), bending the surface's normal
+    Color color = colors::white; // times the texture, alpha too
+    f32 roughness = 0.6f, metallic = 0.0f;
+    f32 normal_strength = 1.0f; // how much the normal map bends
+    f32 emission = 0.0f;        // the decal's colour as light of its own, this strong (glowing paint, embers)
+    // Surfaces turned away from the way the decal is projected from fade: fully drawn where the cosine between their
+    // normal and the box's +Y is above `normal_fade`, fading to nothing at 0 (0: no fade; never onto a surface facing
+    // away).
+    f32 normal_fade = 0.3f;
+    // The share of the box's half depth over which the decal fades out toward its top and bottom faces (0: hard).
+    f32 depth_fade = 0.25f;
+    Wrap3D wrap = Wrap3D::Clamp;
+};
+
 class Scene3D {
 public:
     Scene3D() = default;
@@ -870,6 +894,9 @@ public:
     Status3D draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites, u64 history_id = 0);
     // The system's live particles with its desc's look.
     Status3D draw_particles(const ParticleSystem3D& system, u64 history_id = 0);
+    // A decal (Decal3D), drawn in the order added; clear() takes them away. The overlay's are not drawn.
+    Status3D draw_decal(const Decal3D& decal);
+    std::span<const Decal3D> decals() const { return _decals; }
     void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLightSource3D& light) { lights.spots.push_back(light); }
     // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
@@ -994,6 +1021,7 @@ private:
     std::vector<u32> _skin_offsets;
     std::vector<ParticleDraw> _particle_draws;
     std::vector<ParticleSprite3D> _particle_sprites;
+    std::vector<Decal3D> _decals;
     bool _instances_exposed = false;
     Diagnostics3D _errors;
     bool fail_submission(std::string_view reason) {

@@ -1,7 +1,9 @@
 #include "result3d_helpers.hpp"
 #include "skin_fixtures.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -146,7 +148,35 @@ void profile(Renderer3D& renderer, bool gpu) {
     rejected("index.gltf", skin_fixtures::make_gltf(options).json, "valid joint indices");
     options = {};
     options.morph_channel = true;
-    rejected("morph.gltf", skin_fixtures::make_gltf(options).json, "morph target");
+    {
+        // Morph targets (a skinned strip's, its POSITION offsets) and an animation of the node's weights are read.
+        const auto json = skin_fixtures::make_gltf(options).json;
+        ModelData3D morphed;
+        check(kin::test::read_value3d(read_model_data(json, source.root / "morph.gltf"), morphed, error) &&
+                  morphed.asset_diagnostics.empty() && morphed.parts.size() == 1 &&
+                  morphed.parts[0].mesh.morph_targets.size() == 1 &&
+                  morphed.parts[0].mesh.morph_targets[0].positions.size() == morphed.parts[0].mesh.vertices.size() &&
+                  morphed.parts[0].mesh.morph_weights == std::vector<f32>{0.0f},
+              "morph target geometry not read");
+        const auto clip = std::ranges::find(morphed.clips, std::string{"bend"}, &AnimClip3D::name);
+        check(clip != morphed.clips.end() && clip->morphs.size() == 1 && clip->morphs[0].targets == 1 &&
+                  clip->morphs[0].parts == std::vector<u32>{0} && clip->morphs[0].valid(),
+              "morph weight channel not read");
+        std::vector<f32> weights;
+        sample_morph_channel(clip->morphs[0], 0.5f, weights);
+        check(weights.size() == 1 && std::abs(weights[0] - 0.5f) < 1e-6f, "morph weights sampled wrong");
+        if (gpu) {
+            source.write("morph.gltf", json);
+            auto model = assets.load_model("morph.gltf").value_or({});
+            error = kin::diagnostics3d_text(assets.diagnostics());
+            check(model && model->parts.size() == 1 && model->parts[0].mesh.morph_target_count() == 1 &&
+                      model->parts[0].mesh.skinned(),
+                  "skinned morph target model rejected");
+            check(bool(apply_clip_morphs(renderer, *model, *model->find_clip("bend"), 1.0f, false)) &&
+                      model->parts[0].mesh.morph_weights()[0] == 1.0f,
+                  "a clip's morph weights not applied");
+        }
+    }
     options = {};
     options.node_animation = true;
     rejected("mixed.gltf", skin_fixtures::make_gltf(options).json, "mixed skin and plain-node animation");

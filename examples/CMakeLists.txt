@@ -138,6 +138,9 @@ if(KIN_EXPERIMENTAL_3D)
     # material_gallery: imported materials (kin_import_material --graphs) on pedestals; content not in the repository.
     add_executable(material_gallery material_gallery/main.cpp)
     target_link_libraries(material_gallery PRIVATE kin::engine)
+    # bunker_exit: auto exposure, decals and morph targets in one small scene (every picture made in code).
+    add_executable(bunker_exit bunker_exit/main.cpp)
+    target_link_libraries(bunker_exit PRIVATE kin::engine)
     if(BUILD_TESTING)
         add_executable(kin_blockfield_tests blockfield/tests.cpp)
         target_link_libraries(kin_blockfield_tests PRIVATE kin_blockfield_world)

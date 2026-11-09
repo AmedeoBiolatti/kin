@@ -58,7 +58,54 @@ f32 AnimClip3D::key_duration() const {
             }
         }
     }
+    for (const MorphChannel3D& m : morphs) {
+        if (!m.times.empty()) {
+            d = std::max(d, m.times.back());
+        }
+    }
     return d;
+}
+
+void sample_morph_channel(const MorphChannel3D& channel, f32 time, std::vector<f32>& out) {
+    const std::size_t n = channel.targets;
+    out.assign(n, 0.0f);
+    if (!channel.valid() || channel.times.empty()) {
+        return;
+    }
+    const bool spline = channel.interpolation == Interpolation3D::CubicSpline;
+    // Key k's values (part 1 of a spline's three), in-tangents (part 0) and out-tangents (part 2).
+    const auto at = [&](std::size_t k, std::size_t part) {
+        return channel.values.data() + (spline ? (k * 3 + part) * n : k * n);
+    };
+    const std::size_t last = channel.times.size() - 1;
+    const auto copy = [&](std::size_t k) { std::copy_n(at(k, 1), n, out.begin()); };
+    if (channel.times.size() == 1 || !(time > channel.times.front())) {
+        return copy(0);
+    }
+    if (time >= channel.times[last]) {
+        return copy(last);
+    }
+    const std::size_t k = key_before(channel.times, time);
+    const f32 dt = channel.times[k + 1] - channel.times[k];
+    const f32 s = dt > 0.0f ? (time - channel.times[k]) / dt : 0.0f;
+    switch (channel.interpolation) {
+    case Interpolation3D::Step:
+        return copy(k);
+    case Interpolation3D::Linear: {
+        const f32 *a = at(k, 1), *b = at(k + 1, 1);
+        for (std::size_t t = 0; t < n; ++t)
+            out[t] = a[t] + (b[t] - a[t]) * s;
+        return;
+    }
+    case Interpolation3D::CubicSpline: {
+        const f32 s2 = s * s, s3 = s2 * s;
+        const f32 *v0 = at(k, 1), *b0 = at(k, 2), *a1 = at(k + 1, 0), *v1 = at(k + 1, 1);
+        for (std::size_t t = 0; t < n; ++t)
+            out[t] = v0[t] * (2.0f * s3 - 3.0f * s2 + 1.0f) + b0[t] * (s3 - 2.0f * s2 + s) * dt +
+                     v1[t] * (-2.0f * s3 + 3.0f * s2) + a1[t] * (s3 - s2) * dt;
+        return;
+    }
+    }
 }
 
 Vec3f sample_track(const Track3D<Vec3f>& track, f32 time, Vec3f fallback) {

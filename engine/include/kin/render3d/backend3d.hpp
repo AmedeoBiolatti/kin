@@ -69,6 +69,12 @@ struct RendererCapabilities3D {
     // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not
     // drawn.
     bool skinning = false;
+    // Whether ViewOptions3D::auto_exposure can work (its compute shaders and the output's variants could be made).
+    bool auto_exposure = false;
+    // Whether Scene3D::decals can be drawn (the decal shaders, and the pre-pass whose depth and normals they read).
+    bool decals = false;
+    // Whether Renderer3D::set_morph_weights can change a mesh made with morph targets.
+    bool morph_targets = false;
     // The device is a software rasteriser (Mesa's llvmpipe/lavapipe, SwiftShader, Direct3D's WARP): every picture is
     // right, no timing means anything. Tests compare milliseconds only where this is false.
     bool software = false;
@@ -80,6 +86,26 @@ struct RendererCapabilities3D {
     bool surface_pass = false, sun_shadow_pass = false, local_shadow_pass = false;
     bool bloom_pass = false, output_pass = false;
     bool surface_stages = false, surface_particles = false, surface_soft_particles = false;
+};
+
+// Exposure that follows how bright the picture is (eye adaptation): walk from a dark corridor into the sun and the view
+// is first too bright, then settles. Each render meters the view's HDR picture on the GPU (a histogram of its log
+// luminance; the darkest `low` and the brightest past `high` shares left out), finds the exposure that brings the
+// rest's average to `key`, and moves toward it. The result multiplies ViewOptions3D::exposure, which stays as a manual
+// factor on top. Only for views that tonemap (hdr or bloom, out to an 8-bit 2D pipeline);
+// RendererCapabilities3D::auto_exposure says whether the device can. The time between renders is Scene3D::time's step
+// when it moves forward (by at most a second), else the wall clock's; View3D::reset_history() starts at the target.
+struct AutoExposure3D {
+    bool enabled = false;
+    f32 key = 0.18f;             // the linear brightness the average is brought to (mid-grey)
+    f32 min_ev = -4.0f;          // the exposure stays within 2^min_ev ..
+    f32 max_ev = 6.0f;           // .. 2^max_ev (stops)
+    f32 compensation_ev = 0.0f;  // added to what the metering asks for (stops; + is brighter)
+    f32 speed_up = 1.0f;         // how fast the exposure rises (after going into the dark), per second
+    f32 speed_down = 3.0f;       // and falls (after going into the light)
+    f32 low = 0.1f, high = 0.9f; // the shares of the sorted pixels the average is of
+    f32 centre_weight = 0.0f;    // 0: every pixel alike; 1: the middle of the view counts most
+    bool operator==(const AutoExposure3D&) const = default;
 };
 
 struct ViewOptions3D {
@@ -95,6 +121,7 @@ struct ViewOptions3D {
     // On with bloom.
     bool hdr = false;
     f32 exposure = 1.0f;
+    AutoExposure3D auto_exposure{};
     // A glow round what is brighter than `bloom_threshold` (linear), this
     // strong (0: none). Emissive materials past 1 glow.
     f32 bloom = 0.0f;
@@ -269,6 +296,9 @@ public:
     // MeshClusters3D::leaf_indices), which the hierarchy does not hold, and `chain` is null.
     virtual std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
                                                         std::shared_ptr<const MeshClusters3D> clusters) = 0;
+    // New vertices for a mesh made with morph targets (`data.morph_targets` not empty when it was made: the backend
+    // then keeps its vertices where they can be rewritten), as many as it was made with; seen from the next render on.
+    virtual bool update_mesh_vertices(IMeshBackend3D&, std::span<const MeshVertex3D>) { return false; }
     // An equirectangular picture of `size` pixels, three floats (linear RGB)
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).

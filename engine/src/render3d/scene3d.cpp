@@ -766,6 +766,20 @@ bool Scene3D::draw_particles_operation(const ParticleSystem3D& system, u64 histo
     return _errors.empty();
 }
 
+Status3D Scene3D::draw_decal(const Decal3D& decal) {
+    if (!_errors.empty())
+        return status3d(false, _errors);
+    const bool finite = std::ranges::all_of(decal.transform.m, [](f32 v) { return std::isfinite(v); }) &&
+                        std::isfinite(decal.roughness) && std::isfinite(decal.metallic) &&
+                        std::isfinite(decal.normal_strength) && std::isfinite(decal.emission) &&
+                        std::isfinite(decal.normal_fade) && std::isfinite(decal.depth_fade);
+    if (!finite || std::abs(decal.transform.determinant()) < 1e-12f)
+        return status3d(false, {"Scene3D::draw_decal: needs a finite transform that does not flatten the box, and "
+                                "finite values"});
+    _decals.push_back(decal);
+    return status3d(true, {});
+}
+
 Status3D Scene3D::update_joint_matrices(u32 first, std::span<const Mat4f> matrices) {
     const bool accepted = update_joint_matrices_operation(first, matrices);
     return status3d(accepted, _errors);
@@ -794,6 +808,7 @@ void Scene3D::clear() {
     _skin_offsets.clear();
     _particle_draws.clear();
     _particle_sprites.clear();
+    _decals.clear();
     lights.points.clear();
     lights.spots.clear();
     if (_overlay) {
