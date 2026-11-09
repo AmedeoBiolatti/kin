@@ -93,6 +93,7 @@ Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene) {
                                                   .parallax_extent = scaled(c.parallax_extent),
                                                   .parallax = c.parallax,
                                                   .intensity = c.intensity,
+                                                  .diffuse = c.diffuse,
                                                   .priority = c.priority,
                                                   .capture = p.capture});
         ++d.placed;

@@ -271,6 +271,51 @@ void test_ssr(Renderer2D& r, Renderer3D& r3d) {
     std::cout << "ssr: reflections\n";
 }
 
+// A probe's diffuse light (ReflectionProbeSource3D::diffuse): a rough white box in the dark, a big red panel at its +X
+// side, a probe captured at its centre (the box left out). With the probe's diffuse light, the box's +X face is lit
+// red by what the probe saw that way; without (reflections only: a rough dielectric's faint sheen), it stays dark.
+void test_diffuse(Renderer2D& r, Renderer3D& r3d) {
+    View3D view = r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    const Mesh3D box = r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    const Mesh3D plane = r3d.create_mesh(meshes::plane({1, 1})).value_or({});
+    assert(view && box && plane);
+    const auto room = [&](Scene3D& scene) {
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {};
+        assert(scene.draw(box, Mat4f::identity(), {.color = colors::white, .roughness = 0.9f}, colors::white, 9));
+        assert(scene.draw(plane, Mat4f::trs({3, 0, 0}, Quatf::axis_angle({0, 0, 1}, 90), {8, 1, 8}),
+                          {.color = Color::rgb(240, 20, 20), .unlit = true, .double_sided = true}));
+    };
+    ReflectionCapture3D capture = r3d.create_reflection_capture(32).value_or({});
+    Scene3D scene;
+    room(scene);
+    assert(capture && r3d.capture_reflection(capture, scene, {0, 0, 0}, {.hidden_id = 9}));
+    const auto face = [&](bool diffuse) {
+        Scene3D lit;
+        room(lit);
+        lit.camera = Camera3D::look_at({3, 0.6f, 2.5f}, {0, 0, 0}, 50);
+        lit.lights.reflection_probes.push_back(
+            {.extent = {4, 4, 4}, .blend = 0.1f, .parallax = false, .diffuse = diffuse, .capture = capture});
+        r.clear(colors::black);
+        assert(r3d.render(view, lit));
+        r.draw_texture(view.texture(), rect);
+        std::vector<u8> pixels;
+        Vec2i size;
+        assert(r.read_rgba(rect, pixels, size) && size == extent);
+        r.present();
+        const auto at = lit.camera.project({0.5f, 0, 0}, rect);
+        assert(at);
+        const u8* c = &pixels[(std::size_t(at->pos.y) * std::size_t(extent.x) + std::size_t(at->pos.x)) * 4];
+        return Rgb{c[0], c[1], c[2]};
+    };
+    const Rgb lit = face(true), unlit = face(false);
+    std::cerr << "probe diffuse: " << lit.r << " " << lit.g << " " << lit.b << " / reflections only: " << unlit.r << " "
+              << unlit.g << " " << unlit.b << "\n";
+    assert(lit.r > 80 && lit.g < lit.r / 3);
+    assert(unlit.r < lit.r / 2);
+    std::cout << "probes: diffuse light\n";
+}
+
 } // namespace
 
 int main() {
@@ -285,5 +330,6 @@ int main() {
         return require ? 1 : 77;
     test_parallax(r, r3d);
     test_hidden(r, r3d);
+    test_diffuse(r, r3d);
     test_ssr(r, r3d);
 }

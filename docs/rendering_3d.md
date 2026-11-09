@@ -2669,8 +2669,12 @@ scene.lights.reflection_probes.push_back({.position = {0, 1.5f, 0}, // where it 
 - **What reads them.** The stock lit shaders (the light variants: a scene with probes draws with them, as with global
   illumination), material graphs and surface shaders; custom material shaders keep the environment. A mirror's or a
   portal's picture still wins where it shows (`KinSurface::reflection`), and with global illumination the probes' light
-  replaces the GI's specular where their boxes reach. Diffuse light is not the probes': it stays the environment's or the
-  GI's.
+  replaces the GI's specular where their boxes reach.
+- **Diffuse light.** A probe lights what is inside its box too (`diffuse`, on by default): each surface by what the
+  probe saw all round, facing its way (its picture's irradiance, a level more in its layer, as an environment's), in
+  place of the environment's or the hemisphere's ambient light. Global illumination's probes still win where they have
+  light. `diffuse = false` keeps a probe to reflections (a shiny thing's own probe, say, where the room's light should
+  stay the room's).
 - **Curved mirrors.** A shiny ball, a vase, a helmet: a probe at its centre captured every frame, without parallax (the
   centre is the right point to see the world from), with the thing left out of its own picture (`{.hidden_id = id}`,
   its copies' `MeshInstance3D::id`: `Camera3D::hidden_id`), a small box round it and a higher priority than the room's.
