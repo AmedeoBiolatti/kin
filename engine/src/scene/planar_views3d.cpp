@@ -170,8 +170,9 @@ struct PlanarViews3D::Data {
     // The entity's `k`th view for a picture `size` (at most `limit`), with `options`; made again with its options. A
     // picture's window maps onto the whole of its view, so a view larger than the picture is only sharper. As the eye
     // moves, a picture changes size (in steps of 64) many times a second, and each resize makes all the view's targets
-    // again: the atrium walked through made hundreds of textures a second, and memory below kin (SDL_GPU, the driver)
-    // grew with each. So a view grows at once when its picture outgrows it, an eighth (or 64 pixels) more than it, and
+    // again: the atrium walked through made hundreds of textures a second, and the process's memory grew without end
+    // (the driver's allocations churned through the heap). So a view grows at once when its picture outgrows it, an
+    // eighth (or 64 pixels) more than it, and
     // shrinks only after three seconds of being larger than any picture it showed in them by more than a quarter (or
     // 128 pixels), to the largest of them and 64 pixels: about a tenth of the resizes, for pictures a little larger.
     View3D* view(EcsId id, u32 k, Vec2i size, Vec2i limit, const ViewOptions3D& options) {

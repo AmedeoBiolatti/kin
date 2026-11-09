@@ -65,12 +65,13 @@ releases may change APIs.
   `WorldPhysicsState3D::carry` (a character's feet, velocity, facing, command and state turned; a body's velocities).
   Lua's `scene3d.character_input` takes a `facing`. `planar_atrium` plays a physics character (WASD, mouse camera,
   jump, run) through the portals, and `--autoplay SECONDS` plays it by a bot through the real input and reports falls,
-  escapes, stuck spots, missed portals, frame and GPU times and memory (exit 2 on a gameplay failure).
+  escapes, stuck spots, missed portals, frame and GPU times and memory (exit 2 on a gameplay failure, or on memory
+  still growing over the second half of a run of 4 minutes or more).
 - Planar views (mirrors, water, portals) resize their views a tenth as often as the eye moves: a view grows with an
   eighth (or 64 pixels) of room and shrinks only after three seconds of being a quarter larger than its pictures.
-  Walking through the atrium resized views about 13 times a second (hundreds of textures), and memory below kin grew
-  with each resize (about 45 KB, in SDL_GPU or the driver; still open). The pictures are a little larger: about 0.7 ms
-  more GPU a frame in the atrium on an RTX laptop.
+  Walking through the atrium resized views about 13 times a second (hundreds of textures), and the process's memory
+  grew without end (about 0.5 MiB a second); it now levels off within minutes (SDL_GPU's descriptor caches filling).
+  The pictures are a little larger: about 0.7 ms more GPU a frame in the atrium on an RTX 4080 laptop.
 - 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
   allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
   fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).
