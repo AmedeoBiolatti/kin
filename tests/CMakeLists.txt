@@ -693,6 +693,9 @@ if(KIN_BUILD_BENCHMARKS)
         # kin/render3d CPU costs that need no window: instance batch edits, particle wind (docs/rendering_3d.md).
         add_executable(kin_render3d_bench render3d_bench.cpp)
         target_link_libraries(kin_render3d_bench PRIVATE kin::engine)
+        # GPU and CPU costs of decals, auto exposure and morph targets (needs a GPU; not a test).
+        add_executable(kin_render3d_surface_bench render3d_surface_bench.cpp)
+        target_link_libraries(kin_render3d_surface_bench PRIVATE kin::engine)
     endif()
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)

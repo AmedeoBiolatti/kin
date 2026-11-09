@@ -299,6 +299,12 @@ public:
     // New vertices for a mesh made with morph targets (`data.morph_targets` not empty when it was made: the backend
     // then keeps its vertices where they can be rewritten), as many as it was made with; seen from the next render on.
     virtual bool update_mesh_vertices(IMeshBackend3D&, std::span<const MeshVertex3D>) { return false; }
+    // The same blended where the backend can (on the GPU, from the targets it kept when the mesh was made); false: the
+    // renderer blends on the CPU and calls update_mesh_vertices.
+    virtual bool set_morph_weights(IMeshBackend3D&, std::span<const f32>) { return false; }
+    // Another mesh like `mesh` (made with morph targets), sharing what it can, showing the mesh at weights 0; null: the
+    // renderer makes it again from its data.
+    virtual std::shared_ptr<IMeshBackend3D> copy_mesh(const IMeshBackend3D&) { return {}; }
     // An equirectangular picture of `size` pixels, three floats (linear RGB)
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).
@@ -357,6 +363,8 @@ public:
     }
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) = 0;
+    // ViewOptions3D::auto_exposure's latest adapted exposure that has come back from the GPU, without waiting.
+    virtual std::optional<f32> read_exposure(IViewBackend3D&) { return std::nullopt; }
     // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False
     // when it could not, which Renderer3D::warm_up reports as failure (the default: a backend that has none); a
     // backend with nothing to make ahead says true.

@@ -1112,8 +1112,8 @@ void WorldRenderState3D::apply_morphs(Renderer3D& renderer) {
             const MeshMorphs3D* made = parts.parts[i].mesh.morphs().get();
             if (!copy || !made)
                 continue;
-            const auto& targets = made->data.morph_targets;
-            _morph_scratch = made->data.morph_weights;
+            const auto& targets = made->source->morph_targets;
+            _morph_scratch = made->source->morph_weights;
             _morph_scratch.resize(targets.size(), 0.0f);
             if (clips && i < clips->size() && (*clips)[i].size() == targets.size())
                 _morph_scratch = (*clips)[i];

@@ -244,6 +244,11 @@ public:
     // what is recorded so far (submitting it): ask when something calls for
     // it (a click, the pointer moving), not every frame.
     Result3D<PickResult3D> pick(View3D& view, Vec2i pixel);
+    // The exposure auto exposure has adapted `view` to (ViewOptions3D::auto_exposure: the multiplier it puts on
+    // ViewOptions3D::exposure; 2^ev), as it came back from the GPU: a frame or two behind the pictures, read without
+    // waiting (the view copies it out each render; it arrives once that frame's work is done). nullopt before the
+    // first value arrives, or for a view without auto exposure.
+    std::optional<f32> exposure(const View3D& view);
     // The clusters the last render's GPU cut chose (Scene3D::lod, Scene3D::debug.gpu_culling), for tests and tools;
     // waits for the GPU like pick(). False when that render cut on the CPU or drew no clusters. With Lod3D::occlusion
     // the second pass's clusters (view 0, the camera's) follow the first pass's.
@@ -290,6 +295,9 @@ private:
     Model3D load_model_shared(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error,
                               Assets3D* assets);
     void warn_refused_bake(bool restored);
+    // A mesh with morph targets from `source` (shared), at weights 0, then at `weights`.
+    Mesh3D upload_morph_mesh(std::shared_ptr<const MeshData3D> source, std::span<const f32> weights);
+    bool apply_morph_weights(const Mesh3D& mesh, std::span<const f32> weights);
     Renderer2D* _renderer = nullptr;
     IRendererBackend3D* _backend = nullptr;
     RenderDebugStats3D _stats{};

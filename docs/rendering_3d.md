@@ -1380,8 +1380,8 @@ always runs the pre-pass (with TAA, the main pass then no longer writes the velo
 pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not custom-shader, blended or unlit meshes,
 particles or the overlay; opaque meshes whose material has `receives_decals` off are drawn over them. Seen from outside its box, a decal's front faces are depth-tested against the scene, so
 what stands in front of the box hides it; from inside the box (or within twice the near plane of it) its back faces
-are drawn untested. Each decal is one draw of 36 vertices (`debug_stats().decals_drawn`); a pixel costs four extra
-depth reads (the texture's gradients come from the neighbours on the same surface, so edges of what stands in
+are drawn untested. Decals whose box is out of the view are skipped (`debug_stats().decals_culled`); each other
+one is one draw of 36 vertices (`debug_stats().decals_drawn`); a pixel costs four extra depth reads (the texture's gradients come from the neighbours on the same surface, so edges of what stands in
 front do not pick the smallest mip level). `capabilities().decals` says whether the device can; where not (or on
 WebGL2), decals are not drawn, said once. Not supported: `render_surface`/`prepare` graphs, and clustered
 (many-decal) culling.
@@ -2125,15 +2125,22 @@ kin::Mesh3D other = r3d.copy_mesh(mesh).value_or({}); // a second one with weigh
 ```
 
 `Renderer3D::set_morph_weights(mesh, weights)` takes one weight for each target (`Mesh3D::morph_target_count`,
-`morph_target_name`, `find_morph_target`), each within [-1, 1]. The blend runs on the CPU, skipping targets of weight
-0, and uploads the mesh's vertices (cycled: a frame still drawing the old ones keeps them); weights equal to the
-current ones cost nothing. All passes see the new shape: shadows (the shadow caches notice it), the pre-pass and
+`morph_target_name`, `find_morph_target`), each within [-1, 1]; weights equal to the current ones cost nothing. On
+native devices the blend runs on the GPU (`morph_blend.comp`, recorded into the frame's commands: the call itself
+takes about 5 microseconds whatever the size, against 0.12 to 1.3 ms for an 8,000-vertex mesh blended on the CPU
+with 8 to 52 targets changing; `kin_render3d_surface_bench`): the mesh keeps its vertices at rest and every target's
+offsets on the GPU (24 bytes a vertex a target), shared by its copies. WebGL2 blends on the CPU (skipping targets of
+weight 0) and uploads the vertices. Either way the vertices are cycled: a frame still drawing the old ones keeps
+them. All passes see the new shape: shadows (the shadow caches notice it), the pre-pass and
 its occlusion, decals, picking. A skinned mesh is blended first, then skinned. `Mesh3D::bounds()` of such a mesh
 holds it at any weights within [-1, 1], so culling never drops a blended copy. Since the weights belong to the mesh,
 copies drawn of it share them: `copy_mesh` gives another mesh (its own GPU vertices, the same targets) for another
 character. A mesh with targets has no levels of detail or clusters (asked for, it is made without them, with a warning in the log),
-keeps its vertices and targets on the CPU, and has a vertex buffer of its own. Motion vectors do not see the blend
-(TAA treats a moving shape as the camera's motion only), and global illumination is not told that the shape
+keeps its vertices and targets on the CPU, and has a vertex buffer of its own. Where the GPU blends, temporal anti-aliasing sees a changing shape's own motion: the first blend of a frame keeps the
+shape the frame before drew, and the velocity pre-pass reads its positions from there (the pre-pass always runs with
+TAA when such a mesh is drawn; `debug_stats().morph_velocity_draws`). Set weights before rendering the frame that
+shows them: a shape changed after a frame's render moves without velocity in the next. Meshes with a moving surface
+shader (a world-position offset), and WebGL2, keep the copy's own motion only. Global illumination is not told that the shape
 changed (its scene follows when something else makes it voxelize again; area-light shadows keep the first shape).
 `capabilities().morph_targets` is true on every native device and on WebGL2.
 
@@ -2638,6 +2645,10 @@ time between renders is `Scene3D::time`'s step when it moves forward (by at most
 (at most a quarter of a second); a new view, and one after `reset_history()`, starts at its target. It works where
 the view tonemaps (`hdr` or `bloom`, out to an 8-bit 2D pipeline; an HDR 2D pipeline tonemaps the frame itself) and
 `capabilities().auto_exposure` is true (not on WebGL2, whose views have no HDR yet).
+`Renderer3D::exposure(view)` gives the game the adapted exposure (the multiplier, 2^ev) without stalling: each render
+copies it out, and it arrives once that frame's GPU work is done (a frame or two behind the picture; nullopt until the
+first copy arrives, and for views without auto exposure). Use it for a HUD, or for gameplay that reacts to how
+dazzled the player is.
 
 `render(view, scene)` draws the scene into it, recorded between the 2D drawn before and
 after; a view keeps its picture until rendered again, so a still model needs

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <kin/assets/image.hpp>
@@ -231,9 +232,14 @@ public:
         r.clear(Color::rgb(0, 0, 0));
         r.draw_texture(_view.texture(), {0, 0, f32(size.x), f32(size.y)});
         if (_o.shot.empty()) {
-            const std::string line = std::string{"[E] auto exposure: "} + (_auto ? "on" : "off") +
-                                     "   [D] decals: " + (_decals ? "on" : "off") + "   [Space] " +
-                                     (_paused ? "walk" : "pause");
+            std::string exposure = _auto ? "on" : "off";
+            if (const auto adapted = _r->exposure(_view); _auto && adapted) {
+                char text[32];
+                std::snprintf(text, sizeof(text), "on (x%.2f)", *adapted);
+                exposure = text;
+            }
+            const std::string line = "[E] auto exposure: " + exposure + "   [D] decals: " + (_decals ? "on" : "off") +
+                                     "   [Space] " + (_paused ? "walk" : "pause");
             ui2::draw_text(r, line, {16, 14}, 2, Color::rgb(235, 235, 235));
         }
         if (!_o.shot.empty() && ++_frame == _o.frames) {

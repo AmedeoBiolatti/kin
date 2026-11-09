@@ -873,7 +873,7 @@ public:
 private:
     SDL_GPURenderPass* _pass;
     SDL_GPUGraphicsPipeline* _pipeline = nullptr;
-    std::array<SDL_GPUBuffer*, 6> _storage{}; // largest vertex storage layout is skinned velocity
+    std::array<SDL_GPUBuffer*, 7> _storage{}; // largest vertex storage layout: skinned velocity with morph targets
     u32 _storage_count = 0;
     const GpuMesh3D* _skin_mesh = nullptr;
     SDL_GPUBuffer* _vertices = nullptr;
@@ -899,7 +899,7 @@ GpuMesh3D::~GpuMesh3D() {
         buffer_pool->retire(std::move(allocation));
     if (device && *device) {
         for (SDL_GPUBuffer* buffer :
-             {buffer_pool ? nullptr : vertices, skin, chunk || buffer_pool ? nullptr : indices}) {
+             {buffer_pool ? nullptr : vertices, skin, chunk || buffer_pool ? nullptr : indices, previous}) {
             if (buffer) {
                 tracked_release_buffer(*device, buffer); // freed once the GPU is done with it
             }
@@ -929,6 +929,10 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     _depth_format = depth->format;
     _capabilities.depth_bits = depth->bits;
     _capabilities.morph_targets = true; // a vertex buffer rewritten by an upload: every device
+    // And blended on the GPU where compute can write a vertex buffer: morph_blend.comp (else blended on the CPU).
+    _morph_pipeline = make_compute(
+        handle, "morph_blend.comp.spv",
+        {.readonly_buffers = 2, .readwrite_buffers = 1, .readwrite_textures = 0, .threads_x = 64, .threads_y = 1});
     _capabilities.depth_float = depth->floating;
     _capabilities.max_samples = max_samples(handle, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, _depth_format);
     _capabilities.max_samples_hdr = max_samples(handle, hdr_format, _depth_format);
@@ -1181,6 +1185,18 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                          /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/2);
             _prepass_velocity_shader =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "prepass_velocity.frag.spv");
+            try { // optional: without them a morphing mesh's velocity is its copy's alone
+                _prepass_velocity_morph_vertex_shader =
+                    GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "prepass_velocity_morph.vert.spv",
+                                             /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/3);
+                if (_skinning_available)
+                    _prepass_velocity_morph_skinned_vertex_shader = GpuShader::from_embedded(
+                        device, SDL_GPU_SHADERSTAGE_VERTEX, "prepass_velocity_morph_skinned.vert.spv",
+                        /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/7);
+            } catch (const std::exception& e) {
+                KIN_LOG_INFO_F("render", "3D: morph target velocity not available",
+                               (LogFields{{.name = "reason", .value = e.what()}}));
+            }
             _prepass_velocity_mask_shader =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "prepass_velocity_mask.frag.spv",
                                          /*uniform_buffers=*/1, /*samplers=*/1);
@@ -1550,7 +1566,8 @@ GpuRenderer3D::~GpuRenderer3D() {
                                             _hiz_depth_pipeline,
                                             _hiz_reduce_pipeline,
                                             _exposure_histogram_pipeline,
-                                            _exposure_adapt_pipeline}) {
+                                            _exposure_adapt_pipeline,
+                                            _morph_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
         }
@@ -1941,25 +1958,27 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_velocity_pipeline(SDL_GPUTextureForm
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                                          bool skinned, const GpuSurfaceShader3D* surface) const {
+                                                          bool skinned, const GpuSurfaceShader3D* surface,
+                                                          bool morph) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
     // The pre-pass with velocity: one sample, the normal and the velocity in four floats.
     const bool moves = surface && surface->offsets() && !skinned;
-    return _owner->_pipelines.get(GpuPipelineKey{
-        .vertex = moves
-                      ? surface->vertex(SurfaceVariant3D::VertexPrepassVelocity)
-                      : (skinned ? _prepass_velocity_skinned_vertex_shader : _prepass_velocity_vertex_shader).handle(),
-        .fragment = mask && surface && surface->masks()
-                        ? surface->mask(SurfaceVariant3D::PrepassVelocityMask)
-                        : (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
-        .blend = GpuBlendMode::Replace,
-        .format = hdr_format,
-        .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
-        .depth_stencil = depth,
-        .depth = GpuDepthTest::TestWrite,
-        .cull = cull ? GpuCull::Back : GpuCull::None});
+    const GpuShader& plain =
+        skinned ? (morph ? _prepass_velocity_morph_skinned_vertex_shader : _prepass_velocity_skinned_vertex_shader)
+                : (morph ? _prepass_velocity_morph_vertex_shader : _prepass_velocity_vertex_shader);
+    return _owner->_pipelines.get(
+        GpuPipelineKey{.vertex = moves ? surface->vertex(SurfaceVariant3D::VertexPrepassVelocity) : plain.handle(),
+                       .fragment = mask && surface && surface->masks()
+                                       ? surface->mask(SurfaceVariant3D::PrepassVelocityMask)
+                                       : (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
+                       .blend = GpuBlendMode::Replace,
+                       .format = hdr_format,
+                       .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
+                       .depth_stencil = depth,
+                       .depth = GpuDepthTest::TestWrite,
+                       .cull = cull ? GpuCull::Back : GpuCull::None});
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const {
@@ -2022,7 +2041,175 @@ std::shared_ptr<GpuClusterChunk> GpuRenderer3D::allocate_cluster_range(u32 indic
     return chunk;
 }
 
+GpuSharedFence::~GpuSharedFence() {
+    if (fence && device && *device) {
+        SDL_WaitForGPUFences(*device, true, &fence, 1);
+        SDL_ReleaseGPUFence(*device, fence);
+    }
+}
+
+bool GpuSharedFence::signaled() const {
+    return !fence || !device || !*device || SDL_QueryGPUFence(*device, fence);
+}
+
+GpuExposureReadback::~GpuExposureReadback() {
+    fence.reset(); // (waits, if this is its last holder and the GPU is not done)
+    if (transfer && device && *device)
+        SDL_ReleaseGPUTransferBuffer(*device, transfer);
+}
+
+bool GpuExposureReadback::poll() {
+    if (!fence || !device || !*device)
+        return recorded;
+    if (!fence->signaled())
+        return true;
+    fence.reset();
+    if (const auto* mapped = static_cast<const f32*>(SDL_MapGPUTransferBuffer(*device, transfer, false))) {
+        const f32 exposure = mapped[1]; // ev, exposure, target, pad
+        SDL_UnmapGPUTransferBuffer(*device, transfer);
+        if (std::isfinite(exposure) && exposure > 0)
+            value = exposure;
+    }
+    return false;
+}
+
+static_assert(sizeof(GpuMeshVertex) == 9 * sizeof(u32), "morph_blend.comp reads and writes 9 words a vertex");
+
+bool GpuRenderer3D::set_morph_weights(IMeshBackend3D& base, std::span<const f32> weights) {
+    auto* mesh = dynamic_cast<GpuMesh3D*>(&base);
+    if (!mesh || !mesh->morph || !_morph_pipeline || weights.size() != mesh->morph->targets ||
+        weights.size() > max_morph_targets)
+        return false;
+    struct {
+        u32 counts[4];
+        f32 weights[max_morph_targets];
+    } u{};
+    static_assert(sizeof(u) == 16 + 4 * max_morph_targets);
+    u.counts[0] = mesh->morph->vertices;
+    u.counts[1] = static_cast<u32>(weights.size());
+    u.counts[2] = mesh->morph->normals ? 1u : 0u;
+    std::copy(weights.begin(), weights.end(), u.weights);
+    // Into this frame's commands, after the uploads made so far (the mesh's own, when it is new); cycled, so a frame
+    // still drawing the old vertices keeps them.
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+    // The shape the frame before drew, for the velocity pre-pass: kept by this frame's first blend only.
+    if (mesh->previous && mesh->blended_frame != _owner->_frame_serial) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUBufferLocation from{.buffer = mesh->vertices, .offset = 0};
+            const SDL_GPUBufferLocation to{.buffer = mesh->previous, .offset = 0};
+            SDL_CopyGPUBufferToBuffer(copy, &from, &to, mesh->vertex_count * static_cast<u32>(sizeof(GpuMeshVertex)),
+                                      true);
+            SDL_EndGPUCopyPass(copy);
+        }
+    }
+    mesh->blended_frame = _owner->_frame_serial;
+    const SDL_GPUStorageBufferReadWriteBinding out{mesh->vertices, true};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &out, 1);
+    if (!pass) {
+        resume_2d();
+        return false;
+    }
+    SDL_BindGPUComputePipeline(pass, _morph_pipeline);
+    SDL_GPUBuffer* read[2] = {mesh->morph->base.handle(), mesh->morph->deltas.handle()};
+    SDL_BindGPUComputeStorageBuffers(pass, 0, read, 2);
+    SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (mesh->morph->vertices + 63) / 64, 1, 1);
+    SDL_EndGPUComputePass(pass);
+    resume_2d();
+    ++mesh->content; // the shadow caches see that its shape changed
+    return true;
+}
+
+std::shared_ptr<IMeshBackend3D> GpuRenderer3D::copy_mesh(const IMeshBackend3D& base) {
+    const auto* from = dynamic_cast<const GpuMesh3D*>(&base);
+    if (!from || !from->morph || !from->dynamic || from->levels.size() != 1)
+        return {};
+    try {
+        auto mesh = std::make_shared<GpuMesh3D>(_device->shared());
+        mesh->serial = _next_mesh_serial++;
+        mesh->dynamic = true;
+        mesh->vertex_count = from->vertex_count;
+        mesh->index_count = from->index_count;
+        mesh->levels = {{0, from->index_count, 0.0f}};
+        mesh->skin_bounds = from->skin_bounds;
+        mesh->gi_runs = from->gi_runs;
+        mesh->gi_triangles = from->gi_triangles;
+        mesh->morph = from->morph; // shared: the targets on the GPU once
+        const SDL_GPUBufferUsageFlags gi_read =
+            _capabilities.global_illumination ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0;
+        const u32 vertex_bytes = from->vertex_count * static_cast<u32>(sizeof(GpuMeshVertex));
+        const u32 index_bytes = from->index_count * static_cast<u32>(sizeof(u32));
+        const u32 skin_bytes = from->vertex_count * static_cast<u32>(sizeof(GpuSkinVertex));
+        const auto make = [&](SDL_GPUBufferUsageFlags usage, u32 size) {
+            const SDL_GPUBufferCreateInfo info{.usage = usage, .size = size, .props = 0};
+            SDL_GPUBuffer* buffer = tracked_create_buffer(_device->handle(), &info);
+            if (!buffer)
+                throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
+            return buffer;
+        };
+        mesh->vertices = make(SDL_GPU_BUFFERUSAGE_VERTEX | gi_read | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
+                                  SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+                              vertex_bytes);
+        if (from->previous)
+            mesh->previous = make(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, vertex_bytes);
+        mesh->indices = make(SDL_GPU_BUFFERUSAGE_INDEX | gi_read, index_bytes);
+        if (from->skin)
+            mesh->skin = make(SDL_GPU_BUFFERUSAGE_VERTEX | gi_read, skin_bytes);
+        // Copied on the GPU, in this frame's commands: the vertices at rest (the copy's weights are 0), the triangles,
+        // the skin.
+        _owner->ensure_frame();
+        _owner->flush_to_frame();
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(_owner->_frame->command_buffer());
+        if (!copy) {
+            resume_2d();
+            return {};
+        }
+        const auto buffer_copy = [&](SDL_GPUBuffer* src, u32 offset, SDL_GPUBuffer* dst, u32 size) {
+            const SDL_GPUBufferLocation a{.buffer = src, .offset = offset};
+            const SDL_GPUBufferLocation b{.buffer = dst, .offset = 0};
+            SDL_CopyGPUBufferToBuffer(copy, &a, &b, size, false);
+        };
+        buffer_copy(from->morph->base.handle(), 0, mesh->vertices, vertex_bytes);
+        buffer_copy(from->indices, from->index_offset, mesh->indices, index_bytes);
+        if (from->skin)
+            buffer_copy(from->skin, 0, mesh->skin, skin_bytes);
+        SDL_EndGPUCopyPass(copy);
+        resume_2d();
+        return mesh;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: mesh not copied", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+std::optional<f32> GpuRenderer3D::read_exposure(IViewBackend3D& base) {
+    auto* view = dynamic_cast<GpuView3D*>(&base);
+    if (!view || !view->_exposure_read)
+        return std::nullopt;
+    view->_exposure_read->poll();
+    return view->_exposure_read->value;
+}
+
 void GpuRenderer3D::on_frame_submitted() {
+    // Auto exposure's copies recorded in the frame just submitted: one fence after it says when they can be read.
+    if (!_exposure_unfenced.empty()) {
+        std::erase_if(_exposure_unfenced, [](const auto& weak) { return weak.expired(); });
+        if (!_exposure_unfenced.empty()) {
+            if (auto* commands = SDL_AcquireGPUCommandBuffer(_device->handle())) {
+                if (SDL_GPUFence* raw = SDL_SubmitGPUCommandBufferAndAcquireFence(commands)) {
+                    const auto fence = std::make_shared<GpuSharedFence>(_device->shared(), raw);
+                    for (const auto& weak : _exposure_unfenced)
+                        if (auto read = weak.lock()) {
+                            read->fence = fence;
+                            read->recorded = false;
+                        }
+                    _exposure_unfenced.clear();
+                }
+            }
+        }
+    }
     if (!_mesh_buffers || !_mesh_buffers->pending())
         return;
     // An independent fence following the submitted draws/uploads. The frame timer owns its own fence; neither may be
@@ -2107,8 +2294,13 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
         // Where global illumination can be had, its compute reads every mesh's vertices, indices and skin.
         const SDL_GPUBufferUsageFlags gi_read =
             _capabilities.global_illumination ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0;
+        // (A mesh with morph targets blended on the GPU: its vertices written by compute too.)
+        const SDL_GPUBufferUsageFlags blended =
+            source.morphed() && _morph_pipeline
+                ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ
+                : 0;
         const SDL_GPUBufferCreateInfo vertex_info{
-            .usage = SDL_GPU_BUFFERUSAGE_VERTEX | gi_read, .size = vertex_bytes, .props = 0};
+            .usage = SDL_GPU_BUFFERUSAGE_VERTEX | gi_read | blended, .size = vertex_bytes, .props = 0};
         const SDL_GPUBufferCreateInfo index_info{
             .usage = SDL_GPU_BUFFERUSAGE_INDEX | gi_read, .size = index_bytes, .props = 0};
         // A mesh with morph targets has a vertex buffer of its own, which update_mesh_vertices rewrites (cycled).
@@ -2318,6 +2510,47 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                 const std::size_t v = data.indices.empty() ? i : data.indices[i];
                 mesh->gi_triangles.push_back(v < vertex_count ? data.vertices[v].position : Vec3f{});
             }
+        }
+        if (mesh->dynamic && _morph_pipeline) {
+            // What the GPU blends from: the vertices at rest, and each target's offsets (zeros where it has none).
+            auto morph = std::make_shared<GpuMorphSource>();
+            morph->vertices = static_cast<u32>(vertex_count);
+            morph->targets = static_cast<u32>(source.morph_targets.size());
+            for (const MorphTarget3D& target : source.morph_targets)
+                morph->normals = morph->normals || !target.normals.empty();
+            constexpr SDL_GPUBufferUsageFlags read = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ;
+            const std::size_t delta_count = std::size_t{morph->targets} * vertex_count;
+            if (delta_count * 6 * sizeof(f32) > std::numeric_limits<u32>::max())
+                throw std::runtime_error("morph targets too big for one buffer");
+            morph->base = _device->create_buffer(read, nullptr, static_cast<u32>(vertex_count * sizeof(GpuMeshVertex)));
+            morph->deltas =
+                _device->create_buffer(read, nullptr, static_cast<u32>(std::max<std::size_t>(1, delta_count) * 24));
+            upload(morph->base.handle(), vertex_count, sizeof(GpuMeshVertex),
+                   [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+                       auto* to = reinterpret_cast<GpuMeshVertex*>(out);
+                       for (std::size_t i = begin; i < end; ++i) {
+                           const MeshVertex3D& v = data.vertices[first + i];
+                           to[i] = {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z,
+                                    v.uv.x,       v.uv.y,       v.color.r,    v.color.g,  v.color.b,  v.color.a};
+                       }
+                   });
+            if (delta_count > 0)
+                upload(morph->deltas.handle(), delta_count, 6 * sizeof(f32),
+                       [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+                           auto* to = reinterpret_cast<f32*>(out);
+                           for (std::size_t i = begin; i < end; ++i) {
+                               const std::size_t g = first + i, t = g / vertex_count, v = g % vertex_count;
+                               const MorphTarget3D& target = source.morph_targets[t];
+                               const Vec3f p = target.positions[v],
+                                           n = target.normals.empty() ? Vec3f{} : target.normals[v];
+                               f32* o = to + i * 6;
+                               o[0] = p.x, o[1] = p.y, o[2] = p.z, o[3] = n.x, o[4] = n.y, o[5] = n.z;
+                           }
+                       });
+            mesh->morph = std::move(morph);
+            const SDL_GPUBufferCreateInfo previous_info{
+                .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = vertex_bytes, .props = 0};
+            mesh->previous = tracked_create_buffer(_device->handle(), &previous_info);
         }
         mesh->clusters = std::move(clusters);
         mesh->index_count = static_cast<u32>(level0_count);
@@ -3415,6 +3648,26 @@ bool GpuRenderer3D::meter_exposure(SDL_GPUCommandBuffer* commands, GpuView3D& vi
         return false;
     }
     view._exposure_valid = true;
+    // Out to the CPU (Renderer3D::exposure), once the last copy has come back: ev, exposure, target, a 16-byte copy.
+    if (!view._exposure_read) {
+        auto read = std::make_shared<GpuExposureReadback>();
+        read->device = _device->shared();
+        const SDL_GPUTransferBufferCreateInfo info{
+            .usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, .size = 16, .props = 0};
+        read->transfer = SDL_CreateGPUTransferBuffer(_device->handle(), &info);
+        if (read->transfer)
+            view._exposure_read = std::move(read);
+    }
+    if (view._exposure_read && !view._exposure_read->poll()) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUBufferRegion from{.buffer = view._exposure->handle(), .offset = 128 * sizeof(u32), .size = 16};
+            const SDL_GPUTransferBufferLocation to{.transfer_buffer = view._exposure_read->transfer, .offset = 0};
+            SDL_DownloadFromGPUBuffer(copy, &from, &to);
+            SDL_EndGPUCopyPass(copy);
+            view._exposure_read->recorded = true;
+            _exposure_unfenced.push_back(view._exposure_read);
+        }
+    }
     return true;
 }
 
@@ -11230,8 +11483,10 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[which].m, sizeof(u.prior));
     // A skinned copy's shader also reads the joints (the frame's, each copy's first), and those of the frame before
     // (and where each copy's own start in them).
-    const std::array<SDL_GPUBuffer*, 6> buffers{storage,           previous_storage,    ctx.joints,
-                                                ctx.joint_offsets, ctx.previous_joints, ctx.previous_joint_offsets};
+    std::array<SDL_GPUBuffer*, 7> buffers{
+        storage, previous_storage, ctx.joints, ctx.joint_offsets, ctx.previous_joints, ctx.previous_joint_offsets,
+        nullptr};
+    std::array<SDL_GPUBuffer*, 3> morph_buffers{storage, previous_storage, nullptr};
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{target_pass};
     for (const u32 index : _order) {
@@ -11244,12 +11499,28 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
         }
         const Material3D& occluder = ref.draw->material;
         const bool cutout = occluder.blend == Blend3D::Mask;
+        // A mesh with morph targets blended on the GPU: its previous positions are the vertices as drawn the frame
+        // before (kept by this frame's first blend), or its vertices as they are when it was not blended this frame.
+        const GpuSurfaceShader3D* surface = pass_surface(occluder);
+        const bool morph = ref.mesh->morph && ref.mesh->previous && !(surface && surface->offsets()) &&
+                           (ref.skinned ? bool(_prepass_velocity_morph_skinned_vertex_shader)
+                                        : bool(_prepass_velocity_morph_vertex_shader));
         SDL_GPUGraphicsPipeline* p =
-            velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned, pass_surface(occluder));
+            velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned, surface, morph);
         if (!p) {
             continue;
         }
-        binder.bind_pipeline(p, buffers.data(), ref.skinned ? 6 : 2);
+        SDL_GPUBuffer* const before =
+            morph ? (ref.mesh->blended_frame == _owner->_frame_serial ? ref.mesh->previous : ref.mesh->vertices)
+                  : nullptr;
+        buffers[6] = before;
+        morph_buffers[2] = before;
+        if (morph && which == 0 && before == ref.mesh->previous)
+            ++stats.morph_velocity_draws;
+        if (morph && !ref.skinned)
+            binder.bind_pipeline(p, morph_buffers.data(), 3);
+        else
+            binder.bind_pipeline(p, buffers.data(), ref.skinned ? (morph ? 7 : 6) : 2);
         if (ref.clustered && !cluster_index) {
             continue;
         }
@@ -11534,11 +11805,13 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
     ctx.velocity_drawn = false; // the pre-pass began, so _ao_normals holds this frame's velocity
     // Only stock mesh shaders define the main pass's velocity output. Colour-only particle/custom shaders must
     // stay off that attachment: masking an undefined shader output does not preserve it on every backend.
-    ctx.main_velocity = ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles &&
-                        !ctx.gi_lit && !ctx.fog_sun_wanted && !ctx.decals && _particle_batches.empty() &&
-                        ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
-                        std::none_of(_refs.begin(), _refs.end(),
-                                     [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
+    ctx.main_velocity =
+        ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles && !ctx.gi_lit &&
+        !ctx.fog_sun_wanted && !ctx.decals && _particle_batches.empty() &&
+        std::none_of(_refs.begin(), _refs.end(), [](const DrawRef& ref) { return ref.mesh->previous != nullptr; }) &&
+        ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
+        std::none_of(_refs.begin(), _refs.end(),
+                     [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
     if (!ctx.main_velocity &&
         (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit || ctx.fog_sun_wanted ||
          ctx.decals) &&
@@ -11728,6 +12001,15 @@ void GpuRenderer3D::draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass,
     samplers[13] = {view->_ao_normals.handle(), _point_sampler};
     SDL_GPUGraphicsPipeline* bound = nullptr;
     for (const Decal3D& decal : scene.decals()) {
+        // Out of the view: the sphere round its box.
+        const Mat4f& m = decal.transform;
+        const f32 reach = 0.5f * std::sqrt(m.at(0, 0) * m.at(0, 0) + m.at(1, 0) * m.at(1, 0) + m.at(2, 0) * m.at(2, 0) +
+                                           m.at(0, 1) * m.at(0, 1) + m.at(1, 1) * m.at(1, 1) + m.at(2, 1) * m.at(2, 1) +
+                                           m.at(0, 2) * m.at(0, 2) + m.at(1, 2) * m.at(1, 2) + m.at(2, 2) * m.at(2, 2));
+        if (!sphere_in(ctx.frustums[0], {m.at(0, 3), m.at(1, 3), m.at(2, 3)}, reach)) {
+            ++ctx.stats.decals_culled;
+            continue;
+        }
         const Mat4f to_decal = decal.transform.inverse();
         // Inside: the camera within the box grown by its near plane (in the box's units, along each axis).
         const Vec3f eye = to_decal.apply(camera.position);

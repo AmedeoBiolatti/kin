@@ -21,12 +21,14 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 shared_uploads = 0, shared_joint_uploads = 0;
     bool graph_reused = false;
     u32 graph_passes = 0, graph_culled_passes = 0;
-    f64 graph_compile_ms = 0, graph_record_ms = 0;  // CPU, never GPU timestamps
-    bool geometry_graph_reused = false;             // stock prepass geometry subgraph cache
-    u32 surface_colour_copies = 0;                  // explicit out-of-place transparency input copy
-    u32 bloom_draws = 0, output_draws = 0;          // shared stock/public fullscreen recorders
-    u32 exposure_dispatches = 0;                    // ViewOptions3D::auto_exposure's metering and adaptation
-    u32 decals_drawn = 0;                           // Scene3D::decals drawn (one draw each)
+    f64 graph_compile_ms = 0, graph_record_ms = 0; // CPU, never GPU timestamps
+    bool geometry_graph_reused = false;            // stock prepass geometry subgraph cache
+    u32 surface_colour_copies = 0;                 // explicit out-of-place transparency input copy
+    u32 bloom_draws = 0, output_draws = 0;         // shared stock/public fullscreen recorders
+    u32 exposure_dispatches = 0;                   // ViewOptions3D::auto_exposure's metering and adaptation
+    u32 decals_drawn = 0;                          // Scene3D::decals drawn (one draw each)
+    u32 decals_culled = 0;                         // and those out of the view, not drawn
+    u32 morph_velocity_draws = 0; // velocity pre-pass draws of meshes whose shape changed since the frame before
     u32 geometry_draws = 0, geometry_instances = 0; // standalone geometry; stock prepass also keeps ao_* counters
     // Shared small-mesh GPU pages, excluding dedicated meshes and driver allocations. Retired ranges await GPU fences.
     u64 shared_mesh_allocated_bytes = 0, shared_mesh_live_bytes = 0, shared_mesh_retired_bytes = 0;

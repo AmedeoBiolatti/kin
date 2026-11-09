@@ -203,7 +203,7 @@ Bounds3D morph_bounds(const MeshData3D& data) {
 
 i32 Mesh3D::find_morph_target(std::string_view name) const {
     if (_morphs) {
-        const auto& targets = _morphs->data.morph_targets;
+        const auto& targets = _morphs->source->morph_targets;
         for (std::size_t t = 0; t < targets.size(); ++t) {
             if (targets[t].name == name) {
                 return static_cast<i32>(t);

@@ -99,6 +99,14 @@ struct GpuClusterChunk {
 // A mesh's buffers. Games may keep meshes past the renderer (in scenes that
 // outlive it): like textures they hold the device's shared handle, and skip
 // the release once it is gone.
+// A mesh with morph targets, blended on the GPU (morph_blend.comp): its vertices at rest (GpuMeshVertex, 9 words each)
+// and every target's offsets (6 floats a vertex, target after target), shared by the mesh's copies.
+struct GpuMorphSource {
+    GpuBuffer base, deltas;
+    u32 vertices = 0, targets = 0;
+    bool normals = false; // a target moves normals
+};
+
 class GpuMesh3D final : public IMeshBackend3D {
 public:
     explicit GpuMesh3D(SharedDevice device) : device(std::move(device)) {}
@@ -139,6 +147,11 @@ public:
     bool dynamic = false;
     u32 vertex_count = 0;
     u64 content = 0;
+    std::shared_ptr<const GpuMorphSource> morph; // set where the GPU blends (else the CPU does, update_mesh_vertices)
+    // With `morph`: the vertices as they were before this frame's first blend (the velocity pre-pass's previous
+    // positions: prepass_velocity_morph.vert), and the frame (GpuRenderer2DBackend's serial) of the last blend.
+    SDL_GPUBuffer* previous = nullptr;
+    u64 blended_frame = 0;
     // Where global illumination can be had: the box of each run of gi_run_triangles of level 0's triangles (the mesh's
     // space, at rest), so that the GI scene's voxelizer takes only the runs that reach where it changed.
     std::vector<Bounds3D> gi_runs;
@@ -255,6 +268,31 @@ struct GpuCopyHistory {
     std::vector<u32> joint_first;
 };
 
+// A copy of a view's adapted exposure on its way back from the GPU (Renderer3D::exposure): a small transfer buffer the
+// frame's commands download into, and the fence that says that frame is done (submitted right after it).
+struct GpuSharedFence {
+    SharedDevice device;
+    SDL_GPUFence* fence = nullptr;
+    GpuSharedFence(SharedDevice device, SDL_GPUFence* fence) : device(std::move(device)), fence(fence) {}
+    GpuSharedFence(const GpuSharedFence&) = delete;
+    GpuSharedFence& operator=(const GpuSharedFence&) = delete;
+    ~GpuSharedFence(); // waits for it first: a fence is never released unsignalled
+    bool signaled() const;
+};
+struct GpuExposureReadback {
+    SharedDevice device;
+    SDL_GPUTransferBuffer* transfer = nullptr;
+    std::shared_ptr<GpuSharedFence> fence;
+    bool recorded = false; // downloaded into in commands not yet fenced
+    std::optional<f32> value;
+    GpuExposureReadback() = default;
+    GpuExposureReadback(const GpuExposureReadback&) = delete;
+    GpuExposureReadback& operator=(const GpuExposureReadback&) = delete;
+    ~GpuExposureReadback();
+    // Reads the copy if its fence has signalled (never waits); true when one is in flight.
+    bool poll();
+};
+
 class GpuView3D final : public IViewBackend3D {
 public:
     Texture texture() const override;
@@ -292,6 +330,7 @@ private:
     bool _exposure_time_seen = false;
     f32 _exposure_time = 0.0f;
     std::chrono::steady_clock::time_point _exposure_wall{};
+    std::shared_ptr<GpuExposureReadback> _exposure_read;
     GpuTexture _pick, _pick_depth; // with ViewOptions3D::pick: position and id a pixel
     bool _pick_valid =
         false; // a render has written _pick since it was made (a new target holds whatever the memory did)
@@ -491,6 +530,9 @@ public:
     std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
     bool update_mesh_vertices(IMeshBackend3D& mesh, std::span<const MeshVertex3D> vertices) override;
+    bool set_morph_weights(IMeshBackend3D& mesh, std::span<const f32> weights) override;
+    std::shared_ptr<IMeshBackend3D> copy_mesh(const IMeshBackend3D& mesh) override;
+    std::optional<f32> read_exposure(IViewBackend3D& view) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<ISurfaceShaderBackend3D>
@@ -610,7 +652,7 @@ private:
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
     SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned = false,
-                                               const GpuSurfaceShader3D* surface = nullptr) const;
+                                               const GpuSurfaceShader3D* surface = nullptr, bool morph = false) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
@@ -949,6 +991,8 @@ private:
     SDL_GPUComputePipeline* _exposure_histogram_pipeline = nullptr; // exposure_histogram.comp
     SDL_GPUComputePipeline* _exposure_adapt_pipeline = nullptr;     // exposure_adapt.comp
     bool _auto_exposure_warned = false;
+    SDL_GPUComputePipeline* _morph_pipeline = nullptr;                  // morph_blend.comp
+    std::vector<std::weak_ptr<GpuExposureReadback>> _exposure_unfenced; // recorded this frame, fenced at its submit
     // Scene3D::decals: the box's vertex shader and the lit projection (decal.vert, decal.frag).
     GpuShader _decal_vertex_shader;
     GpuShader _decal_shader;
@@ -1025,6 +1069,9 @@ private:
     GpuShader _shadow_mask_skinned_vertex_shader;      // shadow_mask_skinned.vert
     GpuShader _prepass_skinned_vertex_shader;          // prepass_skinned.vert
     GpuShader _prepass_velocity_skinned_vertex_shader; // prepass_velocity_skinned.vert
+    // The same for meshes with morph targets blended on the GPU (their previous positions too; optional).
+    GpuShader _prepass_velocity_morph_vertex_shader;         // prepass_velocity_morph.vert
+    GpuShader _prepass_velocity_morph_skinned_vertex_shader; // prepass_velocity_morph_skinned.vert
     bool _skinning_available = false;
     bool _skin_warned = false;          // skinned copies cannot be drawn
     std::shared_ptr<GpuBuffer> _joints; // the frame's joint matrices (scene, then overlay); grows

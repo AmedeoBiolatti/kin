@@ -25,7 +25,8 @@ set(_kin_gpu_shader_names_3D
     particle_soft_shadow.frag particle_reactive_shadow.frag particle_soft_reactive_shadow.frag particle_cast.frag
     gi_clear.comp gi_voxelize.comp gi_voxelize_attributes.comp gi_flood.comp gi_view.frag gi_proxy.frag
     gi_light.comp gi_probe_place.comp gi_probe_trace.comp gi_probe_update.comp gi_resolve.comp gi_area.comp gi_area_fill.comp fog_sun.comp fog_sun_apply.frag
-    exposure_histogram.comp exposure_adapt.comp view_output_auto.frag view_output_dither_auto.frag decal.vert decal.frag)
+    exposure_histogram.comp exposure_adapt.comp view_output_auto.frag view_output_dither_auto.frag decal.vert decal.frag morph_blend.comp
+    prepass_velocity_morph.vert prepass_velocity_morph_skinned.vert)
 
 set(_kin_gpu_shader_names ${_kin_gpu_shader_names_2D})
 if(KIN_EXPERIMENTAL_3D)

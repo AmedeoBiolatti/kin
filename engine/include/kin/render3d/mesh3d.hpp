@@ -155,12 +155,12 @@ struct MeshLevelInfo3D {
     f32 error = 0.0f;
 };
 
-// What a mesh made with morph targets keeps on the CPU (Renderer3D::set_morph_weights blends from it): the mesh as made
-// (its targets' names and offsets included) and the weights it shows now.
+// What a mesh made with morph targets keeps on the CPU: the mesh as made (its targets' names and offsets included,
+// shared with its copies: Renderer3D::copy_mesh) and the weights it shows now.
 struct MeshMorphs3D {
-    MeshData3D data;
+    std::shared_ptr<const MeshData3D> source;
     std::vector<f32> weights;
-    std::vector<MeshVertex3D> scratch; // the blended vertices, kept between calls
+    std::vector<MeshVertex3D> scratch; // the blended vertices where the CPU blends, kept between calls
 };
 
 // The backend's copy of a mesh (Renderer3D::create_mesh).
@@ -211,12 +211,14 @@ public:
     // Morph targets (MeshData3D::morph_targets): how many, their names, and the weights the mesh shows now
     // (Renderer3D::set_morph_weights). Copies of a Mesh3D share them: Renderer3D::copy_mesh makes one with its own.
     // `bounds()` of such a mesh holds it at any weights within [-1, 1].
-    u32 morph_target_count() const { return _morphs ? static_cast<u32>(_morphs->data.morph_targets.size()) : 0u; }
+    u32 morph_target_count() const { return _morphs ? static_cast<u32>(_morphs->source->morph_targets.size()) : 0u; }
     std::string_view morph_target_name(u32 target) const {
-        return _morphs && target < _morphs->data.morph_targets.size()
-                   ? std::string_view{_morphs->data.morph_targets[target].name}
+        return _morphs && target < _morphs->source->morph_targets.size()
+                   ? std::string_view{_morphs->source->morph_targets[target].name}
                    : std::string_view{};
     }
+    // The mesh as made (its targets and the weights it was made with), or null for a mesh without targets.
+    const MeshData3D* morph_source() const { return _morphs ? _morphs->source.get() : nullptr; }
     // The target named `name`, or -1.
     i32 find_morph_target(std::string_view name) const;
     std::span<const f32> morph_weights() const {

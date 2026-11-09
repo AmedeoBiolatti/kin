@@ -20,6 +20,9 @@ releases may change APIs.
   `resolve_render3d_assets`), `Material3D::receives_decals` (meshes drawn over the decals), `AnimationPlayer3D`
   blending clips' morph weights (fades, blends, layers, actions) and `WorldRenderState3D::apply_morphs` giving each
   entity its own shaped copies, Lua `scene3d.set_morph_weight` / `morph_weight` / `clear_morph_weight`.
+  Then: morph targets blended on the GPU (about 5 us of CPU a change, from 0.12-1.3 ms; copies share the targets) with
+  motion vectors for TAA, `Renderer3D::exposure(view)` reading the adapted exposure back without a stall, decals
+  culled to the view, and `kin_render3d_surface_bench` (KIN_BUILD_BENCHMARKS) for the features' GPU and CPU costs.
 
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
   with a private six-file cache. It stays off by default because cold/private-header

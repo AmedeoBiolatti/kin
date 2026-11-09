@@ -17,6 +17,18 @@ layout(location = 3) in vec4 aColor;
 layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer Previous {
     mat4 previous[];
 };
+#ifdef KIN_MORPH_PREVIOUS
+// A mesh with morph targets (prepass_velocity_morph.vert): its vertices as they were drawn the frame before (GpuMeshVertex,
+// 9 words each; the position first), so that a change of shape moves the pixels as the copy's own motion does.
+layout(std430, set = 0, binding = 2 + KIN_VS_SHIFT) readonly buffer PreviousVertices {
+    uint previous_vertices[];
+};
+vec3 kin_previous_position() {
+    const uint at = uint(gl_VertexIndex) * 9u;
+    return vec3(uintBitsToFloat(previous_vertices[at]), uintBitsToFloat(previous_vertices[at + 1u]),
+                uintBitsToFloat(previous_vertices[at + 2u]));
+}
+#endif
 
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
@@ -45,7 +57,11 @@ void main() {
     vFresh = before[0][3];
     before[0][3] = 0.0;
     vec4 world = instance.model * vec4(aPos, 1.0);
+#ifdef KIN_MORPH_PREVIOUS
+    vec4 previous_world = before * vec4(kin_previous_position(), 1.0);
+#else
     vec4 previous_world = before * vec4(aPos, 1.0);
+#endif
 #ifdef KIN_SURFACE_VERTEX
     // A surface's World Position Offset (kin_surface_vertex.inc.glsl): now, and at the frame before's time.
     const vec4 colour = instance.color * vec4(decode(aColor.rgb), aColor.a);

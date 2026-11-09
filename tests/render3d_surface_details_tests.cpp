@@ -265,6 +265,15 @@ void auto_exposure(Fixture& f) {
          {AutoExposure3D{.enabled = true, .key = 0}, AutoExposure3D{.enabled = true, .min_ev = 2, .max_ev = 1},
           AutoExposure3D{.enabled = true, .low = 0.9f, .high = 0.5f}, AutoExposure3D{.enabled = true, .speed_up = -1}})
         assert(!f.r3d.create_view(extent, {.hdr = true, .auto_exposure = bad}));
+    // Read back without waiting: after a few presented frames the adapted exposure is there (0.18 / 0.0108, about
+    // 16.7, within a bin); a view without auto exposure has none.
+    View3D readable = f.r3d.create_view(extent, metered).value_or({});
+    assert(!f.r3d.exposure(readable));
+    for (int i = 0; i < 4; ++i)
+        (void)shot(readable, dark);
+    const auto adapted = f.r3d.exposure(readable);
+    assert(adapted && *adapted > 13 && *adapted < 21);
+    assert(!f.r3d.exposure(plain));
     std::cout << "surface details: auto exposure meters, adapts at its speeds, resets, compensates and clamps\n";
 }
 
@@ -395,6 +404,60 @@ void morphs(Fixture& f) {
     assert(f.r3d.render(view, scene));
     p = f.read(view);
     assert(Fixture::at(p, 79, 48)[0] < 20 && Fixture::at(p, 79, 27)[0] > 200);
+    // Blended where the device blends (the GPU) as on the CPU: a lit sphere with position and normal offsets against
+    // the same shape blended by blend_morph_targets, drawn as a plain mesh.
+    MeshData3D ball = meshes::sphere(1.0f, 32, 16);
+    MorphTarget3D bulge{"bulge", {}, {}}, tilt{"tilt", {}, {}};
+    for (const MeshVertex3D& v : ball.vertices) {
+        bulge.positions.push_back(v.normal * (0.3f * std::max(0.0f, v.normal.x)));
+        tilt.positions.push_back({0, 0.2f * v.position.x, 0});
+        tilt.normals.push_back({0.4f, 0, 0});
+    }
+    ball.morph_targets = {bulge, tilt};
+    const std::array<f32, 2> pose{0.8f, -0.6f};
+    Mesh3D blended = f.r3d.create_mesh(ball).value_or({});
+    assert(blended && f.r3d.set_morph_weights(blended, pose));
+    MeshData3D baked = ball;
+    blend_morph_targets(ball, pose, baked.vertices);
+    baked.morph_targets.clear();
+    Mesh3D reference = f.r3d.create_mesh(baked).value_or({});
+    const auto lit = [&](const Mesh3D& mesh) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0, 0, 4}, {0, 0, 0}, 60);
+        scene.lights.sun = {.direction = {0.5f, 0.6f, 0.6f}, .color = {1, 1, 1}};
+        (void)scene.draw(mesh, Mat4f::identity(), Material3D{.roughness = 0.5f});
+        assert(f.r3d.render(view, scene));
+        return f.read(view);
+    };
+    const auto a = lit(blended), b = lit(reference);
+    int worst = 0;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        worst = std::max(worst, std::abs(int(a[i]) - int(b[i])));
+    assert(worst <= 2);
+    // With temporal anti-aliasing: the velocity pre-pass takes a changing shape's previous positions (the shape the
+    // frame before drew), and its own vertices when the shape did not change; the picture follows the shape.
+    if (f.r3d.capabilities().temporal_aa) {
+        View3D smooth = f.r3d.create_view(extent, {.samples = 1}).value_or({});
+        Mesh3D slider = f.r3d.create_mesh(quad(0.5f, {1.5f, 0, 0})).value_or({});
+        const auto frame = [&](f32 weight) {
+            const std::array<f32, 1> w{weight};
+            assert(f.r3d.set_morph_weights(slider, w));
+            Scene3D scene;
+            scene.taa.enabled = true;
+            scene.camera = Camera3D::look_at({0, 0, 4}, {0, 0, 0}, 60);
+            (void)scene.draw(slider, Mat4f::identity(), Material3D{.unlit = true});
+            assert(f.r3d.render(smooth, scene));
+            const auto drawn = f.r3d.debug_stats().morph_velocity_draws;
+            return std::pair{f.read(smooth), drawn};
+        };
+        for (int i = 1; i <= 10; ++i)
+            assert(frame(0.1f * f32(i)).second == 1); // a new shape each frame
+        std::pair<std::vector<u8>, u32> still;
+        for (int i = 0; i < 8; ++i)
+            still = frame(1.0f); // the same shape: no previous positions needed
+        assert(still.second == 0);
+        assert(Fixture::at(still.first, 79, 48)[0] > 200 && Fixture::at(still.first, 48, 48)[0] < 20);
+    }
     // Asking for levels of detail or clusters gives a mesh without them.
     Mesh3D levels = f.r3d.create_mesh(quad(0.5f, {1, 0, 0}), MeshOptions3D{.levels = 4, .clusters = true}).value_or({});
     assert(levels && levels.level_count() == 1 && !levels.has_clusters() && levels.morph_target_count() == 1);
