@@ -10344,7 +10344,8 @@ void GpuRenderer3D::batch_main_commands(FrameCtx& ctx) {
                 const auto& before = _refs[previous.ref];
                 const auto& prior = _draw_commands[previous.ref];
                 if (before.scene == ref.scene && before.mesh == ref.mesh && before.retained == ref.retained &&
-                    prior.pipeline == command->pipeline && prior.binding == command->binding) {
+                    prior.pipeline == command->pipeline && prior.binding == command->binding &&
+                    before.draw->material.receives_decals == ref.draw->material.receives_decals) {
                     previous.count += item.count;
                     ++ctx.stats.main_merged_draws;
                     continue;
@@ -10419,15 +10420,25 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
     const auto composition_started = std::chrono::steady_clock::now();
     const auto append_opaque = [&] {
         u32 world = 0;
-        for (const u32 r : _order) {
-            const auto& ref = _refs[r];
-            const auto pass = pass_of(ref.draw->material);
-            if ((ctx.surface_stage == SurfaceStage3D::Opaque && pass != Pass::Opaque) ||
-                (ctx.surface_stage == SurfaceStage3D::Transparent && pass == Pass::Opaque))
+        // With decals: the world's meshes that receive them first, then those that do not
+        // (Material3D::receives_decals), drawn after the decals and so over them; the overlay's after both. Rounds: 0
+        // everything (without decals), or 1 the world's receivers, 2 its others, 3 the overlay.
+        for (const int round : {0, 1, 2, 3}) {
+            if ((round == 0) == ctx.decals)
                 continue;
-            if (ref.draw->material.blend != Blend3D::Alpha && ref.draw->material.blend != Blend3D::Additive) {
-                _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
-                world += ref.scene == 0;
+            for (const u32 r : _order) {
+                const auto& ref = _refs[r];
+                const auto pass = pass_of(ref.draw->material);
+                if ((ctx.surface_stage == SurfaceStage3D::Opaque && pass != Pass::Opaque) ||
+                    (ctx.surface_stage == SurfaceStage3D::Transparent && pass == Pass::Opaque))
+                    continue;
+                const int mine = ref.scene != 0 ? 3 : ref.draw->material.receives_decals ? 1 : 2;
+                if (round != 0 && round != mine)
+                    continue;
+                if (ref.draw->material.blend != Blend3D::Alpha && ref.draw->material.blend != Blend3D::Additive) {
+                    _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
+                    world += ref.scene == 0;
+                }
             }
         }
         return world;
@@ -11951,7 +11962,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         bound_binding = ~0u;
         bound_draw_materials = nullptr;
     };
-    const auto opaque_done = [&] {
+    const auto decals_now = [&] {
         if (!decals_done) {
             decals_done = true;
             draw_decals(ctx, pass,
@@ -11970,6 +11981,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             lights_bound = false;
             custom_lights_bound = false;
         }
+    };
+    const auto opaque_done = [&] {
+        decals_now();
         if (!sky_done)
             sky_now();
     };
@@ -11993,6 +12007,8 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             const Material3D& material = ref.draw->material;
             if (!(sky_done && decals_done) && (ref.scene != 0 || pass_of(material) != Pass::Opaque)) {
                 opaque_done();
+            } else if (!decals_done && !material.receives_decals) {
+                decals_now(); // (the meshes that do not receive them come last among the world's opaque ones)
             }
             if (ref.scene != current_scene) {
                 current_scene = ref.scene;

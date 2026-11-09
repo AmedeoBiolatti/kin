@@ -15,7 +15,11 @@ releases may change APIs.
   pre-pass. `MeshData3D::morph_targets` and `Renderer3D::set_morph_weights` blend meshes between shapes (before
   skinning; `copy_mesh` for a copy with its own weights); glTF morph targets, target names, default weights and weight
   animations now load (`AnimClip3D::morphs`, `apply_clip_morphs`) instead of rejecting the model. New capabilities
-  `auto_exposure`, `decals`, `morph_targets`; new example `bunker_exit`.
+  `auto_exposure`, `decals`, `morph_targets`; new example `bunker_exit`. Scenes and scripts: `DecalRenderer3D` and
+  `MorphWeights3D` components (scene files, prefabs, inspection, live edits; decal images bound by
+  `resolve_render3d_assets`), `Material3D::receives_decals` (meshes drawn over the decals), `AnimationPlayer3D`
+  blending clips' morph weights (fades, blends, layers, actions) and `WorldRenderState3D::apply_morphs` giving each
+  entity its own shaped copies, Lua `scene3d.set_morph_weight` / `morph_weight` / `clear_morph_weight`.
 
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
   with a private six-file cache. It stays off by default because cold/private-header

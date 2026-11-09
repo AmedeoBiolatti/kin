@@ -233,6 +233,9 @@ struct Material3D {
     // is off, and take it unless `receives_shadow` is.
     bool casts_shadow = true;
     bool receives_shadow = true;
+    // Whether Scene3D's decals land on it (opaque meshes; true): off, it is drawn after the decals, over them, so a
+    // character walking through a scorch mark's box is not painted with it.
+    bool receives_decals = true;
     // Only its triangles' edges, a pixel wide, in its colour (no light),
     // drawn just in front of the faces they edge: a model's wireframe drawn
     // over it, or lines (triangles a, b, b) on the ground. Needs line fill
@@ -862,10 +865,13 @@ public:
                           Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     // Both poses of a model with skins and animated nodes: its skinned parts by `joint_matrices` (of skeletons[0]), the
     // parts that hang from an animated node by `node_matrices` (of skeletons[node_skeleton], as draw(model, transform,
-    // node_matrices) takes them). Empty node matrices: the call above.
+    // node_matrices) takes them). Empty node matrices: the call above. `meshes`, when not empty, are drawn in place of
+    // the parts' meshes (indexed as model.parts; an empty Mesh3D keeps the part's): an entity's own copies of the parts
+    // with morph targets (Renderer3D::copy_mesh), shaped by weights of its own.
     Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                           Color tint, u32 id, std::span<const Material3D> materials,
-                          std::span<const Mat4f> node_matrices, u64 history_id = 0);
+                          std::span<const Mat4f> node_matrices, u64 history_id = 0,
+                          std::span<const Mesh3D> meshes = {});
     // Many copies of `mesh`, in one draw.
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
                             const Material3D& material = {});
@@ -969,7 +975,8 @@ private:
                         Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                 Color tint, u32 id, std::span<const Material3D> materials,
-                                std::span<const Mat4f> node_matrices, u64 history_id = 0);
+                                std::span<const Mat4f> node_matrices, u64 history_id = 0,
+                                std::span<const Mesh3D> meshes = {});
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                 Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,

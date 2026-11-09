@@ -4,14 +4,21 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <kin/assets/image.hpp>
+#include <kin/ecs/scene3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/animation3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/scene/scene_asset.hpp>
+#include <kin/scene/scene_loader3d.hpp>
 #include <vector>
 
 using namespace kin;
@@ -105,6 +112,73 @@ void cpu_morphs() {
     clip.morphs = {linear};
     assert(near(clip.key_duration(), 1));
     std::cout << "surface details: morph blending, bounds, validation, append and weight channels\n";
+}
+
+// AnimationPlayer3D blends the clips' morph weights as it blends their poses.
+void player_morphs() {
+    Skeleton3D sk;
+    sk.names = {"root"};
+    sk.parents = {-1};
+    sk.rest = {JointPose3D{}};
+    sk.inverse_bind = {Mat4f{}};
+    const auto clip = [](const char* name, std::vector<f32> values, std::vector<f32> times = {0, 1}) {
+        AnimClip3D c;
+        c.name = name;
+        c.channels.resize(1);
+        c.morphs = {MorphChannel3D{.parts = {2}, .targets = 1, .times = std::move(times), .values = std::move(values)}};
+        c.duration = c.key_duration();
+        return c;
+    };
+    const AnimClip3D low = clip("low", {0, 0}), high = clip("high", {1, 1}), rise = clip("rise", {0, 1});
+    AnimationPlayer3D player{&sk};
+    player.update(0.1f);
+    assert(player.morph_weights().empty()); // nothing playing moves weights
+    player.play(&low);
+    player.update(0.1f);
+    assert(player.morph_weights().size() == 3 && player.morph_weights()[0].empty() &&
+           near(player.morph_weights()[2][0], 0));
+    player.crossfade_to(&high, 1.0f);
+    player.update(0.5f);
+    assert(near(player.morph_weights()[2][0], 0.5f, 1e-4f));
+    player.update(0.6f); // the fade is over
+    assert(near(player.morph_weights()[2][0], 1));
+    // A layer at half weight toward 0; an additive one adds its change from its first frame.
+    player.layer(0) = {.clip = &low, .weight = 0.5f};
+    player.update(0.1f);
+    assert(near(player.morph_weights()[2][0], 0.5f, 1e-4f));
+    player.layer(0) = {.clip = &rise, .time = 0.0f, .weight = 0.5f, .loop = false, .additive = true};
+    player.update(0.5f); // rise at 0.5: +0.5 from its first frame, at half weight
+    assert(near(player.morph_weights()[2][0], 1.25f, 1e-4f));
+    player.clear_layers();
+    player.play(nullptr);
+    player.update(0.1f);
+    assert(player.morph_weights().empty());
+    std::cout << "surface details: the player blends morph weights through fades and layers\n";
+}
+
+// MorphWeights3D's authored form and the components in the registry.
+void registry() {
+    const auto parsed = parse_morph_weights3d(" smile = 0.5, blink=1 ");
+    assert(parsed && parsed->size() == 2 && (*parsed)[0].target == "smile" && near((*parsed)[0].weight, 0.5f) &&
+           (*parsed)[1].target == "blink");
+    assert(format_morph_weights3d(*parsed) == "smile=0.5, blink=1");
+    assert(parse_morph_weights3d("") && parse_morph_weights3d("")->empty());
+    for (const char* bad : {"smile", "smile=2", "=1", "smile=x", "smile=0.5,,blink"})
+        assert(!parse_morph_weights3d(bad));
+    kin::EcsWorld world;
+    register_builtin_editor_components(world);
+    auto entity = world.raw().entity().set(MorphWeights3D{});
+    kin::EcsEntity e{entity};
+    assert(world.components().patch_field(e, "MorphWeights3D", "weights", std::string("jaw=-0.25")));
+    assert(e.get<MorphWeights3D>()->weights == (std::vector<MorphWeight3D>{{"jaw", -0.25f}}));
+    assert(!world.components().patch_field(e, "MorphWeights3D", "weights", std::string("jaw=3")));
+    auto decal = world.raw().entity().set(DecalRenderer3D{});
+    kin::EcsEntity d{decal};
+    assert(world.components().patch_field(d, "DecalRenderer3D", "size", Vec3f{2, 1, 3}) &&
+           world.components().patch_field(d, "DecalRenderer3D", "normal_fade", 0.5f) &&
+           !world.components().patch_field(d, "DecalRenderer3D", "roughness", 2.0f));
+    assert(d.get<DecalRenderer3D>()->size.z == 3 && d.get<DecalRenderer3D>()->decal.normal_fade == 0.5f);
+    std::cout << "surface details: morph weights and decals in the component registry\n";
 }
 
 struct Fixture {
@@ -328,8 +402,117 @@ void morphs(Fixture& f) {
 }
 } // namespace
 
+// The ECS: a decal entity, a mesh that does not receive decals, entities with weights of their own, and an authored
+// decal from a scene file.
+void ecs(Fixture& f) {
+    Mesh3D wall = f.r3d.create_mesh(quad(20)).value_or({});
+    Mesh3D small = f.r3d.create_mesh(quad(0.3f)).value_or({});
+    Mesh3D sliding = f.r3d.create_mesh(quad(0.5f, {1.5f, 0, 0})).value_or({});
+    assert(wall && small && sliding);
+    std::vector<u8> pixels(16 * 4);
+    for (std::size_t i = 0; i < pixels.size(); i += 4)
+        pixels[i] = 255, pixels[i + 3] = 255;
+    const Texture red = f.r.create_texture_from_rgba(pixels.data(), 4, 4);
+    View3D view = f.r3d.create_view(extent, {.samples = 1}).value_or({});
+    const auto render = [&](kin::EcsWorld& world, WorldRenderState3D& state) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0, 0, 4}, {0, 0, 0}, 60);
+        scene.lights.sun.color = {0, 0, 0};
+        scene.lights.ambient = {1, 1, 1};
+        state.propagate_transforms();
+        state.apply_morphs(f.r3d);
+        state.collect(scene);
+        assert(f.r3d.render(view, scene));
+        return f.read(view);
+    };
+    const Quatf onto_wall = Quatf::axis_angle({1, 0, 0}, 90);
+    for (const bool receives : {true, false}) {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        world.raw().entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = wall});
+        world.raw()
+            .entity()
+            .set(Transform3D{.position = {0, 0, 0.2f}})
+            .set(MeshRenderer3D{.mesh = small,
+                                .material = {.color = Color::rgb(0, 255, 0), .receives_decals = receives}});
+        world.raw()
+            .entity()
+            .set(Transform3D{.rotation = onto_wall})
+            .set(DecalRenderer3D{.decal = {.texture = red}, .size = {1, 1, 1}});
+        const auto p = render(world, state);
+        const auto centre = Fixture::at(p, 48, 48), beside = Fixture::at(p, 48 + 7, 48); // (the quad: 3 pixels round)
+        assert(beside[0] > beside[1] + 120); // the wall under the decal: red
+        if (receives)
+            assert(centre[0] > centre[1] + 120); // the small quad too
+        else
+            assert(centre[1] > centre[0] + 120); // drawn over the decal: its own green
+        assert(f.r3d.debug_stats().decals_drawn == 1);
+    }
+    {
+        // Two entities of one model: the one with weights draws its own slid copy; the shared mesh is untouched.
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        auto model = std::make_shared<Model3D>();
+        model->parts.push_back({.name = "q", .mesh = sliding});
+        auto own = world.raw()
+                       .entity()
+                       .set(Transform3D{.position = {0, 1, 0}})
+                       .set(ModelRenderer3D{.model = model})
+                       .set(MorphWeights3D{.weights = {{"slide", 1.0f}}});
+        world.raw().entity().set(Transform3D{.position = {0, -1, 0}}).set(ModelRenderer3D{.model = model});
+        const auto p = render(world, state);
+        // One unit up is 21 pixels; 1.5 right, 31.
+        assert(Fixture::at(p, 79, 27)[0] > 200 && Fixture::at(p, 48, 27)[0] < 20); // slid
+        assert(Fixture::at(p, 48, 69)[0] > 200 && Fixture::at(p, 79, 69)[0] < 20); // at rest
+        const auto* m = own.get<MorphWeights3D>();
+        assert(m->meshes.size() == 1 && m->meshes[0] && m->meshes[0].morph_weights()[0] == 1.0f &&
+               sliding.morph_weights()[0] == 0.0f);
+        // Back to the model's own weight once the name is gone; a copied component makes copies of its own.
+        own.get_mut<MorphWeights3D>()->erase("slide");
+        auto twin = world.raw().entity().set(Transform3D{.position = {0, -1, 0}}).set(*own.get<ModelRenderer3D>());
+        twin.set(MorphWeights3D{*own.get<MorphWeights3D>()});
+        twin.get_mut<MorphWeights3D>()->set("slide", 1.0f);
+        const auto q = render(world, state);
+        assert(Fixture::at(q, 48, 27)[0] > 200 && Fixture::at(q, 79, 69)[0] > 200);
+        assert(twin.get<MorphWeights3D>()->meshes[0] != own.get<MorphWeights3D>()->meshes[0]);
+    }
+    {
+        // Authored: a .kinscene names the decal's picture; instantiate_scene3d binds it.
+        const auto root =
+            std::filesystem::temp_directory_path() /
+            ("kin-surface-details-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(root);
+        Image image;
+        image.size = {4, 4};
+        image.rgba = pixels;
+        assert(save_image(image, root / "red.png"));
+        {
+            std::ofstream(root / "decal.kinscene") << R"({"name":"Decal","entities":[
+                {"id":"mark","components":{"Transform3D":{},
+                 "DecalRenderer3D":{"texture":"red.png","size":[2,1,2],"normal_fade":0.5},
+                 "MorphWeights3D":{"weights":"smile=0.5"}}}]})";
+        }
+        kin::EcsWorld world;
+        register_builtin_editor_components(world);
+        Assets3D assets{f.r3d, root};
+        SceneAssetRuntime source;
+        assert(source.load(root / "decal.kinscene", root, world.components()));
+        assert(instantiate_scene3d(source, world, assets));
+        const auto mark = source.instance().by_authored_id.at("mark");
+        const auto* d = mark.get<DecalRenderer3D>();
+        assert(d && d->decal.texture && d->bound_texture == "red.png" && d->size.x == 2 &&
+               d->decal.normal_fade == 0.5f);
+        assert(mark.get<MorphWeights3D>()->get("smile") == 0.5f);
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    }
+    std::cout << "surface details: decal and morph components, receives_decals, per-entity copies, scene files\n";
+}
+
 int main() {
     cpu_morphs();
+    player_morphs();
+    registry();
     App app;
     auto& window =
         app.create_window({.title = "surface details", .width = extent.x, .height = extent.y, .hidden = true});
@@ -341,4 +524,5 @@ int main() {
     auto_exposure(f);
     decals(f);
     morphs(f);
+    ecs(f);
 }

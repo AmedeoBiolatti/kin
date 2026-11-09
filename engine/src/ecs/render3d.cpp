@@ -10,6 +10,7 @@
 #include <kin/anim/events.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
 #include <string_view>
 #include <unordered_map>
 
@@ -237,11 +238,16 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
           world.query_builder<const WorldTransform3D, const PointLight3D, const RenderTransform3D*>().build()),
       _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*>().build()),
       _emitters(world.query_builder<const WorldTransform3D, const ParticleEmitter3D>().build()),
+      _decals(world.query_builder<const WorldTransform3D, const DecalRenderer3D, const RenderTransform3D*>().build()),
+      _morphs(
+          world.query_builder<MorphWeights3D, const SkinnedMeshRenderer3D*, const ModelRenderer3D*, const Animator3D*>()
+              .build()),
       _weather(world.query_builder<Weather3D>().build()) {
     world.component<detail::SceneLease3D>();
     // Optional lookups during collection must not lazily register a component
     // while a Flecs table is being iterated, including in non-authored worlds.
     world.component<ModelMaterials3D>();
+    world.component<MorphWeights3D>();
     auto* tracking = _tracking.get();
     tracking->world = world.c_ptr();
     const auto transform_id = world.id<Transform3D>(), world_id = world.id<WorldTransform3D>();
@@ -1075,6 +1081,53 @@ const PoseOverride3D& WorldRenderState3D::pose_override_for(flecs::entity entity
     return animator.pose_override;
 }
 
+void WorldRenderState3D::apply_morphs(Renderer3D& renderer) {
+    _morphs.each([&](flecs::entity entity, MorphWeights3D& m, const SkinnedMeshRenderer3D* skinned,
+                     const ModelRenderer3D* rigid, const Animator3D* animator) {
+        const std::shared_ptr<const Model3D>* model = skinned && skinned->model ? &skinned->model
+                                                      : rigid && rigid->model   ? &rigid->model
+                                                                                : nullptr;
+        if (!model) {
+            m.meshes.clear();
+            m.made_for.reset();
+            return;
+        }
+        const Model3D& parts = **model;
+        const bool same = !m.made_for.expired() && !m.made_for.owner_before(*model) &&
+                          !model->owner_before(m.made_for) && m.made_by == entity.id();
+        if (!same || m.meshes.size() != parts.parts.size()) {
+            // Copies of the parts with targets, once a model: the model's meshes are every entity's.
+            m.meshes.assign(parts.parts.size(), Mesh3D{});
+            for (std::size_t i = 0; i < parts.parts.size(); ++i)
+                if (parts.parts[i].mesh.morph_target_count() > 0)
+                    m.meshes[i] = renderer.copy_mesh(parts.parts[i].mesh).value_or({});
+            m.made_for = *model;
+            m.made_by = entity.id();
+        }
+        // The clips' weights, by part, where the animator plays this model.
+        const auto* clips =
+            animator && m.animated && animator->bound_to(*model) ? &animator->player.morph_weights() : nullptr;
+        for (std::size_t i = 0; i < m.meshes.size(); ++i) {
+            const Mesh3D& copy = m.meshes[i];
+            const MeshMorphs3D* made = parts.parts[i].mesh.morphs().get();
+            if (!copy || !made)
+                continue;
+            const auto& targets = made->data.morph_targets;
+            _morph_scratch = made->data.morph_weights;
+            _morph_scratch.resize(targets.size(), 0.0f);
+            if (clips && i < clips->size() && (*clips)[i].size() == targets.size())
+                _morph_scratch = (*clips)[i];
+            for (const MorphWeight3D& w : m.weights)
+                for (std::size_t t = 0; t < targets.size(); ++t)
+                    if (targets[t].name == w.target)
+                        _morph_scratch[t] = w.weight;
+            for (f32& w : _morph_scratch)
+                w = std::isfinite(w) ? std::clamp(w, -1.0f, 1.0f) : 0.0f;
+            (void)renderer.set_morph_weights(copy, _morph_scratch);
+        }
+    });
+}
+
 void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentation, const PosePresentation3D& poses,
                                  const IKPresentation3D& ik, f32 alpha) {
     struct Guard {
@@ -1096,7 +1149,7 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
     const bool tracked = tracking.mode == SceneMutationMode3D::Tracked;
     const bool simple = tracked && !presentation && _animators.count() == 0 && _skinned.count() == 0 &&
                         _attachments.count() == 0 && _point_lights.count() == 0 && _spot_lights.count() == 0 &&
-                        _emitters.count() == 0;
+                        _emitters.count() == 0 && _decals.count() == 0 && _morphs.count() == 0;
     if (simple && tracking.collection && !tracking.topology) {
         std::unordered_map<u32, std::vector<u32>> edits;
         for (auto id : tracking.changed) {
@@ -1264,12 +1317,18 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                 }
             }
         }
+        // The entity's own copies of the parts with morph targets (MorphWeights3D, made by apply_morphs).
+        const auto* morphs = entity.get<MorphWeights3D>();
+        const bool own_meshes = morphs && morphs->meshes.size() == model.parts.size() &&
+                                morphs->made_by == entity.id() && !morphs->made_for.owner_before(renderer.model) &&
+                                !renderer.model.owner_before(morphs->made_for);
         for (size_t index = 0; index < model.parts.size(); ++index) {
             const auto& part = model.parts[index];
             const auto& material = binding ? binding->materials[index] : part.material;
             if (!part.mesh || part.mesh.skinned() || part.skin >= 0)
                 continue;
-            auto& bucket = bucket_for(part.mesh, material);
+            const Mesh3D& mesh = own_meshes && morphs->meshes[index] ? morphs->meshes[index] : part.mesh;
+            auto& bucket = bucket_for(mesh, material);
             bind(entity.id(), bucket, static_cast<u32>(index));
             bucket.instances.push_back(
                 {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint, id,
@@ -1401,10 +1460,27 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                                       overrides->binding->materials.size() == model->parts.size()
                                   ? overrides->binding.get()
                                   : nullptr;
+        const auto* morphs = it.entity(row).get<MorphWeights3D>();
+        const bool own_meshes =
+            morphs && morphs->meshes.size() == model->parts.size() && morphs->made_by == it.entity(row).id() &&
+            !morphs->made_for.owner_before(renderer.model) && !renderer.model.owner_before(morphs->made_for);
         (void)scene.draw_skinned(*model, _pose_scratch, *placement, renderer.tint, id,
                                  binding ? std::span<const Material3D>{binding->materials}
                                          : std::span<const Material3D>{},
-                                 history_id(it.entity(row)));
+                                 std::span<const Mat4f>{}, history_id(it.entity(row)),
+                                 own_meshes ? std::span<const Mesh3D>{morphs->meshes} : std::span<const Mesh3D>{});
+    });
+    // Decals (Scene3D::draw_decal): the entity's space scaled by the box's size.
+    _decals.each([&](flecs::entity entity, const WorldTransform3D& world, const DecalRenderer3D& renderer,
+                     const RenderTransform3D* presentation) {
+        if (!renderer.visible)
+            return;
+        const auto placement = draw_placement(entity, world, presentation);
+        if (!placement)
+            return;
+        Decal3D decal = renderer.decal;
+        decal.transform = *placement * Mat4f::scaling(renderer.size);
+        (void)scene.draw_decal(decal);
     });
     // Meshes no longer drawn are let go.
     if (std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); }))

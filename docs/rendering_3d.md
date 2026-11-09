@@ -1338,7 +1338,7 @@ cone's in-scattering in fog (a lamp in mist shows no beam), soft shadows by ligh
 ### Decals
 
 `Scene3D::draw_decal(Decal3D)` projects a picture onto the opaque surfaces inside a box: scorch marks, paint,
-dirt, footprints, posters, bullet holes. The box is the unit cube `[-0.5, 0.5]^3` placed by `transform`; the picture
+dirt, footprints, posters, bullet holes (in the ECS: `DecalRenderer3D`, below). The box is the unit cube `[-0.5, 0.5]^3` placed by `transform`; the picture
 lies on its X/Z sides (u along +X, v along +Z, the picture's top at -Z) and is projected along -Y, from the box's top
 face down through its depth. Decals are drawn after the scene's opaque meshes and before the sky and the blended
 meshes, in the order added, and lit as a custom material is: the sun and its shadows, the fill light, ambient or
@@ -1360,16 +1360,31 @@ drawn where the cosine between their normal and the box's +Y is above `normal_fa
 onto a surface facing away, so a floor decal does not smear down the walls. `depth_fade` (0.25) fades it toward the
 box's top and bottom faces. `wrap` is the picture's sampler (clamped by default).
 
+`Material3D::receives_decals` (true; `"receives_decals"` in `.kinmaterials`) turned off keeps decals off a mesh: such
+meshes are drawn after the decals, over them, so a character walking through a scorch mark's box is not painted
+with it (the decal's work under its pixels is simply covered).
+
+In the ECS a `DecalRenderer3D` places one at its entity: the box is the entity's space scaled by `size` (the picture's
+width along X, the depth it reaches along Y, its height along Z), projected along the entity's -Y. Scene files and
+prefabs author it, its images by path (`resolve_render3d_assets` binds them: the texture as colour, the normal map as
+data; a failed load keeps the pictures bound before, and the session reloads them when the files change):
+
+```json
+{"id": "scorch", "components": {
+    "Transform3D": {"position": [2, 0, -3], "rotation": [0, 0.26, 0, 0.97]},
+    "DecalRenderer3D": {"texture": "decals/scorch.png", "size": [2, 1, 2], "normal_fade": 0.4}}}
+```
+
 A decal reads the pre-pass's depth and normals (the mesh's normal, before its own normal map), so a scene with decals
 always runs the pre-pass (with TAA, the main pass then no longer writes the velocity itself). It lands on what the
 pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not custom-shader, blended or unlit meshes,
-particles or the overlay. Seen from outside its box, a decal's front faces are depth-tested against the scene, so
+particles or the overlay; opaque meshes whose material has `receives_decals` off are drawn over them. Seen from outside its box, a decal's front faces are depth-tested against the scene, so
 what stands in front of the box hides it; from inside the box (or within twice the near plane of it) its back faces
 are drawn untested. Each decal is one draw of 36 vertices (`debug_stats().decals_drawn`); a pixel costs four extra
 depth reads (the texture's gradients come from the neighbours on the same surface, so edges of what stands in
 front do not pick the smallest mip level). `capabilities().decals` says whether the device can; where not (or on
-WebGL2), decals are not drawn, said once. Not supported: `render_surface`/`prepare` graphs, decals that pick which
-objects they land on, and clustered (many-decal) culling.
+WebGL2), decals are not drawn, said once. Not supported: `render_surface`/`prepare` graphs, and clustered
+(many-decal) culling.
 
 ### Particles and weather
 
@@ -2123,6 +2138,24 @@ changed (its scene follows when something else makes it voxelize again; area-lig
 `capabilities().morph_targets` is true on every native device and on WebGL2.
 
 `blend_morph_targets(data, weights, out)` and `morph_bounds(data)` are the same on the CPU, for tools.
+`Scene3D::draw_skinned(model, ..., node_matrices, history_id, meshes)` draws a model with some parts' meshes replaced
+(an entity's own copies).
+
+**Animation.** `AnimationPlayer3D::morph_weights()` (by model part; an empty entry is a part no playing clip moves)
+blends the playing clips' weight channels as the pose is blended: crossfades (a fade in the middle of another fades out
+the held weights), 1D blends, layers by their weight (additive ones add their change from their first frame) and the
+action. A model needs a skeleton (a skin or animated nodes) for the player; weights-only animations of a model with
+neither are applied with `apply_clip_morphs`.
+
+**Entities.** A `MorphWeights3D` on an entity with a `SkinnedMeshRenderer3D` or `ModelRenderer3D` gives it weights of
+its own: `WorldRenderState3D::apply_morphs(renderer)` (SceneFrame3D calls it before collecting; call it after
+`animate()` in a hand-made loop) makes the entity copies of the model's parts with targets (once a model, and again for
+an entity the component was copied to) and sets them from the model's weights, then the clips its `Animator3D` plays
+(unless `animated` is off), then the targets named in `weights`. `collect()` draws the copies; entities without the
+component draw the shared meshes. Authored as `{"MorphWeights3D": {"weights": "smile=0.8, blink=1"}}`; from C++
+`get_mut<MorphWeights3D>()->set("smile", 0.8f)` / `erase("smile")`; from Lua `scene3d.set_morph_weight(entity, "smile",
+0.8)` (adds the component when the entity has none), `scene3d.morph_weight(entity, "smile")` (nil when not set) and
+`scene3d.clear_morph_weight(entity, "smile")`.
 `MeshData3D::append` meets targets by name (a target only one side has moves the other side's vertices by nothing).
 
 **glTF.** A primitive's `targets` (POSITION and NORMAL offsets; sparse accessors are read; TANGENT and other
@@ -2401,6 +2434,8 @@ Initial registered authored fields:
 | `CharacterController3D` | capsule dimensions, movement/jump/grounding settings, layer/mask, up/facing |
 | `CharacterAnimationLink3D` | animation parameter names, foot constraint name, ground-query mask |
 | `ParticleEmitter3D` | seed/emission/capacity, shape/ranges/forces/lifetime curves, texture/atlas/blend/facing, enabled/emitting |
+| `DecalRenderer3D` | texture and normal images, box size, colour, roughness/metallic, normal strength, emission, normal/depth fade, visible |
+| `MorphWeights3D` | morph target weights by name (`"smile=0.8, blink=1"`), whether the animator's clips set the others |
 
 Vectors accept arrays or `x/y/z` objects; rotations use `x/y/z/w` order and must be
 finite unit quaternions. Enum adapters reject unknown names through normal patches.

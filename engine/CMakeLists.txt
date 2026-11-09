@@ -484,7 +484,7 @@ if(KIN_EXPERIMENTAL_3D)
     if(KIN_ENABLE_PHYSICS3D)
         target_sources(kin_engine PRIVATE
             src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp
-            src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp
+            src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/ecs/surface_details3d.cpp
             src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp
             src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp
             src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp)

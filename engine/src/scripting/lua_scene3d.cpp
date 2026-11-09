@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <kin/ecs/system.hpp>
 #include <limits>
 #include <sol/sol.hpp>
 #include <stdexcept>
@@ -425,6 +426,49 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
                                                              animator->player.time(), "playing", animator->playing,
                                                              "speed", animator->speed, "loop", animator->loop,
                                                              "finished", animator->player.finished()));
+    };
+    // Morph target weights (MorphWeights3D): set by name on the entity's model (added when the entity has none: it
+    // then draws its own copies of the parts with targets), read back, and given back to the clips and the model.
+    scene["set_morph_weight"] = [api](SceneEntity3D handle, std::string target, f32 weight) {
+        auto& commands = command_buffer(*api);
+        if (target.empty() || !std::isfinite(weight) || weight < -1 || weight > 1)
+            throw std::runtime_error("morph weights need a target name and a weight within [-1, 1]");
+        script_component_access("MorphWeights3D", true);
+        auto actor = resolve(*api, handle);
+        if (!actor)
+            return false;
+        if (auto* own = actor.has<MorphWeights3D>() ? actor.get_mut<MorphWeights3D>() : nullptr) {
+            own->set(target, weight);
+            return true;
+        }
+        const EcsId id = actor.id();
+        commands.defer([id, target = std::move(target), weight](EcsWorld& world, std::string&) {
+            if (auto entity = world.entity_by_id(id))
+                entity.ensure<MorphWeights3D>().set(target, weight);
+            return true;
+        });
+        return true;
+    };
+    scene["morph_weight"] = [api](SceneEntity3D handle, std::string target) -> sol::optional<f32> {
+        script_component_access("MorphWeights3D", false);
+        const auto actor = resolve(*api, handle);
+        const auto* own = actor ? actor.get<MorphWeights3D>() : nullptr;
+        if (!own)
+            return sol::nullopt;
+        for (const MorphWeight3D& w : own->weights)
+            if (w.target == target)
+                return w.weight;
+        return sol::nullopt;
+    };
+    scene["clear_morph_weight"] = [api](SceneEntity3D handle, std::string target) {
+        command_buffer(*api);
+        script_component_access("MorphWeights3D", true);
+        auto actor = resolve(*api, handle);
+        auto* own = actor && actor.has<MorphWeights3D>() ? actor.get_mut<MorphWeights3D>() : nullptr;
+        if (!own)
+            return false;
+        own->erase(target);
+        return true;
     };
     scene["play_action"] = [api](sol::this_state state, SceneEntity3D handle, std::string name,
                                  sol::object mode_argument) -> sol::object {

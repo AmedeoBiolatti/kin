@@ -458,6 +458,7 @@ void AnimationPlayer3D::crossfade_to(const AnimClip3D* clip, f32 seconds, bool l
     if (_fading) {
         // A fade in the middle of another: the picture now, held, fades out, so nothing jumps.
         _frozen = _pose;
+        _frozen_morphs = _morphs;
         _from_frozen = true;
     } else {
         _from = _base;
@@ -477,6 +478,7 @@ void AnimationPlayer3D::crossfade_to_blend(std::span<const BlendPoint3D> points,
     }
     if (_fading) {
         _frozen = _pose;
+        _frozen_morphs = _morphs;
         _from_frozen = true;
     } else {
         _from = _base;
@@ -829,6 +831,108 @@ void AnimationPlayer3D::update(f32 dt, std::span<const ClipEventTrack3D> tracks,
         } else
             blend_masked(_pose, _scratch, _action.mask, _action.weight);
     }
+    compose_morphs();
+}
+
+void AnimationPlayer3D::sample_morphs(const Playing& p, std::vector<std::vector<f32>>& out) {
+    for (auto& part : out)
+        part.clear();
+    std::vector<f32> weights;
+    const auto add = [&](const AnimClip3D& clip, f32 time, f32 share) {
+        for (const MorphChannel3D& channel : clip.morphs) {
+            sample_morph_channel(channel, clip_time(clip, time, p.loop), weights);
+            for (const u32 part : channel.parts) {
+                if (out.size() <= part)
+                    out.resize(part + 1);
+                auto& to = out[part];
+                if (to.empty())
+                    to.assign(weights.size(), 0.0f);
+                for (std::size_t t = 0; t < std::min(to.size(), weights.size()); ++t)
+                    to[t] += weights[t] * share;
+            }
+        }
+    };
+    if (!p.blend.empty()) {
+        const BlendPair pair = blend_pair(p.blend, p.parameter);
+        const bool both = pair.b != pair.a && pair.weight > 0.0f;
+        add(*pair.a, p.time * pair.a->duration, both ? 1.0f - pair.weight : 1.0f);
+        if (both)
+            add(*pair.b, p.time * pair.b->duration, pair.weight);
+    } else if (p.clip) {
+        add(*p.clip, p.time, 1.0f);
+    }
+}
+
+namespace {
+bool has_morphs(const AnimClip3D* clip) {
+    return clip && !clip->morphs.empty();
+}
+// `to` toward `from` by `share`, part by part; a part only one side moves takes that side's weights.
+void mix_morphs(std::vector<std::vector<f32>>& to, const std::vector<std::vector<f32>>& from, f32 share) {
+    if (to.size() < from.size())
+        to.resize(from.size());
+    for (std::size_t p = 0; p < from.size(); ++p) {
+        if (from[p].empty())
+            continue;
+        if (to[p].empty()) {
+            to[p] = from[p];
+            continue;
+        }
+        for (std::size_t t = 0; t < std::min(to[p].size(), from[p].size()); ++t)
+            to[p][t] += (from[p][t] - to[p][t]) * share;
+    }
+}
+} // namespace
+
+void AnimationPlayer3D::compose_morphs() {
+    // Nothing to do (and nothing kept) unless a playing clip moves morph weights.
+    bool any = has_morphs(_base.clip) || has_morphs(_action.clip) ||
+               (_fading && (_from_frozen ? !_frozen_morphs.empty() : has_morphs(_from.clip)));
+    for (const BlendPoint3D& point : _base.blend)
+        any = any || has_morphs(point.clip);
+    for (const BlendPoint3D& point : _from.blend)
+        any = any || (_fading && !_from_frozen && has_morphs(point.clip));
+    for (const Layer& layer : _layers)
+        any = any || has_morphs(layer.clip);
+    if (!any) {
+        _morphs.clear();
+        return;
+    }
+    sample_morphs(_base, _morphs);
+    // (update() has ended a fade that reached its end: _fading is false then.)
+    if (_fading) {
+        const f32 alpha = _fade_seconds > 0.0f ? std::clamp(_fade_elapsed / _fade_seconds, 0.0f, 1.0f) : 1.0f;
+        if (_from_frozen)
+            _morph_scratch = _frozen_morphs;
+        else
+            sample_morphs(_from, _morph_scratch);
+        // The old weights mixed in by what is left of the fade.
+        mix_morphs(_morphs, _morph_scratch, 1.0f - alpha);
+    }
+    const auto overlay = [&](const AnimClip3D* clip, f32 time, bool loop, f32 weight, bool additive) {
+        if (!has_morphs(clip) || !(weight > 0.0f))
+            return;
+        sample_morphs(Playing{clip, time, 1.0f, loop, {}, 0.0f}, _morph_scratch);
+        if (!additive) {
+            mix_morphs(_morphs, _morph_scratch, weight);
+            return;
+        }
+        sample_morphs(Playing{clip, 0.0f, 1.0f, loop, {}, 0.0f}, _morph_reference);
+        if (_morphs.size() < _morph_scratch.size())
+            _morphs.resize(_morph_scratch.size());
+        for (std::size_t p = 0; p < _morph_scratch.size(); ++p) {
+            if (_morph_scratch[p].empty())
+                continue;
+            if (_morphs[p].empty())
+                _morphs[p].assign(_morph_scratch[p].size(), 0.0f);
+            const std::size_t n = std::min({_morphs[p].size(), _morph_scratch[p].size(), _morph_reference[p].size()});
+            for (std::size_t t = 0; t < n; ++t)
+                _morphs[p][t] += (_morph_scratch[p][t] - _morph_reference[p][t]) * weight;
+        }
+    };
+    for (const Layer& layer : _layers)
+        overlay(layer.clip, layer.time, layer.loop, layer.weight, layer.additive);
+    overlay(_action.clip, _action.time, false, _action.weight, _action.options.additive);
 }
 
 void AnimationPlayer3D::joint_matrices(std::vector<Mat4f>& out) const {

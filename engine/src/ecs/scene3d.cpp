@@ -8,10 +8,12 @@ namespace kin {
 void register_scene3d_settings(EcsWorld& world);
 void register_character3d_components(EcsWorld& world);
 void register_particle3d_components(EcsWorld& world);
+void register_surface_details3d_components(EcsWorld& world);
 
 void register_render3d_components(EcsWorld& world) {
     register_scene3d_settings(world);
     register_particle3d_components(world);
+    register_surface_details3d_components(world);
     auto& registry = world.components();
     if (!registry.find("Transform3D"))
         registry.native<Transform3D>("Transform3D")
@@ -301,6 +303,8 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
     diagnostics.insert(diagnostics.end(), animation_errors.begin(), animation_errors.end());
     auto effects = resolve_particles3d_assets(world, assets, particles, selected).diagnostics;
     diagnostics.insert(diagnostics.end(), effects.begin(), effects.end());
+    auto decals = resolve_decals3d_assets(world, assets, selected).diagnostics;
+    diagnostics.insert(diagnostics.end(), decals.begin(), decals.end());
     return diagnostics;
 }
 Status3D resolve_render3d_assets(EcsWorld& world, Assets3D& assets, ParticleLimits3D particles,

@@ -564,19 +564,30 @@ bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, std::
 }
 Status3D Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                Color tint, u32 id, std::span<const Material3D> materials,
-                               std::span<const Mat4f> node_matrices, u64 history_id) {
-    const bool accepted =
-        draw_skinned_operation(model, joint_matrices, transform, tint, id, materials, node_matrices, history_id);
+                               std::span<const Mat4f> node_matrices, u64 history_id, std::span<const Mesh3D> meshes) {
+    const bool accepted = draw_skinned_operation(model, joint_matrices, transform, tint, id, materials, node_matrices,
+                                                 history_id, meshes);
     return status3d(accepted, _errors);
 }
 
 bool Scene3D::draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices,
                                      const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials,
-                                     std::span<const Mat4f> node_matrices, u64 history_id) {
+                                     std::span<const Mat4f> node_matrices, u64 history_id,
+                                     std::span<const Mesh3D> meshes) {
     if (!_errors.empty())
         return false;
     if (!materials.empty() && materials.size() != model.parts.size())
         return fail_submission("material count must match model parts");
+    if (!meshes.empty() && meshes.size() != model.parts.size())
+        return fail_submission("mesh count must match model parts");
+    // A part's own mesh, or the one given in its place (it must be skinned as the part is, with as many joints).
+    const auto mesh_of = [&](std::size_t index) -> const Mesh3D& {
+        const Mesh3D& own = model.parts[index].mesh;
+        if (meshes.empty() || !meshes[index] || meshes[index].skinned() != own.skinned() ||
+            meshes[index].skin_joint_count() > own.skin_joint_count())
+            return own;
+        return meshes[index];
+    };
     // One range for the pose, as many matrices as the most any part uses (a part uses the first of them: its joints are
     // the skeleton's, in the skeleton's order).
     std::size_t need = 0;
@@ -608,10 +619,10 @@ bool Scene3D::draw_skinned_operation(const Model3D& model, std::span<const Mat4f
                 _joints.insert(_joints.end(), joint_matrices.begin(),
                                joint_matrices.begin() + static_cast<std::ptrdiff_t>(need));
             }
-            add_skinned_copy(part.mesh, first_joint, transform, material, tint, id,
+            add_skinned_copy(mesh_of(part_index), first_joint, transform, material, tint, id,
                              detail::part_history3d(history_id, part_index));
         } else {
-            draw_operation(part.mesh,
+            draw_operation(mesh_of(part_index),
                            transform *
                                (node_matrices.empty() ? part.transform : node_posed(model, part_index, node_matrices)),
                            material, tint, id, detail::part_history3d(history_id, part_index));

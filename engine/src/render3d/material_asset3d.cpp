@@ -93,20 +93,35 @@ MaterialTexture3D texture(const JsonValue& value) {
     return result;
 }
 MaterialPatch3D patch(const JsonValue& value) {
-    fields(value, {"color",           "metallic",
-                   "roughness",       "emissive",
-                   "normal_scale",    "occlusion_strength",
-                   "alpha_cutoff",    "unlit",
-                   "double_sided",    "casts_shadow",
-                   "receives_shadow", "wireframe",
-                   "blend",           "wrap_u",
-                   "wrap_v",          "texture",
-                   "normal",          "metallic_roughness",
-                   "occlusion",       "emissive_texture",
-                   "shader",          "shader_params",
-                   "emission_color",  "emission_mode",
-                   "uv_scale",        "uv_offset",
-                   "graph",           "params"});
+    fields(value, {"color",
+                   "metallic",
+                   "roughness",
+                   "emissive",
+                   "normal_scale",
+                   "occlusion_strength",
+                   "alpha_cutoff",
+                   "unlit",
+                   "double_sided",
+                   "casts_shadow",
+                   "receives_shadow",
+                   "receives_decals",
+                   "wireframe",
+                   "blend",
+                   "wrap_u",
+                   "wrap_v",
+                   "texture",
+                   "normal",
+                   "metallic_roughness",
+                   "occlusion",
+                   "emissive_texture",
+                   "shader",
+                   "shader_params",
+                   "emission_color",
+                   "emission_mode",
+                   "uv_scale",
+                   "uv_offset",
+                   "graph",
+                   "params"});
     MaterialPatch3D result;
     if (const auto* v = value.find("emission_mode"))
         result.emission_mode = enumeration<EmissionMode3D>(
@@ -201,6 +216,7 @@ MaterialPatch3D patch(const JsonValue& value) {
     BOOLEAN(double_sided);
     BOOLEAN(casts_shadow);
     BOOLEAN(receives_shadow);
+    BOOLEAN(receives_decals);
     BOOLEAN(wireframe);
 #undef BOOLEAN
     if (const auto* v = value.find("blend"))
@@ -276,6 +292,7 @@ void merge(MaterialPatch3D& to, const MaterialPatch3D& from) {
     FIELD(double_sided);
     FIELD(casts_shadow);
     FIELD(receives_shadow);
+    FIELD(receives_decals);
     FIELD(wireframe);
     FIELD(blend);
     FIELD(wrap_u);
@@ -398,6 +415,7 @@ void write_patch(JsonWriter& json, const MaterialPatch3D& p) {
     BOOLEAN(double_sided);
     BOOLEAN(casts_shadow);
     BOOLEAN(receives_shadow);
+    BOOLEAN(receives_decals);
     BOOLEAN(wireframe);
 #undef BOOLEAN
     if (p.blend)
@@ -609,6 +627,7 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         FIELD(double_sided);
         FIELD(casts_shadow);
         FIELD(receives_shadow);
+        FIELD(receives_decals);
         FIELD(wireframe);
         FIELD(blend);
         FIELD(wrap_u);

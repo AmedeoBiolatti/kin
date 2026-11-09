@@ -297,6 +297,11 @@ public:
     void update(f32 dt, std::span<const ClipEventTrack3D> tracks, AnimationEventBatch3D& events);
     // The pose of the last update (the rest pose before the first).
     const Pose3D& pose() const { return _pose; }
+    // The morph target weights the clips playing give (AnimClip3D::morphs), blended as the pose is: crossfades, 1D
+    // blends, layers by their weight (additive ones add their change from their first frame) and the action. By model
+    // part (Model3D::parts): an empty entry is a part no playing clip moves. Empty when no clip has morph channels.
+    // Made by update(); apply them with Renderer3D::set_morph_weights (or WorldRenderState3D::apply_morphs).
+    const std::vector<std::vector<f32>>& morph_weights() const { return _morphs; }
     // The matrices of that pose (compute_joint_matrices).
     void joint_matrices(std::vector<Mat4f>& out) const;
     void joint_matrices(std::span<Mat4f> out) const;
@@ -313,6 +318,9 @@ private:
     static void advance(Playing& p, f32 dt);
     // `second` is the room for the second clip of a blend.
     void sample(const Playing& p, Pose3D& out, Pose3D& second) const;
+    // A playing's morph weights, by part, into `out` (cleared first).
+    static void sample_morphs(const Playing& p, std::vector<std::vector<f32>>& out);
+    void compose_morphs();
     static void set_blend(Playing& p, std::span<const BlendPoint3D> points, f32 parameter);
 
     struct Action {
@@ -340,6 +348,7 @@ private:
     RootMotion3D _delta;
     Pose3D _pose;
     Pose3D _scratch, _scratch2, _reference;
+    std::vector<std::vector<f32>> _morphs, _frozen_morphs, _morph_scratch, _morph_reference;
 };
 
 } // namespace kin

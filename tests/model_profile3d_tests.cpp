@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <kin/ecs/scene3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/assets3d.hpp>
@@ -175,6 +176,24 @@ void profile(Renderer3D& renderer, bool gpu) {
             check(bool(apply_clip_morphs(renderer, *model, *model->find_clip("bend"), 1.0f, false)) &&
                       model->parts[0].mesh.morph_weights()[0] == 1.0f,
                   "a clip's morph weights not applied");
+            // Through the ECS: the animator plays the clip, apply_morphs puts its weights on the entity's own copy.
+            kin::EcsWorld world;
+            WorldRenderState3D state{world};
+            auto actor = world.raw()
+                             .entity()
+                             .set(Transform3D{})
+                             .set(SkinnedMeshRenderer3D{.model = model.shared()})
+                             .set(Animator3D{.clip = "bend", .loop = false})
+                             .set(MorphWeights3D{});
+            state.animate(0.5f);
+            state.apply_morphs(renderer);
+            const auto* own = actor.get<MorphWeights3D>();
+            check(own->meshes.size() == 1 && own->meshes[0] &&
+                      std::abs(own->meshes[0].morph_weights()[0] - 0.5f) < 1e-4f,
+                  "the animator's morph weights did not reach the entity");
+            actor.get_mut<MorphWeights3D>()->set("target0", -0.25f); // a named weight wins over the clip's
+            state.apply_morphs(renderer);
+            check(own->meshes[0].morph_weights()[0] == -0.25f, "a named morph weight did not override the clip");
         }
     }
     options = {};

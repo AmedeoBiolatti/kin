@@ -192,6 +192,9 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         _rendering.apply_time_of_day(scene);
         const auto fog = scene.fog;
         _rendering.apply_weather(scene, fog);
+        // The entities' morph target weights (MorphWeights3D), onto their own meshes, before they are collected.
+        if (_options.renderer && _options.renderer->available())
+            _rendering.apply_morphs(*_options.renderer);
         _rendering.collect(scene, presentation, poses, ik, alpha);
         if (_options.bodies && _options.renderer && _options.renderer->available())
             _options.bodies->collect_ropes(*_options.renderer, scene, alpha);

@@ -301,6 +301,7 @@ private:
         _concrete = {.color = Color::rgb(150, 146, 138), .roughness = 0.9f};
         _grass = {.color = Color::rgb(92, 110, 70), .roughness = 0.95f};
         _jelly = {.color = Color::rgb(70, 200, 180), .emissive = 0.15f, .roughness = 0.25f};
+        _jelly.receives_decals = false; // they bounce through the scorch marks unmarked
 
         _scene.sky = {.enabled = true, .turbidity = 2.5f, .sun_intensity = 6.0f};
         _scene.lights.sun = {.direction = {0.35f, 0.55f, 1.0f}, .color = {5.2f, 4.8f, 4.2f}};

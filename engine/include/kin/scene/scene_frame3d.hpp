@@ -13,7 +13,7 @@ class WorldPhysicsState3D;
 struct SceneFrameOptions3D {
     ParticleLimits3D particles;
     WorldPhysicsState3D* bodies = nullptr;
-    Renderer3D* renderer = nullptr; // optional; used only to mesh ropes during collection
+    Renderer3D* renderer = nullptr; // optional; meshes ropes and applies MorphWeights3D during collection
     AudioEngine* audio = nullptr;
     const AudioCatalog* audio_catalog = nullptr;
     // For an existing native simulation (e.g. Summit), instead of bodies->step;

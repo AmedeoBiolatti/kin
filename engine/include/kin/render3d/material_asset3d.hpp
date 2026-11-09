@@ -31,7 +31,7 @@ struct MaterialPatch3D {
     std::optional<std::filesystem::path> shader; // SPIR-V; empty clears it
     std::optional<std::array<f32, 16>> shader_params;
     std::optional<f32> metallic, roughness, emissive, normal_scale, occlusion_strength, alpha_cutoff;
-    std::optional<bool> unlit, double_sided, casts_shadow, receives_shadow, wireframe;
+    std::optional<bool> unlit, double_sided, casts_shadow, receives_shadow, receives_decals, wireframe;
     std::optional<Blend3D> blend;
     std::optional<Wrap3D> wrap_u, wrap_v;
     std::optional<LinearRgb> emission_color;
