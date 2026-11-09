@@ -180,6 +180,12 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("taa_blend", taa.blend);
         SETTING("taa_still_blend", taa.still_blend);
         SETTING("taa_sharpness", taa.sharpness);
+        SETTING("ssr_enabled", ssr.enabled);
+        SETTING("ssr_max_roughness", ssr.max_roughness);
+        SETTING("ssr_thickness", ssr.thickness);
+        SETTING("ssr_max_distance", ssr.max_distance);
+        SETTING("ssr_steps", ssr.steps);
+        SETTING("ssr_intensity", ssr.intensity);
         SETTING("anisotropy", anisotropy);
         SETTING("texture_lod_bias", texture_lod_bias);
         SETTING("specular_aa", specular_aa);
@@ -327,8 +333,11 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.contact_shadows.distance >= 0 && settings.contact_shadows.thickness > 0 &&
                  settings.contact_shadows.intensity >= 0 && settings.taa.blend >= 0 && settings.taa.blend <= .98f &&
                  settings.taa.still_blend >= 0 && settings.taa.still_blend <= .98f && settings.taa.sharpness >= 0 &&
-                 settings.taa.sharpness <= 1 && settings.anisotropy >= 1 && settings.anisotropy <= 16 &&
-                 std::abs(settings.texture_lod_bias) <= 2 && settings.specular_aa >= 0 && settings.specular_aa <= 1 &&
+                 settings.taa.sharpness <= 1 && settings.ssr.max_roughness >= 0 && settings.ssr.max_roughness <= 1 &&
+                 settings.ssr.thickness > 0 && settings.ssr.max_distance > 0 && settings.ssr.steps >= 8 &&
+                 settings.ssr.steps <= 128 && settings.ssr.intensity >= 0 && settings.ssr.intensity <= 1 &&
+                 settings.anisotropy >= 1 && settings.anisotropy <= 16 && std::abs(settings.texture_lod_bias) <= 2 &&
+                 settings.specular_aa >= 0 && settings.specular_aa <= 1 &&
                  std::isfinite(settings.global_illumination.cell) && settings.global_illumination.cell > 0 &&
                  settings.global_illumination.levels >= 1 && settings.global_illumination.levels <= max_gi_levels &&
                  settings.global_illumination.side >= 32 && settings.global_illumination.side <= max_gi_side &&
@@ -363,6 +372,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.ambient_occlusion = settings.ambient_occlusion;
             scene.contact_shadows = settings.contact_shadows;
             scene.taa = settings.taa;
+            scene.ssr = settings.ssr;
             scene.anisotropy = settings.anisotropy;
             scene.texture_lod_bias = settings.texture_lod_bias;
             scene.specular_aa = settings.specular_aa;

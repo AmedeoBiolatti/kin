@@ -179,10 +179,13 @@ vec2 environment_uv(vec3 d) {
 // The reflection probes' light at `p` along `r` (unit), at the level `lod`: every probe whose influence box holds `p`, in
 // the renderer's order (by priority, then the smaller), each taking its weight of what the ones before left; .a the
 // share they took (the rest is the environment's). A probe with a parallax box is read toward where the ray leaves it,
-// from where it was captured (reflection_probe_direction in reflection_probes3d.cpp does the same on the CPU).
-vec4 kin_probe_reflection(vec3 p, vec3 r, float lod) {
+// from where it was captured (reflection_probe_direction in reflection_probes3d.cpp does the same on the CPU). `own`: the
+// share taken by probes without parallax (a shiny thing's own, captured from its centre), which the screen-space
+// reflections leave alone.
+vec4 kin_probe_reflection(vec3 p, vec3 r, float lod, out float own) {
     vec3 sum = vec3(0.0);
     float share = 0.0;
+    own = 0.0;
     const int count = int(frame.probes.x);
     for (int i = 0; i < count && share < 0.999; ++i) {
         const vec4 a0 = frame.probe[i * 6], a1 = frame.probe[i * 6 + 1], a2 = frame.probe[i * 6 + 2];
@@ -214,8 +217,50 @@ vec4 kin_probe_reflection(vec3 p, vec3 r, float lod) {
         const float take = weight * (1.0 - share);
         sum += textureLod(uEnvSpecular, vec3(uv, a5.w), lod).rgb * a4.w * take;
         share += take;
+        own += half_box.x > 0.0 ? 0.0 : take;
     }
     return vec4(sum, share);
+}
+#endif
+
+#if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
+// Screen-space reflections (ssr_trace.comp, Scene3D::ssr): the last storage buffer of the light variants, three words a
+// texel of a half-size grid (the colour's red and green, its blue and share, as halves; the view depth traced).
+#if defined(KIN_DRAW_MATERIALS) && defined(KIN_SURFACE)
+#define KIN_SSR_BINDING (21 + KIN_STORAGE_SHIFT)
+#elif defined(KIN_DRAW_MATERIALS)
+#define KIN_SSR_BINDING (20 + KIN_STORAGE_SHIFT)
+#else
+#define KIN_SSR_BINDING (19 + KIN_STORAGE_SHIFT)
+#endif
+layout(std430, set = 2, binding = KIN_SSR_BINDING) readonly buffer KinScreenReflections {
+    uint kin_ssr[];
+};
+// The reflection here (rgb) and its share (a): the four grid texels round the pixel, weighed by their nearness and by
+// how near their traced depth is to `depth` (this fragment's view depth): a texel of another surface (an edge, or what
+// glass is in front of) counts for nothing.
+vec4 kin_ssr_reflection(float depth) {
+    const ivec2 grid = ivec2(frame.ssr.yz);
+    const vec2 at = gl_FragCoord.xy * 0.5 - 0.5;
+    const ivec2 base = ivec2(floor(at));
+    const vec2 f = at - vec2(base);
+    vec4 sum = vec4(0.0);
+    float weights = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        const ivec2 o = ivec2(k & 1, k >> 1);
+        const ivec2 q = clamp(base + o, ivec2(0), grid - 1);
+        const uint i = uint(q.y * grid.x + q.x) * 3u;
+        const float traced = uintBitsToFloat(kin_ssr[i + 2u]);
+        const float near = abs(traced - depth) < 0.02 * depth + 0.05 ? 1.0 : 0.0;
+        const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y) * near;
+        const vec2 rg = unpackHalf2x16(kin_ssr[i]);
+        const vec2 ba = unpackHalf2x16(kin_ssr[i + 1u]);
+        sum += vec4(rg, ba.x, 1.0) * ba.y * w; // premultiplied by the share
+        weights += w;
+    }
+    if (weights <= 1e-4 || sum.a <= 1e-4)
+        return vec4(0.0);
+    return vec4(sum.rgb / sum.a, sum.a / weights);
 }
 #endif
 
@@ -912,14 +957,31 @@ vec3 kin_lit_surface(KinSurface surface) {
 #endif
 #ifdef KIN_LIGHT_GRID
     // The reflection probes', in place of the environment's (and the GI's) where their boxes reach.
+    float own_probe = 0.0; // the share a thing's own probe took (the screen-space reflections leave it)
     if (frame.probes.x > 0.5) {
         const vec3 r = reflect(-v, n);
-        const vec4 probed = kin_probe_reflection(vWorld, r, roughness * frame.probes.y);
+        const vec4 probed = kin_probe_reflection(vWorld, r, roughness * frame.probes.y, own_probe);
         above = probed.rgb + above * (1.0 - probed.a);
         if (coat > 0.0) {
-            const vec4 coat_probed = kin_probe_reflection(vWorld, r, coat_roughness * frame.probes.y);
+            float coat_own;
+            const vec4 coat_probed = kin_probe_reflection(vWorld, r, coat_roughness * frame.probes.y, coat_own);
             coat_above = coat_probed.rgb + coat_above * (1.0 - coat_probed.a);
         }
+    }
+#endif
+#if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
+    // Screen-space reflections, where the trace found something on screen, in place of the probes' or the environment's
+    // (none past the roughness Scene3D::ssr says).
+    // Where the normal turns fast across the screen (a small curved thing, a bumpy map) the half-size trace, of the
+    // pre-pass's smooth normals, is no good: those keep the probes' (a shiny ball's own). (Measured outside the branch:
+    // derivatives need every pixel of the quad.)
+    const float bend = length(fwidth(n));
+    if (frame.ssr.x > 0.5 && roughness < frame.ssr.w) {
+        const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
+        const vec4 screen = kin_ssr_reflection(depth);
+        const float share = screen.a * (1.0 - smoothstep(0.6 * frame.ssr.w, frame.ssr.w, roughness)) *
+                            (1.0 - smoothstep(0.02, 0.08, bend)) * (1.0 - own_probe);
+        above = mix(above, screen.rgb, share);
     }
 #endif
     // A reflection of the surface's own (a mirror's picture: kin_planar_reflect), in place of the environment's or the

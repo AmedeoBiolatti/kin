@@ -2702,6 +2702,38 @@ entity's own copies out of its picture (a shiny statue's own probe):
                         "resolution": 64, "priority": 1}}}
 ```
 
+## Screen-space reflections
+
+`scene.ssr.enabled` traces each pixel's mirror reflection through the depth pre-pass (on a grid half the view's size)
+and reads what it meets from the previous frame's picture: a polished floor shows the columns standing on it, a wet
+road the cars, where they are on the screen. They take over from the reflection probes and the environment where the
+trace finds something; a mirror's or a portal's picture still wins where it shows.
+
+```cpp
+scene.ssr.enabled = true;       // authored: SceneEnvironment3D's "ssr_enabled" (and ssr_max_roughness, ...)
+scene.ssr.max_roughness = 0.5f; // rougher surfaces keep the probes' or the environment's
+scene.ssr.thickness = 0.3f;     // how deep (world units) what the pre-pass sees is taken to be
+scene.ssr.max_distance = 40.0f; // how far a ray goes
+scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refinement
+```
+
+- **How.** A compute pass after the pre-pass (which runs for it) marches each grid texel's reflected ray, its steps
+  growing with the distance, through the pre-pass's depth; where the ray passes behind what it holds by less than the
+  thickness it has hit, and five halvings find where. The hit, reprojected into the previous frame's picture (kept at
+  half size after each frame's temporal resolve: linear, or decoded where the view's output is sRGB), gives the colour.
+  The main pass's stock lit shaders read the four grid texels round each pixel, only those that traced its own surface
+  (by their depth: glass and the overlay, not in the pre-pass, get none). With temporal anti-aliasing each pixel starts
+  its march at a different point (averaged over frames); without, all start alike (no noise, some banding).
+- **Where they fade.** Toward the screen's edges, toward the end of the rays, for rays that come back toward the camera
+  (what they meet is behind it), as the surface roughens to `max_roughness`, where the normal turns fast across the
+  screen (a small curved thing: the trace is of the pre-pass's normals, without normal maps), and wherever a thing's
+  own reflection probe (one without parallax, captured from its centre: a chrome ball) reflects it.
+- **Costs.** About 0.2 to 0.25 ms of the GPU at 1280 x 720 (RTX 4080 Laptop), the pre-pass it needs included; a buffer
+  of 12 bytes a grid texel and a half-size float picture a view.
+- **Limits.** Only what is on screen, as last frame showed it (a thing that just appeared reflects a frame late);
+  rough reflections are the probes'. The stock lit shaders, material graphs and surfaces (the light variants: a scene
+  with them draws with those); custom material shaders and WebGL2 have none.
+
 ## Views
 
 `Renderer3D::create_view(size, {.samples, .background, .hdr, .exposure,

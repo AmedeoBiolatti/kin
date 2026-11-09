@@ -173,6 +173,54 @@ void test_hidden(Renderer2D& r, Renderer3D& r3d) {
     std::cout << "probes: hidden copies\n";
 }
 
+// Screen-space reflections (Scene3D::ssr): a mirror floor and a red box on it, seen from (0, 1, 4). The box's front
+// face's middle (0, 0.5, 0.5), mirrored to (0, -0.5, 0.5), shows on the floor where the line to it crosses it:
+// (0, 0, 5/3). From the second frame on (the trace reads the previous one) it is red there with them, and not without
+// (no environment, no probe: the hemisphere's grey). An LDR view (its picture sRGB-encoded) and an HDR one.
+void test_ssr(Renderer2D& r, Renderer3D& r3d) {
+    const Mesh3D plane = r3d.create_mesh(meshes::plane({1, 1})).value_or({});
+    const Mesh3D box = r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    assert(plane && box);
+    const Vec3f floor_point{0, 0, 5.0f / 3.0f};
+    for (const bool hdr : {false, true}) {
+        View3D view = r3d.create_view(extent, {.samples = 1, .background = colors::black, .hdr = hdr}).value_or({});
+        assert(view);
+        const auto frame = [&](bool ssr) {
+            Scene3D scene;
+            scene.camera = Camera3D::look_at({0, 1, 4}, floor_point, 60);
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.05f, 0.05f, 0.05f};
+            scene.ssr.enabled = ssr;
+            assert(scene.draw(plane, Mat4f::trs({0, 0, 0}, {}, {20, 1, 20}),
+                              {.color = colors::white, .metallic = 1, .roughness = 0}));
+            assert(
+                scene.draw(box, Mat4f::translation({0, 0.5f, 0}), {.color = Color::rgb(240, 20, 20), .unlit = true}));
+            r.clear(colors::black);
+            assert(r3d.render(view, scene));
+            const u32 traces = r3d.debug_stats().ssr_traces;
+            r.draw_texture(view.texture(), rect);
+            std::vector<u8> pixels;
+            Vec2i size;
+            assert(r.read_rgba(rect, pixels, size) && size == extent);
+            r.present();
+            const auto at = scene.camera.project(floor_point, rect);
+            assert(at);
+            const u8* c = &pixels[(std::size_t(at->pos.y) * std::size_t(extent.x) + std::size_t(at->pos.x)) * 4];
+            return std::pair{Rgb{c[0], c[1], c[2]}, traces};
+        };
+        const auto [first, first_traces] = frame(true);
+        assert(first_traces == 0); // nothing to read yet
+        const auto [seen, traces] = frame(true);
+        std::cerr << "ssr (" << (hdr ? "hdr" : "ldr") << "): " << seen.r << " " << seen.g << " " << seen.b << "\n";
+        assert(traces == 1 && seen.r > 120 && seen.g < 60);
+        const auto [plain, none] = frame(false);
+        std::cerr << "no ssr (" << (hdr ? "hdr" : "ldr") << "): " << plain.r << " " << plain.g << " " << plain.b
+                  << " traces " << none << "\n";
+        assert(none == 0 && plain.r < 120 && std::abs(plain.r - plain.g) < 20); // the grey ambient
+    }
+    std::cout << "ssr: reflections\n";
+}
+
 } // namespace
 
 int main() {
@@ -187,4 +235,5 @@ int main() {
         return require ? 1 : 77;
     test_parallax(r, r3d);
     test_hidden(r, r3d);
+    test_ssr(r, r3d);
 }

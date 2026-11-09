@@ -10425,5 +10425,8 @@ filters stay 2D; `env_filter.comp` gets an octahedral mode). Probes are captured
   roughness), resolved (cone-sized reads, spatial then temporal filter); the main pass reads it as a reflection with a
   confidence, so Fresnel and roughness stay the material's. Fades at the screen's edges, by thickness, by roughness
   (off past ~0.6). `Scene3D::ssr` settings, stats, debug view. Off on WebGL2; glass gets none.
+- **R3 as built (2026-11-09).** Mirror rays only (rough surfaces fade to the probes), traced from the pre-pass's
+  normals (no normal maps); the result reaches the lit shaders as their last storage buffer, not a sampler (none
+  left), with each texel's traced depth for a depth-aware upsample; jitter only with TAA. About 0.2 ms at 720p.
 - **R4 — later.** Probes baked to disk as assets (and a bake button in kin-studio), probe gizmos, normalising probes by
   the GI's light, water refraction and depth fade on SSR's colour.
