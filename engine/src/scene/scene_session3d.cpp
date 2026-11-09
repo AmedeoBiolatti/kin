@@ -456,6 +456,7 @@ struct SceneSession3D::Data {
         ViewOptions3D options;
         std::unique_ptr<PlanarViews3D> planar;      // made for the first Mirror3D or Portal3D
         std::unique_ptr<ReflectionProbes3D> probes; // made for the first ReflectionProbe3D
+        std::unique_ptr<PortalTravel3D> travel;     // made for the first PortalTraveller3D
         f64 clock = 0;                              // seconds stepped: Scene3D::time (a material graph's `time`)
         std::vector<std::filesystem::path> dependencies;
         std::map<std::filesystem::path, SourceStamp> watches;
@@ -2510,8 +2511,21 @@ bool SceneSession3D::step_operation(f32 dt) {
             default:
                 break;
             }
-            if (driver.after_phase(phase, dt))
+            if (driver.after_phase(phase, dt)) {
+                // After the physics: what crossed a portal's opening goes out of its exit (PortalTraveller3D).
+                if (phase == SystemPhase::Physics &&
+                    (state.travel || state.world.raw().count<PortalTraveller3D>() > 0)) {
+                    if (!state.travel)
+                        state.travel = std::make_unique<PortalTravel3D>();
+                    if (const auto travelled = state.travel->step(state.world, state.bodies.get()); !travelled) {
+                        append(d.errors, travelled.diagnostics);
+                        for (const auto& message : travelled.diagnostics)
+                            error += (error.empty() ? "" : "\n") + message;
+                        return false;
+                    }
+                }
                 return true;
+            }
             append(d.errors, driver.diagnostics());
             for (const auto& message : driver.diagnostics()) {
                 if (!error.empty())

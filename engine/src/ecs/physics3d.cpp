@@ -1174,6 +1174,54 @@ Status3D WorldPhysicsState3D::teleport(flecs::entity entity, Vec3f position, Qua
     return status3d(true, {});
 }
 
+Status3D WorldPhysicsState3D::carry(flecs::entity entity, Vec3f position, Quatf turn) {
+    if (!entity.is_valid() || entity.world().c_ptr() != _ecs.c_ptr() || !entity.is_alive() ||
+        !std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+        !std::isfinite(turn.x) || !std::isfinite(turn.y) || !std::isfinite(turn.z) || !std::isfinite(turn.w))
+        return status3d(false, {"invalid portal carry target or pose"});
+    // A character: its feet there, its velocity and facing turned (teleport_character clears the velocity: given
+    // after it), what this system last wrote made the same, so the next step does not take it for a teleport again.
+    auto c = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
+    if (c != _characters.end() && c->entity == entity.id() && _physics.character_enabled(c->character)) {
+        const Vec3f velocity = _physics.character(c->character).velocity;
+        _physics.teleport_character(c->character, position);
+        _physics.set_character_velocity(c->character, turn.rotate(velocity));
+        if (auto* controller = EcsEntity{entity}.get_mut<CharacterController3D>()) {
+            controller->facing = (turn * controller->facing).normalized();
+            controller->input.forward = turn.rotate(controller->input.forward);
+            // Read before the next step: where it is now, going as it will (the next step takes the velocity).
+            controller->state = _physics.character(c->character);
+            controller->state.velocity = turn.rotate(velocity);
+        }
+        if (Transform3D* t = EcsEntity{entity}.get_mut<Transform3D>()) {
+            const PublishTransform publish{entity};
+            t->rotation = (turn * t->rotation).normalized();
+            c->last_rotation = c->simulation_rotation = t->rotation;
+        }
+        c->position = c->previous_position = position;
+        c->rotation = c->previous_rotation = (turn * c->rotation).normalized();
+        c->hands.clear();
+        write_character(*c, position);
+        return status3d(true, {});
+    }
+    // A dynamic body: its origin there, turned, its velocities turned.
+    auto b = std::ranges::lower_bound(_bound, entity.id(), {}, &Bound::entity);
+    if (b == _bound.end() || b->entity != entity.id() || !_physics.contains(b->body))
+        return status3d(false, {"entity has no character or bound body to carry"});
+    const Vec3f linear = _physics.linear_velocity(b->body), angular = _physics.angular_velocity(b->body);
+    const Quatf rotation = (turn * _physics.rotation(b->body)).normalized();
+    _physics.teleport(b->body, position, rotation);
+    if (b->motion == Body3DMotion::Dynamic) {
+        _physics.set_linear_velocity(b->body, turn.rotate(linear));
+        _physics.set_angular_velocity(b->body, turn.rotate(angular));
+    }
+    b->position = b->previous_position = _physics.position(b->body);
+    b->rotation = b->previous_rotation = _physics.rotation(b->body);
+    write_back(*b, b->position, b->rotation);
+    b->stamped = false;
+    return status3d(true, {});
+}
+
 void WorldPhysicsState3D::step(f32 dt) {
     if (!(dt > 0.0f)) {
         return;

@@ -121,6 +121,12 @@ void register_render3d_components(EcsWorld& world) {
                 "Its pictures' sharpness, a share of the view's (1: as sharp; each covers only where it shows).")
             .field("stand_in", &Portal3D::stand_in)
             .description("What it shows where it has no picture (its deepest level, in mirrors).");
+    if (!registry.find("PortalTraveller3D"))
+        registry.native<PortalTraveller3D>("PortalTraveller3D")
+            .field("enabled", &PortalTraveller3D::enabled)
+            .field("height", &PortalTraveller3D::height)
+            .units("m")
+            .description("Where above its origin it goes through a portal (a character's waist).");
     if (!registry.find("ReflectionProbe3D"))
         registry.native<ReflectionProbe3D>("ReflectionProbe3D")
             .field("enabled", &ReflectionProbe3D::enabled)

@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <deque>
+#include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/render3d/mesh3d.hpp>
 #include <kin/scene/planar_views3d.hpp>
@@ -141,12 +142,18 @@ std::optional<PortalStep3D> portal_step(EcsWorld& world, Vec3f from, Vec3f to) {
 }
 
 struct PlanarViews3D::Data {
+    // A view's sizing: since when it has been much larger than its pictures, and the largest picture since.
+    struct Room {
+        u64 since = 0;
+        Vec2i peak{};
+    };
     Renderer3D& renderer;
     PlanarSurfaces3D surfaces;
     Mesh3D quad, box;
     struct Entry {
         std::deque<View3D>
             views; // a mirror's one, a portal's a level each (a deque: a level's view stays put as more come)
+        std::deque<Room> room; // each view's
         ViewOptions3D options;
         u64 frame = 0;
     };
@@ -160,23 +167,51 @@ struct PlanarViews3D::Data {
         if (auto it = entries.find(id); it != entries.end())
             it->second.frame = frame;
     }
-    // The entity's `k`th view, `size`, with `options`: resized when its size changed, made again with its options.
-    View3D* view(EcsId id, u32 k, Vec2i size, const ViewOptions3D& options) {
+    // The entity's `k`th view for a picture `size` (at most `limit`), with `options`; made again with its options. A
+    // picture's window maps onto the whole of its view, so a view larger than the picture is only sharper. As the eye
+    // moves, a picture changes size (in steps of 64) many times a second, and each resize makes all the view's targets
+    // again: the atrium walked through made hundreds of textures a second, and memory below kin (SDL_GPU, the driver)
+    // grew with each. So a view grows at once when its picture outgrows it, an eighth (or 64 pixels) more than it, and
+    // shrinks only after three seconds of being larger than any picture it showed in them by more than a quarter (or
+    // 128 pixels), to the largest of them and 64 pixels: about a tenth of the resizes, for pictures a little larger.
+    View3D* view(EcsId id, u32 k, Vec2i size, Vec2i limit, const ViewOptions3D& options) {
         Entry& e = entries[id];
         e.frame = frame;
         if (e.options.hdr != options.hdr || e.options.samples != options.samples ||
             e.options.background != options.background) {
             e.views.clear();
+            e.room.clear();
             e.options = options;
         }
+        const auto grown = [&](int want, int most) {
+            return std::clamp((want + std::max(want / 8, 64) + 63) / 64 * 64, want, std::max(most, want));
+        };
+        const auto fitted = [&](int want, int most) { return std::clamp(want + 64, want, std::max(most, want)); };
+        const auto roomy = [](int want, int have) { return have > want + std::max(want / 4, 128); };
         while (e.views.size() <= k) {
-            auto made = renderer.create_view(size, options);
+            auto made = renderer.create_view({grown(size.x, limit.x), grown(size.y, limit.y)}, options);
             if (!made)
                 return nullptr;
             e.views.push_back(std::move(*made));
+            e.room.push_back({});
         }
         View3D& v = e.views[k];
-        if (v.texture().size() != size && !renderer.resize(v, size))
+        Room& room = e.room[k];
+        const Vec2i have = v.texture().size();
+        room.peak = {std::max(room.peak.x, size.x), std::max(room.peak.y, size.y)};
+        if (!(roomy(room.peak.x, have.x) || roomy(room.peak.y, have.y)))
+            room = {frame, size};
+        Vec2i want = have;
+        if (have.x < size.x || have.y < size.y) {
+            want = {have.x >= size.x ? have.x : grown(size.x, limit.x),
+                    have.y >= size.y ? have.y : grown(size.y, limit.y)};
+            room = {frame, size};
+        } else if (frame - room.since >= 180) {
+            want = {roomy(room.peak.x, have.x) ? fitted(room.peak.x, limit.x) : have.x,
+                    roomy(room.peak.y, have.y) ? fitted(room.peak.y, limit.y) : have.y};
+            room = {frame, size};
+        }
+        if (v.texture().size() != want && !renderer.resize(v, want))
             return nullptr;
         return &v;
     }
@@ -373,7 +408,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         if (bounds && d.surfaces.reflection) {
             // Only where the mirror shows (its ripples read a little round it: the margin), as sharp as the view.
             const PlanarPicture3D picture = planar_picture(*bounds, frame_size(c.resolution));
-            m.view = d.view(m.id, 0, picture.size, options);
+            m.view = d.view(m.id, 0, picture.size, frame_size(c.resolution), options);
             if (m.view) {
                 m.seen = mirror_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
                 crop_planar_view(m.seen, picture.window, f32(picture.size.x) / f32(picture.size.y), true);
@@ -385,7 +420,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 // map. Its murk is a height fog thickening fast under the surface (level water: its base height the
                 // surface's), about two thirds gone looking straight down `murk_depth` deep.
                 if (c.refraction > 0.0f && c.metallic < 1.0f)
-                    m.below_view = d.view(m.id, 1, picture.size, options);
+                    m.below_view = d.view(m.id, 1, picture.size, frame_size(c.resolution), options);
                 if (m.below_view) {
                     m.below = refraction_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
                     crop_planar_view(m.below, picture.window, f32(picture.size.x) / f32(picture.size.y), false);
@@ -433,7 +468,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 if (!seen)
                     break;
                 const PlanarPicture3D picture = planar_picture(*seen, frame);
-                View3D* view = d.view(p.id, p.shown, picture.size, options);
+                View3D* view = d.view(p.id, p.shown, picture.size, frame, options);
                 if (!view)
                     break;
                 PlanarView3D& level = p.chain[p.shown];
@@ -504,6 +539,53 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     for (const Portal& p : portals)
         (void)scene.set_draw_material(p.draw, p.shown ? p.levels[0] : p.stand_in);
     std::erase_if(d.entries, [&](const auto& e) { return e.second.frame != d.frame; });
+    return status3d(errors.empty(), std::move(errors));
+}
+
+Status3D PortalTravel3D::step(EcsWorld& world, WorldPhysicsState3D* physics) {
+    _crossings.clear();
+    Diagnostics3D errors;
+    std::unordered_map<u64, Vec3f> points;
+    world.each([&](flecs::entity entity, const PortalTraveller3D& c) {
+        if (!c.enabled)
+            return;
+        const auto* placed = entity.get<WorldTransform3D>();
+        const auto* local = entity.get<Transform3D>();
+        if (!local)
+            return;
+        // (A traveller has no parent, most often: its own Transform3D is its place, fresh from this step.)
+        const Mat4f world_matrix = entity.parent().is_valid() && placed ? placed->matrix : Mat4f{};
+        const Vec3f origin = entity.parent().is_valid() && placed
+                                 ? Vec3f{world_matrix.m[12], world_matrix.m[13], world_matrix.m[14]}
+                                 : local->position;
+        const Vec3f offset{0.0f, c.height, 0.0f};
+        Vec3f point = origin + offset;
+        if (const auto before = _points.find(entity.id()); before != _points.end())
+            if (const auto through = portal_step(world, before->second, point)) {
+                const Vec3f turned = through->turn.rotate(offset);
+                const Vec3f to = through->position - turned;
+                bool carried = false;
+                if (physics) {
+                    const auto status = physics->carry(entity, to, through->turn);
+                    carried = bool(status);
+                }
+                if (!carried && !entity.parent().is_valid()) {
+                    // No body: the transform itself.
+                    Transform3D* t = EcsEntity{entity}.get_mut<Transform3D>();
+                    t->position = to;
+                    t->rotation = (through->turn * t->rotation).normalized();
+                    carried = true;
+                }
+                if (carried) {
+                    point = through->position;
+                    _crossings.push_back({EcsEntity{entity}, through->portal, through->exit, through->turn});
+                } else {
+                    errors.push_back("portal travel: an entity under a parent, without a body, cannot be carried");
+                }
+            }
+        points[entity.id()] = point;
+    });
+    _points = std::move(points);
     return status3d(errors.empty(), std::move(errors));
 }
 

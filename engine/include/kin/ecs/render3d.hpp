@@ -198,6 +198,16 @@ struct Mirror3D {
 // drawn (two portals facing each other show their corridor that deep); the deepest, and the portal in other planar
 // views' pictures, is `stand_in`, unlit. Things go through it by portal_step (kin/scene/planar_views3d.hpp; Lua
 // scene3d.portal_step).
+// Goes through portals (PortalTravel3D, kin/scene/planar_views3d.hpp): when the point `height` above the entity's
+// origin (a character's waist: the openings may start above its feet) crosses an enabled portal's opening from its
+// front, the entity is put at the exit (its character or dynamic body carried by the physics, its velocity turned with
+// it: WorldPhysicsState3D::carry; else its Transform3D moved and turned). SceneSession3D runs it after each physics
+// step.
+struct PortalTraveller3D {
+    bool enabled = true;
+    f32 height = 1.0f;
+};
+
 struct Portal3D {
     bool enabled = true;
     Vec2f size{1.8f, 2.8f};
