@@ -186,7 +186,14 @@ struct Mirror3D {
     f32 distortion = 0.0f;
     f32 strength = 1.0f;   // how much of the reflection its picture is
     f32 resolution = 1.0f; // its picture's pixels' density, a share of the view's
-    Texture normal;        // runtime: normal_asset's (resolve_render3d_assets), or one from C++
+    // Water you see into (refraction_view): `refraction` of what is below shows through (0: none, a mirror), bent by
+    // the ripples by `refraction_distortion`, fading into `murk` as it deepens (half of it gone about `murk_depth`
+    // down).
+    f32 refraction = 0.0f;
+    f32 refraction_distortion = 0.1f;
+    Color murk = Color::rgb(28, 64, 70);
+    f32 murk_depth = 1.5f;
+    Texture normal; // runtime: normal_asset's (resolve_render3d_assets), or one from C++
     std::string bound_normal;
 };
 

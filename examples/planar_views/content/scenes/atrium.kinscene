@@ -1017,7 +1017,16 @@
       0.025,
       0.015
      ],
-     "distortion": 0.18
+     "distortion": 0.18,
+     "refraction": 1.0,
+     "refraction_distortion": 0.08,
+     "murk": [
+      18,
+      58,
+      66,
+      255
+     ],
+     "murk_depth": 0.5
     }
    }
   },

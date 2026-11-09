@@ -167,6 +167,18 @@ std::optional<Rectf> planar_on_screen(const Camera3D& camera, f32 aspect, Vec3f 
 // window's colour: 1 all). `params` must hold 20 at least.
 void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 distortion = 0.0f, f32 strength = 1.0f);
 
+// Water you see into: what is below `plane` (the side its normal does not face, from `offset` under it, so that the
+// surface itself is not in the picture), seen by `camera` itself, and the projector to read it where each point of the
+// surface shows (crop_planar_view cuts it to the surface's place on the screen, as a mirror's: `mirrored` false). The
+// water's surface (planar_reflection.surface.glsl) shows it, bent by its ripples, as the light that comes up through
+// it.
+PlanarView3D refraction_view(const Camera3D& camera, Vec4f plane, f32 aspect, f32 offset = 0.005f);
+// Its picture's projector and how it is read into a planar surface's parameters (after planar_view_params' 20: the
+// projector, then `strength` (0: none) and `distortion`, world units the ripples move where it is read, as a
+// reflection's).
+void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion = 0.1f,
+                              f32 strength = 1.0f);
+
 // A planar view cut down to `window` of its frame (Camera3D::window: where its surface shows, planar_on_screen's bounds
 // for a portal, the same turned left to right for a mirror, whose camera sees its frame flipped), for a picture
 // `window` of the frame's size: as sharp as the frame's pixels, for the window's share of the cost. `aspect`: the

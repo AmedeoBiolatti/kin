@@ -94,6 +94,9 @@ releases may change APIs.
 - Reflection probes baked to disk: `Renderer3D::save_reflection_capture` (a Radiance .hdr panorama) and
   `load_reflection_capture` (any 2:1 panorama, through the content), the component's `baked` (loaded instead of
   captured) and `ReflectionProbes3D::bake` (captures and writes every probe, setting `baked`).
+- Water you see into: `refraction_view` and `planar_refraction_params` (what is below a planar surface, bent by its
+  ripples, weighed by what its Fresnel does not reflect), and `Mirror3D::refraction`, `refraction_distortion`, `murk`,
+  `murk_depth` (the picture fogged by a height fog under the surface: deeper is murkier).
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
