@@ -53,6 +53,9 @@ releases may change APIs.
 - Water you see into: `refraction_view` and `planar_refraction_params` (what is below a planar surface, bent by its
   ripples, weighed by what its Fresnel does not reflect), and `Mirror3D::refraction`, `refraction_distortion`, `murk`,
   `murk_depth` (the picture fogged by a height fog under the surface: deeper is murkier).
+- Reflection probes lit by global illumination: `ReflectionCaptureOptions3D::global_illumination` lends a capture a
+  view's GI (its probes, read, not moved; `Renderer3D::global_illumination_lit`), and sessions' probes borrow their
+  view's, captured once more when it has settled (`ReflectionProbes3D::gi_settle`).
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds

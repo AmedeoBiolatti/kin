@@ -2845,8 +2845,14 @@ std::shared_ptr<IReflectionCaptureBackend3D> GpuRenderer3D::create_reflection_ca
     }
 }
 
+bool GpuRenderer3D::global_illumination_lit(IViewBackend3D& base) const {
+    const auto* view = dynamic_cast<const GpuView3D*>(&base);
+    return view && view->_gi.lit && view->_gi.irradiance;
+}
+
 bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3D& scene, Vec3f position,
-                                       const ReflectionCaptureOptions3D& options, RenderDebugStats3D& stats) {
+                                       const ReflectionCaptureOptions3D& options, IViewBackend3D* lighting,
+                                       RenderDebugStats3D& stats) {
     auto* capture = dynamic_cast<GpuReflectionCapture3D*>(&base);
     if (!capture)
         return false;
@@ -2871,15 +2877,19 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
     auto* view = dynamic_cast<GpuView3D*>(capture->view.get());
     if (!view)
         return false;
-    // Six square views, 90 degrees each, without the overlay, temporal anti-aliasing (each face would be one jittered
-    // frame) or global illumination (its light is a view's own and settles over frames).
+    // Six square views, 90 degrees each, without the overlay or temporal anti-aliasing (each face would be one
+    // jittered frame). Global illumination only borrowed from `lighting`'s view (its probes, as they stand): a view's
+    // own is made over frames, and a capture's would start dark.
     const Camera3D camera = scene.camera;
     const bool overlay = scene.show_overlay;
     const bool taa = scene.taa.enabled;
     const bool gi = scene.global_illumination.enabled;
+    const auto* lit_by = dynamic_cast<const GpuView3D*>(lighting);
+    const bool borrow = gi && lit_by && lit_by != view && lit_by->_gi.lit && lit_by->_gi.irradiance;
     scene.show_overlay = false;
     scene.taa.enabled = false;
-    scene.global_illumination.enabled = false;
+    scene.global_illumination.enabled = borrow;
+    _gi_borrowed = borrow ? lit_by : nullptr;
     struct Face {
         Vec3f forward, up;
     };
@@ -2925,6 +2935,9 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
     scene.show_overlay = overlay;
     scene.taa.enabled = taa;
     scene.global_illumination.enabled = gi;
+    _gi_borrowed = nullptr;
+    if (borrow)
+        ++stats.reflection_gi_captures;
     if (!ok)
         return false;
     // The faces into the panorama, then its mips (the filter reads them as an environment's).
@@ -12037,9 +12050,11 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             }
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
-            ctx.gi_resolved =
-                ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, ctx.taa && !ctx.taa_reset, stats);
-            view->_gi.area_resolved = ctx.gi_resolved && gi_area(commands, *view, scene, ctx.main_projection, stats);
+            ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, _gi_borrowed, scene, ctx.main_projection,
+                                                       ctx.taa && !ctx.taa_reset, stats);
+            // (A view borrowing another's GI has no area lights' light: theirs is that view's, on its own pixels.)
+            view->_gi.area_resolved =
+                !_gi_borrowed && ctx.gi_resolved && gi_area(commands, *view, scene, ctx.main_projection, stats);
             // (Added to a float picture after the main pass: an HDR view's or temporal anti-aliasing's.)
             ctx.fog_sun =
                 ctx.fog_sun_wanted && ctx.fog && (view->_hdr || ctx.taa) && fog_sun(commands, *view, ctx, stats);
@@ -13160,11 +13175,15 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
          },
          [&] { return local_shadow_pass(ctx); },
          [&] {
-             ctx.gi = gi_scene(ctx.commands, *view, scene, stats);
+             // (A capture borrowing a view's GI builds none of its own: that view's probes light it.)
+             ctx.gi = !_gi_borrowed && gi_scene(ctx.commands, *view, scene, stats);
              return true;
          },
          [&] {
-             if (ctx.gi) {
+             if (_gi_borrowed) {
+                 ctx.gi_lit = _lights_available && _gi_borrowed->_gi.lit && _gi_borrowed->_gi.irradiance;
+                 ctx.lights_variant = ctx.lights_variant || ctx.gi_lit;
+             } else if (ctx.gi) {
                  const Mat4f to_environment =
                      Mat4f::rotation_y(ctx.sky_env_used ? 0.0f : -scene.lights.environment_rotation);
                  ctx.gi_lit =

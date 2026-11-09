@@ -275,10 +275,13 @@ public:
     virtual std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
     // Reflection probes' pictures (render3d/reflection_probes3d.hpp): none where unsupported.
     virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32) { return {}; }
+    // `lighting`: ReflectionCaptureOptions3D::global_illumination's view (null: none).
     virtual bool capture_reflection(IReflectionCaptureBackend3D&, Scene3D&, Vec3f, const ReflectionCaptureOptions3D&,
-                                    RenderDebugStats3D&) {
+                                    IViewBackend3D* /*lighting*/, RenderDebugStats3D&) {
         return false;
     }
+    // Whether a view's global illumination has light (its probes traced at least once): what a capture borrows.
+    virtual bool global_illumination_lit(IViewBackend3D&) const { return false; }
     // A capture's panorama read back (linear RGB floats, rows top to bottom), and one made from such a picture (2:1).
     virtual bool read_reflection_capture(IReflectionCaptureBackend3D&, std::vector<f32>&, Vec2i&) { return false; }
     virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i, std::span<const f32>) {

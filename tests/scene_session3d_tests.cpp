@@ -1278,7 +1278,35 @@ void gpu_probes(Renderer2D& renderer) {
     baked_frame();
     check(baked.scene()->lights.reflection_probes[0].capture.backend()->generation() == 1,
           "moving a baked probe captured it");
-    std::cout << "probe session: placed, captured when needed, baked\n";
+    // With global illumination: the probes are lit by the session's view's GI; one captured before it had settled (its
+    // first frame) is captured once more when it has (ReflectionProbes3D::gi_settle updates of light), then not again.
+    write(scratch.path / "probes_gi.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"gi_enabled":true,
+        "gi_min":[-4,-1,-4],"gi_max":[4,4,4]}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,0.5,0]},"ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"room","components":{"Transform3D":{"position":[0,1,0]},
+        "ReflectionProbe3D":{"extent":[6,3,6],"resolution":16}}}]})");
+    if (r3d.capabilities().global_illumination) {
+        SceneSession3D lit{r3d, assets, options};
+        check(lit.load("probes_gi.kinscene"), "GI probes scene failed");
+        std::vector<u64> captured;
+        u32 borrowed = 0;
+        for (int i = 0; i < 90; ++i) {
+            renderer.clear();
+            if (!lit.render())
+                for (const auto& e : lit.diagnostics())
+                    std::cerr << e << '\n';
+            renderer.present();
+            captured.push_back(lit.scene()->lights.reflection_probes.at(0).capture.backend()->generation());
+            borrowed += r3d.debug_stats().gi_resolved ? 1 : 0;
+        }
+        std::cerr << "GI probe captures: first " << captured.front() << ", last " << captured.back() << '\n';
+        check(captured.front() == 1 && captured.back() == 2 && captured[captured.size() - 2] == 2,
+              "a probe captured before the GI settled was not captured again, once");
+        check(borrowed > 0, "the session's GI did not light its view");
+    }
+    std::cout << "probe session: placed, captured when needed, baked, lit by the GI\n";
 }
 
 // The same over a game-owned world (SceneFrame3D::collect, no session): the authored SceneEnvironment3D sets the

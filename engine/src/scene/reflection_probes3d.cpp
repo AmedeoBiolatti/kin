@@ -20,12 +20,14 @@ struct ReflectionProbes3D::Data {
         u32 recapture = 0;
         f32 captured_at = 0.0f;
         bool captured = false;
-        u64 seen = 0;      // the update it was last in
-        std::string baked; // the picture it was loaded from (ReflectionProbe3D::baked), if any
+        u64 seen = 0;           // the update it was last in
+        std::string baked;      // the picture it was loaded from (ReflectionProbe3D::baked), if any
+        bool unsettled = false; // captured before the lighting view's GI had settled (captured again once it has)
     };
     std::unordered_map<u64, Probe> probes;
     u64 updates = 0;
     u32 placed = 0, captured = 0;
+    u32 lit_updates = 0; // updates in a row the lighting view's GI has had light
 };
 
 ReflectionProbes3D::ReflectionProbes3D(Renderer3D& renderer, std::filesystem::path content)
@@ -40,9 +42,13 @@ u32 ReflectionProbes3D::captures() const {
     return _data->captured;
 }
 
-Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene) {
+Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene, const View3D* lighting) {
     Data& d = *_data;
     ++d.updates;
+    // How settled the borrowed GI is: probes captured before it was are captured again, once, when it is.
+    const bool gi = lighting && scene.global_illumination.enabled;
+    d.lit_updates = gi && d.renderer.global_illumination_lit(*lighting) ? d.lit_updates + 1 : 0;
+    const bool settled = gi && d.lit_updates >= gi_settle;
     d.placed = d.captured = 0;
     Diagnostics3D errors;
     struct Due {
@@ -100,7 +106,8 @@ Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene) {
                          rotation.w * p.rotation.w;
         const bool moved = length(position - p.position) > 1e-4f || std::abs(std::abs(turn) - 1.0f) > 1e-6f;
         const bool clock = c.interval > 0.0f && scene.time - p.captured_at >= c.interval;
-        const bool live = p.baked.empty() && (!p.captured || moved || clock || c.every_frame);
+        const bool live =
+            p.baked.empty() && (!p.captured || moved || clock || c.every_frame || (p.unsettled && settled));
         if (live || c.recapture != p.recapture)
             due.push_back({entity.id(), c.hide_self ? static_cast<u32>(entity.id()) : 0u, std::max(c.z_near, 1e-4f)});
         p.position = position;
@@ -126,24 +133,27 @@ Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene) {
     // The captures, of the scene with every probe placed (so each sees the others, as last captured).
     for (const Due& c : due) {
         Data::Probe& p = d.probes[c.id];
-        if (!d.renderer.capture_reflection(p.capture, scene, p.position, {.z_near = c.z_near, .hidden_id = c.hidden})) {
+        if (!d.renderer.capture_reflection(
+                p.capture, scene, p.position,
+                {.z_near = c.z_near, .hidden_id = c.hidden, .global_illumination = gi ? lighting : nullptr})) {
             const auto& why = d.renderer.diagnostics();
             errors.insert(errors.end(), why.begin(), why.end());
             continue;
         }
         p.captured = true;
         p.captured_at = scene.time;
+        p.unsettled = gi && !settled;
         ++d.captured;
     }
     return status3d(errors.empty(), std::move(errors));
 }
 
 Status3D ReflectionProbes3D::bake(EcsWorld& world, Scene3D& scene, const std::filesystem::path& content,
-                                  const std::filesystem::path& folder) {
+                                  const std::filesystem::path& folder, const View3D* lighting) {
     Data& d = *_data;
     Diagnostics3D errors;
     // Placed first, so each capture sees the others (as last captured or loaded).
-    if (auto placed = update(world, scene); !placed)
+    if (auto placed = update(world, scene, lighting); !placed)
         return placed;
     std::vector<flecs::entity> probes;
     world.each([&](flecs::entity entity, const ReflectionProbe3D& c) {
@@ -156,9 +166,11 @@ Status3D ReflectionProbes3D::bake(EcsWorld& world, Scene3D& scene, const std::fi
             continue;
         Data::Probe& p = it->second;
         const auto* c = entity.get<ReflectionProbe3D>();
-        if (!d.renderer.capture_reflection(p.capture, scene, p.position,
-                                           {.z_near = std::max(c->z_near, 1e-4f),
-                                            .hidden_id = c->hide_self ? static_cast<u32>(entity.id()) : 0u})) {
+        if (!d.renderer.capture_reflection(
+                p.capture, scene, p.position,
+                {.z_near = std::max(c->z_near, 1e-4f),
+                 .hidden_id = c->hide_self ? static_cast<u32>(entity.id()) : 0u,
+                 .global_illumination = scene.global_illumination.enabled ? lighting : nullptr})) {
             const auto& why = d.renderer.diagnostics();
             errors.insert(errors.end(), why.begin(), why.end());
             continue;
