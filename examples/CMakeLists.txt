@@ -135,6 +135,18 @@ if(KIN_EXPERIMENTAL_3D)
     target_link_libraries(blockfield_render_compare PRIVATE kin_blockfield_world)
     add_executable(industrial_yard industrial_yard/main.cpp)
     target_link_libraries(industrial_yard PRIVATE kin::engine)
+    # planar_views: mirrors, still water and portals; kin's planar surfaces compiled at build time (kin_planar_surfaces).
+    if(KIN_GLSLC)
+        add_executable(planar_views planar_views/main.cpp)
+        target_link_libraries(planar_views PRIVATE kin::engine)
+        kin_planar_surfaces(planar_views)
+        # planar_atrium: the same as an authored scene (Mirror3D, Portal3D, material graphs, Lua) in a SceneSession3D.
+        add_executable(planar_atrium planar_views/atrium.cpp)
+        target_link_libraries(planar_atrium PRIVATE kin::engine)
+        target_compile_definitions(planar_atrium PRIVATE
+            ATRIUM_CONTENT="${CMAKE_CURRENT_SOURCE_DIR}/planar_views/content")
+        kin_planar_surfaces(planar_atrium)
+    endif()
     # material_gallery: imported materials (kin_import_material --graphs) on pedestals; content not in the repository.
     add_executable(material_gallery material_gallery/main.cpp)
     target_link_libraries(material_gallery PRIVATE kin::engine)

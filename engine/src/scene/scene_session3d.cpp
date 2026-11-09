@@ -454,6 +454,8 @@ struct SceneSession3D::Data {
         Scene3D scene;
         View3D view;
         ViewOptions3D options;
+        std::unique_ptr<PlanarViews3D> planar; // made for the first Mirror3D or Portal3D
+        f64 clock = 0;                         // seconds stepped: Scene3D::time (a material graph's `time`)
         std::vector<std::filesystem::path> dependencies;
         std::map<std::filesystem::path, SourceStamp> watches;
         std::map<u64, Spawned> spawned;
@@ -713,6 +715,12 @@ struct SceneSession3D::Data {
                 for (const auto& source : collider.asset_binding->source_files)
                     watch(state, source);
         });
+        inspect_components<Mirror3D>(state.world.raw(), [&](flecs::entity, const Mirror3D& mirror) {
+            if (!mirror.normal_asset.id.empty())
+                watch(state, mirror.normal_asset.id);
+            if (!mirror.bound_normal.empty())
+                watch(state, mirror.bound_normal);
+        });
         inspect_components<ParticleEmitter3D>(state.world.raw(), [&](flecs::entity, const ParticleEmitter3D& emitter) {
             if (!emitter.texture_asset.id.empty())
                 watch(state, emitter.texture_asset.id);
@@ -905,6 +913,7 @@ struct SceneSession3D::Data {
             append(errors, frame.diagnostics());
             return false;
         }
+        state.scene.time = f32(state.clock); // (compose may set its own)
         if (state.script_background)
             view_options.background = *state.script_background;
         if (options.compose) {
@@ -2454,6 +2463,7 @@ bool SceneSession3D::step_operation(f32 dt) {
     }
     try {
         auto& state = *d.current;
+        state.clock += dt;
         if (state.script) {
             BoolScope callback(state.script_callback);
             if (!state.script->call_update(d.script_context(dt))) {
@@ -2619,6 +2629,16 @@ bool SceneSession3D::render_operation(f32 alpha) {
         return configuration_error("no renderer");
     if (!collect_operation(alpha))
         return false;
+    auto& state = *_data->current;
+    if (state.planar || state.world.raw().count<Mirror3D>() > 0 || state.world.raw().count<Portal3D>() > 0) {
+        if (!state.planar)
+            state.planar = std::make_unique<PlanarViews3D>(_data->renderer, _data->options.planar_surfaces);
+        const auto planar = state.planar->render(state.world, state.scene, _data->options.viewport, state.options);
+        if (!planar) {
+            _data->errors = planar.diagnostics;
+            return false;
+        }
+    }
     if (_data->renderer.render(_data->current->view, _data->current->scene))
         return true;
     _data->errors = _data->renderer.diagnostics();

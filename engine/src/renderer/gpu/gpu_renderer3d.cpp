@@ -254,9 +254,22 @@ constexpr f32 overlay_split = 0.9f;
 // mesh.vert's uniforms, a draw.
 struct DrawUniforms {
     f32 view_projection[16];
-    u32 first[4]; // x: the draw's first instance
+    u32 first[4];                           // x: the draw's first instance
+    f32 clip[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // Camera3D::clip_plane (the default keeps everything: the shadows')
 };
-static_assert(sizeof(DrawUniforms) == 80);
+static_assert(sizeof(DrawUniforms) == 96);
+// A camera pass's clip plane into a draw's uniforms.
+void put_clip(f32 (&clip)[4], const Camera3D& camera) {
+    clip[0] = camera.clip_plane.x;
+    clip[1] = camera.clip_plane.y;
+    clip[2] = camera.clip_plane.z;
+    clip[3] = camera.clip_plane.w;
+}
+void put_clip(f32 (&clip)[4], const Scene3D* scene) {
+    if (scene) {
+        put_clip(clip, scene->camera);
+    }
+}
 
 // mesh.frag's: the frame's (slot 0) and the draw's (slot 1). The sizes below
 // are those of the std140 blocks in the GLSL (cascade_end and _blend are vec4s):
@@ -338,15 +351,16 @@ struct ContactUniforms {
     f32 shape[4]; // distance, thickness, intensity, steps
 };
 static_assert(sizeof(ContactUniforms) == 208);
-// prepass_velocity.vert's and mesh_velocity.vert's, a draw. DrawUniforms is its first 80 bytes, so that a pipeline with
+// prepass_velocity.vert's and mesh_velocity.vert's, a draw. DrawUniforms is its first 96 bytes, so that a pipeline with
 // mesh.vert (a custom shader's) can be given the same block in the main pass.
 struct VelocityUniforms {
-    f32 view_projection[16]; // jittered: where the pixel is drawn
-    u32 first[4];            // x: the draw's first instance
-    f32 current[16];         // this frame's, without the jitter
-    f32 prior[16];           // the last frame's
+    f32 view_projection[16];                // jittered: where the pixel is drawn
+    u32 first[4];                           // x: the draw's first instance
+    f32 clip[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // Camera3D::clip_plane
+    f32 current[16];                        // this frame's, without the jitter
+    f32 prior[16];                          // the last frame's
 };
-static_assert(sizeof(VelocityUniforms) == 208);
+static_assert(sizeof(VelocityUniforms) == 224);
 // taa.comp's.
 struct TaaUniforms {
     f32 sizes[4];  // the picture's width and height, and 1 over them
@@ -542,8 +556,9 @@ struct ParticleDrawUniforms {
     f32 sun_light[4];
     FogParamUniforms fog;
     AtmosphereUniforms sky;
+    f32 clip[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // Camera3D::clip_plane
 };
-static_assert(sizeof(ParticleDrawUniforms) == 368);
+static_assert(sizeof(ParticleDrawUniforms) == 384);
 struct ParticleFragUniforms {
     f32 tint[4];
     f32 flags[4];     // encode, decode the texture, the blend, 1 with a texture
@@ -689,6 +704,8 @@ LodView lod_view_of(const Lod3D& lod, const RenderDebugOptions3D& debug, const C
     v.pixels = std::max(lod.error_pixels, 0.0f) / std::max(lod.bias, 1e-3f);
     v.per_unit = v.orthographic ? viewport_height / std::max(camera.height, 1e-6f)
                                 : 0.5f * viewport_height / std::tan(0.5f * camera.fov * (3.14159265358979f / 180.0f));
+    if (camera.windowed() && camera.window.h > 0.0f)
+        v.per_unit /= camera.window.h; // a window's pixels are denser than the frame's
     v.eye = camera.position;
     v.forward = camera.forward();
     return v;
@@ -4456,6 +4473,7 @@ struct GpuRenderer3D::FrameCtx {
     std::array<Mat4f, 2> view_projections{}; // exact
     std::array<Mat4f, 2> drawn{};            // with the temporal anti-aliasing's jitter
     std::array<GpuFrustum, 2> frustums{};
+    std::array<GpuFrustum, 2> whole_frustums{}; // without the clip plane: for draws it does not cut (DrawClip3D)
     bool sun_shines = false;
     bool decals = false; // Scene3D::decals to draw (they need the pre-pass)
     bool contact_wanted =
@@ -4668,7 +4686,7 @@ std::shared_ptr<IPreparedSceneBackend3D> GpuRenderer3D::prepare(const Scene3D& s
                                     centre, radius);
                     prepared->scales[first + i] = sphere_of(instance.transform, centre, radius, world, world_radius);
                     prepared->spheres[first + i] = {world.x, world.y, world.z, world_radius};
-                    prepared->records[first + i] = pack_instance(instance, draw.material.color);
+                    prepared->records[first + i] = pack_instance(instance, draw.material.color, draw.clip);
                 }
             };
             constexpr u32 chunk = 1024;
@@ -5987,6 +6005,7 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     }
     ParticleDrawUniforms v{};
     std::memcpy(v.view_projection, ctx.drawn[0].m, sizeof(v.view_projection));
+    put_clip(v.clip, camera);
     put(v.right, camera.right(), 0.0f);
     put(v.up, camera.up(), 0.0f);
     put(v.eye, camera.position, orthographic ? 1.0f : 0.0f);
@@ -6109,7 +6128,7 @@ SDL_GPUTextureSamplerBinding GpuRenderer3D::texture_binding(const Texture& textu
     const auto* gpu = backend && backend->kind() == ITextureBackend::Kind::Gpu
                           ? static_cast<const GpuTextureBackend*>(backend)
                           : nullptr;
-    return gpu && gpu->texture()
+    return gpu && gpu->texture() && gpu->texture().handle() != _drawn_picture
                ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), sampler_for(*gpu, wrap_u, wrap_v, sampler)}
                : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear};
 }
@@ -6194,7 +6213,11 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s]) {
             ctx.view_projections[s] = ctx.scenes[s]->camera.view_projection(ctx.aspect);
-            ctx.frustums[s] = frustum_of(ctx.view_projections[s]);
+            ctx.frustums[s] = ctx.whole_frustums[s] = frustum_of(ctx.view_projections[s]);
+            const Camera3D& camera = ctx.scenes[s]->camera;
+            if (const f32 n = length(camera.clip_plane.xyz()); camera.clipped() && n > 0 && std::isfinite(n))
+                ctx.frustums[s].planes[ctx.frustums[s].count++] = {camera.clip_plane.x / n, camera.clip_plane.y / n,
+                                                                   camera.clip_plane.z / n, camera.clip_plane.w / n};
         }
     }
     // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy and mip bias.
@@ -8300,7 +8323,7 @@ void GpuRenderer3D::push_local_lights(const FrameCtx& ctx, u32 s, u32 slot) {
     SDL_PushGPUFragmentUniformData(ctx.commands, slot, &u, sizeof(u));
 }
 
-GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color material) const {
+GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color material, DrawClip3D clip) const {
     const Color m = material;
     GpuInstance3D g;
     std::memcpy(g.model, instance.transform.m, sizeof(g.model));
@@ -8311,7 +8334,8 @@ GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color
     const Vec3f x = cross(c1, c2);
     const f32 sign = dot(c0, x) < 0.0f ? -1.0f : 1.0f;
     const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
-    f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
+    // (the second column's w: how the clip plane meets the copy, kin_clip_distance)
+    f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, f32(clip), n2.x, n2.y, n2.z, 0.0f};
     const u32 id = instance.id + 1; // 0: nothing there
     std::memcpy(&normal[3], &id, sizeof(id));
     std::memcpy(g.normal, normal, sizeof(g.normal));
@@ -8550,7 +8574,8 @@ void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
                 for (const auto& ref : _refs)
                     if (ref.scene == s && eligible(ref))
                         for (u32 i = 0; i < ref.draw->count; ++i) {
-                            const auto record = pack_instance(ref.instances[i], ref.draw->material.color);
+                            const auto record =
+                                pack_instance(ref.instances[i], ref.draw->material.color, ref.draw->clip);
                             std::memcpy(out.data() + std::size_t(ref.draw->first + i) * sizeof(record), &record,
                                         sizeof(record));
                         }
@@ -8912,8 +8937,11 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                                     draw.material.casts_shadow && !draw.material.wireframe;
                 _refs.push_back(
                     {&draw, draw.batch ? draw.batch.instances().data() : ctx.scenes[s]->instances().data() + draw.first,
-                     mesh, s, ctx.scenes[s]->cull ? &ctx.frustums[s] : nullptr, caster, b.center(), b.radius(), 0, 0,
-                     0});
+                     mesh, s,
+                     !ctx.scenes[s]->cull              ? nullptr
+                     : draw.clip == DrawClip3D::camera ? &ctx.frustums[s]
+                                                       : &ctx.whole_frustums[s],
+                     caster, b.center(), b.radius(), 0, 0, 0});
                 _refs.back().batch = bool(draw.batch);
                 if (draw.skinned) {
                     DrawRef& ref = _refs.back();
@@ -8963,7 +8991,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     }
     if (reuse)
         for (DrawRef& ref : _refs) {
-            ref.frustum = ctx.scenes[ref.scene]->cull ? &ctx.frustums[ref.scene] : nullptr;
+            ref.frustum = !ctx.scenes[ref.scene]->cull           ? nullptr
+                          : ref.draw->clip == DrawClip3D::camera ? &ctx.frustums[ref.scene]
+                                                                 : &ctx.whole_frustums[ref.scene];
             ref.caster = ctx.shadows && ref.scene == 0 &&
                          (ref.draw->material.blend == Blend3D::Opaque || ref.draw->material.blend == Blend3D::Mask) &&
                          ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
@@ -9446,7 +9476,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             if (ctx.prepared) {
                 _preparation_rows[at] = ref.prepared_first + static_cast<u32>(&instance - ref.instances);
             } else {
-                const GpuInstance3D g = pack_instance(instance, ref.draw->material.color);
+                const GpuInstance3D g = pack_instance(instance, ref.draw->material.color, ref.draw->clip);
                 std::memcpy(out + static_cast<std::size_t>(at) * sizeof(GpuInstance3D), &g, sizeof(g));
             }
         };
@@ -10215,6 +10245,7 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
             set_viewport(pass, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+            put_clip(u.clip, ctx.scenes[0]); // (what is behind a mirror hides nothing in its reflection)
             // the shadow vertex shaders' second buffer is a list this does not use; a skinned copy's also read the
             // joints
             const std::array<SDL_GPUBuffer*, 4> buffers{storage, storage, ctx.joints, ctx.joint_offsets};
@@ -10304,12 +10335,14 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx, u32 phase) {
         std::memcpy(p.cut[s], cut, sizeof(cut));
     }
     const auto put_frustum = [&](u32 f, const GpuFrustum& frustum) {
-        for (u32 k = 0; k < frustum.count; ++k) {
+        // Six a view: a camera's clip plane (the seventh) is left to the vertex shaders here.
+        const u32 count = std::min(frustum.count, 6u);
+        for (u32 k = 0; k < count; ++k) {
             const Vec4f& plane = frustum.planes[k];
             const f32 v[4] = {plane.x, plane.y, plane.z, plane.w};
             std::memcpy(p.planes[f * 6 + k], v, sizeof(v));
         }
-        p.counts[f >> 2][f & 3] = frustum.count;
+        p.counts[f >> 2][f & 3] = count;
     };
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s]) {
@@ -11775,6 +11808,7 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     }
     VelocityUniforms u{};
     std::memcpy(u.view_projection, ctx.drawn[which].m, sizeof(u.view_projection));
+    put_clip(u.clip, ctx.scenes[which]);
     std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
     std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[which].m, sizeof(u.prior));
     // A skinned copy's shader also reads the joints (the frame's, each copy's first), and those of the frame before
@@ -11912,6 +11946,7 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
                      !which && ctx.overlaid ? overlay_split : 1);
         VelocityUniforms u{};
         std::memcpy(u.view_projection, ctx.drawn[which].m, sizeof(u.view_projection));
+        put_clip(u.clip, ctx.scenes[which]);
         std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
         std::memcpy(u.prior, view->_taa_prior[which].m, sizeof(u.prior));
         for (const auto index : _order) {
@@ -12001,6 +12036,7 @@ bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL
     set_viewport(prepass, view->_size.x, view->_size.y);
     DrawUniforms u{};
     std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+    put_clip(u.clip, ctx.scenes[0]);
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{prepass};
     _phase = !ctx.occlusion ? Phase::All : second ? Phase::Second : Phase::First;
@@ -12531,6 +12567,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // (the pre-pass's, from the same frame: the overlay has its own).
     const auto fill_uniforms = [&](auto& u, u32 s) {
         std::memcpy(u.view_projection, ctx.drawn[s].m, sizeof(u.view_projection));
+        put_clip(u.clip, ctx.scenes[s]);
         if constexpr (std::is_same_v<std::decay_t<decltype(u)>, VelocityUniforms>) {
             std::memcpy(u.current, ctx.view_projections[s].m, sizeof(u.current));
             std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[s].m, sizeof(u.prior));
@@ -13450,6 +13487,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
             set_viewport(picking, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
+            put_clip(u.clip, ctx.scenes[0]);
             SDL_GPUBuffer* cluster_index = cluster_index_buffer();
             DrawBinder binder{picking};
             for (const u32 index : _order) {
@@ -13582,6 +13620,7 @@ bool GpuRenderer3D::render_visibility(const VisibilityTargets3D& targets, IPrepa
         set_viewport(picking, scratch._size.x, scratch._size.y);
         DrawUniforms u{};
         std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
+        put_clip(u.clip, ctx.scene.camera);
         const u32 ids[4] = {options.target_id, options.ignored_id.value_or(0), options.ignored_id ? 1u : 0u, 0};
         SDL_PushGPUFragmentUniformData(commands, 1, ids, sizeof(ids));
         DrawBinder binder{picking};
@@ -13774,6 +13813,14 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     const std::array material_outputs{view->texture()};
     if (!validate_material_inputs(scene, material_outputs, &input_signature))
         return false;
+    // A material whose map is this view's picture (a mirror's or a portal's, drawn into its own view) reads white here.
+    struct DrawnPicture {
+        SDL_GPUTexture*& slot;
+        ~DrawnPicture() { slot = nullptr; }
+    } drawn_picture{_drawn_picture};
+    if (const auto* own = dynamic_cast<const GpuTextureBackend*>(view->texture().backend().get());
+        own && own->texture())
+        _drawn_picture = own->texture().handle();
     FrameCtx ctx{view, scene, stats};
     ctx.input_signature = input_signature;
     ctx.prepared = prepared;

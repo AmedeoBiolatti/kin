@@ -1,6 +1,7 @@
 #include "result3d_helpers.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <kin/platform/app.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/scene/planar_views3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
@@ -1019,6 +1021,143 @@ void gpu_pick(Renderer2D& renderer) {
           "pick without a pick pass did not say why");
     renderer.present();
 }
+// Mirrors and portals authored in a scene (Mirror3D, Portal3D; PlanarViews3D through render()): through the portal
+// the view shows what a camera standing where the portals take the eye sees; without the planar surfaces the portal
+// is its stand-in colour; portal_step goes through it; a mirror's scene renders.
+void gpu_planar(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
+    // Two portals facing +Z, 20 m apart; the model in front of the exit; the eye 6 m in front of the entry.
+    write(scratch.path / "portals.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"entry","components":{"Transform3D":{},"Portal3D":{"size":[2,2],"exit":"exit","stand_in":[255,0,0,255],
+        "resolution":1}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[2,2],"exit":"entry"}}},
+      {"id":"box","components":{"Transform3D":{"position":[20,0,4]},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    // What the eye sees through it: from 6 m behind the exit, turned half round (looking +Z), no portals.
+    write(scratch.path / "direct.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[20,0,-6],"rotation":[0,1,0,0]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"box","components":{"Transform3D":{"position":[20,0,4]},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    write(scratch.path / "mirror.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,2,6],"rotation":[-0.1305,0,0,0.9914]},
+        "SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"floor","components":{"Transform3D":{"rotation":[-0.7071068,0,0,0.7071068]},"Mirror3D":{"size":[12,12]}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,1,0]},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    const auto surfaces = compile_planar_surfaces(r3d);
+    if (!surfaces) {
+        std::cout << "planar session checks skipped (no glslc for the planar surfaces)\n";
+        return;
+    }
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    const auto centre = [&](SceneSession3D& session) {
+        renderer.clear();
+        if (!session.render())
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        renderer.draw_texture(session.view()->texture(), {0, 0, 160, 120});
+        std::vector<u8> pixels;
+        Vec2i size;
+        check(renderer.read_rgba({0, 0, 160, 120}, pixels, size) && size == Vec2i{160, 120}, "planar read failed");
+        renderer.present();
+        const u8* c = &pixels[(60 * 160 + 80) * 4];
+        return std::array<int, 3>{c[0], c[1], c[2]};
+    };
+    SceneSession3D direct{r3d, assets, options};
+    check(direct.load("direct.kinscene"), "direct scene failed");
+    const auto expected = centre(direct);
+    check(!(expected[0] > 200 && expected[1] < 50), "the direct view is red");
+    // Without the planar surfaces: the stand-in.
+    SceneSession3D plain{r3d, assets, options};
+    check(plain.load("portals.kinscene"), "portal scene failed");
+    const auto red = centre(plain);
+    check(red[0] > 240 && red[1] < 15 && red[2] < 15, "a portal without its surface is not its stand-in");
+    // With them: the box, as the direct view has it.
+    options.planar_surfaces = *surfaces;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("portals.kinscene"), "portal scene failed");
+    const auto seen = centre(session);
+    for (int i = 0; i < 3; ++i)
+        check(std::abs(seen[size_t(i)] - expected[size_t(i)]) <= 12, "the portal does not show what is beyond it");
+    // Going through it: in at the entry's front, out of the exit's, the rest of the step after.
+    const auto step = portal_step(*session.world(), {0.5f, 0, 1}, {0.5f, 0, -1});
+    check(step && step->portal.id() == session.entity("entry").id() && step->exit.id() == session.entity("exit").id(),
+          "portal_step missed the portal");
+    check(std::abs(step->position.x - 19.5f) < 1e-4f && std::abs(step->position.z - 1) < 1e-4f,
+          "portal_step did not come out of the exit's front");
+    check(!portal_step(*session.world(), {5, 0, 1}, {5, 0, -1}), "portal_step went through beside the opening");
+    // Half-way through: a model straddling the entry is drawn at the exit too (PlanarViews3D's images), so the view
+    // through the portal shows it beyond the exit. The model is mostly through the entry (its front face just behind
+    // the entry's plane: none of it shows before the portal), right of centre; through the portal, the eye sees its
+    // image where it would see the model's far part.
+    write(scratch.path / "straddle.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"entry","components":{"Transform3D":{},"Portal3D":{"size":[4,4],"exit":"exit","stand_in":[255,0,0,255]}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[4,4],"exit":"entry"}}},
+      {"id":"box","components":{"Transform3D":{"position":[0.8,0,-0.35],"scale":[0.6,0.6,0.6]},
+        "ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    SceneSession3D straddle{r3d, assets, options};
+    check(straddle.load("straddle.kinscene"), "straddle scene failed");
+    renderer.clear();
+    check(straddle.render(), "straddle render failed");
+    renderer.draw_texture(straddle.view()->texture(), {0, 0, 160, 120});
+    std::vector<u8> pixels;
+    Vec2i size;
+    check(renderer.read_rgba({0, 0, 160, 120}, pixels, size), "straddle read failed");
+    renderer.present();
+    const auto image_at = straddle.scene()->camera.project({0.8f, 0, -0.35f}, {0, 0, 160, 120});
+    check(bool(image_at), "straddle point off screen");
+    const u8* image = &pixels[(std::size_t(image_at->pos.y) * 160 + std::size_t(image_at->pos.x)) * 4];
+    const u8* empty = &pixels[(60 * 160 + 80) * 4]; // the picture's background beyond the exit, nothing in it
+    check(std::abs(int(image[0]) - int(empty[0])) + std::abs(int(image[1]) - int(empty[1])) +
+                  std::abs(int(image[2]) - int(empty[2])) >
+              30,
+          "the part through the portal is not drawn beyond its exit");
+    // Neither half is cut by the pictures' clip planes: the image whole, the box again whole in the pictures only.
+    std::size_t whole = 0, if_cut = 0;
+    for (const Scene3D::Draw& draw : straddle.scene()->draws()) {
+        whole += draw.clip == DrawClip3D::whole ? draw.count : 0;
+        if_cut += draw.clip == DrawClip3D::whole_if_cut ? draw.count : 0;
+    }
+    check(whole > 0 && if_cut == whole, "the straddling box's draws are cut by the pictures' clip planes");
+    // A floor through the portal's plane is too large to be going through it: no image of it (drawn whole, it would
+    // stand in front of every picture).
+    write(scratch.path / "straddle_floor.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"entry","components":{"Transform3D":{},"Portal3D":{"size":[4,4],"exit":"exit","stand_in":[255,0,0,255]}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[4,4],"exit":"entry"}}},
+      {"id":"box","components":{"Transform3D":{"position":[0.8,0,-0.35],"scale":[0.6,0.6,0.6]},
+        "ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"floor","components":{"Transform3D":{"position":[0,-1.5,0],"scale":[30,0.1,30]},
+        "ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    SceneSession3D floored{r3d, assets, options};
+    check(floored.load("straddle_floor.kinscene") && floored.render(), "straddle floor scene failed");
+    std::size_t floored_whole = 0;
+    for (const Scene3D::Draw& draw : floored.scene()->draws())
+        floored_whole += draw.clip == DrawClip3D::whole ? draw.count : 0;
+    check(floored_whole == whole, "a floor through a portal's plane is drawn as going through it");
+    // A mirror renders, and shows something else than kin's own metal does.
+    SceneSession3D mirror{r3d, assets, options};
+    check(mirror.load("mirror.kinscene"), "mirror scene failed");
+    const auto reflected = centre(mirror);
+    options.planar_surfaces = {};
+    SceneSession3D metal{r3d, assets, options};
+    check(metal.load("mirror.kinscene"), "metal scene failed");
+    const auto stock = centre(metal);
+    check(std::abs(reflected[0] - stock[0]) + std::abs(reflected[1] - stock[1]) + std::abs(reflected[2] - stock[2]) >
+              30,
+          "the mirror shows what kin's metal shows");
+    std::cout << "planar session: portals, portal_step, mirror\n";
+}
 // The same over a game-owned world (SceneFrame3D::collect, no session): the authored SceneEnvironment3D sets the
 // picture (samples) and the game's `pick` survives it, so a view made from the collected options can be picked.
 void gpu_frame_pick(Renderer2D& renderer) {
@@ -1194,6 +1333,7 @@ int main(int argc, char** argv) {
         gpu_session(renderer);
         gpu_prepared_requests(renderer);
         gpu_pick(renderer);
+        gpu_planar(renderer);
         gpu_frame_pick(renderer);
         gpu_frame_cost(renderer);
         std::cout << "Transactional scene lifecycle, reload, budgets and ownership checks passed\n";

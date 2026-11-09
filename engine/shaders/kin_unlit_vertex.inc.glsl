@@ -12,11 +12,13 @@ layout(location = 2) out vec2 vUV;
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first;
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 } draw;
 void main() {
     const uint at = instance_at(draw.first.x + uint(gl_InstanceIndex));
     const vec4 world = instances[at].model * vec4(aPos, 1.0);
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instances[at].normal1.w);
     vColor = instances[at].color * vec4(decode(aColor.rgb), aColor.a);
 #ifdef KIN_UNLIT_TEXTURED
     vUV = aUV;

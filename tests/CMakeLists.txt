@@ -594,6 +594,11 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
         set_tests_properties(kin-render3d-gi-history PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     endif()
     kin_add_test(kin_render3d_direct_cache_tests kin-render3d-direct-cache SOURCES render3d_direct_cache_tests.cpp)
+    # Mirrors and portals: Camera3D::clip_plane, mirror_view/portal_view and the planar surfaces.
+    kin_add_test(kin_render3d_planar_tests kin-render3d-planar SOURCES render3d_planar_tests.cpp)
+    target_compile_definitions(kin_render3d_planar_tests PRIVATE
+        KIN_ENGINE_SHADERS="${PROJECT_SOURCE_DIR}/engine/shaders")
+    set_tests_properties(kin-render3d-planar PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     # Area lights' hierarchy and emitters (GlobalIllumination3D::area_lights), on the CPU.
     kin_add_test(kin_render3d_area_lights_tests kin-render3d-area-lights SOURCES render3d_area_lights_tests.cpp)
     target_include_directories(kin_render3d_area_lights_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/renderer/gpu)

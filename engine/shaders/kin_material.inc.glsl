@@ -338,6 +338,8 @@ struct KinSurface {
     float specular;     // a dielectric's reflectance head on, 0.08 times it (0.5: 4%, kin's own; Unreal's Specular)
     float diffuse_wrap; // how far the diffuse light wraps round: 0 Lambert's (kin's own), 0.5 and 1 Unreal's volume
                         // lighting of translucency, directional and not (wrapped_diffuse); no reflection with it
+    vec4 reflection;    // rgb: a reflection of its own (linear light: a mirror's picture, kin_planar_reflection); a: how
+                        // much of the reflection it is, in place of the environment's or the probes' (0: none, kin's own)
 };
 
 #ifdef KIN_SURFACE
@@ -349,6 +351,84 @@ vec4 kin_surface_param(int i) {
 #else
     return material.surface[i];
 #endif
+}
+#endif
+
+// --- Mirrors and portals (Camera3D's mirror_view and portal_view; docs/rendering_3d.md) ---
+
+// Where `world` shows in a planar view's picture (0..1, rows down): `projector` is its PlanarView3D::projector.
+vec2 kin_planar_uv(mat4 projector, vec3 world) {
+    const vec4 clip = projector * vec4(world, 1.0);
+    const vec2 ndc = clip.xy / clip.w;
+    return vec2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y); // (SDL_GPU's clip space goes up, its rows down)
+}
+
+// A picture of kin's (a View3D's texture) at `uv`, in linear light: decoded as the material's maps are.
+vec3 kin_planar_read(sampler2D picture, vec2 uv) {
+    vec3 c = textureLod(picture, uv, 0.0).rgb;
+    if (frame.flags.y > 0.5) {
+        c = decode(c);
+    }
+    return c;
+}
+
+// The face's own normal, on the viewer's side, without the normal map (kin_normal() is bent by it).
+vec3 kin_geometric_normal() {
+    const float front = gl_FrontFacing ? 1.0 : -1.0;
+    return dot(vNormal, vNormal) < 1e-20 ? kin_screen_normal(dFdx(vWorld), dFdy(vWorld)) : normalize(vNormal) * front;
+}
+
+// Where this fragment reads a planar view's picture: its point moved by `distortion` (world units) times how far the
+// surface's normal bends from the face's (a normal map's ripples), so that the picture wavers with them.
+vec2 kin_planar_point_uv(mat4 projector, vec3 normal, float distortion) {
+    const vec3 bend = normal - kin_geometric_normal();
+    return kin_planar_uv(projector, vWorld + bend * distortion);
+}
+
+// A mirror, still water, a polished floor: `picture` (a mirror_view's View3D texture, read through `projector`) is the
+// surface's reflection, `strength` of it, in place of the environment's or the probes'. The surface's Fresnel, roughness
+// and specular occlusion weigh it as ever (water reflects little head on and much at a glance; a metal all of it); its
+// highlights stay. A rough surface reads it blurred, and past a roughness of 0.4 leaves it, by 0.7, to the environment's.
+void kin_planar_reflect(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength) {
+    const vec2 uv = kin_planar_point_uv(projector, s.normal, distortion); // (before any branch: it may take derivatives)
+    const float share = strength * (1.0 - smoothstep(0.4, 0.7, s.roughness));
+    if (share <= 0.0) {
+        return;
+    }
+    vec3 seen = kin_planar_read(picture, uv);
+    if (s.roughness > 0.1) {
+        // Four more reads round it, as far as the roughness spreads a reflection (a cheap blur: the picture has no
+        // levels of detail).
+        const vec2 r = vec2(0.04 * s.roughness * s.roughness) * vec2(1.0, float(textureSize(picture, 0).x) /
+                                                                        float(textureSize(picture, 0).y));
+        seen = (seen + kin_planar_read(picture, uv + vec2(r.x, 0.0)) + kin_planar_read(picture, uv - vec2(r.x, 0.0)) +
+                kin_planar_read(picture, uv + vec2(0.0, r.y)) + kin_planar_read(picture, uv - vec2(0.0, r.y))) * 0.2;
+    }
+    s.reflection = vec4(seen, share);
+}
+
+// A portal, a window onto a view, a security camera's screen seen in place: `picture` (a portal_view's View3D texture,
+// read through `projector`) is the surface's colour, `strength` of it. For an unlit material (Material3D::unlit), which
+// shows its colour as it is.
+void kin_planar_show(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength) {
+    const vec3 seen = kin_planar_read(picture, kin_planar_point_uv(projector, s.normal, distortion));
+    s.base_color = mix(s.base_color, seen, strength);
+}
+
+#ifdef KIN_SURFACE
+// The same with a planar-view surface's parameters (planar_view_params: the projector, then distortion and strength)
+// and the picture in the material's emissive map (Material3D::emissive_texture, with `emissive` 0): what kin's own
+// planar_reflection.surface.glsl and planar_window.surface.glsl are.
+mat4 kin_planar_projector() {
+    return mat4(kin_surface_param(0), kin_surface_param(1), kin_surface_param(2), kin_surface_param(3));
+}
+void kin_planar_reflection(inout KinSurface s) {
+    const vec4 settings = kin_surface_param(4);
+    kin_planar_reflect(s, uEmissive, kin_planar_projector(), settings.x, settings.y);
+}
+void kin_planar_window(inout KinSurface s) {
+    const vec4 settings = kin_surface_param(4);
+    kin_planar_show(s, uEmissive, kin_planar_projector(), settings.x, settings.y);
 }
 #endif
 
@@ -368,6 +448,7 @@ KinSurface kin_stock_surface() {
     s.clearcoat_roughness = 0.045;
     s.specular = 0.5;
     s.diffuse_wrap = 0.0;
+    s.reflection = vec4(0.0);
     return s;
 }
 
@@ -799,6 +880,11 @@ vec3 kin_lit_surface(KinSurface surface) {
         }
     }
 #endif
+    // A reflection of the surface's own (a mirror's picture: kin_planar_reflect), in place of the environment's or the
+    // probes' by its share. The Fresnel, the roughness and the specular occlusion weigh it as they would theirs.
+    if (surface.reflection.a > 0.0) {
+        above = mix(above, surface.reflection.rgb, surface.reflection.a);
+    }
     // A diffuse wrapped past 0.5 sees the ambient light less by its normal: toward the mean of the two sides'.
     if (wrap > 0.5) {
         around = mix(around, 0.5 * (around + behind), 2.0 * wrap - 1.0);
@@ -849,6 +935,7 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     s.clearcoat_roughness = 0.045;
     s.specular = 0.5;
     s.diffuse_wrap = 0.0;
+    s.reflection = vec4(0.0);
     return kin_lit_surface(s);
 }
 

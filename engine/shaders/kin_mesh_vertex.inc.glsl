@@ -32,6 +32,7 @@ layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer Previous {
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
     uvec4 first;          // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
     mat4 current;         // without the jitter, this frame's camera
     mat4 prior;           // and the last frame's
 }
@@ -44,6 +45,7 @@ layout(location = 8) out vec3 vOldInCurrent;
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 }
 draw;
 #endif
@@ -90,6 +92,7 @@ void main() {
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w);
 #ifdef KIN_SKIN
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * normalize(mat3(skin) * aNormal);
 #else

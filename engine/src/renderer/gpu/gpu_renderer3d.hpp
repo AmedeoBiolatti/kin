@@ -35,15 +35,17 @@ class GpuTextureBackend;
 
 // A view's bounding planes (xyz the normal, inward, length 1; w the offset),
 // from its view-projection matrix; an infinite far plane is left out.
+// A view's bounding planes: its six (five with no far plane), and a seventh for a camera's clip plane (Camera3D::
+// clip_plane: a mirror's or a portal's view culls what is behind it as it culls what is out of view).
 struct GpuFrustum {
-    std::array<Vec4f, 6> planes{};
+    std::array<Vec4f, 7> planes{};
     u32 count = 0;
 };
 
 // One mesh instance as mesh.vert reads it (std430): 128 bytes.
 struct GpuInstance3D {
     f32 model[16];
-    f32 normal[12]; // three columns of the normals' matrix, each padded to four
+    f32 normal[12]; // three columns of the normals' matrix, each padded to four (w: the pick id, the DrawClip3D)
     f32 color[4];   // linear, straight alpha
 };
 static_assert(sizeof(GpuInstance3D) == 128);
@@ -971,7 +973,9 @@ private:
     void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum,
                        SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     static Pass pass_of(const Material3D& material);
-    // A material's texture as a binding: its own, or a white one without.
+    // A material's texture as a binding: its own, or a white one without, or for the picture the render draws into (a
+    // mirror's own reflection in its view: `_drawn_picture`), which a draw may not read while it is drawn.
+    SDL_GPUTexture* _drawn_picture = nullptr;
     SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v,
                                                  std::optional<TextureSampler3D> sampler = {});
     void bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material);
@@ -1510,7 +1514,8 @@ private:
     u64 _instance_generation = 0, _local_instance_generation = 0, _joints_generation = 0, _offsets_generation = 0;
     std::vector<u32> _retained_visible;
     std::shared_ptr<GpuBuffer> _retained_indices;
-    GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material) const;
+    GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material,
+                                DrawClip3D clip = DrawClip3D::camera) const;
     void retain_instances(DrawRef& ref, FrameCtx& ctx);
     void retain_scene_instances(FrameCtx& ctx);
     void cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stats);

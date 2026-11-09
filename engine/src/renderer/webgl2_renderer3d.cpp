@@ -218,8 +218,10 @@ u32 level_for(const Scene3D& scene, const Scene3D::Draw& draw, const MeshInstanc
     const bool ortho = scene.camera.projection == Projection3D::Orthographic;
     const f32 distance = std::max(0.0f, dot(center - scene.camera.position, scene.camera.forward()) - radius);
     const f32 pixels = std::max(0.0f, scene.lod.error_pixels) / std::max(1e-3f, scene.lod.bias);
-    const f32 per_unit = ortho ? height / std::max(1e-6f, scene.camera.height)
-                               : height * 0.5f / std::tan(math3d_detail::radians(scene.camera.fov) * 0.5f);
+    const f32 per_unit =
+        ortho ? height / std::max(1e-6f, scene.camera.height)
+              : height * 0.5f / std::tan(math3d_detail::radians(scene.camera.fov) * 0.5f) /
+                    (scene.camera.windowed() && scene.camera.window.h > 0.0f ? scene.camera.window.h : 1.0f);
     for (u32 l = count - 1; l > 0; --l)
         if (draw.mesh.level_error(l) * scale * per_unit <= pixels * (ortho ? 1.0f : distance))
             return l;
@@ -249,7 +251,7 @@ struct WebGLRenderer3D::Impl {
     GLuint program = 0, instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0;
     Texture white;
     RendererCapabilities3D caps{};
-    bool warned = false;
+    bool warned = false, clip_warned = false;
     std::unordered_map<std::string_view, GLint> uniforms, sky_uniforms;
     sky_model::FogTable3D fog_table;
     // By wrap and filter, then the mipmapped ones' by anisotropy (2 to 16) and wrap; the mipmapped ones read with
@@ -772,7 +774,7 @@ struct WebGLRenderer3D::Impl {
             for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
                 const auto& draw = scene.draws()[slot];
                 if (!draw.material.casts_shadow || draw.material.blend == Blend3D::Alpha ||
-                    draw.material.blend == Blend3D::Additive)
+                    draw.material.blend == Blend3D::Additive || draw.clip == DrawClip3D::whole_if_cut)
                     continue;
                 copies.clear();
                 const auto source =
@@ -864,6 +866,8 @@ struct WebGLRenderer3D::Impl {
         std::array<std::vector<u32>, max_mesh_levels> batches;
         for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
             const auto& draw = scene.draws()[slot];
+            if (draw.clip == DrawClip3D::whole_if_cut)
+                continue; // (nothing is cut here: Camera3D::clip_plane is not supported)
             auto* records = slot < prepared.size() ? prepared[slot].get() : nullptr;
             for (auto& batch : batches)
                 batch.clear();
@@ -989,6 +993,10 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     if (!_impl->warned && (!scene.lights.spots.empty() || !scene.particle_draws().empty())) {
         _impl->warned = true;
         KIN_LOG_WARN("render", "WebGL2: initial mesh path omits spot lights and particles");
+    }
+    if (!_impl->clip_warned && scene.camera.clipped()) {
+        _impl->clip_warned = true;
+        KIN_LOG_WARN("render", "WebGL2: Camera3D::clip_plane is not supported; the view draws everything");
     }
     _impl->renderer.before_3d();
     // The 2D pass and texture uploads can change bindings between 3D renders.

@@ -163,6 +163,47 @@ struct ParticleEmitter3D {
     std::string bound_texture; // runtime-only; empty refs clear only authored bindings
 };
 
+// Mirrors and portals on entities (docs/rendering_3d.md, Mirrors and portals; PlanarViews3D in
+// kin/scene/planar_views3d.hpp renders them, SceneSession3D on its own). Each is a surface in the entity's XY plane,
+// centred on it, its front its +Z, `size` wide (its X) and high (its Y) times the entity's scale; PlanarViews3D draws
+// it (pick answers the entity) and renders the picture it shows into a view of its own when it is on screen: of where
+// it shows only, with the main view's samples and its pixels' density times `resolution` (1: as sharp as the view).
+//
+// A mirror, still water, a polished floor: its reflection is its picture, weighed as kin's material weighs a
+// reflection (its colour, metallic and roughness: water reflects little head on and much at a glance, a silver mirror
+// all of it). `normal_asset` (a normal map, linear: water's ripples) repeats `uv_scale` times across it and moves by
+// `flow` a second; `distortion` (world units) is how far its ripples move where the picture is read.
+struct Mirror3D {
+    bool enabled = true;
+    Vec2f size{2.0f, 2.0f};
+    Color color = Color::rgb(235, 235, 240);
+    f32 metallic = 1.0f;
+    f32 roughness = 0.045f;
+    ComponentAssetRef normal_asset;
+    f32 normal_scale = 1.0f;
+    Vec2f uv_scale{1.0f, 1.0f};
+    Vec2f flow{0.0f, 0.0f};
+    f32 distortion = 0.0f;
+    f32 strength = 1.0f;   // how much of the reflection its picture is
+    f32 resolution = 1.0f; // its picture's pixels' density, a share of the view's
+    Texture normal;        // runtime: normal_asset's (resolve_render3d_assets), or one from C++
+    std::string bound_normal;
+};
+
+// A portal: the entity `exit` (another portal, or any entity: its placing is the exit's) is what it opens onto, in at
+// this one's front and out of the exit's front (portal_view). `depth`: how many levels of it seen through itself are
+// drawn (two portals facing each other show their corridor that deep); the deepest, and the portal in other planar
+// views' pictures, is `stand_in`, unlit. Things go through it by portal_step (kin/scene/planar_views3d.hpp; Lua
+// scene3d.portal_step).
+struct Portal3D {
+    bool enabled = true;
+    Vec2f size{1.8f, 2.8f};
+    ComponentEntityRef exit{};
+    u32 depth = 1;
+    f32 resolution = 1.0f;
+    Color stand_in = Color::rgb(24, 40, 52);
+};
+
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the
 // rest pose without one). Not MeshRenderer3D: a mesh renderer's entities are instances of one mesh and merge into one
 // draw, and a character is a model of several parts with a skeleton and a pose of its own.
