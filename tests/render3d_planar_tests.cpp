@@ -213,8 +213,8 @@ void test_params() {
         const Vec4f c = part * Vec4f{x, y, 0, 1};
         return Vec2f{0.5f + 0.5f * c.x / c.w, 0.5f - 0.5f * c.y / c.w};
     };
-    assert(near(uv(-1, 1).x, 0) && near(uv(-1, 1).y, 0));         // the picture's top-left: the texture's
-    assert(near(uv(1, -1).x, 0.5f) && near(uv(1, -1).y, 0.25f));  // its bottom-right: the share's
+    assert(near(uv(-1, 1).x, 0) && near(uv(-1, 1).y, 0));        // the picture's top-left: the texture's
+    assert(near(uv(1, -1).x, 0.5f) && near(uv(1, -1).y, 0.25f)); // its bottom-right: the share's
     assert(material.shader_params[18] == 0.5f && material.shader_params[19] == 0.25f);
 }
 

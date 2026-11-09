@@ -588,6 +588,14 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   panelled door: bright-line pixels down from 170 to 61 a frame. Both backends;
   the scene's for the overlay too. `SceneEnvironment3D` authors it as
   `specular_aa`.
+- The sun is a disc, not a point: its highlight is never sharper than the disc
+  (the specular lobe's alpha at least its angular radius: `Sky3D::sun_size`
+  with the sky on, the real sun's 0.53 degrees without). A near-mirror (chrome,
+  roughness 0.04) lit by a point sun has a peak thinner than a pixel and very
+  bright: sampled at one pixel and missed at the next as the eye moves, it
+  flickers, and bloom makes the flicker a blob changing size. The atrium's
+  chrome ball, circled: its highlight's saturated pixels went 505 to 762 frame
+  to frame; now 747 to 761. Rougher surfaces are as before.
 - `Scene3D::specular_multiscatter` (on by default): the light a rough
   specular surface reflects more than once among its microfacets, which single
   scattering leaves out, put back (Fdez-Aguera's fit, in the lights' highlights
@@ -2636,7 +2644,9 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   where the renderer can render part of a view, each picture at its own size into a view that only grows, to the
   largest picture it has shown, so that a moving eye does not resize views, all their targets made again, every few
   frames; otherwise the view is the picture's size); a portal's levels while the level before sees it, each of
-  where it shows within the level before, deepest first; each with the other planar surfaces as stand-ins (a mirror as kin's own metal) and without the scene's overlay
+  where it shows within the level before, deepest first; a portal seen in a mirror, a picture of what is beyond it as the
+  mirror's camera sees through it (one level), drawn on the portal in the mirror's picture; each with the other planar
+  surfaces as stand-ins (a mirror as kin's own metal) and without the scene's overlay
   (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). Views are kept from frame to frame and
   dropped with their entities. `PlanarViews3D::views_rendered()` and `views_skipped()` count them. Whatever is
   half-way through a portal is drawn at its exit too (`portal_straddle`, `Scene3D::draw_again`): every copy of the

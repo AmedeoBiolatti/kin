@@ -1260,6 +1260,36 @@ void gpu_planar(Renderer2D& renderer) {
     check(std::abs(reflected[0] - stock[0]) + std::abs(reflected[1] - stock[1]) + std::abs(reflected[2] - stock[2]) >
               30,
           "the mirror shows what kin's metal shows");
+    // A portal in a mirror shows what is beyond it, as the mirror's camera sees through it (not its stand-in): a floor
+    // mirror under a portal whose far side holds a green box; where the mirror shows the portal, green.
+    write(scratch.path / "green.kinmaterials",
+          R"({"schema":"kin.materials3d/1","material":{"color":[20,230,20,255],"unlit":true}})");
+    write(scratch.path / "mirror_portal.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1.5,6],"rotation":[-0.1602,0,0,0.9871]},
+        "SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"floor","components":{"Transform3D":{"rotation":[-0.7071068,0,0,0.7071068]},"Mirror3D":{"size":[30,30]}}},
+      {"id":"entry","components":{"Transform3D":{"position":[0,1.5,-3]},"Portal3D":{"size":[2,2],"exit":"exit",
+        "stand_in":[255,0,0,255]}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,1.5,0]},"Portal3D":{"size":[2,2],"exit":"entry"}}},
+      {"id":"box","components":{"Transform3D":{"position":[20,1.5,4],"scale":[4,4,1]},
+        "ModelRenderer3D":{"asset":"parts.glb"},"ModelMaterials3D":{"asset":"green.kinmaterials"}}}]})");
+    options.planar_surfaces = *surfaces;
+    SceneSession3D mirrored{r3d, assets, options};
+    check(mirrored.load("mirror_portal.kinscene"), "mirror portal scene failed");
+    (void)centre(mirrored);
+    renderer.clear();
+    check(mirrored.render(), "mirror portal render failed");
+    renderer.draw_texture(mirrored.view()->texture(), {0, 0, 160, 120});
+    std::vector<u8> seen_pixels;
+    Vec2i seen_size;
+    check(renderer.read_rgba({0, 0, 160, 120}, seen_pixels, seen_size), "mirror portal read failed");
+    renderer.present();
+    const auto in_mirror = mirrored.scene()->camera.project({0, -1.5f, -3}, {0, 0, 160, 120});
+    check(bool(in_mirror), "the portal's reflection is off screen");
+    const u8* c = &seen_pixels[(std::size_t(in_mirror->pos.y) * 160 + std::size_t(in_mirror->pos.x)) * 4];
+    std::cerr << "portal in a mirror: " << int(c[0]) << "," << int(c[1]) << "," << int(c[2]) << '\n';
+    check(c[1] > c[0] + 60 && c[1] > c[2] + 60, "a portal in a mirror does not show what is beyond it");
     std::cout << "planar session: portals, portal_step, mirror\n";
 }
 // Reflection probes as entities (ReflectionProbe3D): placed in the scene's lights each frame, captured when first shown

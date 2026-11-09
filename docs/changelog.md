@@ -74,6 +74,13 @@ releases may change APIs.
   targets) about 13 times a second; after the first seconds, none. It is pixel for pixel the picture of a view of that
   size. `planar_view_params` / `planar_refraction_params` take the part's `share`, and the planar surfaces keep their
   reads in it; water's own colour no longer comes from its refraction picture.
+- A portal seen in a mirror (or in water) shows what is beyond it: PlanarViews3D renders it a picture from the mirror's
+  camera through the portal and draws it on the portal in the mirror's picture (it showed its stand-in colour).
+- The sun's highlight is the size of its disc (the specular lobe's alpha at least its angular radius): a chrome
+  surface's highlight no longer flickers as the eye moves.
+- planar_atrium: the brass ring's patina and brushing turn with it (its own graph, the pattern from the ring's rest
+  position: it was in world space, so the ring turned through it); both portal lights are the trims' teal (walking
+  through, the light went from teal to magenta).
 - 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
   allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
   fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).

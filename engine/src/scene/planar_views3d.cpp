@@ -291,6 +291,16 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         PlanarView3D below{};
         View3D* below_view = nullptr;
         Fog3D murk{};
+        // Its camera's whole frame (before the cut to where it shows), and the portals in its picture: each one's
+        // picture as the mirror's camera sees through it, drawn on the portal while the mirror's picture is.
+        Camera3D frame_camera{};
+        struct Through {
+            std::size_t portal;
+            View3D* view;
+            Camera3D camera;
+            Material3D level;
+        };
+        std::vector<Through> through;
     };
     struct Portal {
         EcsId id;
@@ -301,6 +311,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         std::vector<PlanarView3D> chain;
         std::vector<View3D*> views;
         u32 shown = 0;
+        Vec2i frame{}; // its pictures' frame (Portal3D::resolution)
     };
     std::vector<Mirror> mirrors;
     std::vector<Portal> portals;
@@ -420,6 +431,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
             m.view = d.view(m.id, 0, picture.size, frame_size(c.resolution), options, scene);
             if (m.view) {
                 m.seen = mirror_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
+                m.frame_camera = m.seen.camera;
                 crop_planar_view(m.seen, picture.window, f32(picture.size.x) / f32(picture.size.y), true);
                 m.real.surface = d.surfaces.reflection;
                 m.real.emissive_texture = m.view->texture();
@@ -469,6 +481,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                                   Mat4f::rotation(portal_rotation(p.pose, p.exit)) *
                                   Mat4f::translation(-p.pose.position);
             const Vec2i frame = frame_size(c.resolution);
+            p.frame = frame;
             Camera3D from = eye; // the level before's whole frame (portal_chain made each level from it)
             Rectf within{0, 0, 1, 1};
             while (p.shown < p.chain.size()) {
@@ -505,6 +518,41 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     if (!errors.empty())
         return status3d(false, std::move(errors));
 
+    // Portals in mirrors: where a portal shows in a mirror's picture, a picture of what is beyond it as the mirror's
+    // camera sees it (one level: the portals in that are stand-ins), for the mirror's picture to show.
+    if (d.surfaces.window)
+        for (Mirror& m : mirrors) {
+            if (!m.view)
+                continue;
+            const Rectf within = m.seen.camera.window; // where the mirror shows, in its camera's frame
+            for (std::size_t i = 0; i < portals.size(); ++i) {
+                const Portal& p = portals[i];
+                if (p.frame.x <= 0)
+                    continue;
+                const auto bounds =
+                    planar_on_screen(m.frame_camera, aspect, p.pose.position, p.pose.rotation, p.pose.size);
+                const auto seen = bounds ? intersect(*bounds, within) : std::nullopt;
+                if (!seen)
+                    continue;
+                const PlanarPicture3D picture = planar_picture(*seen, p.frame);
+                // (Its views are the portal's own entry's, keyed by the mirror too.)
+                View3D* view = d.view(p.id ^ (m.id * 0x9e3779b97f4a7c15ull), 0, picture.size, p.frame, options, scene);
+                if (!view)
+                    continue;
+                PlanarView3D level = portal_view(m.frame_camera, p.pose, p.exit, aspect);
+                const Mat4f through = Mat4f::translation(p.exit.position) *
+                                      Mat4f::rotation(portal_rotation(p.pose, p.exit)) *
+                                      Mat4f::translation(-p.pose.position);
+                crop_planar_view(level, picture.window, f32(picture.size.x) / f32(picture.size.y), false, through);
+                Material3D shown = p.stand_in;
+                shown.color = colors::white;
+                shown.surface = d.surfaces.window;
+                shown.emissive_texture = view->texture();
+                planar_view_params(shown.shader_params, level.projector, 0.0f, 1.0f, Data::part_of(*view));
+                m.through.push_back({i, view, level.camera, std::move(shown)});
+            }
+        }
+
     // The pictures, each with the planar surfaces as stand-ins, but for a portal's own next level; without the overlay.
     const bool overlay = scene.show_overlay;
     scene.show_overlay = false;
@@ -521,7 +569,17 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         return true;
     };
     for (const Mirror& m : mirrors) {
-        if (m.view && !picture(*m.view, m.seen.camera))
+        // The portals it sees first (with the planar surfaces as stand-ins), then its own picture with them on them.
+        bool ok = true;
+        for (const Mirror::Through& t : m.through)
+            ok = ok && picture(*t.view, t.camera);
+        for (const Mirror::Through& t : m.through)
+            (void)scene.set_draw_material(portals[t.portal].draw, t.level);
+        if (ok && m.view)
+            ok = picture(*m.view, m.seen.camera);
+        for (const Mirror::Through& t : m.through)
+            (void)scene.set_draw_material(portals[t.portal].draw, portals[t.portal].stand_in);
+        if (!ok)
             break;
         if (m.below_view) { // (with the water's murk for fog)
             const Fog3D fog = scene.fog;
