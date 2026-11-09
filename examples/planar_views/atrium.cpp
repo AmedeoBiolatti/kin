@@ -5,11 +5,14 @@
 //
 //   planar_atrium [--camera N] [--shot picture.png] [--frames N] [--content folder] [--bake-probes]
 //
-// --camera: 0 orbits the atrium, 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the
-// portals (the keys 0-4 too). --shot renders headless and writes a picture after --frames frames (with
-// KIN_RENDER_BACKEND=gpu). --bake-probes captures the scene's reflection probes after a few frames and writes them to
-// the content's probes/ folder (Radiance .hdr panoramas; name them in a probe's "baked" to load them instead of
-// capturing at run time), then quits. The first run compiles the material graphs with glslc (some seconds). Esc: quit.
+// --camera: 6 (the default) plays: the survivor (an animated character) is yours, seen from behind (W/S or the up and
+// down arrows walk, A/D or left and right turn, Shift runs; through the portals the camera follows it). 0 orbits the
+// atrium, 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the portals, 5 watches the
+// survivor walk its round into the west portal (the keys 0-6 too). --shot renders
+// headless and writes a picture after --frames frames (with KIN_RENDER_BACKEND=gpu). --bake-probes captures the scene's
+// reflection probes after a few frames and writes them to the content's probes/ folder (Radiance .hdr panoramas; name
+// them in a probe's "baked" to load them instead of capturing at run time), then quits. The first run compiles the
+// material graphs with glslc (some seconds). Esc: quit.
 #include "planar_surfaces.hpp"
 
 #include <algorithm>
@@ -32,7 +35,7 @@ using namespace kin;
 
 struct Options {
     std::filesystem::path content = ATRIUM_CONTENT, shot;
-    int camera = 0;
+    int camera = 6;
     int frames = 90;
     bool bake = false;
 };
@@ -51,6 +54,15 @@ public:
         if (!_renderer->available())
             throw std::runtime_error("needs the GPU 3D renderer (for --shot: KIN_RENDER_BACKEND=gpu)");
         _assets = std::make_unique<Assets3D>(*_renderer, _o.content);
+        // The survivor's controls (atrium.lua reads the actions).
+        const std::vector<std::pair<const char*, std::vector<Key>>> controls{{"forward", {Key::W, Key::Up}},
+                                                                             {"back", {Key::S, Key::Down}},
+                                                                             {"left", {Key::A, Key::Left}},
+                                                                             {"right", {Key::D, Key::Right}},
+                                                                             {"run", {Key::LeftShift}}};
+        for (const auto& [action, keys] : controls)
+            for (const Key key : keys)
+                ctx.input.bind(action, key);
         const auto surfaces = create_planar_surfaces(*_renderer, planar_surfaces);
         require(surfaces.diagnostics);
         SceneSession3DOptions options;
@@ -70,7 +82,7 @@ public:
     void update(SceneContext& ctx) override {
         if (ctx.input.pressed(Key::Escape))
             ctx.app.quit();
-        const std::array keys{Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4};
+        const std::array keys{Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6};
         for (int i = 0; i < int(keys.size()); ++i)
             if (ctx.input.pressed(keys[size_t(i)]) && _lua) {
                 _camera = i;
@@ -152,7 +164,7 @@ int main(int argc, char** argv) {
             else if (a == "--content")
                 o.content = value();
             else if (a == "--camera")
-                o.camera = std::clamp(std::stoi(value()), 0, 4);
+                o.camera = std::clamp(std::stoi(value()), 0, 6);
             else if (a == "--frames")
                 o.frames = std::max(1, std::stoi(value()));
             else if (a == "--bake-probes")
