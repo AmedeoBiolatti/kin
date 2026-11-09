@@ -32,6 +32,9 @@ struct RenderDebugOptions3D {
     bool prepass_depth = true; // false: the main pass clears its depth and draws it all again, instead of starting
                                // from the pre-pass's (to compare with it)
     bool gi_sun_map = true;    // false: the GI's voxels take the sun's light by their own march, not its sun map
+    // Fog3D::volumetric: cells behind every surface their pixels (and their neighbours') show are not lit (no ray
+    // reaches them); false lights them all, for comparing (the picture is the same).
+    bool fog_volume_cull = true;
     GiView3D gi_view = GiView3D::Off;
 };
 

@@ -14293,6 +14293,280 @@ void test_gpu_fog_sun_shadows() {
     });
 }
 
+// Fog3D::volumetric: a lamp in the fog glows round it (the air near its line of sight brighter than without, the far
+// corners as they were); a spot's beam is cut where its shadow map says a plate shades the air (the side under the
+// plate darker than the open side, both as bright without the shadow); a light whose `volumetric` is 0 adds nothing.
+void test_gpu_fog_volumetric_lights() {
+    with_gpu("test_gpu_fog_volumetric_lights", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .hdr = true}).value_or({});
+        // Temporal anti-aliasing's float picture without the tonemap, unjittered: the light as it was added.
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const kin::Material3D black{.color = Color::rgb(0, 0, 0), .unlit = true};
+        struct Shot {
+            bool volumetric = true;
+            bool lamp = true, spot = false, spot_shadow = false;
+            kin::f32 lamp_volumetric = 1.0f;
+            bool linear = false;
+            kin::f32 history = 0.0f;
+            int frames = 1;
+            bool pane = false;
+            kin::f32 pane_z = -3.0f;
+            bool wall = false, cull = true;
+        };
+        const auto shoot = [&](const Shot& s) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -1.0f}, 60.0f);
+            scene.lights.sun = {.direction = normalize(Vec3f{0.0f, 1.0f, 0.35f}), .color = {0.0f, 0.0f, 0.0f}};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.fog = {.enabled = true, .density = 0.05f, .colour = {0.0f, 0.0f, 0.0f}};
+            scene.fog.volumetric = {.enabled = s.volumetric, .anisotropy = 0.0f, .history = s.history};
+            if (s.linear) {
+                scene.taa = {.enabled = true, .jitter_scale = 0.0f};
+            }
+            (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, -60.5f}) * Mat4f::scaling({400.0f, 400.0f, 1.0f}),
+                             black);
+            scene.debug.fog_volume_cull = s.cull;
+            if (s.wall) {
+                // A lit wall 4 m ahead over the left of the view, between the camera and the lamp (6 m), and a
+                // second lamp in front of it.
+                (void)scene.draw(box, Mat4f::translation({-2.5f, 1.0f, -4.0f}) * Mat4f::scaling({3.0f, 4.0f, 0.2f}),
+                                 {.color = Color::rgb(160, 160, 160)});
+                scene.add_point_light({.position = {-1.0f, 1.2f, -2.5f}, .color = {6.0f, 6.0f, 6.0f}, .radius = 3.0f});
+            }
+            if (s.pane) {
+                // Dark glass 3 m ahead over the lamp's side of the view, 90% opaque.
+                (void)scene.draw(box, Mat4f::translation({-2.0f, 1.0f, s.pane_z}) * Mat4f::scaling({3.0f, 3.0f, 0.02f}),
+                                 {.color = Color::rgba(0, 0, 0, 230), .unlit = true, .blend = kin::Blend3D::Alpha});
+            }
+            if (s.lamp) {
+                scene.add_point_light({.position = {-2.0f, 1.0f, -6.0f},
+                                       .color = {20.0f, 20.0f, 20.0f},
+                                       .radius = 4.0f,
+                                       .size = 0.1f,
+                                       .volumetric = s.lamp_volumetric});
+            }
+            if (s.spot) {
+                // Straight down at x = 1.5, 3 m up; a plate 1 m under it shades the cone's half at x < 1.5.
+                scene.add_spot_light({.position = {1.5f, 3.0f, -6.0f},
+                                      .direction = {0.0f, -1.0f, 0.0f},
+                                      .color = {40.0f, 40.0f, 40.0f},
+                                      .radius = 6.0f,
+                                      .inner_angle = 20.0f,
+                                      .outer_angle = 30.0f,
+                                      .shadow_enabled = s.spot_shadow});
+                (void)scene.draw(box, Mat4f::translation({0.0f, 2.0f, -6.0f}) * Mat4f::scaling({3.0f, 0.05f, 3.0f}),
+                                 black);
+            }
+            Pixels p;
+            for (int f = 0; f < s.frames; ++f) {
+                p = shoot_view(renderer, r3d, s.linear ? plain : view, scene);
+                renderer.present();
+            }
+            return p;
+        };
+        const auto mean = [](const Pixels& p, int x0, int x1, int y0, int y1) {
+            double sum = 0.0;
+            int n = 0;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    sum += linear_level(p.at(x, y));
+                    ++n;
+                }
+            }
+            return sum / n;
+        };
+        const Pixels off = shoot({.volumetric = false});
+        const Pixels on = shoot({});
+        if (!r3d.debug_stats().fog_volume) {
+            std::cerr << "no volumetric fog: skipped\n";
+            return;
+        }
+        assert(r3d.debug_stats().fog_volume_lights == 1);
+        // The lamp is at x -2 m, 6 m ahead: about 36 pixels left of the middle.
+        const double glow_off = mean(off, 38, 50, 55, 65), glow_on = mean(on, 38, 50, 55, 65);
+        const double corner_off = mean(off, 140, 160, 0, 20), corner_on = mean(on, 140, 160, 0, 20);
+        std::printf("    volumetric fog: glow %.4f (%.4f without), far corner %.4f (%.4f)\n", glow_on, glow_off,
+                    corner_on, corner_off);
+        assert(glow_on > glow_off + 0.05);
+        assert(std::abs(corner_on - corner_off) < 0.01);
+        // Against the integral along the pixel's ray (the light's windowed inverse square, an even lobe, the air before
+        // it): pixels in the middle of the volume's columns (x 44: the sixth of 20 across, at 8 pixels), 0.9 m and 2.3
+        // m above the lamp at its distance.
+        const Pixels linear = shoot({.linear = true});
+        // (To view depth `to`: the light of the air in front of the glass below.)
+        const auto expected = [](int px, int py, double to = 40.0) {
+            const kin::f32 t30 = std::tan(30.0f * 3.14159265f / 180.0f), aspect = 160.0f / 120.0f;
+            const kin::f32 nx = (static_cast<kin::f32>(px) + 0.5f) / 80.0f - 1.0f;
+            const kin::f32 ny = 1.0f - (static_cast<kin::f32>(py) + 0.5f) / 60.0f;
+            const Vec3f dir = normalize(Vec3f{nx * t30 * aspect, ny * t30, -1.0f});
+            const Vec3f eye{0.0f, 1.0f, 0.0f}, lamp{-2.0f, 1.0f, -6.0f};
+            double sum = 0.0;
+            const double dt = 0.0005;
+            for (double t = 0.5 * dt; t * static_cast<double>(-dir.z) < to; t += dt) {
+                const Vec3f q = eye + dir * static_cast<kin::f32>(t);
+                const double d2 = static_cast<double>(dot(q - lamp, q - lamp));
+                const double r2 = d2 / 16.0;
+                const double window = std::clamp(1.0 - r2 * r2, 0.0, 1.0);
+                sum +=
+                    0.05 * 20.0 * window * window / std::max(d2, 0.01) / (4.0 * 3.14159265) * std::exp(-0.05 * t) * dt;
+            }
+            return sum;
+        };
+        if (r3d.debug_stats().fog_volume) {
+            for (const auto [px, py] : {std::pair{44, 44}, std::pair{44, 20}}) {
+                const double want = expected(px, py), got = linear_level(linear.at(px, py));
+                std::printf("    volumetric fog at (%d, %d): %.4f, the integral %.4f\n", px, py, got, want);
+                assert(std::abs(got - want) < 0.2 * want + 0.004);
+            }
+        }
+        // A history: the points moved over the cells frame after frame average to about the cells' middles' light (no
+        // noise left worth the name after 60 frames of a still camera); and a camera put elsewhere drops it.
+        {
+            view.reset_history();
+            const Pixels settled = shoot({.history = 0.9f, .frames = 60});
+            double worst = 0.0, total = 0.0;
+            for (int y = 40; y < 80; ++y) {
+                for (int x = 20; x < 70; ++x) {
+                    const double d = std::abs(linear_level(settled.at(x, y)) - linear_level(on.at(x, y)));
+                    worst = std::max(worst, d);
+                    total += d;
+                }
+            }
+            std::printf("    volumetric fog history: mean difference %.4f, worst %.4f\n", total / 2000.0, worst);
+            assert(total / 2000.0 < 0.02 && worst < 0.12);
+        }
+        // Behind dark glass the glow is dimmed as the glass dims what is behind it (the light added before the blended
+        // draws), not laid over it; the glass adds the air's in front of it for its own share (90%): at a pixel through
+        // it, a tenth of the whole ray's light and nine tenths of the light of the 3 m in front of the pane.
+        {
+            const Pixels glass = shoot({.linear = true, .pane = true});
+            const double behind = mean(glass, 40, 48, 56, 64), open = mean(linear, 40, 48, 56, 64);
+            std::printf("    volumetric fog behind 90%% glass: %.4f (%.4f without the glass)\n", behind, open);
+            assert(behind < 0.2 * open);
+            const double a = 230.0 / 255.0;
+            const double want = (1.0 - a) * expected(44, 44) + a * expected(44, 44, 3.0);
+            const double got = linear_level(glass.at(44, 44));
+            std::printf("    volumetric fog through 90%% glass at (44, 44): %.4f, the integrals %.4f (in front %.4f)\n",
+                        got, want, expected(44, 44, 3.0));
+            assert(std::abs(got - want) < 0.25 * want + 0.004);
+            // The pane behind the lamp (9 m): nearly all the glow is the air's in front of it, which the glass shows.
+            const Pixels far = shoot({.linear = true, .pane = true, .pane_z = -9.0f});
+            const double far_want = (1.0 - a) * expected(44, 44) + a * expected(44, 44, 9.0);
+            const double far_got = linear_level(far.at(44, 44));
+            std::printf("    volumetric fog in front of 90%% glass at 9 m: %.4f, the integrals %.4f\n", far_got,
+                        far_want);
+            assert(std::abs(far_got - far_want) < 0.2 * far_want + 0.004);
+        }
+        // The cells behind every surface their pixels and their neighbours' show are not lit
+        // (RenderDebugOptions3D::fog_volume_cull): the same picture as lighting them all.
+        {
+            const Pixels culled = shoot({.wall = true});
+            const Pixels all = shoot({.wall = true, .cull = false});
+            int worst = 0;
+            for (std::size_t i = 0; i < culled.rgba.size(); ++i) {
+                worst = std::max(worst, std::abs(int(culled.rgba[i]) - int(all.rgba[i])));
+            }
+            std::printf("    volumetric fog culled behind a wall: worst difference %d of 255\n", worst);
+            assert(worst <= 1);
+            assert(culled.rgba != shoot({}).rgba); // (the wall is in the picture)
+        }
+        // A light that lights no air: nothing added (the lamp is the only light, so nothing is lit at all).
+        const Pixels none = shoot({.lamp_volumetric = 0.0f});
+        assert(!r3d.debug_stats().fog_volume);
+        assert(std::abs(mean(none, 38, 50, 55, 65) - glow_off) < 0.005);
+
+        // The beam under the plate: a strip of the cone's left half (x 0.6 to 1.1 m, below 2 m) against its mirror
+        // in the right half, each a cell or more (0.46 m at 8 pixels) from the shadow's edge at x 1.5 m.
+        const auto halves = [&](const Pixels& p) {
+            // x 1.5 m at 6 m is about 26 pixels right of the middle (80); y 0.5 to 1.5 m is rows 52 to 68.
+            return std::pair{mean(p, 91, 99, 52, 68), mean(p, 113, 121, 52, 68)};
+        };
+        const auto [open_left, open_right] = halves(shoot({.lamp = false, .spot = true}));
+        const auto [cut_left, cut_right] = halves(shoot({.lamp = false, .spot = true, .spot_shadow = true}));
+        std::printf("    volumetric beam: shaded side %.4f, open side %.4f (unshadowed %.4f, %.4f)\n", cut_left,
+                    cut_right, open_left, open_right);
+        assert(open_left > 0.01 && open_right > 0.01);
+        assert(std::abs(open_left - open_right) < 0.25 * open_right); // no shadow: even
+        assert(cut_left < 0.5 * open_left);                           // the plate's shade
+        assert(cut_right > 0.8 * open_right);                         // the open side as it was
+    });
+}
+
+// Fog3D::volumetric with sun_and_moon: the sun's in-scattering through its shadow, in the volume (no walk): the air
+// under a roof dark, the sunlit air as the main pass's fog has it; and the fill light (the moon), which the main pass's
+// fog has not, scattered through its own shadow the same way.
+void test_gpu_fog_volumetric_sun_and_moon() {
+    with_gpu("test_gpu_fog_volumetric_sun_and_moon", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .hdr = true}).value_or({});
+        const kin::Material3D black{.color = Color::rgb(0, 0, 0), .unlit = true};
+        const Vec3f toward = normalize(Vec3f{0.0f, 1.0f, 0.35f});
+        const auto shoot = [&](bool volumetric, bool moon) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -1.0f}, 60.0f);
+            scene.lights.sun = {.direction = toward,
+                                .color = moon ? kin::LinearRgb{} : kin::LinearRgb{1.0f, 1.0f, 1.0f}};
+            if (moon) {
+                scene.lights.fill = {.direction = toward, .color = {1.0f, 1.0f, 1.0f}};
+                scene.lights.fill_shadow = {.enabled = true, .cascades = 1, .resolution = 1024};
+            }
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.lights.shadow_area = kin::Bounds3D{{-40.0f, -1.0f, -80.0f}, {40.0f, 10.0f, 10.0f}};
+            scene.lights.shadow_resolution = 1024;
+            scene.fog = {.enabled = true,
+                         .density = 0.02f,
+                         .colour = {0.0f, 0.0f, 0.0f},
+                         .sun_scatter = 0.5f,
+                         .sun_anisotropy = 0.0f};
+            scene.fog.volumetric = {.enabled = volumetric, .history = 0.0f};
+            (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, -60.5f}) * Mat4f::scaling({400.0f, 400.0f, 1.0f}),
+                             black);
+            // The roof: over x < 0, from the camera to the wall.
+            (void)scene.draw(box, Mat4f::translation({-20.0f, 5.5f, -30.0f}) * Mat4f::scaling({40.0f, 1.0f, 70.0f}),
+                             black);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const auto mean = [](const Pixels& p, int x0, int x1) {
+            double sum = 0.0;
+            int n = 0;
+            for (int y = 70; y < 110; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    sum += linear_level(p.at(x, y));
+                    ++n;
+                }
+            }
+            return sum / n;
+        };
+        const Pixels plain = shoot(false, false);
+        const Pixels volume = shoot(true, false);
+        if (!r3d.debug_stats().fog_volume) {
+            std::cerr << "no volumetric fog: skipped\n";
+            return;
+        }
+        assert(!r3d.debug_stats().fog_sun_shadowed); // (the volume does the walk's work)
+        const double plain_left = mean(plain, 10, 60), plain_right = mean(plain, 100, 150);
+        const double left = mean(volume, 10, 60), right = mean(volume, 100, 150);
+        std::printf("    volumetric sun: left %.3f (%.3f unshadowed), right %.3f (%.3f)\n", left, plain_left, right,
+                    plain_right);
+        assert(left < 0.5 * plain_left);                                 // the air under the roof is dark
+        assert(right > 0.85 * plain_right && right < 1.1 * plain_right); // the sunlit air as the main pass has it
+        // The moon: none in the main pass's fog; in the volume, through its shadow.
+        const Pixels moon_plain = shoot(false, true);
+        const Pixels moon = shoot(true, true);
+        const double moon_left = mean(moon, 10, 60), moon_right = mean(moon, 100, 150);
+        std::printf("    volumetric moon: left %.3f, right %.3f (without the volume %.3f, %.3f)\n", moon_left,
+                    moon_right, mean(moon_plain, 10, 60), mean(moon_plain, 100, 150));
+        assert(mean(moon_plain, 100, 150) < 0.01);
+        assert(moon_right > 0.1);
+        assert(moon_left < 0.5 * moon_right);
+    });
+}
+
 // Blended and additive meshes are fogged too, as particles will be: a glass of alpha a shows a*fogged colour over the
 // window's black; an additive glow dims by the opacity (what it lies over has the fog already). A custom material
 // shader using kin_output receives the same fog as a stock material.
@@ -18225,6 +18499,84 @@ void test_time_of_day_shadows() {
     day.hours = 3.0f;
     kin::apply(day, lights, sky, fog);
     assert(lights.fill_shadow.enabled && lights.fill_shadow.strength == 0.37f && lights.sun_shadow_strength == 0.6f);
+}
+
+// More point lights with shadows than there were layers for (Lights3D::max_shadowed_points up to 8): six lamps that ask
+// for 256-texel cubes beside a spot's 1024 map, their faces packed sixteen to a layer of the 1024 array (four layers,
+// not 37). Each lamp's pole still casts its own shadow onto the floor beyond it.
+void test_gpu_point_shadows_packed() {
+    with_gpu("test_gpu_point_shadows_packed", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh3D pole = make_box(r3d, {0.3f, 1.0f, 0.3f});
+        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1}).value_or({});
+        const kin::Rectf rect{0.0f, 0.0f, 640.0f, 480.0f};
+        std::vector<Vec3f> lamps;
+        for (const float z : {-3.5f, 3.5f}) {
+            for (const float x : {-5.5f, 0.0f, 5.5f}) {
+                lamps.push_back({x, 2.0f, z});
+            }
+        }
+        kin::Scene3D scene;
+        scene.camera = stage.camera();
+        const auto shoot = [&](bool shadows) {
+            scene.clear();
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.01f, 0.01f, 0.01f};
+            scene.lights.max_shadowed_points = 8;
+            stage.draw_floor(scene);
+            for (std::size_t i = 0; i < lamps.size(); ++i) {
+                (void)scene.draw(pole, Mat4f::translation(lamps[i] + Vec3f{0.8f, -1.5f, 0.0f}),
+                                 {.color = Color::rgb(200, 200, 200)});
+                kin::PointLightSource3D lamp{
+                    .position = lamps[i], .color = {8.0f, 8.0f, 8.0f}, .radius = 3.0f, .size = 0.05f};
+                lamp.shadow_enabled = shadows;
+                lamp.shadow_resolution = 256;
+                lamp.id = static_cast<kin::u32>(i + 1);
+                scene.add_point_light(lamp);
+            }
+            // A spot that sizes the array (1024), its map a layer of its own, aimed at nothing much.
+            kin::SpotLightSource3D spot{.position = {0.0f, 6.0f, 0.0f},
+                                        .direction = {0.0f, -1.0f, 0.0f},
+                                        .color = {0.5f, 0.5f, 0.5f},
+                                        .radius = 7.0f,
+                                        .inner_angle = 5.0f,
+                                        .outer_angle = 8.0f};
+            spot.shadow_enabled = shadows;
+            spot.shadow_resolution = 1024;
+            scene.add_spot_light(spot);
+            const Pixels p = shoot_large(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels with = shoot(true);
+        const kin::RenderDebugStats3D& stats = r3d.debug_stats();
+        std::cerr << "packed point shadows: " << stats.local_shadow_maps << " maps, " << stats.local_shadow_bytes
+                  << " bytes\n";
+        assert(stats.local_shadow_maps == 1 + 6 * 6);
+        for (kin::u32 i = 0; i < 6; ++i) {
+            assert(stats.point_slot[i] >= 0);
+        }
+        // Four layers of 1024: the spot's, then 36 faces of 256 (sixteen to a layer).
+        assert(stats.local_shadow_bytes == 4ull * 1024ull * 1024ull * 2ull ||
+               stats.local_shadow_bytes == 4ull * 1024ull * 1024ull * 4ull);
+        const Pixels without = shoot(false);
+        for (const Vec3f& lamp : lamps) {
+            // The floor beyond the pole (its shadow), and its mirror on the other side of the lamp (lit).
+            const auto dark_at = scene.camera.project(lamp + Vec3f{1.4f, -2.0f, 0.0f}, rect);
+            const auto lit_at = scene.camera.project(lamp + Vec3f{-1.4f, -2.0f, 0.0f}, rect);
+            assert(dark_at && lit_at);
+            const int dark = brightness(with.at(dark_at->pos)), lit = brightness(with.at(lit_at->pos));
+            const int open = brightness(without.at(dark_at->pos));
+            std::cerr << "  lamp at " << lamp.x << ", " << lamp.z << ": shadow " << dark << ", mirror " << lit
+                      << ", unshadowed " << open << "\n";
+            assert(lit > 40 && open > 40);
+            assert(dark < lit / 3);
+        }
+    });
 }
 
 void test_gpu_moon_shadow() {
@@ -23702,6 +24054,8 @@ int main(int argc, char** argv) {
     RUN(test_gpu_sky_and_fog_off_are_unchanged());
     RUN(test_gpu_fog_matches_formula());
     RUN(test_gpu_fog_sun_shadows());
+    RUN(test_gpu_fog_volumetric_lights());
+    RUN(test_gpu_fog_volumetric_sun_and_moon());
     RUN(test_gpu_fog_blended_and_custom());
     RUN(test_gpu_fog_melts_into_the_sky());
     RUN(test_gpu_sky_under_taa());
@@ -23739,6 +24093,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_spot_shadow_cache());
     RUN(test_gpu_spot_shadow_budget());
     RUN(test_gpu_point_shadow_cube());
+    RUN(test_gpu_point_shadows_packed());
     RUN(test_gpu_moon_shadow());
     RUN(test_gpu_spot_light_fogged());
     RUN(test_gpu_spot_lights_off_is_unchanged());

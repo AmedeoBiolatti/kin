@@ -204,6 +204,9 @@ public:
     // Its variants (but the cut-outs) sample Material3D::graph_maps, the sampler after the stock layout's (made from
     // kin_material.inc.glsl since graph maps; older SPIR-V has the stock layout as it was).
     bool graph_maps = false;
+    // Its fog variants sample the fog volume's sums (uFogVolume, after the graph maps; made since volumetric fog): the
+    // plain ones', and the light ones' (none: SDL_GPU's 16 samplers are the stock light layout's and the graph maps).
+    bool fog_volume = false, fog_volume_lit = false;
     bool valid() const override {
         for (u32 i = 0; i < surface_required_variants3d; ++i)
             if (!variants[i])
@@ -302,6 +305,7 @@ public:
         _taa_reset_asked = true;
         _occ_reset = true;
         _exposure_valid = false;
+        _fog_volume_valid = false;
     }
 
 private:
@@ -349,6 +353,22 @@ private:
     // With Fog3D::sun_shadows: the share of the fog's air the sun reaches along each ray (fog_sun.comp), RGBA16F at
     // half the view's size; made by the first render that asks, dropped by the first that does not.
     GpuTexture _fog_sun;
+    // With Fog3D::volumetric: the lights' light in the fog's air, a cell each (fog_volume.comp, RGBA16F volumes: this
+    // frame's and the last's, swapped each render), and its sums along the rays (fog_volume_integrate.comp); made by
+    // the first render that asks, dropped by the first that does not. What the last frame's volume was made with, to
+    // read it where a cell was then: the camera's world to clip (unjittered), eye and forward, and the volume's shape.
+    std::array<GpuTexture, 2> _fog_volume;
+    GpuTexture _fog_volume_sum;
+    // Per column of its cells, the view depth they are lit to (fog_volume_depth.comp: the tile's farthest surface, then
+    // its 3 x 3 neighbourhood's), R32F.
+    std::array<GpuTexture, 2> _fog_volume_reach;
+    u32 _fog_volume_written = 0; // the one of _fog_volume the last render wrote
+    bool _fog_volume_valid = false;
+    Mat4f _fog_volume_previous{};
+    Vec3f _fog_volume_eye{}, _fog_volume_forward{};
+    f32 _fog_volume_depth = 0.0f;
+    std::array<u32, 3> _fog_volume_cells{}; // across, down, slices
+    u32 _fog_volume_frame = 0;              // the point within each cell moves each render
     // With Scene3D::taa, made by the first render that asks and dropped by the
     // first that does not: one-sample depth for the main pass (the view's own
     // may be multisampled), the 8-bit view's float picture before the resolve
@@ -750,11 +770,10 @@ private:
     void build_local_shadows(FrameCtx& ctx);
     bool local_shadow_pass(FrameCtx& ctx);
     void push_local_lights(const FrameCtx& ctx, u32 s, u32 slot);
-    // The local array made or kept (`side` x `side`, a layer for each of `spot_layers` spots then six for each of
-    // `point_slots` point lights: only ever more, until it has been idle for _release_after renders; false where it
-    // could not be made), and the moon's (its own side, `layers` cascades; how many it has, 0 where one could not be
-    // made).
-    bool ensure_local_map(u32 side, u32 spot_layers, u32 point_slots);
+    // The local array made or kept (`side` x `side`, `layers` of them, which pack_local_maps fills: only ever more,
+    // until it has been idle for _release_after renders; false where it could not be made), and the moon's (its own
+    // side, `layers` cascades; how many it has, 0 where one could not be made).
+    bool ensure_local_map(u32 side, u32 layers);
     u32 ensure_moon_map(u32 side, u32 layers);
     bool ensure_gi_sun_map(); // the GI's sun map (made once); false where there can be none
     void upload_joints(FrameCtx& ctx);
@@ -822,6 +841,14 @@ private:
     bool fog_sun(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats);
     // And its light added to the main pass's picture, once a pixel (fog_sun_apply.frag).
     void fog_sun_apply(FrameCtx& ctx);
+    // Fog3D::volumetric: the point and spot lights' light in the fog's air, lit in a volume over the view and summed
+    // along its rays (fog_volume.comp, fog_volume_integrate.comp), after the local shadows; true when it was.
+    bool fog_volume(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats);
+    // And the sums added to the main pass's picture, once a pixel at the pre-pass's depth (fog_volume_apply.frag).
+    void fog_volume_apply(FrameCtx& ctx);
+    // The same inside the main pass (its targets' formats and samples), between the opaque draws and the blended ones.
+    bool fog_volume_apply(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
+                          SDL_GPUTextureFormat format, u32 samples);
     // The view's GI scene and probes as the shaders read them (kin_gi.inc.glsl's KinGiScene, 5 vec4s, into `scene`;
     // KinGiProbes, 7, into `probes`; either may be null).
     void gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, f32* scene, f32* probes) const;
@@ -1127,6 +1154,14 @@ private:
     // Ambient occlusion needs these formats and two compute pipelines; where
     // the device lacks one it is off (a line in the log the first time it is asked for).
     SDL_GPUTextureFormat _ao_depth_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
+    // Fog3D::volumetric's.
+    SDL_GPUComputePipeline* _fog_volume_pipeline = nullptr;           // fog_volume.comp
+    SDL_GPUComputePipeline* _fog_volume_integrate_pipeline = nullptr; // fog_volume_integrate.comp
+    SDL_GPUComputePipeline* _fog_volume_depth_pipeline = nullptr;     // fog_volume_depth.comp
+    GpuShader _fog_volume_apply_shader;                               // fog_volume_apply.frag
+    std::shared_ptr<GpuBuffer> _fog_lights;                           // fog_volume.comp's FogLights
+    GpuTexture _no_fog_volume; // 1 x 1 x 1: the fog variants' uFogVolume without a volume
+
     bool _ao_available = false;
     bool _ao_warned = false;
     bool _contact_warned = false;
@@ -1177,8 +1212,7 @@ private:
     // draws into a corner of it); the moon's cascades are an array of their own. `_*_generation` changes when one is
     // made again (nothing cached is in it).
     GpuTexture _local_map;
-    u32 _local_side = 0, _local_layers = 0;
-    u32 _local_spot_layers = 0, _local_point_slots = 0; // its layout: the spots' layers, then the point lights' cubes
+    u32 _local_side = 0, _local_layers = 0; // the maps are packed into its layers (pack_local_maps)
     u64 _local_generation = 0;
     u32 _local_idle = 0;
     u32 _local_smaller = 0; // renders in a row the lights with maps needed a smaller side than the array's
@@ -1230,6 +1264,9 @@ private:
         u32 layer = 0; // in its array
         u32 cache = 0; // its _local_cache index
         u32 size = 0;  // the viewport's side
+        // Packed with others into its layer (the renderer's own local maps): its square's corner, cleared alone.
+        u32 x = 0, y = 0;
+        bool packed = false;
         bool moon = false;
         bool gi_sun = false;     // the GI's sun map: every caster over the GI's area, whatever the camera sees
         bool single_map = false; // a moon's lone map over the whole area (no slice test)
@@ -1482,7 +1519,7 @@ private:
         u8 camera = 1;          // 0 outside, 1 partial, 2 inside
         u8 sun_mask = 0, sun_inside = 0;
         std::array<u8, max_shadow_cascades> sun_reach_planes{}, moon_reach_planes{};
-        u32 local_mask = 0, local_radius_inside = 0;
+        u64 local_mask = 0, local_radius_inside = 0; // a bit a local view
         std::array<u8, max_local_shadow_layers + max_shadow_cascades + 1> local_planes{};
     };
     struct Piece {
