@@ -2595,6 +2595,15 @@ r3d.render(view, scene);       // then the view that sees the mirror
   window's unlit surface is fogged again at its own distance.
 
 
+- **Water you see into.** `refraction_view(camera, plane, aspect)` is what is below a surface, seen by the camera itself
+  (clipped just under the plane, so the surface is not in it), and `planar_refraction_params(params, projector,
+  distortion, strength)` puts its projector into a planar surface's parameters; the reflection surface shows that
+  picture (in the material's base colour map) as the light that comes up through the water: what is not reflected (1
+  minus its Fresnel, water's 2% head on), bent by the ripples. Render the picture with a fog that thickens under the
+  surface (a height fog, its base height the surface's) and what is below fades into the water's murk as it deepens.
+  `Mirror3D` does all of it: `refraction` (0: a mirror), `refraction_distortion`, `murk` and `murk_depth` (about two
+  thirds gone that deep, looking straight down); the atrium's pool shows its floor.
+
 ### Mirrors and portals on entities
 
 `Mirror3D` and `Portal3D` (`kin/ecs/render3d.hpp`; authored in scenes and prefabs, shown by the inspector like any

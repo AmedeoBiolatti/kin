@@ -1146,6 +1146,37 @@ void gpu_planar(Renderer2D& renderer) {
     for (const Scene3D::Draw& draw : floored.scene()->draws())
         floored_whole += draw.clip == DrawClip3D::whole ? draw.count : 0;
     check(floored_whole == whole, "a floor through a portal's plane is drawn as going through it");
+    // Water you see into (Mirror3D::refraction): seen from above, a red box just under the surface shows red, one deep
+    // down shows the murk's blue; without refraction neither shows (the water reflects).
+    write(scratch.path / "red.kinmaterials",
+          R"({"schema":"kin.materials3d/1","material":{"color":[230,20,20,255],"unlit":true}})");
+    const auto water_scene = [&](f32 depth, f32 refraction) {
+        const std::string name =
+            "water_" + std::to_string(int(depth * 10)) + "_" + std::to_string(int(refraction)) + ".kinscene";
+        write(scratch.path / name, std::string(R"({"schema":"kin.scene/1","entities":[
+          {"id":"camera","components":{"Transform3D":{"position":[0,3,0],"rotation":[-0.7071068,0,0,0.7071068]},
+            "SceneCamera3D":{"fov":40}}},
+          {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+          {"id":"water","components":{"Transform3D":{"rotation":[-0.7071068,0,0,0.7071068]},
+            "Mirror3D":{"size":[20,20],"metallic":0,"roughness":0.05,"color":[255,255,255,255],
+              "murk":[0,0,255,255],"murk_depth":1,"refraction":)") +
+                                       std::to_string(refraction) + R"(}}},
+          {"id":"box","components":{"Transform3D":{"position":[0,)" +
+                                       std::to_string(-depth) +
+                                       R"(,0],"scale":[1.5,0.1,1.5]},"ModelRenderer3D":{"asset":"parts.glb"},
+            "ModelMaterials3D":{"asset":"red.kinmaterials"}}}]})");
+        SceneSession3D water{r3d, assets, options};
+        check(water.load(name), "water scene failed");
+        (void)centre(water);
+        return centre(water);
+    };
+    const auto shallow = water_scene(0.2f, 1), deep = water_scene(4.0f, 1), still = water_scene(0.2f, 0);
+    std::cerr << "water: shallow " << shallow[0] << "," << shallow[1] << "," << shallow[2] << " deep " << deep[0] << ","
+              << deep[1] << "," << deep[2] << " no refraction " << still[0] << "," << still[1] << "," << still[2]
+              << '\n';
+    check(shallow[0] > shallow[2] + 40, "a box just under the water does not show through it");
+    check(deep[2] > deep[0] + 20, "a box deep under the water does not fade into its murk");
+    check(!(still[0] > still[2] + 40), "the water shows what is below it without refraction");
     // A mirror renders, and shows something else than kin's own metal does.
     SceneSession3D mirror{r3d, assets, options};
     check(mirror.load("mirror.kinscene"), "mirror scene failed");

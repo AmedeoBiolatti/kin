@@ -243,6 +243,10 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         Material3D real, stand_in;
         PlanarView3D seen;
         View3D* view = nullptr;
+        // Water you see into (Mirror3D::refraction): what is below, through its own view, fogged by its murk.
+        PlanarView3D below{};
+        View3D* below_view = nullptr;
+        Fog3D murk{};
     };
     struct Portal {
         EcsId id;
@@ -351,6 +355,24 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 m.real.emissive_texture = m.view->texture();
                 planar_view_params(m.real.shader_params, m.seen.projector, c.distortion,
                                    std::clamp(c.strength, 0.0f, 1.0f));
+                // Water you see into: what is below the surface, in a picture of the same place, in its base colour
+                // map. Its murk is a height fog thickening fast under the surface (level water: its base height the
+                // surface's), about two thirds gone looking straight down `murk_depth` deep.
+                if (c.refraction > 0.0f && c.metallic < 1.0f)
+                    m.below_view = d.view(m.id, 1, picture.size, options);
+                if (m.below_view) {
+                    m.below = refraction_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
+                    crop_planar_view(m.below, picture.window, f32(picture.size.x) / f32(picture.size.y), false);
+                    m.real.texture = m.below_view->texture();
+                    planar_refraction_params(m.real.shader_params, m.below.projector, c.refraction_distortion,
+                                             std::clamp(c.refraction, 0.0f, 1.0f));
+                    const f32 k = 3.0f / std::max(c.murk_depth, 0.01f);
+                    m.murk = Fog3D{.enabled = true,
+                                   .height_density = k / (std::exp(3.0f) - 1.0f),
+                                   .height_falloff = k,
+                                   .base_height = at->position.y,
+                                   .colour = to_linear_rgb(c.murk)};
+                }
             }
         } else
             ++d.skipped;
@@ -428,9 +450,18 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         ++d.rendered;
         return true;
     };
-    for (const Mirror& m : mirrors)
+    for (const Mirror& m : mirrors) {
         if (m.view && !picture(*m.view, m.seen.camera))
             break;
+        if (m.below_view) { // (with the water's murk for fog)
+            const Fog3D fog = scene.fog;
+            scene.fog = m.murk;
+            const bool ok = picture(*m.below_view, m.below.camera);
+            scene.fog = fog;
+            if (!ok)
+                break;
+        }
+    }
     for (Portal& p : portals) {
         for (u32 k = p.shown; k-- > 0 && errors.empty();) {
             (void)scene.set_draw_material(p.draw, k + 1 < p.shown ? p.levels[k + 1] : p.stand_in);

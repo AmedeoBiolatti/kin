@@ -260,6 +260,30 @@ void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 disto
     params[19] = 0.0f;
 }
 
+PlanarView3D refraction_view(const Camera3D& camera, Vec4f plane, f32 aspect, f32 offset) {
+    PlanarView3D view;
+    view.camera = camera;
+    const f32 n = length(Vec3f{plane.x, plane.y, plane.z});
+    const Vec4f unit = n > 0.0f ? Vec4f{plane.x / n, plane.y / n, plane.z / n, plane.w / n} : plane;
+    // Keeps dot(normal, p) + w <= -offset: below the plane.
+    view.camera.clip_plane = {-unit.x, -unit.y, -unit.z, -unit.w - offset};
+    view.projector = view.camera.view_projection(aspect);
+    return view;
+}
+
+void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength) {
+    if (params.size() < 40) {
+        return;
+    }
+    for (std::size_t i = 0; i < 16; ++i) {
+        params[20 + i] = projector.m[i];
+    }
+    params[36] = strength;
+    params[37] = distortion;
+    params[38] = 0.0f;
+    params[39] = 0.0f;
+}
+
 std::optional<Vec3f> hit_plane_y(const Ray3& ray, f32 y) {
     if (std::abs(ray.direction.y) < 1e-6f) {
         return std::nullopt;

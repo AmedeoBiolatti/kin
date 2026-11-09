@@ -553,6 +553,22 @@ void kin_planar_reflect(inout KinSurface s, sampler2D picture, mat4 projector, f
     s.reflection = vec4(seen, share);
 }
 
+// Water you see into: `picture` (a refraction_view's View3D texture, read through `projector`: what is below the surface,
+// fogged by the water's murk as it deepens) is the light that comes up through the surface, `strength` of it: what is
+// not reflected (1 minus the surface's Fresnel, water's 2% head on), bent the other way from the reflection by its
+// ripples (`distortion`). The surface's own diffuse colour gives way to it (light goes in, not back).
+void kin_planar_refract(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength) {
+    const vec2 uv = kin_planar_point_uv(projector, s.normal, -distortion); // (before any branch: it may take derivatives)
+    if (strength <= 0.0) {
+        return;
+    }
+    const vec3 below = kin_planar_read(picture, uv);
+    const vec3 v = normalize(frame.eye.xyz - vWorld);
+    const float fresnel = 0.02 + 0.98 * pow(1.0 - clamp(dot(s.normal, v), 0.0, 1.0), 5.0);
+    s.emission += below * strength * (1.0 - fresnel);
+    s.base_color *= 1.0 - strength;
+}
+
 // A portal, a window onto a view, a security camera's screen seen in place: `picture` (a portal_view's View3D texture,
 // read through `projector`) is the surface's colour, `strength` of it. For an unlit material (Material3D::unlit), which
 // shows its colour as it is.
@@ -571,6 +587,11 @@ mat4 kin_planar_projector() {
 void kin_planar_reflection(inout KinSurface s) {
     const vec4 settings = kin_surface_param(4);
     kin_planar_reflect(s, uEmissive, kin_planar_projector(), settings.x, settings.y);
+    // Water you see into (planar_refraction_params): its picture in the base colour map, its projector after.
+    const vec4 below = kin_surface_param(9);
+    kin_planar_refract(s, uBase,
+                       mat4(kin_surface_param(5), kin_surface_param(6), kin_surface_param(7), kin_surface_param(8)),
+                       below.y, below.x);
 }
 void kin_planar_window(inout KinSurface s) {
     const vec4 settings = kin_surface_param(4);

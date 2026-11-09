@@ -92,8 +92,18 @@ void register_render3d_components(EcsWorld& world) {
             .description("How much of its reflection the picture is (the rest the sky's).")
             .field("resolution", &Mirror3D::resolution)
             .range(0.05, 1.0)
-            .description(
-                "Its picture's sharpness, a share of the view's (1: as sharp; it covers only where it shows).");
+            .description("Its picture's sharpness, a share of the view's (1: as sharp; it covers only where it shows).")
+            .field("refraction", &Mirror3D::refraction)
+            .range(0.0, 1.0)
+            .description("Water you see into: how much of what is below shows through (0: none, a mirror).")
+            .field("refraction_distortion", &Mirror3D::refraction_distortion)
+            .units("m")
+            .description("How far its ripples bend what is seen below.")
+            .field("murk", &Mirror3D::murk)
+            .description("The water's colour where it is deep (what is below fades into it).")
+            .field("murk_depth", &Mirror3D::murk_depth)
+            .units("m")
+            .description("How deep the water is before what is below is mostly gone into its murk.");
     if (!registry.find("Portal3D"))
         registry.native<Portal3D>("Portal3D")
             .field("enabled", &Portal3D::enabled)
