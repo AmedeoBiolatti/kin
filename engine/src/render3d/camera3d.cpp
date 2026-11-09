@@ -261,7 +261,8 @@ Mat4f into_part(const Mat4f& projector, Vec2f share) {
 }
 } // namespace
 
-void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength, Vec2f share) {
+void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength, Vec2f share,
+                        bool compressed) {
     if (params.size() < 20) {
         return;
     }
@@ -273,6 +274,8 @@ void planar_view_params(std::span<f32> params, const Mat4f& projector, f32 disto
     params[17] = strength;
     params[18] = std::clamp(share.x, 1e-4f, 1.0f);
     params[19] = std::clamp(share.y, 1e-4f, 1.0f);
+    if (params.size() > 40)
+        params[40] = compressed ? 1.0f : 0.0f;
 }
 
 PlanarView3D refraction_view(const Camera3D& camera, Vec4f plane, f32 aspect, f32 offset) {
@@ -286,8 +289,8 @@ PlanarView3D refraction_view(const Camera3D& camera, Vec4f plane, f32 aspect, f3
     return view;
 }
 
-void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength,
-                              Vec2f share) {
+void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32 distortion, f32 strength, Vec2f share,
+                              bool compressed) {
     if (params.size() < 40) {
         return;
     }
@@ -299,6 +302,8 @@ void planar_refraction_params(std::span<f32> params, const Mat4f& projector, f32
     params[37] = distortion;
     params[38] = std::clamp(share.x, 1e-4f, 1.0f);
     params[39] = std::clamp(share.y, 1e-4f, 1.0f);
+    if (params.size() > 41)
+        params[41] = compressed ? 1.0f : 0.0f;
 }
 
 std::optional<Vec3f> hit_plane_y(const Ray3& ray, f32 y) {

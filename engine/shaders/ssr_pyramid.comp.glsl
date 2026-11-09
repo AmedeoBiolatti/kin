@@ -13,7 +13,8 @@ layout(std430, set = 1, binding = 0) buffer Pyramid {
 layout(set = 2, binding = 0) uniform Params {
     vec4 size;  // xy: this level's size, zw: the level before's
     vec4 where; // x: this level's first word, y: the level before's, z: 1 for level 0 (from the picture), w: 1 to decode
-    vec4 share; // xy: the part of the picture the render filled (View3D::set_render_size), from its top-left
+    vec4 share; // xy: the part of the picture the render filled (View3D::set_render_size), from its top-left; z: 1 when
+                // it is compressed (ViewOptions3D::compress: x / (1 + x)), taken back
 } params;
 
 vec3 decode_srgb(vec3 c) {
@@ -39,6 +40,8 @@ void main() {
         c = textureLod(uSource, (vec2(xy) + 0.5) / vec2(size) * params.share.xy, 0.0).rgb;
         if (params.where.w > 0.5)
             c = decode_srgb(c);
+        if (params.share.z > 0.5)
+            c = c / max(vec3(1.0) - c, vec3(1.0 / 64.0));
     } else {
         c = 0.25 * (before(xy * 2) + before(xy * 2 + ivec2(1, 0)) + before(xy * 2 + ivec2(0, 1)) +
                     before(xy * 2 + ivec2(1, 1)));

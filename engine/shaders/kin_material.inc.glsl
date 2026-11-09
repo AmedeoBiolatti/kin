@@ -278,7 +278,7 @@ vec4 kin_probe_irradiance(vec3 p, vec3 n) {
 
 #if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
 // Screen-space reflections (ssr_trace.comp, Scene3D::ssr): the last storage buffer of the light variants: three words a
-// texel of a half-size grid (how far its reflection meets something, its share as a half, the view depth traced), then
+// pixel of the view (how far its reflection meets something, its share as a half, the view depth traced), then
 // the previous frame's picture as a pyramid (ssr_pyramid.comp: two words a texel).
 #if defined(KIN_DRAW_MATERIALS) && defined(KIN_SURFACE)
 #define KIN_SSR_BINDING (21 + KIN_STORAGE_SHIFT)
@@ -294,7 +294,7 @@ layout(std430, set = 2, binding = KIN_SSR_BINDING) readonly buffer KinScreenRefl
 // part each frame), packed x + 4096 y; 0: as this frame's.
 ivec2 kin_ssr_prior_grid() {
     const float packed = frame.ssr_pyramid.w;
-    return packed > 0.5 ? ivec2(int(mod(packed, 4096.0)), int(packed / 4096.0)) : ivec2(frame.ssr.yz);
+    return packed > 0.5 ? ivec2(int(mod(packed, 4096.0)), int(packed / 4096.0)) : (ivec2(frame.ssr.yz) + 1) / 2;
 }
 // A texel of the previous frame's picture at `level` of its pyramid (ssr_pyramid.comp), clamped to the level.
 vec3 kin_ssr_texel(int level, ivec2 q) {
@@ -323,17 +323,21 @@ vec3 kin_ssr_picture(vec2 uv, float level) {
     }
     return mix(c[0], c[1], fract(level));
 }
-// The reflection at `p` (world) along `r` (this fragment's own: its normal map's) and its share (a). The four grid
-// texels round the pixel that traced this fragment's surface (by their depth: an edge's other side, or what glass is in
-// front of, counts for nothing) say how far the reflection meets something; the reflection followed that far is looked
-// up in the previous frame's picture, at the level as wide as the reflection's lobe is there (wider as the surface is
-// rougher and the hit further): blurred for a rough surface.
+// The reflection at `p` (world) along `r` (this fragment's own: its normal map's) and its share (a). The grid texels
+// round the pixel (its own: the trace is a texel a pixel) that traced this fragment's surface (by their depth: an edge's other side, or what glass is in
+// front of, counts for nothing) each say how far the reflection meets something; the reflection followed that far is
+// looked up in the previous frame's picture, at the level as wide as the reflection's lobe is there (wider as the
+// surface is rougher and the hit further): blurred for a rough surface. Each texel's own look-up, weighed (not their
+// distances averaged: along a reflected edge one meets the thing and the next what is behind it, and a distance
+// between the two reads neither, in steps of the grid).
 vec4 kin_ssr_reflection(float depth, vec3 p, vec3 r, float roughness) {
     const ivec2 grid = ivec2(frame.ssr.yz);
-    const vec2 at = gl_FragCoord.xy * 0.5 - 0.5;
+    const vec2 at = gl_FragCoord.xy - 0.5; // (a texel a pixel: its own)
     const ivec2 base = ivec2(floor(at));
     const vec2 f = at - vec2(base);
-    float distance = 0.0, share = 0.0, weights = 0.0;
+    const float alpha = roughness * roughness;
+    vec3 colour = vec3(0.0);
+    float shown = 0.0, weights = 0.0;
     for (int k = 0; k < 4; ++k) {
         const ivec2 o = ivec2(k & 1, k >> 1);
         const ivec2 q = clamp(base + o, ivec2(0), grid - 1);
@@ -341,29 +345,30 @@ vec4 kin_ssr_reflection(float depth, vec3 p, vec3 r, float roughness) {
         const float traced = uintBitsToFloat(kin_ssr[i + 2u]);
         const float near = abs(traced - depth) < 0.02 * depth + 0.05 ? 1.0 : 0.0;
         const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y) * near;
-        const float s = unpackHalf2x16(kin_ssr[i + 1u]).x;
-        distance += uintBitsToFloat(kin_ssr[i]) * s * w;
-        share += s * w;
         weights += w;
+        const float share = unpackHalf2x16(kin_ssr[i + 1u]).x;
+        if (w <= 0.0 || share <= 0.0)
+            continue;
+        const float distance = uintBitsToFloat(kin_ssr[i]);
+        const vec4 clip = frame.ssr_previous * vec4(p + r * distance, 1.0);
+        if (clip.w <= 1e-4)
+            continue;
+        const vec2 ndc = clip.xy / clip.w;
+        const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        const vec2 edge = min(uv, 1.0 - uv);
+        const float s = share * smoothstep(0.0, 0.08, min(edge.x, edge.y)) * w;
+        if (s <= 0.0)
+            continue;
+        // The lobe's width where it meets what it reflects (GGX's, about alpha a unit away), in the grid's pixels there.
+        const float width =
+            1.5 * alpha * distance * frame.ssr_pyramid.y / clip.w * 0.5 * float(kin_ssr_prior_grid().y);
+        const float level = clamp(log2(max(width, 1.0)), 0.0, frame.ssr_pyramid.x - 1.0);
+        colour += kin_ssr_picture(uv, level) * s;
+        shown += s;
     }
-    if (weights <= 1e-4 || share <= 1e-4)
+    if (weights <= 1e-4 || shown <= 1e-4)
         return vec4(0.0);
-    distance /= share;
-    share /= weights;
-    const vec4 clip = frame.ssr_previous * vec4(p + r * distance, 1.0);
-    if (clip.w <= 1e-4)
-        return vec4(0.0);
-    const vec2 ndc = clip.xy / clip.w;
-    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    const vec2 edge = min(uv, 1.0 - uv);
-    share *= smoothstep(0.0, 0.08, min(edge.x, edge.y));
-    if (share <= 1e-4)
-        return vec4(0.0);
-    // The lobe's width where it meets what it reflects (GGX's, about alpha a unit away), in the grid's pixels there.
-    const float alpha = roughness * roughness;
-    const float width = 1.5 * alpha * distance * frame.ssr_pyramid.y / clip.w * 0.5 * float(kin_ssr_prior_grid().y);
-    const float level = clamp(log2(max(width, 1.0)), 0.0, frame.ssr_pyramid.x - 1.0);
-    return vec4(kin_ssr_picture(uv, level), share);
+    return vec4(colour / shown, shown / weights);
 }
 #endif
 
@@ -543,13 +548,17 @@ vec2 kin_planar_uv(mat4 projector, vec3 world) {
 
 // A picture of kin's (a View3D's texture) at `uv`, in linear light: decoded as the material's maps are. `share`: how much
 // of the texture the picture fills, from the top-left (View3D::set_render_size); the read stays in it.
-vec3 kin_planar_read(sampler2D picture, vec2 uv, vec2 share) {
+vec3 kin_planar_read(sampler2D picture, vec2 uv, vec2 share, bool compressed) {
     const vec2 half_texel = 0.5 / vec2(textureSize(picture, 0));
     vec3 c = textureLod(picture, clamp(uv, half_texel, share - half_texel), 0.0).rgb;
     if (frame.flags.y > 0.5) {
         c = decode(c);
     }
-    return c;
+    // (ViewOptions3D::compress: the light past white kept as x / (1 + x), taken back.)
+    return compressed ? c / max(vec3(1.0) - c, vec3(1.0 / 64.0)) : c;
+}
+vec3 kin_planar_read(sampler2D picture, vec2 uv, vec2 share) {
+    return kin_planar_read(picture, uv, share, false);
 }
 
 vec3 kin_planar_read(sampler2D picture, vec2 uv) {
@@ -574,27 +583,32 @@ vec2 kin_planar_point_uv(mat4 projector, vec3 normal, float distortion) {
 // and specular occlusion weigh it as ever (water reflects little head on and much at a glance; a metal all of it); its
 // highlights stay. A rough surface reads it blurred, and past a roughness of 0.4 leaves it, by 0.7, to the environment's.
 void kin_planar_reflect(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength,
-                        vec2 part) {
+                        vec2 part, bool compressed) {
     const vec2 uv = kin_planar_point_uv(projector, s.normal, distortion); // (before any branch: it may take derivatives)
     const float share = strength * (1.0 - smoothstep(0.4, 0.7, s.roughness));
     if (share <= 0.0) {
         return;
     }
-    vec3 seen = kin_planar_read(picture, uv, part);
+    vec3 seen = kin_planar_read(picture, uv, part, compressed);
     if (s.roughness > 0.1) {
         // Four more reads round it, as far as the roughness spreads a reflection (a cheap blur: the picture has no
         // levels of detail).
         const vec2 r = vec2(0.04 * s.roughness * s.roughness * part.x) *
                        vec2(1.0, float(textureSize(picture, 0).x) / float(textureSize(picture, 0).y));
-        seen = (seen + kin_planar_read(picture, uv + vec2(r.x, 0.0), part) +
-                kin_planar_read(picture, uv - vec2(r.x, 0.0), part) + kin_planar_read(picture, uv + vec2(0.0, r.y), part) +
-                kin_planar_read(picture, uv - vec2(0.0, r.y), part)) *
+        seen = (seen + kin_planar_read(picture, uv + vec2(r.x, 0.0), part, compressed) +
+                kin_planar_read(picture, uv - vec2(r.x, 0.0), part, compressed) +
+                kin_planar_read(picture, uv + vec2(0.0, r.y), part, compressed) +
+                kin_planar_read(picture, uv - vec2(0.0, r.y), part, compressed)) *
                0.2;
     }
     s.reflection = vec4(seen, share);
 }
+void kin_planar_reflect(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength,
+                        vec2 part) {
+    kin_planar_reflect(s, picture, projector, distortion, strength, part, false);
+}
 void kin_planar_reflect(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength) {
-    kin_planar_reflect(s, picture, projector, distortion, strength, vec2(1.0));
+    kin_planar_reflect(s, picture, projector, distortion, strength, vec2(1.0), false);
 }
 
 // Water you see into: `picture` (a refraction_view's View3D texture, read through `projector`: what is below the surface,
@@ -602,31 +616,39 @@ void kin_planar_reflect(inout KinSurface s, sampler2D picture, mat4 projector, f
 // not reflected (1 minus the surface's Fresnel, water's 2% head on), bent the other way from the reflection by its
 // ripples (`distortion`). The surface's own diffuse colour gives way to it (light goes in, not back).
 void kin_planar_refract(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength,
-                        vec2 part) {
+                        vec2 part, bool compressed) {
     const vec2 uv = kin_planar_point_uv(projector, s.normal, -distortion); // (before any branch: it may take derivatives)
     if (strength <= 0.0) {
         return;
     }
-    const vec3 below = kin_planar_read(picture, uv, part);
+    const vec3 below = kin_planar_read(picture, uv, part, compressed);
     const vec3 v = normalize(frame.eye.xyz - vWorld);
     const float fresnel = 0.02 + 0.98 * pow(1.0 - clamp(dot(s.normal, v), 0.0, 1.0), 5.0);
     s.emission += below * strength * (1.0 - fresnel);
     s.base_color *= 1.0 - strength;
 }
+void kin_planar_refract(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength,
+                        vec2 part) {
+    kin_planar_refract(s, picture, projector, distortion, strength, part, false);
+}
 void kin_planar_refract(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength) {
-    kin_planar_refract(s, picture, projector, distortion, strength, vec2(1.0));
+    kin_planar_refract(s, picture, projector, distortion, strength, vec2(1.0), false);
 }
 
 // A portal, a window onto a view, a security camera's screen seen in place: `picture` (a portal_view's View3D texture,
 // read through `projector`) is the surface's colour, `strength` of it. For an unlit material (Material3D::unlit), which
 // shows its colour as it is.
 void kin_planar_show(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength,
-                     vec2 part) {
-    const vec3 seen = kin_planar_read(picture, kin_planar_point_uv(projector, s.normal, distortion), part);
+                     vec2 part, bool compressed) {
+    const vec3 seen = kin_planar_read(picture, kin_planar_point_uv(projector, s.normal, distortion), part, compressed);
     s.base_color = mix(s.base_color, seen, strength);
 }
+void kin_planar_show(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength,
+                     vec2 part) {
+    kin_planar_show(s, picture, projector, distortion, strength, part, false);
+}
 void kin_planar_show(inout KinSurface s, sampler2D picture, mat4 projector, float distortion, float strength) {
-    kin_planar_show(s, picture, projector, distortion, strength, vec2(1.0));
+    kin_planar_show(s, picture, projector, distortion, strength, vec2(1.0), false);
 }
 
 #ifdef KIN_SURFACE
@@ -640,9 +662,14 @@ mat4 kin_planar_projector() {
 vec2 kin_planar_part(vec4 settings) {
     return settings.z > 0.0 ? settings.zw : vec2(1.0);
 }
+// Which of a planar surface's pictures are compressed (ViewOptions3D::compress): x its own, y the refraction's.
+vec2 kin_planar_compressed() {
+    return kin_surface_param(10).xy;
+}
 void kin_planar_reflection(inout KinSurface s) {
     const vec4 settings = kin_surface_param(4);
-    kin_planar_reflect(s, uEmissive, kin_planar_projector(), settings.x, settings.y, kin_planar_part(settings));
+    kin_planar_reflect(s, uEmissive, kin_planar_projector(), settings.x, settings.y, kin_planar_part(settings),
+                       kin_planar_compressed().x > 0.5);
     // Water you see into (planar_refraction_params): its picture in the base colour map, its projector after. The
     // picture is no base colour: the surface's own is the material's (the stock surface read the picture at the
     // surface's UVs, and its alpha where the picture fills only part of its texture: black there).
@@ -653,11 +680,12 @@ void kin_planar_reflection(inout KinSurface s) {
     }
     kin_planar_refract(s, uBase,
                        mat4(kin_surface_param(5), kin_surface_param(6), kin_surface_param(7), kin_surface_param(8)),
-                       below.y, below.x, kin_planar_part(below));
+                       below.y, below.x, kin_planar_part(below), kin_planar_compressed().y > 0.5);
 }
 void kin_planar_window(inout KinSurface s) {
     const vec4 settings = kin_surface_param(4);
-    kin_planar_show(s, uEmissive, kin_planar_projector(), settings.x, settings.y, kin_planar_part(settings));
+    kin_planar_show(s, uEmissive, kin_planar_projector(), settings.x, settings.y, kin_planar_part(settings),
+                    kin_planar_compressed().x > 0.5);
 }
 #endif
 
@@ -763,6 +791,15 @@ bool kin_backlit(Surface s) {
 }
 
 #ifdef KIN_LIGHTS
+// A light of `radius_squared` (its size, squared: colour.w) `d2` away is a sphere, not a point: its highlight is never
+// sharper than the angle it spans (as the sun's disc; a near-mirror's point-light peak is thinner than a pixel, so it
+// flickers as the eye or the light moves).
+Surface kin_sphere_light(Surface s, float radius_squared, float d2) {
+    const float spans = sqrt(clamp(radius_squared / max(d2, 1e-8), 0.0, 1.0));
+    s.alpha = max(s.alpha, spans);
+    s.coat_alpha = max(s.coat_alpha, spans);
+    return s;
+}
 // A point light's light on the surface: the inverse square, windowed to nothing at the radius (Karis' fall-off, as
 // glTF's punctual lights), no brighter than at the light's own size (colour.w: its square), so a surface inside a
 // flash is lit as at its edge, not without bound; its shadow from its cube (`first`: the cube's first layer, -1:
@@ -788,10 +825,11 @@ vec3 kin_point_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour
     ) {
         seen = point_light_shadow_from(first, through_offset, toward, sqrt(d2));
     }
+    const Surface sphere = kin_sphere_light(s, colour.w, d2);
 #ifdef KIN_DIRECT_LIGHT
-    return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_POINT, at.xyz, sqrt(d2));
+    return kin_direct_light(sphere, toward, colour.rgb * k, seen, KIN_LIGHT_POINT, at.xyz, sqrt(d2));
 #else
-    return shade(s, toward, colour.rgb * (k * seen));
+    return shade(sphere, toward, colour.rgb * (k * seen));
 #endif
 }
 
@@ -819,10 +857,11 @@ vec3 kin_spot_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour,
     ) {
         seen = local_shadow(int(more.y), through_offset, toward, sqrt(d2));
     }
+    const Surface sphere = kin_sphere_light(s, colour.w, d2);
 #ifdef KIN_DIRECT_LIGHT
-    return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_SPOT, at.xyz, sqrt(d2));
+    return kin_direct_light(sphere, toward, colour.rgb * k, seen, KIN_LIGHT_SPOT, at.xyz, sqrt(d2));
 #else
-    return shade(s, toward, colour.rgb * (k * seen));
+    return shade(sphere, toward, colour.rgb * (k * seen));
 #endif
 }
 #endif
@@ -1296,7 +1335,10 @@ vec4 kin_output(vec3 colour, float alpha) {
     colour = kin_fog_apply(colour);
 #endif
     if (frame.flags.x > 0.5) {
-        colour = encode(colour);
+        if (frame.flags.x > 1.5) // (ViewOptions3D::compress)
+            colour = colour / (1.0 + max(colour, vec3(0.0)));
+        if (frame.flags.x < 2.5)
+            colour = encode(colour);
     }
     return vec4(colour * alpha, alpha);
 }
@@ -1308,7 +1350,10 @@ vec4 kin_output_unfogged(vec3 colour, float alpha) {
         if (alpha < material.params.w) discard;
         alpha = 1.0;
     }
-    if (frame.flags.x > 0.5) colour = encode(colour);
+    if (frame.flags.x > 1.5)
+        colour = colour / (1.0 + max(colour, vec3(0.0)));
+    if (frame.flags.x > 0.5 && frame.flags.x < 2.5)
+        colour = encode(colour);
     return vec4(colour * alpha, alpha);
 }
 #endif

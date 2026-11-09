@@ -163,7 +163,9 @@ void main() {
         const vec3 sun = sky.fog.view.z > 0.5 ? vec3(0.0) : kin_fog_sun_light(sky.fog, d, sun_dir, frame.sun_color.rgb);
         c = mix(c, (sky.fog.colour.w > 0.5 ? scattered : sky.fog.colour.rgb) + sun, opacity);
     }
-    if (frame.flags.x > 0.5) {
+    if (frame.flags.x > 1.5) // (ViewOptions3D::compress)
+        c = c / (1.0 + max(c, vec3(0.0)));
+    if (frame.flags.x > 0.5 && frame.flags.x < 2.5) {
         c = kin_encode(c);
     }
     FragColor = vec4(c, 1.0);
