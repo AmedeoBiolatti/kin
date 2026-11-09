@@ -2818,7 +2818,9 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   half-way through a portal is drawn at its exit too (`portal_straddle`, `Scene3D::draw_again`): every copy of the
   scene's draws whose bounds straddle an opening, plain, skinned (a character walking through: its pose as it is) or an
   instance batch's, with its id, whole, and an opaque one again where it is, whole, in the pictures only (`DrawClip3D`).
-  The atrium's survivor (Kenney's, CC0) walks through its portals (`planar_atrium --camera 5`).
+  The atrium's survivor (Kenney's, CC0) walks through its portals: yours to steer from behind in `planar_atrium` (W/S
+  walk, A/D turn, Shift runs; the camera follows it through a portal, seeing it through the other one), or walking its
+  round (`--camera 5`).
 - **Going through.** `portal_step(world, from, to)` (Lua `scene3d.portal_step(from, to)`) tests a step against every
   enabled portal: where it ends, out of the exit, and the turn to give its facing and velocity (`turn`, a quaternion),
   or nothing (nil). `portal_poses(entity)` gives an entity's portal and its exit as the camera3d.hpp helpers take them.
