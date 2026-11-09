@@ -4,6 +4,9 @@
 
 Kin is a C++ game engine designed for humans and AI agents alike. It starts small, stays honest about its scope, and grows incrementally alongside the games built with it.
 
+This page describes principles. For current project structure, supported runtime
+paths and working examples, use the [project workflow](project_workflow.md).
+
 ---
 
 ## Philosophy
@@ -12,13 +15,15 @@ Kin is a C++ game engine designed for humans and AI agents alike. It starts smal
 Systems, components, and behaviors are assembled, not inherited. No deep class hierarchies. Logic lives in systems; data lives in components.
 
 ### Independent systems
-Every subsystem (renderer, audio, physics, scripting, localization) is a self-contained module with a clean interface. Systems can be replaced, mocked, or omitted. Nothing is load-bearing by accident.
+Subsystems have explicit dependencies and clean interfaces. Optional components
+can be omitted; the dependency boundaries below identify the foundational APIs
+and replaceable backend seams.
 
 ### AI-first
 Kin is designed to be worked on and with by AI agents. This means:
 - Headless execution mode for automated testing and simulation
 - Structured, machine-readable logging and state introspection
-- CLI tooling for every workflow (project creation, builds, asset pipeline)
+- Shared build, asset and runtime CLI tooling, with a runnable project starter
 - Clear, consistent APIs that are easy to generate and consume
 - Live entity/world inspection via flecs REST API
 
@@ -28,22 +33,29 @@ agent assertions. Visual output is optional in headless mode; state and events
 are the test surface.
 
 ### Hot reload
-Fast iteration is non-negotiable. Asset hot reload ships early. Script hot reload follows. The engine should never force a full restart for a texture swap or a Lua change.
+Assets and Lua scripts support hot reload through shared development paths.
+Use [development sessions](hot_reload.md) for reload and rollback rather than
+implementing another watcher in each game.
 
 ### Scripting is a first-class citizen
-Logic can be written in C++ or in script. Lua ships first. The scripting layer is an abstraction — additional languages (TypeScript, Python) can be added without rewiring the engine. Scripts are hot-reloadable.
+Logic can be written in C++ or in script. Lua has shared gameplay, checking,
+testing and reload workflows; see [Lua development](lua_development.md). Add
+script hosts when real games need them, reusing the existing runtime boundaries.
 
 ### Localization from day one
 No hardcoded strings. All user-facing text routes through a key lookup. Locale switching is a runtime operation. This is not a feature bolted on later.
 
-### 2D first, 3D later
-The engine targets 2D games at launch. Architecture decisions (renderer abstraction, coordinate systems, camera) are made with a future Vulkan/3D path in mind, but that path is not built until it is needed.
+### Incremental renderer and platform support
+Kin supports 2D games and an experimental 3D path. Use the
+[current 3D guide](rendering_3d.md) and its session lifecycle for 3D work. Extend
+platforms and renderers for actual workloads, with explicit validation of the
+supported configuration.
 
 ### Incremental complexity
 Kin earns its features. Each system is added when a real game needs it, not speculatively. A turn-based strategy game and a card game should run before a particle system exists.
 
 ### Deterministic execution
-All randomness is handled by a unique RngKey provided to a sceen using the provided utilities.
+All randomness uses the scene's seeded `RngKey` and the provided utilities.
 
 ---
 
@@ -51,7 +63,9 @@ All randomness is handled by a unique RngKey provided to a sceen using the provi
 
 **Games:** Small, incremental 2D games — turn-based strategy, card games, puzzle games, and similar.
 
-**Platforms:** Windows and Linux first. Steam Deck (Linux) follows naturally. Android is out of scope for now.
+**Platforms:** Windows and Linux first. [Android](android.md) and
+[browser exports](web.md) are experimental; use their current guides for status
+and requirements.
 
 **Developers:** Solo developers and small teams, human or AI.
 
@@ -63,8 +77,7 @@ All randomness is handled by a unique RngKey provided to a sceen using the provi
 |---|---|---|
 | Language | C++23 | Performance, control, ecosystem |
 | Platform layer | SDL3 | Modern, cross-platform, good 2D renderer |
-| Renderer (now) | SDL3 renderer | Simple, sufficient for 2D |
-| Renderer (future) | Vulkan | Power and portability for 3D |
+| Rendering | SDL3 GPU/software paths and experimental 3D | Shared runtime with explicit backend choices; see [rendering](rendering.md) |
 | ECS | flecs | Built-in hierarchies, REST API, reflection, relationships |
 | Physics | Box2D | Mature, well-understood, sufficient for 2D |
 | Scripting | Lua (sol2) | Lightweight, hot-reloadable, proven in games |
@@ -93,9 +106,9 @@ Not every dependency is hidden, and the line is deliberate:
 ## Non-Goals
 
 - **Not a visual editor** (yet). Kin is a code-first engine. Editor tooling may come later.
-- **Not a 3D engine** (yet). Architectural decisions respect the future; implementation does not rush it.
+- **No speculative engine features.** Experimental 3D grows with real game workloads and validated runtime paths.
 - **Not a framework for AAA games**. Kin optimizes for clarity, iteration speed, and agent-friendliness over raw enterprise scale.
-- **Not opinionated about game structure**. Kin provides systems; game architecture is the developer's choice.
+- **Default project conventions.** The starter and project guide provide a consistent foundation; game-specific architecture grows from actual responsibilities.
 
 ---
 

@@ -10,13 +10,44 @@ and the runnable [example project](../examples/lua_testing/README.md).
 
 ## Quick Start
 
-Configure, build, and run the full test suite:
+For a normal edit, configure once and build/run the affected suite:
+
+```sh
+cmake --preset dev
+cmake --build --preset dev --target kin_scene_tests
+ctest --preset dev -R '^kin-scene$'
+```
+
+The development presets enable `KIN_BUILD_ON_DEMAND`: tests, sample games and
+tools stay available as targets but are excluded from the default build. CTest
+still lists all registered tests; it does not build missing executables. Always
+build the selected targets first and filter CTest to the corresponding tests.
+Some integration tests also require game/tool targets; build those dependencies
+as well. Running unfiltered CTest after a focused build can report missing
+executables.
+
+Documentation-only changes need relevant document checks, not compilation.
+Script and content changes usually need relevant script checks and a bounded
+sample smoke run. For C++ changes, start with affected targets and existing
+subsystem tests. Broaden coverage for shared headers/contracts, build settings,
+cross-module changes, failures or uncertainty. CI covers the full platform matrix.
+Repeat passing checks only after relevant edits or a new concern.
+
+For integration/release work, configure, build, and run the full suite:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure -j 8
 ```
+
+The plain configuration defaults to `KIN_BUILD_ON_DEMAND=OFF`, so existing CI
+and full-build commands retain their behavior. To run all enabled tests in an
+existing development build, reconfigure that same directory with
+`cmake --preset dev -DKIN_BUILD_ON_DEMAND=OFF`, build it, then run
+`ctest --preset dev`. Restore on-demand mode with `cmake --preset dev`.
+Examples and benchmarks remain disabled by the development presets; enable
+them explicitly when their coverage is needed.
 
 Keep CTest parallelism at 8 or below: many tests start SDL, and higher counts
 cause backend startup contention.
@@ -58,7 +89,9 @@ are found.
 
 ## Test Layout
 
-Each test source usually builds one executable:
+Extend an existing subsystem suite when adding cases. Create a separate
+executable when it needs different dependencies, process isolation or build
+configuration. A typical existing suite is registered like this:
 
 ```cmake
 add_executable(kin_scene_tests

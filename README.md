@@ -82,22 +82,30 @@ sudo apt-get install build-essential cmake ninja-build pkg-config \
     libdbus-1-dev libudev-dev libibus-1.0-dev
 ```
 
-Configure, build, and test:
+Configure a development build and build the sample you want to run:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure -j 8
+cmake --preset dev
+cmake --build --preset dev --target hex_demo
 ```
 
 On Windows, run these from a Visual Studio developer prompt. Executables land in
-`build/bin/` (`build/bin/Release/` with multi-config generators). To run the
+`out/build/dev/bin/`. To run the
 tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 `SDL_AUDIO_DRIVER=dummy`.
 
-For the edit/build/run loop, use `cmake --preset dev` (or `dev-3d`) and
-`cmake --build --preset dev --target hex_demo`. These enable precompiled
-headers and optional compiler-cache discovery. See [faster development builds](docs/build_times.md)
+The `dev` and `dev-3d` presets enable precompiled headers, optional
+compiler-cache discovery and on-demand targets in
+`out/build/<preset>/`. Tests, games and tools build only when requested (or needed
+as dependencies). For a focused test run:
+
+```sh
+cmake --build --preset dev --target kin_scene_tests
+ctest --preset dev -R '^kin-scene$'
+```
+
+Reuse one compatible build per worktree. See [testing](docs/testing.md) for full
+validation and [faster development builds](docs/build_times.md)
 for games using Kin as a subproject, cache setup, and measurements.
 On Linux, `dev-clang` and `dev-3d-clang` offer the same settings with Clang.
 
@@ -107,6 +115,7 @@ On Linux, `dev-clang` and `dev-3d-clang` offer the same settings with Clang.
 | `KIN_BUILD_EXAMPLES` | top-level only | Performance examples in `examples/` |
 | `KIN_BUILD_BENCHMARKS` | top-level only | `kin_bench` and other benchmark runners |
 | `KIN_BUILD_TESTS` | top-level only | Engine tests (with `BUILD_TESTING`) |
+| `KIN_BUILD_ON_DEMAND` | `OFF` (`ON` in development presets) | Keep tools, samples and tests out of the default build; request their targets explicitly |
 | `KIN_SHIPPING` | `OFF` | A build to give to players ([docs/shipping.md](docs/shipping.md)); the `ship` preset sets it, which turns off release profiling, the render probe, the determinism check and the agent server |
 | `KIN_ENABLE_PROFILING` | `OFF` | Manual profiling macros ([docs/profiling.md](docs/profiling.md)) |
 | `KIN_ENABLE_RELEASE_PROFILING` | `ON` | Profiling macros in Release builds |
@@ -138,10 +147,15 @@ On Linux, `dev-clang` and `dev-3d-clang` offer the same settings with Clang.
 Try the agent interface on a demo:
 
 ```sh
-./build/bin/ecs_systems_demo --headless --frames=120 --seed=7 --report=-
+cmake --build --preset dev --target ecs_systems_demo
+./out/build/dev/bin/ecs_systems_demo --headless --frames=120 --seed=7 --report=-
 ```
 
 ## Using kin in a game
+
+Start with the [minimal runnable game](games/starter/README.md) and the
+[project workflow](docs/project_workflow.md) for layout, current examples and
+growth conventions. Existing projects should keep their established structure.
 
 A game is its own project that adds kin's source tree with `add_subdirectory`.
 As a subproject kin builds only its engine: its demos, examples, benchmarks and
@@ -170,8 +184,9 @@ The game finds that content with
 `kin::find_content_root(KIN_GAME_CONTENT, argc, argv)`. While it is made, the
 content is read from the source folder. Once it ships, it is read from one
 `.kinpak` beside the executable.
-`cmake --preset ship && cmake --build --preset ship --target my_game_package`
-makes the archive players get ([shipping](docs/shipping.md)).
+The `my_game_package` target makes the archive players get from an optimized
+build; see [shipping](docs/shipping.md) for configuration. The `ship` preset is
+provided by the Kin repository; standalone games configure their own build.
 
 Or with a local checkout beside the game:
 
@@ -190,7 +205,7 @@ Kin installs games, not itself, so `find_package(kin)` is not supported.
 | ECS | [entities](docs/ecs_entities.md), [components](docs/ecs_components.md), [data components](docs/ecs_data_components.md), [systems](docs/ecs_systems.md), [events](docs/ecs_events.md), [prefabs](docs/ecs_prefabs.md), [inspection](docs/ecs_inspection.md), [editor workflow](docs/ecs_editor_workflow.md) |
 | Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [localization](docs/localization.md), [input](docs/input.md), [dialogue](docs/dialogue.md), [scripting](docs/scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [hex grids](docs/hex_grids.md) |
 | Experimental 3D | [3D rendering](docs/rendering_3d.md), [render graphs](docs/render_graph.md), [build and validation guide](docs/rendering_validation.md), [scene evaluation](tools/eval/README.md) |
-| Project | [shipping a game](docs/shipping.md), [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
+| Project | [starting and growing a project](docs/project_workflow.md), [shipping a game](docs/shipping.md), [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing
 

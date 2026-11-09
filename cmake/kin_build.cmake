@@ -1,5 +1,30 @@
 include_guard(GLOBAL)
 
+option(KIN_BUILD_ON_DEMAND "Build tools, samples and tests only when their targets are requested" OFF)
+
+# Exclude targets rather than directories so component install rules remain
+# available to explicitly requested <game>_package targets.
+function(kin_exclude_directory_targets directory)
+    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+    if(targets)
+        set_target_properties(${targets} PROPERTIES
+            EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+    endif()
+    get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(child IN LISTS children)
+        kin_exclude_directory_targets("${child}")
+    endforeach()
+endfunction()
+
+# Keep targets and CTest registration available without adding every executable
+# to the default build. Dependencies of an explicitly requested target still build.
+macro(kin_add_optional_subdirectory directory)
+    add_subdirectory("${directory}")
+    if(KIN_BUILD_ON_DEMAND)
+        kin_exclude_directory_targets("${CMAKE_CURRENT_SOURCE_DIR}/${directory}")
+    endif()
+endmacro()
+
 # Keep developer build settings separate from the shipping/release contract.
 option(KIN_ENABLE_PCH "Precompile stable headers for the engine and kin_game targets" OFF)
 option(KIN_ENABLE_WIDGET_PCH "Use a private PCH for the six UI2 widget implementation files (requires KIN_ENABLE_PCH)" OFF)

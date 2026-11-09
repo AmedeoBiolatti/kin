@@ -121,6 +121,67 @@ file(WRITE "${CMAKE_BINARY_DIR}/compiler-id.txt" "${CMAKE_CXX_COMPILER_ID}")
             self.assertTrue(all(value.endswith("-NOTFOUND") for value in settings[:2]))
             self.assertEqual(settings[2], "custom-launcher")
 
+    def test_on_demand_build_keeps_tests_and_builds_only_requested_targets(self):
+        with tempfile.TemporaryDirectory(prefix="kin on demand ") as directory:
+            source, build = self.fixture(Path(directory))
+            optional = source / "optional"
+            optional.mkdir()
+            (optional / "library.cpp").write_text("int optional_value() { return 7; }\n")
+            (optional / "main.cpp").write_text(
+                "int optional_value();\nint main() { return optional_value() == 7 ? 0 : 1; }\n")
+            (optional / "CMakeLists.txt").write_text('''
+add_library(optional_dependency STATIC library.cpp)
+add_subdirectory(nested)
+foreach(target focused sibling)
+    add_executable(${target} main.cpp)
+    target_link_libraries(${target} PRIVATE optional_dependency)
+    add_test(NAME ${target} COMMAND ${target})
+endforeach()
+install(TARGETS focused RUNTIME DESTINATION bin COMPONENT focused)
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/optional-paths-$<CONFIG>.txt"
+    CONTENT "$<TARGET_FILE:focused>\\n$<TARGET_FILE:sibling>\\n$<TARGET_FILE:optional_dependency>\\n")
+''')
+            (optional / "nested").mkdir()
+            (optional / "nested/CMakeLists.txt").write_text('''
+add_custom_target(nested_output ALL
+    COMMAND "${CMAKE_COMMAND}" -E touch "${CMAKE_BINARY_DIR}/nested-output")
+''')
+            with (source / "CMakeLists.txt").open("a") as stream:
+                stream.write('''
+include(CTest)
+kin_add_optional_subdirectory(optional)
+''')
+            self.configure(source, build, "-DKIN_BUILD_ON_DEMAND=ON",
+                           "-DCMAKE_BUILD_TYPE=Release", "-DKIN_COMPILER_CACHE=off")
+            paths = [Path(p) for p in
+                     (build / "optional-paths-Release.txt").read_text().splitlines()]
+            self.run_command(ARGS.cmake, "--build", str(build), "--config", "Release")
+            self.assertTrue(all(not p.exists() for p in paths), paths)
+            self.assertFalse((build / "nested-output").exists())
+            ctest = str(Path(shutil.which(ARGS.cmake) or ARGS.cmake).with_name(
+                "ctest.exe" if os.name == "nt" else "ctest"))
+            listing = json.loads(self.run_command(ctest, "--test-dir", str(build),
+                                                 "-C", "Release", "--show-only=json-v1"))
+            self.assertEqual({t["name"] for t in listing["tests"]}, {"focused", "sibling"})
+            self.run_command(ARGS.cmake, "--build", str(build), "--config", "Release",
+                             "--target", "focused")
+            self.assertTrue(paths[0].exists())
+            self.assertFalse(paths[1].exists())
+            self.assertTrue(paths[2].exists())
+            self.run_command(ctest, "--test-dir", str(build), "-C", "Release",
+                             "-R", "^focused$", "--output-on-failure")
+            stage = Path(directory) / "stage"
+            self.run_command(ARGS.cmake, "--install", str(build), "--config", "Release",
+                             "--component", "focused", "--prefix", str(stage))
+            self.assertTrue((stage / "bin" / paths[0].name).exists())
+            # Reuse the same build: disabling the option restores the full build.
+            self.configure(source, build, "-DKIN_BUILD_ON_DEMAND=OFF")
+            self.run_command(ARGS.cmake, "--build", str(build), "--config", "Release")
+            self.assertTrue(all(p.exists() for p in paths), paths)
+            self.assertTrue((build / "nested-output").exists())
+            self.run_command(ctest, "--test-dir", str(build), "-C", "Release",
+                             "--output-on-failure")
+
     def test_fast_scripting_is_private_and_uses_a_matching_pch(self):
         with tempfile.TemporaryDirectory(prefix="kin fast scripting ") as directory:
             source, build = self.fixture(Path(directory))

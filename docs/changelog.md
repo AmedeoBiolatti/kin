@@ -25,7 +25,13 @@ releases may change APIs.
   culled to the view, and `kin_render3d_surface_bench` (KIN_BUILD_BENCHMARKS) for the features' GPU and CPU costs.
   Decals are batched: one buffer of placings a frame and one instanced draw for the decals of one `Decal3D::order`
   that share their pictures (drawn by order, then picture; previously one draw each, in the order added).
-
+- A minimal native 2D [starter](../games/starter/README.md) runs inside Kin or as a
+  standalone project. The [project workflow](project_workflow.md) documents reuse,
+  incremental structure and current starting points for native and Lua games.
+- Development presets build tools, games and tests on demand and use
+  `out/build/<preset>/`. `KIN_BUILD_ON_DEMAND` defaults off for other builds;
+  focused testing and output conventions are documented in [testing](testing.md)
+  and [the agent workflow](../AGENTS.md).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
   with a private six-file cache. It stays off by default because cold/private-header
   rebuilds cost more; see [measurements](build_times.md#private-widget-implementation-pch).
