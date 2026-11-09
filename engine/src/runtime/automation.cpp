@@ -635,6 +635,7 @@ const JsonValue& automation_protocol() {
       "view.frame":{"effect":"capture","inspect":false,"params":{"type":"object","required":["width","height"],"properties":{"path":{"type":"string"},"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1},"x":{"type":"number"},"y":{"type":"number"},"zoom":{"type":"number","exclusiveMinimum":0},"rotation":{"type":"number"}}}},
       "server.status":{"effect":"read","inspect":true,"params":{"type":"object"}},
       "frame.timing":{"effect":"diagnostic","inspect":true,"params":{"type":"object","properties":{"since":{"type":"integer"},"reset":{"type":"boolean"}}}},
+      "render.graph":{"effect":"diagnostic","inspect":true,"params":{"type":"object"}},
       "ping":{"effect":"read","inspect":true,"params":{"type":"object"}},
       "server.shutdown":{"effect":"shutdown","inspect":true,"params":{"type":"object"}},
       "sim.pause":{"effect":"control","inspect":true,"driven":false,"params":{"type":"object"}},

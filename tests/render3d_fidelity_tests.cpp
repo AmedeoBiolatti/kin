@@ -8,10 +8,12 @@
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/render3d/frame_graph3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/resource_graph.hpp>
 #include <stdexcept>
 
 namespace {
@@ -86,6 +88,18 @@ void stock_graph_parity(Renderer2D& renderer) {
         b = shoot(renderer, r3d, reference, scene);
     }
     assert(a == b);
+    // What tools are shown is what ran: the public recipe compiles to the 13 passes, none culled, and the render timed
+    // each (the main pass records draws: never free).
+    ResourceGraphCompiler shown;
+    const auto& plan = shown.compile(stock_frame_graph3d(), ~u64{0});
+    assert(plan && plan.order.size() == frame_graph_passes3d && plan.culled_passes == 0);
+    const auto& timed = r3d.debug_stats().graph_pass_ms;
+    f64 passes_ms = 0;
+    for (const f64 ms : timed) {
+        assert(ms >= 0);
+        passes_ms += ms;
+    }
+    assert(timed[8] > 0 && passes_ms <= r3d.debug_stats().graph_record_ms + 1e-6);
     const auto hit_a = r3d.pick(compiled, {80, 60}), hit_b = r3d.pick(reference, {80, 60});
     assert(hit_a && hit_b && hit_a->hit && hit_b->hit && hit_a->id == hit_b->id);
     std::cout << "stock graph: exact fixed-order parity with HDR, TAA, AO, contact/sun shadows and picking\n";

@@ -54,6 +54,21 @@ The legacy 2D `RenderGraph` caches its dependency order through this compiler. M
 
 The native 3D migration currently exposes thirteen backend operations as dependency tokens. Their existing internal depth, shadow, GI, temporal and output work remains atomic and owns its resources. `Scene3D::debug.graph_reference` runs the original fixed order for parity testing. `RenderDebugStats3D` reports pass counts, cache reuse and CPU compilation/recording time. Stock transient allocation aliasing, complete stock composition from public operations and a general finite-propagation simulation remain separate work. Standalone geometry, sun-shadow and mesh-surface operations are available below.
 
+## Showing a graph
+
+`write_resource_graph_json(JsonWriter&, plan, pass_ms)` writes a compiled graph as one JSON object
+(`kin.render-graph/1`) for tools: its resources (kind, imported/exported/persistent, size), its passes in definition
+order with their reads and writes by resource name (a loaded attachment's previous version is read, its new version
+written; a read-only depth is read), `after`, `enabled`, and `order`, the pass's place in the run (-1 when culled), the
+run's `order` by name, the culled count and the plan's diagnostics. `pass_ms`, when given, adds each pass's `ms` by
+definition index.
+
+The stock 3D frame's recipe is public as `stock_frame_graph3d()` (`kin/render3d/frame_graph3d.hpp`): compiled with
+every feature available it is the order `Renderer3D::render()` runs. `RenderDebugStats3D::graph_pass_ms` holds each of
+its passes' CPU recording time in the last render, by the same index (0 for a pass not run). The game server's
+`render.graph` method ([agent interface](agent_interface.md)) answers both, also to a tool inspecting a game while it is
+played: an editor can draw the frame as boxes and wires.
+
 ## Attachment loads and logical versions
 
 `GraphPassDesc::attachments` distinguishes attachment accesses from sampled shader reads. Each `GraphAttachment` declares a target `resource`, `load` (`Clear`, `Discard`, or `Load`), `store` (`Store` or `Discard`) and `access` (`Write` or `ReadOnlyDepth`). Writable attachments implicitly declare a writer; do not repeat them in `writes`. `Load` requires a distinct, compatible `previous` resource and implicitly depends on its producer. A read-only depth attachment names the existing depth in `resource`, requires `Load`/`Store`, has no `previous`, and declares a reader without a new writer.

@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace kin {
+class JsonWriter;
 using GraphResource = u32;
 inline constexpr u32 graph_no_slot = ~u32{0};
 // Tokens describe backend-owned operations with no graph-managed allocation.
@@ -115,4 +116,10 @@ private:
 bool execute_resource_graph(const CompiledResourceGraph&, std::span<const std::function<bool()>> operations,
                             const std::function<bool(const GraphAttachmentCopy&)>& copy = {});
 u64 graph_resource_payload(const GraphResourceDesc&);
+// A compiled graph as one JSON object ("kin.render-graph/1"), for tools that show it: its resources (name, kind,
+// imported/exported/persistent, size), its passes in definition order (each's reads and writes by resource name,
+// attachments included, `after`, enabled, and `order`: its place in the run, -1 when culled or not run), `order`
+// (the pass names as they run), `culled` and the plan's diagnostics. `pass_ms`, when given, holds each pass's time by
+// definition index (written as `ms`; what it measures is the caller's: the stock 3D frame's is CPU recording time).
+void write_resource_graph_json(JsonWriter&, const CompiledResourceGraph&, std::span<const f64> pass_ms = {});
 } // namespace kin

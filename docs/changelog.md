@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Render graphs for tools: `write_resource_graph_json` writes a compiled graph (`kin.render-graph/1`: resources,
+  passes with their reads and writes by name, the run's order, culled passes, times); the stock 3D frame's recipe is
+  public as `stock_frame_graph3d()`, `RenderDebugStats3D::graph_pass_ms` times each of its passes, and the game server's
+  `render.graph` method (inspect mode too) answers the frame's graph with the last render's times.
 - 3D auto exposure, decals and morph targets (native renderers; WebGL2 has morph targets only).
   `ViewOptions3D::auto_exposure` (`AutoExposure3D`) meters an HDR view on the GPU (a log-luminance histogram with
   the darkest and brightest shares left out) and adapts its exposure over time, faster toward light than toward dark,
