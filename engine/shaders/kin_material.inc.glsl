@@ -224,8 +224,9 @@ vec4 kin_probe_reflection(vec3 p, vec3 r, float lod, out float own) {
 #endif
 
 #if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
-// Screen-space reflections (ssr_trace.comp, Scene3D::ssr): the last storage buffer of the light variants, three words a
-// texel of a half-size grid (the colour's red and green, its blue and share, as halves; the view depth traced).
+// Screen-space reflections (ssr_trace.comp, Scene3D::ssr): the last storage buffer of the light variants: three words a
+// texel of a half-size grid (how far its reflection meets something, its share as a half, the view depth traced), then
+// the previous frame's picture as a pyramid (ssr_pyramid.comp: two words a texel).
 #if defined(KIN_DRAW_MATERIALS) && defined(KIN_SURFACE)
 #define KIN_SSR_BINDING (21 + KIN_STORAGE_SHIFT)
 #elif defined(KIN_DRAW_MATERIALS)
@@ -236,16 +237,44 @@ vec4 kin_probe_reflection(vec3 p, vec3 r, float lod, out float own) {
 layout(std430, set = 2, binding = KIN_SSR_BINDING) readonly buffer KinScreenReflections {
     uint kin_ssr[];
 };
-// The reflection here (rgb) and its share (a): the four grid texels round the pixel, weighed by their nearness and by
-// how near their traced depth is to `depth` (this fragment's view depth): a texel of another surface (an edge, or what
-// glass is in front of) counts for nothing.
-vec4 kin_ssr_reflection(float depth) {
+// A texel of the previous frame's picture at `level` of its pyramid (ssr_pyramid.comp), clamped to the level.
+vec3 kin_ssr_texel(int level, ivec2 q) {
+    const ivec2 grid = ivec2(frame.ssr.yz);
+    uint first = uint(frame.ssr_pyramid.z);
+    ivec2 size = grid;
+    for (int k = 0; k < level; ++k) {
+        first += uint(size.x * size.y) * 2u;
+        size = max(size / 2, ivec2(1));
+    }
+    q = clamp(q, ivec2(0), size - 1);
+    const uint at = first + uint(q.y * size.x + q.x) * 2u;
+    return vec3(unpackHalf2x16(kin_ssr[at]), unpackHalf2x16(kin_ssr[at + 1u]).x);
+}
+// The picture at `uv` (0..1, top row first), bilinear in a level, mixed between two levels.
+vec3 kin_ssr_picture(vec2 uv, float level) {
+    vec3 c[2];
+    for (int i = 0; i < 2; ++i) {
+        const int l = min(int(level) + i, int(frame.ssr_pyramid.x) - 1);
+        const ivec2 size = max(ivec2(frame.ssr.yz) >> l, ivec2(1));
+        const vec2 at = uv * vec2(size) - 0.5;
+        const ivec2 base = ivec2(floor(at));
+        const vec2 f = at - vec2(base);
+        c[i] = mix(mix(kin_ssr_texel(l, base), kin_ssr_texel(l, base + ivec2(1, 0)), f.x),
+                   mix(kin_ssr_texel(l, base + ivec2(0, 1)), kin_ssr_texel(l, base + ivec2(1, 1)), f.x), f.y);
+    }
+    return mix(c[0], c[1], fract(level));
+}
+// The reflection at `p` (world) along `r` (this fragment's own: its normal map's) and its share (a). The four grid
+// texels round the pixel that traced this fragment's surface (by their depth: an edge's other side, or what glass is in
+// front of, counts for nothing) say how far the reflection meets something; the reflection followed that far is looked
+// up in the previous frame's picture, at the level as wide as the reflection's lobe is there (wider as the surface is
+// rougher and the hit further): blurred for a rough surface.
+vec4 kin_ssr_reflection(float depth, vec3 p, vec3 r, float roughness) {
     const ivec2 grid = ivec2(frame.ssr.yz);
     const vec2 at = gl_FragCoord.xy * 0.5 - 0.5;
     const ivec2 base = ivec2(floor(at));
     const vec2 f = at - vec2(base);
-    vec4 sum = vec4(0.0);
-    float weights = 0.0;
+    float distance = 0.0, share = 0.0, weights = 0.0;
     for (int k = 0; k < 4; ++k) {
         const ivec2 o = ivec2(k & 1, k >> 1);
         const ivec2 q = clamp(base + o, ivec2(0), grid - 1);
@@ -253,14 +282,29 @@ vec4 kin_ssr_reflection(float depth) {
         const float traced = uintBitsToFloat(kin_ssr[i + 2u]);
         const float near = abs(traced - depth) < 0.02 * depth + 0.05 ? 1.0 : 0.0;
         const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y) * near;
-        const vec2 rg = unpackHalf2x16(kin_ssr[i]);
-        const vec2 ba = unpackHalf2x16(kin_ssr[i + 1u]);
-        sum += vec4(rg, ba.x, 1.0) * ba.y * w; // premultiplied by the share
+        const float s = unpackHalf2x16(kin_ssr[i + 1u]).x;
+        distance += uintBitsToFloat(kin_ssr[i]) * s * w;
+        share += s * w;
         weights += w;
     }
-    if (weights <= 1e-4 || sum.a <= 1e-4)
+    if (weights <= 1e-4 || share <= 1e-4)
         return vec4(0.0);
-    return vec4(sum.rgb / sum.a, sum.a / weights);
+    distance /= share;
+    share /= weights;
+    const vec4 clip = frame.ssr_previous * vec4(p + r * distance, 1.0);
+    if (clip.w <= 1e-4)
+        return vec4(0.0);
+    const vec2 ndc = clip.xy / clip.w;
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    const vec2 edge = min(uv, 1.0 - uv);
+    share *= smoothstep(0.0, 0.08, min(edge.x, edge.y));
+    if (share <= 1e-4)
+        return vec4(0.0);
+    // The lobe's width where it meets what it reflects (GGX's, about alpha a unit away), in the grid's pixels there.
+    const float alpha = roughness * roughness;
+    const float width = 1.5 * alpha * distance * frame.ssr_pyramid.y / clip.w * 0.5 * frame.ssr.z;
+    const float level = clamp(log2(max(width, 1.0)), 0.0, frame.ssr_pyramid.x - 1.0);
+    return vec4(kin_ssr_picture(uv, level), share);
 }
 #endif
 
@@ -972,15 +1016,20 @@ vec3 kin_lit_surface(KinSurface surface) {
 #if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
     // Screen-space reflections, where the trace found something on screen, in place of the probes' or the environment's
     // (none past the roughness Scene3D::ssr says).
-    // Where the normal turns fast across the screen (a small curved thing, a bumpy map) the half-size trace, of the
-    // pre-pass's smooth normals, is no good: those keep the probes' (a shiny ball's own). (Measured outside the branch:
-    // derivatives need every pixel of the quad.)
-    const float bend = length(fwidth(n));
+    // Where the surface's own shape turns fast across the screen (a small curved thing) its neighbours' hits do not
+    // stand for its own: those keep the probes' (a shiny ball's own). Its normal map's turns do not count (the reflection
+    // follows them). (Measured outside the branch: derivatives need every pixel of the quad.)
+    const float bend = length(fwidth(dot(vNormal, vNormal) > 1e-20 ? normalize(vNormal) : vec3(0.0)));
+    const vec3 flat_normal = kin_geometric_normal();
     if (frame.ssr.x > 0.5 && roughness < frame.ssr.w) {
         const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
-        const vec4 screen = kin_ssr_reflection(depth);
-        const float share = screen.a * (1.0 - smoothstep(0.6 * frame.ssr.w, frame.ssr.w, roughness)) *
-                            (1.0 - smoothstep(0.02, 0.08, bend)) * (1.0 - own_probe);
+        const vec3 r = reflect(-v, n);
+        const vec4 screen = kin_ssr_reflection(depth, vWorld, r, roughness);
+        // The hit's distance was found along the face's own reflection: followed along one the normal map turned much
+        // further (past about 20 degrees) it is no guide, and those keep the probes'.
+        const float follows = smoothstep(0.8, 0.95, dot(r, reflect(-v, flat_normal)));
+        const float share = screen.a * (1.0 - smoothstep(0.75 * frame.ssr.w, frame.ssr.w, roughness)) *
+                            (1.0 - smoothstep(0.02, 0.08, bend)) * (1.0 - own_probe) * follows;
         above = mix(above, screen.rgb, share);
     }
 #endif

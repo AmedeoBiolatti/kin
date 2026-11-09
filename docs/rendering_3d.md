@@ -2711,7 +2711,7 @@ trace finds something; a mirror's or a portal's picture still wins where it show
 
 ```cpp
 scene.ssr.enabled = true;       // authored: SceneEnvironment3D's "ssr_enabled" (and ssr_max_roughness, ...)
-scene.ssr.max_roughness = 0.5f; // rougher surfaces keep the probes' or the environment's
+scene.ssr.max_roughness = 0.8f; // blurred more as surfaces roughen; rougher ones keep the probes' or the environment's
 scene.ssr.thickness = 0.3f;     // how deep (world units) what the pre-pass sees is taken to be
 scene.ssr.max_distance = 40.0f; // how far a ray goes
 scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refinement
@@ -2719,19 +2719,24 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
 
 - **How.** A compute pass after the pre-pass (which runs for it) marches each grid texel's reflected ray, its steps
   growing with the distance, through the pre-pass's depth; where the ray passes behind what it holds by less than the
-  thickness it has hit, and five halvings find where. The hit, reprojected into the previous frame's picture (kept at
-  half size after each frame's temporal resolve: linear, or decoded where the view's output is sRGB), gives the colour.
-  The main pass's stock lit shaders read the four grid texels round each pixel, only those that traced its own surface
-  (by their depth: glass and the overlay, not in the pre-pass, get none). With temporal anti-aliasing each pixel starts
-  its march at a different point (averaged over frames); without, all start alike (no noise, some banding).
+  thickness it has hit, and five halvings find where. It keeps how far the hit is, not its colour. After each frame's
+  temporal resolve the frame's picture is kept as a pyramid (half size, then each level half the one before; linear,
+  or decoded where the view's output is sRGB) in the same buffer. The main pass's stock lit shaders take the hit
+  distance of the grid texels round each pixel that traced its own surface (by their depth: glass and the overlay, not
+  in the pre-pass, get none), follow the fragment's own reflection (its normal map's) that far, and read the previous
+  picture there at the pyramid level as wide as the reflection's lobe is at that distance: a rough surface reflects a
+  blurred picture. With temporal anti-aliasing each pixel starts its march at a different point (averaged over
+  frames); without, all start alike (no noise, some banding).
 - **Where they fade.** Toward the screen's edges, toward the end of the rays, for rays that come back toward the camera
-  (what they meet is behind it), as the surface roughens to `max_roughness`, where the normal turns fast across the
-  screen (a small curved thing: the trace is of the pre-pass's normals, without normal maps), and wherever a thing's
-  own reflection probe (one without parallax, captured from its centre: a chrome ball) reflects it.
+  (what they meet is behind it), as the surface roughens to `max_roughness`, where the surface's own shape turns fast
+  across the screen (a small curved thing: its neighbours' hits are not its own), where the normal map turns the
+  reflection more than about 20 degrees from the face's own (the hit's distance was found along that one), and wherever
+  a thing's own reflection probe (one without parallax, captured from its centre: a chrome ball) reflects it.
 - **Costs.** About 0.2 to 0.25 ms of the GPU at 1280 x 720 (RTX 4080 Laptop), the pre-pass it needs included; a buffer
-  of 12 bytes a grid texel and a half-size float picture a view.
-- **Limits.** Only what is on screen, as last frame showed it (a thing that just appeared reflects a frame late);
-  rough reflections are the probes'. The stock lit shaders, material graphs and surfaces (the light variants: a scene
+  a view of 12 bytes a grid texel plus about 11 for the picture's pyramid.
+- **Limits.** Only what is on screen, as last frame showed it (what just appeared reflects a frame late; what is off
+  screen is the probes'). A normal map's detail is followed with the face's hit distance: close for bumps, off for steep
+  ones (which fade to the probes). The stock lit shaders, material graphs and surfaces (the light variants: a scene
   with them draws with those); custom material shaders and WebGL2 have none.
 
 ## Views

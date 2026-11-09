@@ -547,7 +547,7 @@ struct ContactShadows3D {
 // picture still wins. The stock lit shaders only; off on WebGL2. The pre-pass runs for it.
 struct ScreenSpaceReflections3D {
     bool enabled = false;
-    f32 max_roughness = 0.5f; // none on rougher surfaces (they keep the probes' or the environment's)
+    f32 max_roughness = 0.8f; // blurred more as surfaces roughen; none past this (the probes' or the environment's)
     f32 thickness = 0.3f;     // how deep (world units) what the pre-pass sees is taken to be, behind its front
     f32 max_distance = 40.0f; // how far (world units) a ray goes
     u32 steps = 48;           // marching steps a ray (8 to 128), then a refinement
