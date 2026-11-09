@@ -1,7 +1,12 @@
-# cmake -DOUTPUT=<cpp> -DHEADER=<hpp> -DNAME=<function> [-DNAMESPACE=<ns>] -DFILES=<a|b|...> -P kin_embed_generate.cmake
+# cmake -DOUTPUT=<cpp> -DHEADER=<hpp> -DNAME=<function> [-DNAMESPACE=<ns>]
+#       (-DFILES_LIST=<a file of paths, one a line> | -DFILES=<a|b|...>) -P kin_embed_generate.cmake
 # Writes the source that kin_embed_files builds into a target.
 
-string(REPLACE "|" ";" files "${FILES}")
+if(DEFINED FILES_LIST)
+    file(STRINGS "${FILES_LIST}" files)
+else()
+    string(REPLACE "|" ";" files "${FILES}")
+endif()
 
 # Sorted by name alone, as the lookup's lower_bound needs: "a.py" before
 # "a.pyi" (sorting "name|path" put them the other way round).

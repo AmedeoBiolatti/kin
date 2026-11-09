@@ -279,12 +279,16 @@ std::span<const unsigned char> ${ARG_NAME}(std::string_view file_name);
 // The names of the built-in files, sorted.
 std::span<const std::string_view> ${ARG_NAME}_files();
 ${close_ns}")
-    string(REPLACE ";" "|" files_arg "${ARG_FILES}")
+    # The files' paths go in a list file, not on the command line: many long absolute paths pass the 8191 characters
+    # Windows' cmd.exe takes for a command (the built-in shader list did). Written only when it changes.
+    set(list_file "${dir}/${ARG_NAME}.files")
+    string(JOIN "\n" files_text ${ARG_FILES})
+    file(CONFIGURE OUTPUT "${list_file}" CONTENT "${files_text}\n" @ONLY)
     add_custom_command(
         OUTPUT "${source}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${source}" "-DHEADER=${ARG_NAME}.hpp" "-DNAME=${ARG_NAME}"
-                "-DNAMESPACE=${ARG_NAMESPACE}" "-DFILES=${files_arg}" -P "${generator}"
-        DEPENDS ${ARG_FILES} "${generator}"
+                "-DNAMESPACE=${ARG_NAMESPACE}" "-DFILES_LIST=${list_file}" -P "${generator}"
+        DEPENDS ${ARG_FILES} "${generator}" "${list_file}"
         COMMENT "Embedding ${ARG_NAME} in ${target}"
         VERBATIM)
     target_sources(${target} PRIVATE "${source}")
