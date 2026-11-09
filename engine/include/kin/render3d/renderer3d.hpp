@@ -165,6 +165,8 @@ public:
     // load_reflection_capture read), and one loaded from such a picture through the content folder or pack (a baked
     // probe, or any panorama: a room painted or rendered elsewhere). A loaded capture can be captured again.
     Status3D save_reflection_capture(const ReflectionCapture3D& capture, const std::filesystem::path& file);
+    // Whether `view`'s global illumination has light yet (what capture_reflection's global_illumination borrows).
+    bool global_illumination_lit(const View3D& view) const;
     Result3D<ReflectionCapture3D> load_reflection_capture(const std::filesystem::path& path);
     // A fragment shader for materials (Material3D::shader), from SPIR-V
     // compiled against kin_material.inc.glsl (docs/rendering_3d.md, Custom

@@ -153,6 +153,10 @@ Status3D Renderer3D::save_reflection_capture(const ReflectionCapture3D& capture,
     return status3d(true, _errors);
 }
 
+bool Renderer3D::global_illumination_lit(const View3D& view) const {
+    return _backend && view.valid() && _backend->global_illumination_lit(*view.backend());
+}
+
 Result3D<ReflectionCapture3D> Renderer3D::load_reflection_capture(const std::filesystem::path& path) {
     _errors.clear();
     const auto fail = [&](const std::string& why) {
@@ -215,7 +219,10 @@ Status3D Renderer3D::capture_reflection(ReflectionCapture3D& capture, Scene3D& s
         !(options.z_near > 0.0f) || !(options.z_far >= 0.0f) ||
         (options.z_far > 0.0f && options.z_far <= options.z_near))
         return fail("a position, or near and far, that is not finite and in order");
-    if (!_backend->capture_reflection(*capture.backend(), scene, position, options, _stats))
+    IViewBackend3D* lighting = options.global_illumination && options.global_illumination->valid()
+                                   ? options.global_illumination->backend()
+                                   : nullptr;
+    if (!_backend->capture_reflection(*capture.backend(), scene, position, options, lighting, _stats))
         return fail("the device refused it");
     return status3d(true, _errors);
 }

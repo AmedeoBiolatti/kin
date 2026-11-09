@@ -18,6 +18,8 @@
 
 namespace kin {
 
+class View3D;
+
 // The backend's copy of a capture: the six views' picture, as a panorama.
 class IReflectionCaptureBackend3D {
 public:
@@ -49,6 +51,10 @@ struct ReflectionCaptureOptions3D {
     f32 z_far = 0.0f;   // 0: the scene camera's
     // The copies left out of its picture (Camera3D::hidden_id): a shiny thing's own, for the probe at its centre.
     u32 hidden_id = 0;
+    // A view whose global illumination lights the capture (its probes as they stand, read, not moved: they are round
+    // that view's camera, so a probe inside their reach is lit as the view sees the scene lit). Without one, or where
+    // that view's GI has no light yet, the capture has none (it is a view's own, and takes renders to settle).
+    const View3D* global_illumination = nullptr;
 };
 
 // A probe placed in the scene (Lights3D::reflection_probes). Its boxes share a centre and a rotation:

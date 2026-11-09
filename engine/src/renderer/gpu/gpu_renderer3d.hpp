@@ -579,7 +579,9 @@ public:
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32 side) override;
     bool capture_reflection(IReflectionCaptureBackend3D& capture, Scene3D& scene, Vec3f position,
-                            const ReflectionCaptureOptions3D& options, RenderDebugStats3D& stats) override;
+                            const ReflectionCaptureOptions3D& options, IViewBackend3D* lighting,
+                            RenderDebugStats3D& stats) override;
+    bool global_illumination_lit(IViewBackend3D& view) const override;
     bool read_reflection_capture(IReflectionCaptureBackend3D& capture, std::vector<f32>& rgb, Vec2i& size) override;
     std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i size,
                                                                                 std::span<const f32> rgb) override;
@@ -867,8 +869,9 @@ private:
     // G5c: the probes' light on what the pre-pass drew, at half the view's size (gi_resolve.comp), after it and its
     // compute (`projection`: the one it drew with; `jittered`: temporal anti-aliasing's, which each texel's keeping
     // from the render before evens out); true when it was read.
-    bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
-                    bool jittered, RenderDebugStats3D& stats);
+    // `source`: another view whose probes light this one's pixels (a capture borrowing them; null: its own).
+    bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuView3D* source, const Scene3D& scene,
+                    const Mat4f& projection, bool jittered, RenderDebugStats3D& stats);
     // GlobalIllumination3D::area_lights: their light on what the pre-pass drew (gi_area.comp), after gi_resolve; true
     // when it was (the main pass then reads it in the coverage's place).
     bool gi_area(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
@@ -1237,12 +1240,15 @@ private:
     bool shadow_unchanged(FrameCtx& ctx);
     void shadow_drawn(FrameCtx& ctx, bool complete);
     bool _chain_ready = false; // the occlusion built the linear depth chain this render: the blurs read it
-    SDL_GPUSampler* _point_sampler = nullptr;                // texel by texel, for compute
-    SDL_GPUSampler* _compare_sampler = nullptr;              // the shadow map's
-    SDL_GPUSampler* _environment_sampler = nullptr;          // wraps round, clamps at the poles, mipmapped
-    SDL_GPUComputePipeline* _filter_pipeline = nullptr;      // env_filter.comp
-    SDL_GPUComputePipeline* _panorama_pipeline = nullptr;    // probe_panorama.comp
-    SDL_GPUComputePipeline* _ssr_pipeline = nullptr;         // ssr_trace.comp
+    SDL_GPUSampler* _point_sampler = nullptr;             // texel by texel, for compute
+    SDL_GPUSampler* _compare_sampler = nullptr;           // the shadow map's
+    SDL_GPUSampler* _environment_sampler = nullptr;       // wraps round, clamps at the poles, mipmapped
+    SDL_GPUComputePipeline* _filter_pipeline = nullptr;   // env_filter.comp
+    SDL_GPUComputePipeline* _panorama_pipeline = nullptr; // probe_panorama.comp
+    SDL_GPUComputePipeline* _ssr_pipeline = nullptr;      // ssr_trace.comp
+    // While a capture renders with a view's global illumination borrowed (capture_reflection): that view, whose probes
+    // light it, untouched (no GI scene or probes of the capture's own).
+    const GpuView3D* _gi_borrowed = nullptr;
     SDL_GPUComputePipeline* _ssr_pyramid_pipeline = nullptr; // ssr_pyramid.comp
     std::shared_ptr<GpuBuffer> _ssr_dummy;                   // bound where a light variant reads no reflections
     // The reflection array (prepare_reflections): equirectangular layers the environment's specular size (or 256 x

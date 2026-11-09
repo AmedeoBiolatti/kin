@@ -2844,11 +2844,15 @@ scene.lights.reflection_probes.push_back({.position = {0, 1.5f, 0}, // where it 
                                           .capture = hall});
 ```
 
-- **Capturing.** `capture_reflection(capture, scene, position, {z_near, z_far})` renders six square 90-degree views
-  (as `render` draws them: sky, lights, shadows, fog, the probes already there; without temporal anti-aliasing, the
-  overlay or global illumination, whose light is a view's own and settles over frames) into a panorama, in world space.
-  It costs six renders at the capture's side; `debug_stats().reflection_captures` counts them. The renders that use a
-  capture filter it into a layer of the renderer's reflection array once a capture (`reflection_filters`).
+- **Capturing.** `capture_reflection(capture, scene, position, {z_near, z_far, hidden_id, global_illumination})` renders
+  six square 90-degree views (as `render` draws them: sky, lights, shadows, fog, the probes already there; without
+  temporal anti-aliasing or the overlay) into a panorama, in world space. Global illumination is a view's own and
+  settles over frames, so a capture has its own none: `global_illumination` (a `View3D*`) lends it that view's, its
+  probes as they stand (read, not moved; round that view's camera, so a probe within their reach is lit as the view
+  sees the scene lit; not its area lights). `global_illumination_lit(view)` says whether that view's GI has light yet.
+  It costs six renders at the capture's side; `debug_stats().reflection_captures` counts them
+  (`reflection_gi_captures` those lit by a view's GI). The renders that use a capture filter it into a layer of the
+  renderer's reflection array once a capture (`reflection_filters`).
 - **The boxes.** `extent` is the influence box's half extents, round `position + box_offset`, turned by `rotation`; a
   surface inside it reflects the probe, fading out over `blend` (world units) inside its faces toward the probes it
   overlaps or the environment. `parallax_extent` (zero: the influence box's) is the box the picture is taken to lie on;
@@ -2888,7 +2892,9 @@ captured from its place, its boxes round it (plus `box_offset`), turned and scal
 and places them (`ReflectionProbes3D`, `kin/scene/reflection_probes3d.hpp`, for a game that renders `scene()` itself),
 before the mirrors' and portals' pictures, which reflect them too. A probe is captured when it first shows, when it
 moves, when `recapture` changes, every `interval` seconds (of `Scene3D::time`) or `every_frame`; `hide_self` leaves the
-entity's own copies out of its picture (a shiny statue's own probe). With `baked` (a picture in the content) it is loaded
+entity's own copies out of its picture (a shiny statue's own probe). With global illumination on, the session's view
+lends its GI to the captures, and a probe captured before that GI settled (`ReflectionProbes3D::gi_settle` updates of
+light, 60) is captured once more when it has. With `baked` (a picture in the content) it is loaded
 from there instead and captured only when `recapture` changes; `ReflectionProbes3D::bake(world, scene, content)` captures
 every probe, writes `probes/<authored id>.hdr` and sets their `baked` (save the scene to keep it; `planar_atrium
 --bake-probes` does it for the atrium):

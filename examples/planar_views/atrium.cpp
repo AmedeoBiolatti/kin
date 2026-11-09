@@ -91,7 +91,7 @@ public:
         ctx.renderer.draw_texture(_session->view()->texture(), {0, 0, f32(size.x), f32(size.y)});
         if (_o.bake && ++_baked == 3) { // (a few frames in: the scene and its probes as they stand)
             ReflectionProbes3D baker{*_renderer, _o.content};
-            if (!baker.bake(*_session->world(), *_session->scene(), _o.content))
+            if (!baker.bake(*_session->world(), *_session->scene(), _o.content, "probes", _session->view()))
                 require(_renderer->diagnostics());
             std::cout << "planar_atrium: baked the reflection probes into " << (_o.content / "probes").string() << '\n';
             ctx.app.quit();

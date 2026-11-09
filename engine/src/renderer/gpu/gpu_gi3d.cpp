@@ -2123,10 +2123,15 @@ std::array<SDL_GPUTextureSamplerBinding, 3> GpuRenderer3D::gi_atlases(const GpuV
             SDL_GPUTextureSamplerBinding{view._gi.probe_data.handle(), _gi_sampler}};
 }
 
-bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
-                               const Mat4f& projection, bool jittered, RenderDebugStats3D& stats) {
+bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuView3D* source,
+                               const Scene3D& scene, const Mat4f& projection, bool jittered,
+                               RenderDebugStats3D& stats) {
     GpuView3D::Gi& g = view._gi;
-    if (!g.lit || !g.irradiance || !_gi_resolve || !view._ao_depth || !view._ao_normals) {
+    // The probes: the view's own, or the view it borrows them from (their light, as they stand; its history not this
+    // view's to keep from).
+    const GpuView3D& from = source ? *source : view;
+    const GpuView3D::Gi& probes = from._gi;
+    if (!probes.lit || !probes.irradiance || !_gi_resolve || !view._ao_depth || !view._ao_normals) {
         return false;
     }
     const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
@@ -2135,7 +2140,7 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
     // anti-aliasing's jitter (without, nothing moves under a texel: it would only lag).
     std::swap(g.light, g.last_light);
     std::swap(g.slope, g.last_slope);
-    const bool keep = jittered && view._taa_valid && view._taa_motion && g.has_last && g.last_light &&
+    const bool keep = !source && jittered && view._taa_valid && view._taa_motion && g.has_last && g.last_light &&
                       g.last_light.width() == hw && g.last_light.height() == hh;
     try {
         if (!g.light || g.light.width() != hw || g.light.height() != hh) {
@@ -2179,7 +2184,7 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
     const f32 way[4] = {forward.x, forward.y, forward.z, 0.0f};
     std::memcpy(u.eye, eye, sizeof(eye));
     std::memcpy(u.forward, way, sizeof(way));
-    gi_uniforms(view, scene.global_illumination.probes.intensity, true, nullptr, u.probes.counts);
+    gi_uniforms(from, scene.global_illumination.probes.intensity, true, nullptr, u.probes.counts);
     std::memcpy(u.last_view_projection, g.last_view_projection.m, sizeof(u.last_view_projection));
     const f32 last_eye[4] = {g.last_eye.x, g.last_eye.y, g.last_eye.z, keep ? 1.0f : 0.0f};
     const f32 last_way[4] = {g.last_forward.x, g.last_forward.y, g.last_forward.z, 0.0f};
@@ -2197,9 +2202,9 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
     const std::array<SDL_GPUTextureSamplerBinding, 8> samplers{
         SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _gi_sampler},
         SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _gi_sampler},
-        SDL_GPUTextureSamplerBinding{g.irradiance.handle(), _gi_linear},
-        SDL_GPUTextureSamplerBinding{g.moments.handle(), _gi_linear},
-        SDL_GPUTextureSamplerBinding{g.probe_data.handle(), _gi_sampler},
+        SDL_GPUTextureSamplerBinding{probes.irradiance.handle(), _gi_linear},
+        SDL_GPUTextureSamplerBinding{probes.moments.handle(), _gi_linear},
+        SDL_GPUTextureSamplerBinding{probes.probe_data.handle(), _gi_sampler},
         keep ? SDL_GPUTextureSamplerBinding{g.last_light.handle(), _gi_linear} : flat,
         keep ? SDL_GPUTextureSamplerBinding{g.last_slope.handle(), _gi_linear} : flat,
         keep ? SDL_GPUTextureSamplerBinding{view._taa_motion.handle(), _gi_sampler} : flat};

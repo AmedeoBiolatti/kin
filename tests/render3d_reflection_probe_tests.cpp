@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
@@ -13,6 +14,11 @@
 #include <tuple>
 
 using namespace kin;
+
+extern "C" { // (kin's .hdr decoder, in the engine)
+float* kin_hdr_load(const unsigned char* bytes, int size, int* width, int* height);
+void kin_hdr_free(float* pixels);
+}
 
 namespace {
 
@@ -338,6 +344,78 @@ void test_diffuse(Renderer2D& r, Renderer3D& r3d) {
     std::cout << "probes: diffuse light\n";
 }
 
+// A capture lit by a view's global illumination (ReflectionCaptureOptions3D::global_illumination): a closed white room
+// lit only by a bright green emitter on its floor (no sun, no sky, no ambient light), seen by a view until its GI has
+// light. A probe captured at the room's middle borrowing that view's GI sees the walls lit green by the emitter's
+// bounce; one without (a capture's own GI would start dark) sees them black.
+void test_gi_capture(Renderer2D& r, Renderer3D& r3d) {
+    if (!r3d.capabilities().global_illumination) {
+        std::cout << "probes: GI capture skipped (no GI here)\n";
+        return;
+    }
+    View3D view = r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    const Mesh3D box = r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    assert(view && box);
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({0, 1.5f, 1.5f}, {0, 1.0f, -2}, 70);
+    scene.lights.sun.color = {};
+    scene.lights.ambient = {};
+    scene.global_illumination = {.enabled = true, .area = {{-3, -1, -3}, {3, 4, 3}}, .cell = 0.15f};
+    scene.global_illumination.probes.per_render = 256;
+    Material3D wall{.color = colors::white, .roughness = 0.9f};
+    wall.double_sided = true;
+    const auto room = [&] {
+        scene.clear();
+        assert(scene.draw(box, Mat4f::trs({0, 1.5f, 0}, {}, {4, 3, 4}), wall));
+        assert(scene.draw(box, Mat4f::trs({0, 0.1f, 0}, {}, {1, 0.2f, 1}),
+                          {.color = Color::rgb(40, 255, 40), .emissive = 20}));
+    };
+    room();
+    for (int i = 0; i < 40; ++i) {
+        r.clear(colors::black);
+        assert(r3d.render(view, scene));
+        r.present();
+    }
+    assert(r3d.global_illumination_lit(view));
+    // The captures' panoramas' mean green, the emitter's bright texels left out: the walls' light.
+    const auto walls = [&](const ReflectionCapture3D& capture, const char* name) {
+        const auto file = std::filesystem::temp_directory_path() / name;
+        assert(r3d.save_reflection_capture(capture, file));
+        std::ifstream in(file, std::ios::binary);
+        const std::string bytes{std::istreambuf_iterator<char>(in), {}};
+        int w = 0, h = 0;
+        float* rgb = kin_hdr_load(reinterpret_cast<const unsigned char*>(bytes.data()), int(bytes.size()), &w, &h);
+        assert(rgb);
+        double sum = 0;
+        int n = 0;
+        for (int i = 0; i < w * h; ++i)
+            if (rgb[i * 3 + 1] < 2.0f) {
+                sum += rgb[i * 3 + 1];
+                ++n;
+            }
+        kin_hdr_free(rgb);
+        std::filesystem::remove(file);
+        return n ? sum / n : 0.0;
+    };
+    ReflectionCapture3D lit = r3d.create_reflection_capture(32).value_or({});
+    ReflectionCapture3D dark = r3d.create_reflection_capture(32).value_or({});
+    assert(lit && dark);
+    room();
+    assert(r3d.capture_reflection(lit, scene, {0, 1.5f, 0}, {.global_illumination = &view}));
+    assert(r3d.debug_stats().reflection_gi_captures == 1);
+    assert(r3d.capture_reflection(dark, scene, {0, 1.5f, 0}));
+    assert(r3d.debug_stats().reflection_gi_captures == 0);
+    const double with_gi = walls(lit, "kin-probe-gi.hdr"), without = walls(dark, "kin-probe-nogi.hdr");
+    std::cerr << "probes: walls' green with the view's GI " << with_gi << ", without " << without << "\n";
+    assert(with_gi > 0.02 && with_gi > 4.0 * without);
+    // The view's own GI is as it was: it still renders lit.
+    r.clear(colors::black);
+    assert(r3d.render(view, scene));
+    r.present();
+    assert(r3d.global_illumination_lit(view));
+    std::cout << "probes: captures lit by a view's global illumination\n";
+}
+
 } // namespace
 
 int main() {
@@ -353,5 +431,6 @@ int main() {
     test_parallax(r, r3d);
     test_hidden(r, r3d);
     test_diffuse(r, r3d);
+    test_gi_capture(r, r3d);
     test_ssr(r, r3d);
 }

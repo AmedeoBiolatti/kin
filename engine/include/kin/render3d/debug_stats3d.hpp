@@ -162,6 +162,7 @@ struct RenderDebugStats3D : RenderStats3D {
     // Reflection probes (Lights3D::reflection_probes): those this render read, the captures it filtered into its
     // array (once a capture), and the captures capture_reflection made (its own stats).
     u32 reflection_probes = 0, reflection_filters = 0, reflection_captures = 0;
+    u32 reflection_gi_captures = 0; // of those, lit by a view's global illumination (borrowed)
     // Screen-space reflections (Scene3D::ssr): 1 when this render traced them (and its main pass read them).
     u32 ssr_traces = 0;
     // Sky, fog and the sky's image-based light (P3a): the sky pass ran; meshes were drawn with the fog's shader
