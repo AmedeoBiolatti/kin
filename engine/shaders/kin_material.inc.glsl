@@ -13,10 +13,19 @@
 #define KIN_FOG
 #define KIN_LIGHTS
 #endif
+#ifdef KIN_DECAL
+// A decal (decal.frag) shades the surface under it, found from the pre-pass's depth: no mesh's varyings, but the
+// same names, set by its main() before it calls anything here.
+vec3 vNormal;
+vec4 vColor;
+vec2 vUV;
+vec3 vWorld;
+#else
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec4 vColor; // linear, straight alpha
 layout(location = 2) in vec2 vUV;
 layout(location = 3) in vec3 vWorld;
+#endif
 #ifdef KIN_SURFACE
 // The copy's origin in the world (kin_mesh_vertex.inc.glsl's, flat): a surface's object position (as the offset's, at
 // a vertex: kin_surface_vertex.inc.glsl).

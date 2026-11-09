@@ -233,6 +233,9 @@ struct Material3D {
     // is off, and take it unless `receives_shadow` is.
     bool casts_shadow = true;
     bool receives_shadow = true;
+    // Whether Scene3D's decals land on it (opaque meshes; true): off, it is drawn after the decals, over them, so a
+    // character walking through a scorch mark's box is not painted with it.
+    bool receives_decals = true;
     // Only its triangles' edges, a pixel wide, in its colour (no light),
     // drawn just in front of the faces they edge: a model's wireframe drawn
     // over it, or lines (triangles a, b, b) on the ground. Needs line fill
@@ -727,6 +730,36 @@ private:
     std::shared_ptr<Data> _data;
 };
 
+// A decal (Scene3D::draw_decal; docs/rendering_3d.md, Decals): a picture projected onto the opaque surfaces inside a
+// box (scorch marks, paint, dirt, footprints, posters), lit with them. The box is the unit cube [-0.5, 0.5]^3 placed by
+// `transform`: the picture lies on its X/Z sides (u along +X, v along +Z, the picture's top at -Z) and is projected
+// along -Y, from its top face down through its depth. Drawn after the opaque meshes and before the blended ones, in
+// order of their `order`, then by picture (one instanced draw for the decals sharing one); reads the pre-pass's depth
+// and normals (RendererCapabilities3D::decals; the pre-pass runs whenever
+// a scene has decals). Lands on what the pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not
+// custom-shader, blended or unlit ones, nor the overlay.
+struct Decal3D {
+    Mat4f transform{};
+    Texture texture;             // colour (sRGB, as mesh textures) and coverage (alpha); white without
+    Texture normal;              // optional tangent-space normal map (green up), bending the surface's normal
+    Color color = colors::white; // times the texture, alpha too
+    f32 roughness = 0.6f, metallic = 0.0f;
+    f32 normal_strength = 1.0f; // how much the normal map bends
+    f32 emission = 0.0f;        // the decal's colour as light of its own, this strong (glowing paint, embers)
+    // Surfaces turned away from the way the decal is projected from fade: fully drawn where the cosine between their
+    // normal and the box's +Y is above `normal_fade`, fading to nothing at 0 (0: no fade; never onto a surface facing
+    // away).
+    f32 normal_fade = 0.3f;
+    // The share of the box's half depth over which the decal fades out toward its top and bottom faces (0: hard).
+    f32 depth_fade = 0.25f;
+    Wrap3D wrap = Wrap3D::Clamp;
+    // Drawing order: lower first, so a higher one lies over a lower one where they overlap. Decals of the same order
+    // are drawn together by picture (texture, normal map, wrap), in the order each picture first appears, so that the
+    // decals sharing a picture are one draw: give overlapping decals of different pictures different orders when one
+    // must lie over the other.
+    i32 order = 0;
+};
+
 class Scene3D {
 public:
     Scene3D() = default;
@@ -838,10 +871,13 @@ public:
                           Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     // Both poses of a model with skins and animated nodes: its skinned parts by `joint_matrices` (of skeletons[0]), the
     // parts that hang from an animated node by `node_matrices` (of skeletons[node_skeleton], as draw(model, transform,
-    // node_matrices) takes them). Empty node matrices: the call above.
+    // node_matrices) takes them). Empty node matrices: the call above. `meshes`, when not empty, are drawn in place of
+    // the parts' meshes (indexed as model.parts; an empty Mesh3D keeps the part's): an entity's own copies of the parts
+    // with morph targets (Renderer3D::copy_mesh), shaped by weights of its own.
     Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                           Color tint, u32 id, std::span<const Material3D> materials,
-                          std::span<const Mat4f> node_matrices, u64 history_id = 0);
+                          std::span<const Mat4f> node_matrices, u64 history_id = 0,
+                          std::span<const Mesh3D> meshes = {});
     // Many copies of `mesh`, in one draw.
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
                             const Material3D& material = {});
@@ -870,6 +906,10 @@ public:
     Status3D draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites, u64 history_id = 0);
     // The system's live particles with its desc's look.
     Status3D draw_particles(const ParticleSystem3D& system, u64 history_id = 0);
+    // A decal (Decal3D), drawn by its `order`, then grouped by picture; clear() takes them away. The overlay's are not
+    // drawn.
+    Status3D draw_decal(const Decal3D& decal);
+    std::span<const Decal3D> decals() const { return _decals; }
     void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLightSource3D& light) { lights.spots.push_back(light); }
     // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
@@ -942,7 +982,8 @@ private:
                         Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                 Color tint, u32 id, std::span<const Material3D> materials,
-                                std::span<const Mat4f> node_matrices, u64 history_id = 0);
+                                std::span<const Mat4f> node_matrices, u64 history_id = 0,
+                                std::span<const Mesh3D> meshes = {});
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                 Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
@@ -994,6 +1035,7 @@ private:
     std::vector<u32> _skin_offsets;
     std::vector<ParticleDraw> _particle_draws;
     std::vector<ParticleSprite3D> _particle_sprites;
+    std::vector<Decal3D> _decals;
     bool _instances_exposed = false;
     Diagnostics3D _errors;
     bool fail_submission(std::string_view reason) {

@@ -75,6 +75,12 @@ Mesh3D Renderer3D::create_mesh_operation(const MeshData3D& data, const MeshOptio
 Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptions3D& requested) {
     _errors.clear();
     MeshOptions3D options = requested;
+    if (data.morphed() && (options.clusters || options.levels > 1)) {
+        // Morph targets move the vertices: levels and clusters are built from one shape and would not follow.
+        KIN_LOG_WARN("render", "3D: a mesh with morph targets cannot have levels of detail or clusters: made without");
+        options.clusters = false;
+        options.levels = 1;
+    }
     if (data.skinned() && (options.clusters || options.levels > 1)) {
         // A skinned mesh moves with its joints: levels and clusters are built from the mesh at rest and would not
         // follow.
@@ -157,6 +163,14 @@ Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptio
             }
         }
     }
+    // A mesh with morph targets: made at weights 0 (the backend keeps the vertices where they can be rewritten, and the
+    // targets where it can blend them itself), then set to its first weights; the mesh keeps the data on the CPU.
+    if (data.morphed()) {
+        std::vector<f32> weights = data.morph_weights;
+        weights.resize(data.morph_targets.size(), 0.0f);
+        return upload_morph_mesh(std::make_shared<const MeshData3D>(data), weights);
+    }
+    std::shared_ptr<MeshMorphs3D> morphs;
     std::shared_ptr<IMeshBackend3D> backend =
         _backend->create_mesh(clusters ? welded : data, chain.count() > 1 ? &chain : nullptr, clusters);
     welded = {};
@@ -176,8 +190,104 @@ Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptio
     if (clusters) {
         cluster_info = std::make_shared<const MeshClusterInfo3D>(clusters->info());
     }
-    return Mesh3D{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds(),
-                  std::move(levels),  std::move(cluster_info),    data.skin_joint_count()};
+    return Mesh3D{std::move(backend),        static_cast<u32>(vertices),
+                  static_cast<u32>(indices), morphs ? morph_bounds(data) : data.bounds(),
+                  std::move(levels),         std::move(cluster_info),
+                  data.skin_joint_count(),   std::move(morphs)};
+}
+
+std::optional<f32> Renderer3D::exposure(const View3D& view) {
+    return _backend && view.backend() ? _backend->read_exposure(*view.backend()) : std::nullopt;
+}
+
+Mesh3D Renderer3D::upload_morph_mesh(std::shared_ptr<const MeshData3D> source, std::span<const f32> weights) {
+    std::shared_ptr<IMeshBackend3D> backend = _backend->create_mesh(*source, nullptr, nullptr);
+    if (!backend) {
+        fail3d(_errors, "Renderer3D::create_mesh", "device refused mesh buffers");
+        return {};
+    }
+    auto morphs = std::make_shared<MeshMorphs3D>();
+    morphs->weights.assign(source->morph_targets.size(), 0.0f);
+    const MeshData3D& data = *source;
+    morphs->source = std::move(source);
+    Mesh3D mesh{std::move(backend),
+                static_cast<u32>(data.vertices.size()),
+                static_cast<u32>(data.indices.empty() ? data.vertices.size() : data.indices.size()),
+                morph_bounds(data),
+                {},
+                {},
+                data.skin_joint_count(),
+                std::move(morphs)};
+    if (!apply_morph_weights(mesh, weights)) {
+        fail3d(_errors, "Renderer3D::create_mesh", "the device refused the mesh's first morph weights");
+        return {};
+    }
+    return mesh;
+}
+
+bool Renderer3D::apply_morph_weights(const Mesh3D& mesh, std::span<const f32> weights) {
+    MeshMorphs3D* morphs = mesh.morphs().get();
+    if (std::ranges::equal(weights, morphs->weights))
+        return true;
+    // On the GPU where the backend can, else blended here and uploaded.
+    if (!_backend->set_morph_weights(*mesh.backend(), weights)) {
+        blend_morph_targets(*morphs->source, weights, morphs->scratch);
+        if (!_backend->update_mesh_vertices(*mesh.backend(), morphs->scratch))
+            return false;
+    }
+    morphs->weights.assign(weights.begin(), weights.end());
+    return true;
+}
+
+Status3D Renderer3D::set_morph_weights(const Mesh3D& mesh, std::span<const f32> weights) {
+    _errors.clear();
+    const auto fail = [&](const char* reason) {
+        fail3d(_errors, "Renderer3D::set_morph_weights", reason);
+        return status3d(false, _errors);
+    };
+    MeshMorphs3D* morphs = mesh.morphs().get();
+    if (!mesh.valid() || !morphs)
+        return fail("the mesh was not made with morph targets");
+    if (weights.size() != morphs->source->morph_targets.size())
+        return fail("one weight for each morph target is needed");
+    for (const f32 w : weights)
+        if (!std::isfinite(w) || w < -1.0f || w > 1.0f)
+            return fail("morph weights must be within [-1, 1]");
+    if (std::ranges::equal(weights, morphs->weights))
+        return status3d(true, _errors);
+    if (!_backend || !_backend->capabilities().morph_targets)
+        return fail("morph targets are not available on this backend");
+    if (!apply_morph_weights(mesh, weights))
+        return fail("the device refused the mesh's new vertices");
+    return status3d(true, _errors);
+}
+
+Result3D<Mesh3D> Renderer3D::copy_mesh(const Mesh3D& mesh) {
+    _errors.clear();
+    if (!mesh.valid() || !mesh.morphs()) {
+        fail3d(_errors, "Renderer3D::copy_mesh", "only a mesh made with morph targets can be copied");
+        return result3d(Mesh3D{}, _errors);
+    }
+    if (!_backend) {
+        fail3d(_errors, "Renderer3D::copy_mesh", "3D is not available");
+        return result3d(Mesh3D{}, _errors);
+    }
+    const MeshMorphs3D& from = *mesh.morphs();
+    // A copy of the backend's own (sharing what it can) at weights 0, else made again from the shared data.
+    if (std::shared_ptr<IMeshBackend3D> backend = _backend->copy_mesh(*mesh.backend())) {
+        auto morphs = std::make_shared<MeshMorphs3D>();
+        morphs->source = from.source;
+        morphs->weights.assign(from.weights.size(), 0.0f);
+        Mesh3D copy{std::move(backend),      mesh.vertex_count(), mesh.index_count(), mesh.bounds(), {}, {},
+                    mesh.skin_joint_count(), std::move(morphs)};
+        if (!apply_morph_weights(copy, from.weights)) {
+            fail3d(_errors, "Renderer3D::copy_mesh", "the device refused the copy's morph weights");
+            return result3d(Mesh3D{}, _errors);
+        }
+        return result3d(std::move(copy), _errors);
+    }
+    Mesh3D copy = upload_morph_mesh(from.source, from.weights);
+    return result3d(std::move(copy), _errors);
 }
 
 Result3D<View3D> Renderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
@@ -188,6 +298,16 @@ Result3D<View3D> Renderer3D::create_view(Vec2i size, const ViewOptions3D& option
 View3D Renderer3D::create_view_operation(Vec2i size, const ViewOptions3D& options) {
     _errors.clear();
     size = at_least_one(size);
+    const AutoExposure3D& a = options.auto_exposure;
+    if (a.enabled && !(std::isfinite(a.key) && a.key > 0 && std::isfinite(a.min_ev) && std::isfinite(a.max_ev) &&
+                       a.min_ev <= a.max_ev && std::isfinite(a.compensation_ev) && std::isfinite(a.speed_up) &&
+                       a.speed_up >= 0 && std::isfinite(a.speed_down) && a.speed_down >= 0 && a.low >= 0 &&
+                       a.low <= a.high && a.high <= 1 && a.centre_weight >= 0 && a.centre_weight <= 1)) {
+        fail3d(_errors, "Renderer3D::create_view",
+               "auto exposure needs a positive key, min_ev <= max_ev, nonnegative speeds, 0 <= low <= high <= 1 and "
+               "a centre weight in [0, 1]");
+        return {};
+    }
     if (_backend) {
         View3D result{_backend->create_view(size, options)};
         if (!result)

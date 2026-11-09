@@ -377,7 +377,8 @@ struct BoolScope {
 };
 bool same_options(const ViewOptions3D& a, const ViewOptions3D& b) {
     return a.samples == b.samples && a.background == b.background && a.hdr == b.hdr && a.exposure == b.exposure &&
-           a.bloom == b.bloom && a.bloom_threshold == b.bloom_threshold && a.pick == b.pick;
+           a.bloom == b.bloom && a.bloom_threshold == b.bloom_threshold && a.pick == b.pick &&
+           a.auto_exposure == b.auto_exposure;
 }
 bool runtime_script_field(std::string_view component, std::string_view field) {
     if (component == "Transform3D" && (field == "position" || field == "rotation"))
@@ -717,6 +718,12 @@ struct SceneSession3D::Data {
                 watch(state, emitter.texture_asset.id);
             if (!emitter.bound_texture.empty())
                 watch(state, emitter.bound_texture);
+        });
+        inspect_components<DecalRenderer3D>(state.world.raw(), [&](flecs::entity, const DecalRenderer3D& decal) {
+            for (const std::string* path :
+                 {&decal.texture_asset.id, &decal.normal_asset.id, &decal.bound_texture, &decal.bound_normal})
+                if (!path->empty())
+                    watch(state, *path);
         });
         inspect_components<ModelMaterials3D>(state.world.raw(), [&](flecs::entity, const ModelMaterials3D& material) {
             if (!material.asset.id.empty())
@@ -1295,7 +1302,7 @@ struct SceneSession3D::Data::EditTransaction {
         bool full = false, pose = false, move = false, body = false;
     };
     std::map<EcsId, Entry> entries;
-    bool models = false, materials = false, animation = false, particles = false, physics = false;
+    bool models = false, materials = false, animation = false, particles = false, decals = false, physics = false;
     bool animators = false; // an Animator edited (kin/ecs/animator.hpp): its file bound again
 
     EditTransaction(Data& data, std::span<const SceneFieldEdit3D> changes)
@@ -1391,6 +1398,7 @@ struct SceneSession3D::Data::EditTransaction {
             animation |= has("AnimatorAsset3D");
             animators |= has("Animator");
             particles |= has("ParticleEmitter3D");
+            decals |= has("DecalRenderer3D");
             entry.body = d.options.physics && (entry.pose || has("Collider3D") || has("RigidBody3D"));
             if (d.options.physics && (has("CharacterController3D") || has("Ragdoll3D") || has("Rope3D") ||
                                       (entry.pose && (entry.copy.has<CharacterController3D>() ||
@@ -1421,6 +1429,8 @@ struct SceneSession3D::Data::EditTransaction {
             if (particles)
                 append(d.errors,
                        resolve_particles3d_assets(staging.world, d.assets, d.options.particle_limits).diagnostics);
+            if (decals)
+                append(d.errors, resolve_decals3d_assets(staging.world, d.assets).diagnostics);
         }
         if (animators) // their files read here first, to refuse an edit naming one that can't be
             append(d.errors, resolve_animators3d(staging.world, d.assets.root(), animated(true)).diagnostics);

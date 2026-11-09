@@ -17,8 +17,8 @@ The file format remains glTF 2.0; this profile is a Kin contract, not a new exte
 | UVs | One selected coordinate set and placement per material, including a shared `KHR_texture_transform` | Every map in that material must use the same set/offset/rotation/scale, and the primitive must provide that set. Bake differing placements into common UVs or split the material/geometry. |
 | Skin | One distinct palette, at most 256 joints including intermediate nodes; multiple meshes may share it | All skins in the file must have identical joint order and inverse bind matrices. Remove unused distinct skins or split armatures into separate model files. |
 | Influences | `JOINTS_0` u8/u16; `WEIGHTS_0` float/normalized u8/u16; four influences per vertex | Limit to four, normalize and remove invalid/zero-total weights. Extra influence sets and invalid joint references reject the asset. |
-| Animation | Translation/rotation/scale; LINEAR, STEP, CUBICSPLINE; skin clips or plain-node clips | Bake constraints/IK to transform keys. Do not mix a skinned character with separately animated rigid nodes needing another pose in one model. Attach rigid props under a joint instead. |
-| Deformation | Linear blend skinning and rigid-node transforms | Bake/remove shape keys and morph targets. Oversized or unsupported skins do not fall back to static geometry. |
+| Animation | Translation/rotation/scale and morph weights; LINEAR, STEP, CUBICSPLINE; skin clips or plain-node clips | Bake constraints/IK to transform keys. Do not mix a skinned character with separately animated rigid nodes needing another pose in one model. Attach rigid props under a joint instead. |
+| Deformation | Linear blend skinning, rigid-node transforms and morph targets (POSITION and NORMAL offsets, sparse or not; at most 256 targets) | Shape keys export as morph targets; keep `extras.targetNames` for their names. Morph targets are blended before skinning; TANGENT offsets are ignored. Oversized or unsupported skins do not fall back to static geometry. |
 | Scene content | Mesh parts from the default scene, or first scene when no default is selected | Author Kin cameras/lights/environment in `.kinscene`; model loading does not create them from glTF. |
 
 Emission preserves the authored linear RGB factor independently of base colour and tint, multiplied by the decoded
@@ -58,7 +58,8 @@ particular Blender binary or every exporter version.
    intermediate nodes, within 256. Multiple character mesh objects are fine only
    when they export the same palette.
 4. Export the intended actions/clips with baked transform sampling where constraints
-   or IK drive them. Turn off mesh compression. Remove shape-key/morph deformation.
+   or IK drive them. Turn off mesh compression. Shape keys may stay (exported as morph targets); their
+   animations are read as morph weight channels.
    Export a separate model for independently animated rigid scenery.
 5. Validate the file with the
    [Khronos glTF Validator](https://github.com/KhronosGroup/glTF-Validator), then
@@ -83,8 +84,8 @@ error; on a failed live reload it retains the last good model and reports
 `kin-model-profile3d` runs without a GPU; `kin-model-profile3d-gpu` exercises the
 same structural acceptance rules with the native renderer. They cover GLB/static/PBR
 fixtures, external PNG and embedded JPEG images, u8/u16 joint indices, float/u8/u16 weights,
-equivalent multi-mesh skins, rejection of distinct palettes/oversized skins/bad
-joint indices/morphs/mixed poses, shared versus incompatible UV placements, and
+equivalent multi-mesh skins, a skinned mesh with a morph target and its weight channel (applied with
+`apply_clip_morphs` on the GPU), rejection of distinct palettes/oversized skins/bad joint indices/mixed poses, shared versus incompatible UV placements, and
 repair after rejection. The GPU case also submits both parts of an equivalent-skin
 character and verifies that a rejected direct load has no drawable fragments and
 that a failed polling reload retains its last good model.

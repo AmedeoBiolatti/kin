@@ -52,6 +52,8 @@
 
 namespace kin {
 
+class Renderer3D;
+
 // Where an entity sits relative to its parent (flecs ChildOf), or to the
 // world without one: scaled, then turned, then moved to `position`.
 struct Transform3D {
@@ -173,6 +175,61 @@ struct SkinnedMeshRenderer3D {
     // Optional authored reference; model stays runtime-only. Resolve before
     // animation/physics setup. An empty reference leaves C++ models untouched.
     ComponentAssetRef asset;
+};
+
+// One morph target weight by the target's name (MorphWeights3D).
+struct MorphWeight3D {
+    std::string target;
+    f32 weight = 0.0f;
+    friend bool operator==(const MorphWeight3D&, const MorphWeight3D&) = default;
+};
+
+// Morph target weights (docs/rendering_3d.md, Morph targets) for the model of the entity's SkinnedMeshRenderer3D or
+// ModelRenderer3D: a face's expression, a door's dent. Each part of the model with a target of a listed name shows that
+// weight (within [-1, 1]); the other targets keep what the clips of the entity's Animator3D give them (when `animated`)
+// or the weights the model was made with. The model's meshes are shared by every entity drawing it, so the entity draws
+// copies of its own of the parts with targets (made by WorldRenderState3D::apply_morphs, once a model; their memory is
+// the parts' vertices again). Without this component an entity draws the model's shared meshes, at their weights.
+// Authored as one string, "smile=0.8, blink=1" (`weights` in a scene file; Lua scene3d.set_morph_weight).
+struct MorphWeights3D {
+    std::vector<MorphWeight3D> weights;
+    bool animated = true;
+    // The weight set for `target`, or `fallback` when none is.
+    f32 get(std::string_view target, f32 fallback = 0.0f) const {
+        for (const MorphWeight3D& w : weights)
+            if (w.target == target)
+                return w.weight;
+        return fallback;
+    }
+    // Sets (or adds) `target`'s weight; erase() takes it away (the clips' or the model's weight again).
+    void set(std::string_view target, f32 weight) {
+        for (MorphWeight3D& w : weights)
+            if (w.target == target) {
+                w.weight = weight;
+                return;
+            }
+        weights.push_back({std::string(target), weight});
+    }
+    void erase(std::string_view target) {
+        std::erase_if(weights, [&](const MorphWeight3D& w) { return w.target == target; });
+    }
+
+    // --- set by WorldRenderState3D::apply_morphs; not for setting
+    std::vector<Mesh3D> meshes;            // by model part: the entity's copy, or empty (the part's own)
+    std::weak_ptr<const Model3D> made_for; // the model they are copies of
+    flecs::entity_t made_by = 0;           // the entity they were made for (a copied component makes its own)
+};
+
+// A decal (Decal3D: docs/rendering_3d.md, Decals) at the entity's WorldTransform3D: the box is the entity's space
+// scaled by `size` (the picture's width along X, the depth it reaches along Y, its height along Z), projected along the
+// entity's -Y. `decal.transform` is ignored. `texture_asset` and `normal_asset` are authored images relative to
+// Assets3D::root(), bound by resolve_render3d_assets (empty: `decal.texture`/`decal.normal` as set from C++).
+struct DecalRenderer3D {
+    Decal3D decal{};
+    Vec3f size{1.0f, 1.0f, 1.0f};
+    bool visible = true;
+    ComponentAssetRef texture_asset, normal_asset;
+    std::string bound_texture, bound_normal; // runtime-only: the paths bound
 };
 
 // What a constraint aims at: a point of the world, a point carried by another entity (its WorldTransform3D of the
@@ -511,6 +568,11 @@ public:
     using IKPresentation3D = std::function<std::optional<IKTargetPose3D>(const IKConstraint3D&)>;
     void collect(Scene3D& scene, const Presentation3D& presentation = {}, const PosePresentation3D& poses = {},
                  const IKPresentation3D& ik = {}, f32 alpha = 1);
+    // Morph targets: for each entity with a MorphWeights3D and a model with targets, makes its own copies of the parts
+    // with targets (once a model) and sets their weights: the model's, then its Animator3D's clips' (when `animated`),
+    // then the named ones. Call it after animate() and before collect(), on the renderer's thread (SceneFrame3D does);
+    // collect() draws the copies. Unchanged weights cost nothing.
+    void apply_morphs(Renderer3D& renderer);
     // Release reusable mesh/material buckets after bulk removal. ECS-owned
     // handles remain intact; the next collect rebuilds active buckets.
     void clear_collection_cache();
@@ -580,6 +642,9 @@ private:
     flecs::query<const WorldTransform3D, const PointLight3D, const RenderTransform3D*> _point_lights;
     flecs::query<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*> _spot_lights;
     flecs::query<const WorldTransform3D, const ParticleEmitter3D> _emitters;
+    flecs::query<const WorldTransform3D, const DecalRenderer3D, const RenderTransform3D*> _decals;
+    flecs::query<MorphWeights3D, const SkinnedMeshRenderer3D*, const ModelRenderer3D*, const Animator3D*> _morphs;
+    std::vector<f32> _morph_scratch;
     std::vector<ParticleSprite3D> _particle_sprites;
     flecs::query<Weather3D> _weather;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused

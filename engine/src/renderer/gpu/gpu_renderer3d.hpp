@@ -11,6 +11,7 @@
 
 #include <SDL3/SDL.h>
 #include <array>
+#include <chrono>
 #include <kin/render3d/backend3d.hpp>
 #include <kin/render3d/local_lights3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
@@ -98,6 +99,14 @@ struct GpuClusterChunk {
 // A mesh's buffers. Games may keep meshes past the renderer (in scenes that
 // outlive it): like textures they hold the device's shared handle, and skip
 // the release once it is gone.
+// A mesh with morph targets, blended on the GPU (morph_blend.comp): its vertices at rest (GpuMeshVertex, 9 words each)
+// and every target's offsets (6 floats a vertex, target after target), shared by the mesh's copies.
+struct GpuMorphSource {
+    GpuBuffer base, deltas;
+    u32 vertices = 0, targets = 0;
+    bool normals = false; // a target moves normals
+};
+
 class GpuMesh3D final : public IMeshBackend3D {
 public:
     explicit GpuMesh3D(SharedDevice device) : device(std::move(device)) {}
@@ -133,6 +142,16 @@ public:
     std::shared_ptr<GpuClusterChunk> chunk;
     u32 table_first = 0;
     u64 serial = 0; // unique for the renderer's life: the shadow cache's name for the mesh (a pointer can be reused)
+    // A mesh with morph targets (MeshData3D::morph_targets): its own vertex buffer, rewritten by update_mesh_vertices,
+    // and how many times it has been (the shadow caches' key for its shape).
+    bool dynamic = false;
+    u32 vertex_count = 0;
+    u64 content = 0;
+    std::shared_ptr<const GpuMorphSource> morph; // set where the GPU blends (else the CPU does, update_mesh_vertices)
+    // With `morph`: the vertices as they were before this frame's first blend (the velocity pre-pass's previous
+    // positions: prepass_velocity_morph.vert), and the frame (GpuRenderer2DBackend's serial) of the last blend.
+    SDL_GPUBuffer* previous = nullptr;
+    u64 blended_frame = 0;
     // Where global illumination can be had: the box of each run of gi_run_triangles of level 0's triangles (the mesh's
     // space, at rest), so that the GI scene's voxelizer takes only the runs that reach where it changed.
     std::vector<Bounds3D> gi_runs;
@@ -249,6 +268,31 @@ struct GpuCopyHistory {
     std::vector<u32> joint_first;
 };
 
+// A copy of a view's adapted exposure on its way back from the GPU (Renderer3D::exposure): a small transfer buffer the
+// frame's commands download into, and the fence that says that frame is done (submitted right after it).
+struct GpuSharedFence {
+    SharedDevice device;
+    SDL_GPUFence* fence = nullptr;
+    GpuSharedFence(SharedDevice device, SDL_GPUFence* fence) : device(std::move(device)), fence(fence) {}
+    GpuSharedFence(const GpuSharedFence&) = delete;
+    GpuSharedFence& operator=(const GpuSharedFence&) = delete;
+    ~GpuSharedFence(); // waits for it first: a fence is never released unsignalled
+    bool signaled() const;
+};
+struct GpuExposureReadback {
+    SharedDevice device;
+    SDL_GPUTransferBuffer* transfer = nullptr;
+    std::shared_ptr<GpuSharedFence> fence;
+    bool recorded = false; // downloaded into in commands not yet fenced
+    std::optional<f32> value;
+    GpuExposureReadback() = default;
+    GpuExposureReadback(const GpuExposureReadback&) = delete;
+    GpuExposureReadback& operator=(const GpuExposureReadback&) = delete;
+    ~GpuExposureReadback();
+    // Reads the copy if its fence has signalled (never waits); true when one is in flight.
+    bool poll();
+};
+
 class GpuView3D final : public IViewBackend3D {
 public:
     Texture texture() const override;
@@ -257,6 +301,7 @@ public:
     void reset_history() override {
         _taa_reset_asked = true;
         _occ_reset = true;
+        _exposure_valid = false;
     }
 
 private:
@@ -278,6 +323,14 @@ private:
     GpuTexture _depth;
     GpuTexture _scene;             // HDR: the resolved float picture
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
+    // ViewOptions3D::auto_exposure: the histogram and the adapted exposure (exposure_histogram/adapt.comp), whether it
+    // holds a metered exposure yet, and the clocks the time between renders is measured with.
+    std::shared_ptr<GpuBuffer> _exposure;
+    bool _exposure_valid = false;
+    bool _exposure_time_seen = false;
+    f32 _exposure_time = 0.0f;
+    std::chrono::steady_clock::time_point _exposure_wall{};
+    std::shared_ptr<GpuExposureReadback> _exposure_read;
     GpuTexture _pick, _pick_depth; // with ViewOptions3D::pick: position and id a pixel
     bool _pick_valid =
         false; // a render has written _pick since it was made (a new target holds whatever the memory did)
@@ -476,6 +529,10 @@ public:
     RendererCapabilities3D capabilities() const override { return _capabilities; }
     std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
+    bool update_mesh_vertices(IMeshBackend3D& mesh, std::span<const MeshVertex3D> vertices) override;
+    bool set_morph_weights(IMeshBackend3D& mesh, std::span<const f32> weights) override;
+    std::shared_ptr<IMeshBackend3D> copy_mesh(const IMeshBackend3D& mesh) override;
+    std::optional<f32> read_exposure(IViewBackend3D& view) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<ISurfaceShaderBackend3D>
@@ -595,7 +652,7 @@ private:
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
     SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned = false,
-                                               const GpuSurfaceShader3D* surface = nullptr) const;
+                                               const GpuSurfaceShader3D* surface = nullptr, bool morph = false) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
@@ -632,14 +689,20 @@ private:
     // `plain` is an 8-bit view's resolved picture (temporal anti-aliasing), which only needs encoding.
     // `dither`: the output shader with a dither of an 8-bit step (a view with a sky; falls back to the plain one
     // without it).
+    // `time` is Scene3D::time (auto exposure's step between renders).
     bool finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither,
-                     RenderDebugStats3D&);
+                     f32 time, RenderDebugStats3D&);
+    // ViewOptions3D::auto_exposure: meters `source` into the view's exposure buffer and adapts it; false (the view is
+    // output with its plain exposure) where it can't.
+    bool meter_exposure(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, f32 time,
+                        RenderDebugStats3D&);
     bool post_pass(SDL_GPUCommandBuffer*, const GpuTexture&, SDL_GPUShader*, std::span<const SDL_GPUTexture* const>,
-                   const std::array<f32, 4>&);
+                   const std::array<f32, 4>&, SDL_GPUBuffer* storage = nullptr);
     bool record_bloom(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& result,
                       const GpuTexture& scratch, f32 threshold, RenderDebugStats3D&);
     bool record_output(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& target,
-                       const GpuTexture* bloom, const OutputOptions3D&, RenderDebugStats3D&);
+                       const GpuTexture* bloom, const OutputOptions3D&, RenderDebugStats3D&,
+                       SDL_GPUBuffer* exposure = nullptr);
     const GpuTextureBackend* post_texture(const Texture&, bool attachment) const;
     // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
     bool ensure_taa_targets(GpuView3D& view, bool sharpen);
@@ -820,6 +883,27 @@ private:
     GpuTexture _area_cache_none; // 1 x 1 x 1: gi_light.comp's cache binding without area lights
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
+    // Scene3D::decals, in the main pass after the scene's opaque meshes (decal.vert/frag). `shared` is the custom
+    // material layout's twelve samplers as the pass binds them (the shadow maps, environment, occlusion); each decal
+    // puts its own picture and normal map in their places.
+    void draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass, std::array<SDL_GPUTextureSamplerBinding, 12> shared);
+    // Before the frame's passes: the decals in the view, as records in one storage buffer (decal.vert's KinDecal) and
+    // runs of them that share their pictures, sampler and pipeline (one instanced draw each, in the order added).
+    void prepare_decals(FrameCtx& ctx);
+    struct DecalRecord {
+        f32 model[16], to_decal[16], colour[4], surface[4], fade[4];
+    };
+    static_assert(sizeof(DecalRecord) == 176);
+    struct DecalRun {
+        u32 first = 0, count = 0;
+        Texture texture, normal;
+        Wrap3D wrap = Wrap3D::Clamp;
+        bool inside = false, mirrored = false;
+    };
+    std::vector<DecalRecord> _decal_records;
+    std::vector<u32> _decal_order, _decal_group; // the drawing order, and each decal's picture group
+    std::vector<DecalRun> _decal_runs;
+    std::shared_ptr<GpuBuffer> _decal_buffer;
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to
     // the instance buffer; draw_particles() then records them into the main pass.
     struct ParticleSource {
@@ -918,6 +1002,18 @@ private:
     GpuShader _sky_velocity_only_shader; // sky_velocity_only.frag
     GpuShader _sky_env_shader;           // sky_env.frag
     GpuShader _output_dither_shader; // view_output_dither.frag: view_output.frag with a dither, for a view with a sky
+    // ViewOptions3D::auto_exposure: the output's variants that read the adapted exposure, and the metering.
+    GpuShader _output_auto_shader;                                  // view_output_auto.frag
+    GpuShader _output_dither_auto_shader;                           // view_output_dither_auto.frag
+    SDL_GPUComputePipeline* _exposure_histogram_pipeline = nullptr; // exposure_histogram.comp
+    SDL_GPUComputePipeline* _exposure_adapt_pipeline = nullptr;     // exposure_adapt.comp
+    bool _auto_exposure_warned = false;
+    SDL_GPUComputePipeline* _morph_pipeline = nullptr;                  // morph_blend.comp
+    std::vector<std::weak_ptr<GpuExposureReadback>> _exposure_unfenced; // recorded this frame, fenced at its submit
+    // Scene3D::decals: the box's vertex shader and the lit projection (decal.vert, decal.frag).
+    GpuShader _decal_vertex_shader;
+    GpuShader _decal_shader;
+    bool _decals_warned = false;
     // P3c: particles (the billboards' vertex shader, the fragment shader and its soft-particle variant).
     GpuShader _particle_vertex_shader; // particle.vert
     GpuShader _particle_shader;        // particle.frag
@@ -990,6 +1086,9 @@ private:
     GpuShader _shadow_mask_skinned_vertex_shader;      // shadow_mask_skinned.vert
     GpuShader _prepass_skinned_vertex_shader;          // prepass_skinned.vert
     GpuShader _prepass_velocity_skinned_vertex_shader; // prepass_velocity_skinned.vert
+    // The same for meshes with morph targets blended on the GPU (their previous positions too; optional).
+    GpuShader _prepass_velocity_morph_vertex_shader;         // prepass_velocity_morph.vert
+    GpuShader _prepass_velocity_morph_skinned_vertex_shader; // prepass_velocity_morph_skinned.vert
     bool _skinning_available = false;
     bool _skin_warned = false;          // skinned copies cannot be drawn
     std::shared_ptr<GpuBuffer> _joints; // the frame's joint matrices (scene, then overlay); grows

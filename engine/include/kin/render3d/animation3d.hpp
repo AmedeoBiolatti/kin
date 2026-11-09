@@ -52,6 +52,23 @@ struct JointChannels3D {
     Track3D<Vec3f> scale;
 };
 
+// glTF's morph target weights over time (an animation channel of a node's "weights"): the weights of the parts
+// (Model3D::parts) made from that node's mesh, `targets` of them a key. Applied with apply_clip_morphs (model3d.hpp)
+// or sampled with sample_morph_channel and given to Renderer3D::set_morph_weights.
+struct MorphChannel3D {
+    std::vector<u32> parts;
+    u32 targets = 0;
+    Interpolation3D interpolation = Interpolation3D::Linear;
+    std::vector<f32> times;
+    // `targets` a key; for a cubic spline three times that (in-tangents, values, out-tangents, each `targets` long).
+    std::vector<f32> values;
+
+    bool valid() const {
+        return targets > 0 &&
+               values.size() == times.size() * targets * (interpolation == Interpolation3D::CubicSpline ? 3u : 1u);
+    }
+};
+
 // A keyframed animation of one skeleton's joints.
 struct AnimClip3D {
     std::string name;
@@ -60,6 +77,9 @@ struct AnimClip3D {
     u32 skeleton = 0;
     // By joint index; shorter than the skeleton's joints is allowed (the rest are not animated).
     std::vector<JointChannels3D> channels;
+    // And the morph target weights the same animation moves (glTF's "weights" channels), on the same timeline. A file's
+    // animation that moves only weights is a clip with no joint channels.
+    std::vector<MorphChannel3D> morphs;
 
     // The duration from the keys (the latest time of any track).
     f32 key_duration() const;
@@ -120,6 +140,9 @@ private:
 // A track's value at `time`, as glTF's spec has it: before the first key the first value, after the last the last;
 // between two keys by the interpolation. Rotations are normalised. `fallback` when the track is empty.
 Vec3f sample_track(const Track3D<Vec3f>& track, f32 time, Vec3f fallback);
+// The weights of `channel` at `time` (held at its first and last keys outside them), into `out` (resized to
+// channel.targets; all 0 for an invalid channel). Cubic-spline results are not clamped.
+void sample_morph_channel(const MorphChannel3D& channel, f32 time, std::vector<f32>& out);
 Quatf sample_track(const Track3D<Quatf>& track, f32 time, Quatf fallback);
 
 // The time to sample a clip at for a player's `time`: wrapped into [0, duration) when `loop` (always 0 for a clip with
@@ -274,6 +297,11 @@ public:
     void update(f32 dt, std::span<const ClipEventTrack3D> tracks, AnimationEventBatch3D& events);
     // The pose of the last update (the rest pose before the first).
     const Pose3D& pose() const { return _pose; }
+    // The morph target weights the clips playing give (AnimClip3D::morphs), blended as the pose is: crossfades, 1D
+    // blends, layers by their weight (additive ones add their change from their first frame) and the action. By model
+    // part (Model3D::parts): an empty entry is a part no playing clip moves. Empty when no clip has morph channels.
+    // Made by update(); apply them with Renderer3D::set_morph_weights (or WorldRenderState3D::apply_morphs).
+    const std::vector<std::vector<f32>>& morph_weights() const { return _morphs; }
     // The matrices of that pose (compute_joint_matrices).
     void joint_matrices(std::vector<Mat4f>& out) const;
     void joint_matrices(std::span<Mat4f> out) const;
@@ -290,6 +318,9 @@ private:
     static void advance(Playing& p, f32 dt);
     // `second` is the room for the second clip of a blend.
     void sample(const Playing& p, Pose3D& out, Pose3D& second) const;
+    // A playing's morph weights, by part, into `out` (cleared first).
+    static void sample_morphs(const Playing& p, std::vector<std::vector<f32>>& out);
+    void compose_morphs();
     static void set_blend(Playing& p, std::span<const BlendPoint3D> points, f32 parameter);
 
     struct Action {
@@ -317,6 +348,7 @@ private:
     RootMotion3D _delta;
     Pose3D _pose;
     Pose3D _scratch, _scratch2, _reference;
+    std::vector<std::vector<f32>> _morphs, _frozen_morphs, _morph_scratch, _morph_reference;
 };
 
 } // namespace kin

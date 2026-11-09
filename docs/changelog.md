@@ -7,6 +7,24 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 3D auto exposure, decals and morph targets (native renderers; WebGL2 has morph targets only).
+  `ViewOptions3D::auto_exposure` (`AutoExposure3D`) meters an HDR view on the GPU (a log-luminance histogram with
+  the darkest and brightest shares left out) and adapts its exposure over time, faster toward light than toward dark,
+  with no read-back. `Scene3D::draw_decal(Decal3D)` projects a picture (and optionally a normal map) through a box
+  onto the opaque surfaces in it, lit with them, fading on surfaces that turn away; scenes with decals always run the
+  pre-pass. `MeshData3D::morph_targets` and `Renderer3D::set_morph_weights` blend meshes between shapes (before
+  skinning; `copy_mesh` for a copy with its own weights); glTF morph targets, target names, default weights and weight
+  animations now load (`AnimClip3D::morphs`, `apply_clip_morphs`) instead of rejecting the model. New capabilities
+  `auto_exposure`, `decals`, `morph_targets`; new example `bunker_exit`. Scenes and scripts: `DecalRenderer3D` and
+  `MorphWeights3D` components (scene files, prefabs, inspection, live edits; decal images bound by
+  `resolve_render3d_assets`), `Material3D::receives_decals` (meshes drawn over the decals), `AnimationPlayer3D`
+  blending clips' morph weights (fades, blends, layers, actions) and `WorldRenderState3D::apply_morphs` giving each
+  entity its own shaped copies, Lua `scene3d.set_morph_weight` / `morph_weight` / `clear_morph_weight`.
+  Then: morph targets blended on the GPU (about 5 us of CPU a change, from 0.12-1.3 ms; copies share the targets) with
+  motion vectors for TAA, `Renderer3D::exposure(view)` reading the adapted exposure back without a stall, decals
+  culled to the view, and `kin_render3d_surface_bench` (KIN_BUILD_BENCHMARKS) for the features' GPU and CPU costs.
+  Decals are batched: one buffer of placings a frame and one instanced draw for the decals of one `Decal3D::order`
+  that share their pictures (drawn by order, then picture; previously one draw each, in the order added).
 - A minimal native 2D [starter](../games/starter/README.md) runs inside Kin or as a
   standalone project. The [project workflow](project_workflow.md) documents reuse,
   incremental structure and current starting points for native and Lua games.

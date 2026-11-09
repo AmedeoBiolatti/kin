@@ -122,6 +122,13 @@ public:
     // is `data` itself, so the picture without Scene3D::lod is the same. Takes
     // time to build (about a second for a million triangles).
     Result3D<Mesh3D> create_mesh(const MeshData3D& data, const MeshOptions3D& options);
+    // Morph targets (MeshData3D::morph_targets; docs/rendering_3d.md, Morph targets): the weights `mesh` shows from the
+    // next render on, one for each target (Mesh3D::morph_target_count), each within [-1, 1]. Blended on the CPU and
+    // uploaded (skipped when they are what it shows); a skinned mesh is blended, then skinned. Every copy drawn of the
+    // mesh shows the same weights: copy_mesh() makes one that can show others.
+    Status3D set_morph_weights(const Mesh3D& mesh, std::span<const f32> weights);
+    // A mesh with morph targets again, its own weights starting at `mesh`'s (the same targets, a GPU copy of its own).
+    Result3D<Mesh3D> copy_mesh(const Mesh3D& mesh);
     // Where create_mesh keeps what it builds for levels of detail and clusters (kin/assets/bake_cache.hpp), and
     // reads it back on a later run instead of building again: the same bytes, so the same mesh and pictures. Keyed by
     // the mesh's bytes and the options the build reads (mesh_clusters_bake_key, mesh_levels_bake_key); meshes too
@@ -237,6 +244,11 @@ public:
     // what is recorded so far (submitting it): ask when something calls for
     // it (a click, the pointer moving), not every frame.
     Result3D<PickResult3D> pick(View3D& view, Vec2i pixel);
+    // The exposure auto exposure has adapted `view` to (ViewOptions3D::auto_exposure: the multiplier it puts on
+    // ViewOptions3D::exposure; 2^ev), as it came back from the GPU: a frame or two behind the pictures, read without
+    // waiting (the view copies it out each render; it arrives once that frame's work is done). nullopt before the
+    // first value arrives, or for a view without auto exposure.
+    std::optional<f32> exposure(const View3D& view);
     // The clusters the last render's GPU cut chose (Scene3D::lod, Scene3D::debug.gpu_culling), for tests and tools;
     // waits for the GPU like pick(). False when that render cut on the CPU or drew no clusters. With Lod3D::occlusion
     // the second pass's clusters (view 0, the camera's) follow the first pass's.
@@ -283,6 +295,9 @@ private:
     Model3D load_model_shared(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error,
                               Assets3D* assets);
     void warn_refused_bake(bool restored);
+    // A mesh with morph targets from `source` (shared), at weights 0, then at `weights`.
+    Mesh3D upload_morph_mesh(std::shared_ptr<const MeshData3D> source, std::span<const f32> weights);
+    bool apply_morph_weights(const Mesh3D& mesh, std::span<const f32> weights);
     Renderer2D* _renderer = nullptr;
     IRendererBackend3D* _backend = nullptr;
     RenderDebugStats3D _stats{};

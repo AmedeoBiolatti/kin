@@ -612,6 +612,9 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     kin_embed_files(kin_render3d_surface_stages_tests NAME surface_stage_shaders FILES ${_surface_stage_spv})
     add_test(NAME kin-render3d-surface-stages-foreign COMMAND kin_render3d_surface_stages_tests --foreign-device)
     set_tests_properties(kin-render3d-surface-stages kin-render3d-surface-stages-foreign PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+    kin_add_test(kin_render3d_surface_details_tests kin-render3d-surface-details
+        SOURCES render3d_surface_details_tests.cpp)
+    set_tests_properties(kin-render3d-surface-details PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_postprocess_tests kin-render3d-postprocess SOURCES render3d_postprocess_tests.cpp)
     kin_compile_glsl(_postprocess_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/postprocess/shaders"
         SOURCES shaders/postprocess/fill.comp.glsl shaders/postprocess/input.frag.glsl shaders/postprocess/probe.frag.glsl)
@@ -690,6 +693,9 @@ if(KIN_BUILD_BENCHMARKS)
         # kin/render3d CPU costs that need no window: instance batch edits, particle wind (docs/rendering_3d.md).
         add_executable(kin_render3d_bench render3d_bench.cpp)
         target_link_libraries(kin_render3d_bench PRIVATE kin::engine)
+        # GPU and CPU costs of decals, auto exposure and morph targets (needs a GPU; not a test).
+        add_executable(kin_render3d_surface_bench render3d_surface_bench.cpp)
+        target_link_libraries(kin_render3d_surface_bench PRIVATE kin::engine)
     endif()
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)

@@ -557,6 +557,10 @@ function on_enter(ctx)
     assert(scene3d.set_animation_parameter(actor, 'amount', 1.25))
     assert(scene3d.set_animation_parameter(actor, 'ready', true))
     assert(scene3d.trigger_animation(other, 'wave'))
+    assert(not pcall(scene3d.set_morph_weight, actor, 'smile', 2))
+    assert(not pcall(scene3d.set_morph_weight, actor, '', 0.5))
+    assert(scene3d.morph_weight(actor, 'smile') == nil and not scene3d.clear_morph_weight(actor, 'smile'))
+    assert(scene3d.set_morph_weight(actor, 'smile', 0.5)) -- adds MorphWeights3D when the commands run
     assert(scene3d.play_action(actor, 'missing') == nil)
     assert(not pcall(scene3d.play_action, actor, 'wave', 'bogus'))
     local first = scene3d.play_action(actor, 'wave')
@@ -606,6 +610,9 @@ function update(ctx)
         forward=turn and {x=0,y=0,z=1} or {x=0,y=0,z=-1}, jump=ticks==40,
         crouch=ticks>=65 and ticks<=75,sprint=ticks>=90 and ticks<=100}))
     if ticks == 2 then
+        assert(scene3d.morph_weight(actor, 'smile') == 0.5)
+        assert(scene3d.set_morph_weight(actor, 'smile', -0.25) and scene3d.morph_weight(actor, 'smile') == -0.25)
+        assert(scene3d.clear_morph_weight(actor, 'smile') and scene3d.morph_weight(actor, 'smile') == nil)
         assert(scene3d.set_animation(actor, {playing=false}))
     elseif ticks == 3 then
         assert(scene3d.set_animation(actor, {playing=true}))

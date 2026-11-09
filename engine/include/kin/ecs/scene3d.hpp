@@ -86,6 +86,12 @@ Status3D resolve_animator3d_assets(EcsWorld& world, const std::filesystem::path&
 // read keeps the one bound before. SceneSession3D calls it; tools call it after making or loading a world.
 Status3D resolve_animators3d(EcsWorld& world, const std::filesystem::path& content_root,
                              std::span<const EcsId> entities = {});
+// DecalRenderer3D's images (its texture as colour, its normal map as data), renderer thread. Called by
+// resolve_render3d_assets. A failed load keeps the pictures bound before; an emptied reference clears what it bound.
+Status3D resolve_decals3d_assets(EcsWorld& world, Assets3D& assets, std::span<const EcsId> entities = {});
+// MorphWeights3D's authored form: "smile=0.8, blink=1" (each weight within [-1, 1]); nullopt when it is not.
+std::string format_morph_weights3d(std::span<const MorphWeight3D> weights);
+std::optional<std::vector<MorphWeight3D>> parse_morph_weights3d(std::string_view text);
 // Atomic per entity, renderer thread. Called by resolve_render3d_assets.
 // Invalid replacements retain the last good binding; empty refs clear it.
 Status3D resolve_materials3d_assets(EcsWorld& world, Assets3D& assets, std::span<const EcsId> entities = {});

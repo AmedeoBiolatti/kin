@@ -558,10 +558,13 @@ private:
                                    attribute(primitive, cgltf_attribute_type_weights);
                 if (own && !bound)
                     unsupported("skinned primitives require a supported skin, JOINTS_0 and WEIGHTS_0", name);
-                MeshData3D data = mesh_data(primitive, bound ? own_info : nullptr, name);
+                MeshData3D data = mesh_data(primitive, bound ? own_info : nullptr, name, node);
                 if (data.vertices.empty()) {
                     continue;
                 }
+                // The parts a "weights" channel of this node moves (build_clips).
+                if (data.morphed())
+                    _morph_parts[node].push_back(_parts_sunk);
                 ModelPartData3D part{name, {}, world, -1};
                 if (bound) {
                     part.transform = Mat4f{}; // the node's placing is ignored for a skinned mesh
@@ -586,6 +589,7 @@ private:
                     }
                 }
                 (*_sink)(std::move(part), primitive.material);
+                ++_parts_sunk;
             }
         }
         for (cgltf_size i = 0; i < node->children_count; ++i) {
@@ -771,10 +775,63 @@ private:
         unsupported("primitive geometry cannot be read", std::string{name} + ": " + why);
     }
 
-    MeshData3D mesh_data(const cgltf_primitive& primitive, const SkinInfo* skin, const char* name) {
+    // The primitive's morph targets (POSITION and NORMAL offsets; TANGENT and others are not used), their names (the
+    // mesh's extras.targetNames) and the weights the node, else the mesh, starts them at. Sparse accessors are read
+    // (cgltf unpacks them). False, with the reason noted, when they cannot be.
+    bool read_morph_targets(const cgltf_primitive& primitive, const cgltf_node* node, std::size_t count,
+                            const char* name, MeshData3D& data) {
+        if (primitive.targets_count > max_morph_targets) {
+            unsupported(("more than " + std::to_string(max_morph_targets) + " morph targets").c_str(), name);
+            return false;
+        }
+        const cgltf_mesh* mesh = node ? node->mesh : nullptr;
+        data.morph_targets.resize(primitive.targets_count);
+        for (cgltf_size t = 0; t < primitive.targets_count; ++t) {
+            const cgltf_morph_target& target = primitive.targets[t];
+            MorphTarget3D& out = data.morph_targets[t];
+            out.name = mesh && t < mesh->target_names_count && mesh->target_names[t] ? mesh->target_names[t]
+                                                                                     : "target" + std::to_string(t);
+            out.positions.assign(count, Vec3f{});
+            for (cgltf_size a = 0; a < target.attributes_count; ++a) {
+                const cgltf_attribute& attribute = target.attributes[a];
+                if (attribute.index != 0 ||
+                    (attribute.type != cgltf_attribute_type_position && attribute.type != cgltf_attribute_type_normal))
+                    continue;
+                const cgltf_accessor* accessor = attribute.data;
+                if (accessor->type != cgltf_type_vec3 || accessor->count < count) {
+                    unsupported("a morph target's POSITION or NORMAL is not VEC3 for every vertex", name);
+                    return false;
+                }
+                if (accessor->buffer_view && accessor->buffer_view->has_meshopt_compression) {
+                    unsupported("morph target data uses meshopt compression (EXT_meshopt_compression)", name);
+                    return false;
+                }
+                std::vector<Vec3f>& to = attribute.type == cgltf_attribute_type_position ? out.positions : out.normals;
+                to.assign(count, Vec3f{});
+                std::vector<cgltf_float> floats(accessor->count * 3);
+                if (cgltf_accessor_unpack_floats(accessor, floats.data(), floats.size()) != floats.size()) {
+                    unsupported("a morph target's offsets cannot be read", name);
+                    return false;
+                }
+                for (std::size_t i = 0; i < count; ++i)
+                    to[i] = {floats[i * 3], floats[i * 3 + 1], floats[i * 3 + 2]};
+            }
+        }
+        const cgltf_float* weights = node && node->weights_count   ? node->weights
+                                     : mesh && mesh->weights_count ? mesh->weights
+                                                                   : nullptr;
+        const cgltf_size weight_count = node && node->weights_count   ? node->weights_count
+                                        : mesh && mesh->weights_count ? mesh->weights_count
+                                                                      : 0;
+        data.morph_weights.assign(primitive.targets_count, 0.0f);
+        for (cgltf_size t = 0; weights && t < std::min<cgltf_size>(weight_count, primitive.targets_count); ++t)
+            data.morph_weights[t] = std::clamp(static_cast<f32>(weights[t]), -1.0f, 1.0f);
+        return true;
+    }
+
+    MeshData3D mesh_data(const cgltf_primitive& primitive, const SkinInfo* skin, const char* name,
+                         const cgltf_node* node = nullptr) {
         MeshData3D data;
-        if (primitive.targets_count)
-            unsupported("morph target geometry is unsupported; bake the deformation before export", name);
         const cgltf_accessor* positions = attribute(primitive, cgltf_attribute_type_position);
         if (!positions) {
             return data;
@@ -842,9 +899,17 @@ private:
             refuse(name, "cgltf could not read its values");
             return {};
         }
+        if (primitive.targets_count && !read_morph_targets(primitive, node, data.vertices.size(), name, data)) {
+            data.morph_targets.clear();
+            data.morph_weights.clear();
+        }
         if (!normals) {
-            // Flat: each triangle its own vertices, facing its own way.
+            // Flat: each triangle its own vertices, facing its own way. Morph targets move the same corners (their
+            // normals stay the triangle's at rest).
             MeshData3D flat;
+            flat.morph_weights = data.morph_weights;
+            for (const MorphTarget3D& target : data.morph_targets)
+                flat.morph_targets.push_back({target.name, {}, {}});
             const std::size_t count = data.indices.empty() ? data.vertices.size() : data.indices.size();
             for (std::size_t t = 0; t + 2 < count; t += 3) {
                 MeshVertex3D v[3];
@@ -860,6 +925,8 @@ private:
                     flat.vertices.push_back(v[k]);
                     if (skin)
                         flat.skin.push_back(data.skin[at[k]]);
+                    for (std::size_t t = 0; t < data.morph_targets.size(); ++t)
+                        flat.morph_targets[t].positions.push_back(data.morph_targets[t].positions[at[k]]);
                 }
             }
             return flat;
@@ -890,11 +957,22 @@ private:
             // One clip a skeleton it moves, made when a channel first needs it.
             std::map<u32, std::size_t> clip_of;
             AnimClip3D* node_clip = nullptr; // in node_clips
-            bool morph = false, other = false;
+            bool other = false;
+            std::vector<MorphChannel3D> morphs;
             for (cgltf_size ci = 0; ci < animation.channels_count; ++ci) {
                 const cgltf_animation_channel& channel = animation.channels[ci];
                 if (channel.target_path == cgltf_animation_path_type_weights) {
-                    morph = true;
+                    const auto parts =
+                        channel.target_node ? _morph_parts.find(channel.target_node) : _morph_parts.end();
+                    if (parts == _morph_parts.end()) {
+                        other = true; // weights of no part read with morph targets
+                        continue;
+                    }
+                    MorphChannel3D morph;
+                    morph.parts = parts->second;
+                    morph.targets = static_cast<u32>(channel.target_node->mesh->primitives[0].targets_count);
+                    if (read_morph_channel(channel, morph))
+                        morphs.push_back(std::move(morph));
                     continue;
                 }
                 const auto found =
@@ -930,17 +1008,28 @@ private:
                     read_channel(channel, _out.clips[it->second].channels[joint]);
                 }
             }
+            // The weights go with every clip of the animation (one timeline); an animation of weights alone is a clip
+            // of its own, of skeleton 0 with no joint channels.
+            if (!morphs.empty()) {
+                if (clip_of.empty() && !node_clip) {
+                    AnimClip3D clip;
+                    clip.name = name;
+                    _out.clips.push_back(std::move(clip));
+                    clip_of.emplace(0u, _out.clips.size() - 1);
+                }
+                for (const auto& [skeleton, at] : clip_of)
+                    _out.clips[at].morphs = morphs;
+                if (node_clip)
+                    node_clip->morphs = morphs;
+            }
             for (const auto& [skeleton, at] : clip_of) {
                 _out.clips[at].duration = _out.clips[at].key_duration();
             }
             if (node_clip) {
                 node_clip->duration = node_clip->key_duration();
             }
-            if (clip_of.empty() && !node_clip && !morph) {
+            if (clip_of.empty() && !node_clip) {
                 note("3D: an animation moves no joint of a skin and no node a part hangs from: it is left out", name);
-            }
-            if (morph) {
-                unsupported("morph target animation is unsupported; bake it before export", name);
             }
             if (other && (!clip_of.empty() || node_clip)) {
                 note("3D: an animation moves nodes no part of the model hangs from: those channels are ignored", name);
@@ -949,6 +1038,34 @@ private:
         for (AnimClip3D& clip : node_clips) {
             _out.clips.push_back(std::move(clip));
         }
+    }
+
+    // A "weights" channel: `targets` floats a key (three times that for a cubic spline).
+    bool read_morph_channel(const cgltf_animation_channel& channel, MorphChannel3D& out) {
+        const cgltf_animation_sampler& sampler = *channel.sampler;
+        out.interpolation = sampler.interpolation == cgltf_interpolation_type_step ? Interpolation3D::Step
+                            : sampler.interpolation == cgltf_interpolation_type_cubic_spline
+                                ? Interpolation3D::CubicSpline
+                                : Interpolation3D::Linear;
+        const std::size_t keys = sampler.input->count;
+        const std::size_t values = keys * out.targets * (out.interpolation == Interpolation3D::CubicSpline ? 3 : 1);
+        if (out.targets == 0 || sampler.output->count < values || sampler.output->type != cgltf_type_scalar) {
+            unsupported("a morph weight channel has fewer weights than its keys and targets need", _label);
+            return false;
+        }
+        for (const cgltf_accessor* accessor : {sampler.input, sampler.output}) {
+            if (const char* why = unreadable(accessor)) {
+                unsupported("animation channel keys cannot be read", _label + ": " + why);
+                return false;
+            }
+        }
+        out.times.resize(keys);
+        for (std::size_t k = 0; k < keys; ++k)
+            cgltf_accessor_read_float(sampler.input, k, &out.times[k], 1);
+        out.values.resize(values);
+        for (std::size_t v = 0; v < values; ++v)
+            cgltf_accessor_read_float(sampler.output, v, &out.values[v], 1);
+        return true;
     }
 
     void read_channel(const cgltf_animation_channel& channel, JointChannels3D& out) {
@@ -1007,9 +1124,11 @@ private:
     std::map<const cgltf_node*, std::pair<i32, i32>>
         _joint_of; // a joint node: its skin (the file's) and its index in it
     std::map<const cgltf_node*, std::vector<std::pair<u32, u32>>> _animation_joints;
-    std::map<const cgltf_node*, i32> _node_joint; // a node of the node skeleton: its joint
-    std::size_t _node_parts = 0;                  // parts that hang from one
-    std::vector<SkinKey> _skin_keys;              // the skins made, to fold the same again into them
+    std::map<const cgltf_node*, i32> _node_joint;               // a node of the node skeleton: its joint
+    std::map<const cgltf_node*, std::vector<u32>> _morph_parts; // a node's parts with morph targets
+    u32 _parts_sunk = 0;                                        // the parts handed to the sink so far
+    std::size_t _node_parts = 0;                                // parts that hang from one
+    std::vector<SkinKey> _skin_keys;                            // the skins made, to fold the same again into them
     std::map<const cgltf_material*, std::optional<UvTransform>> _uv_transforms; // by material, once looked at
 };
 
@@ -1527,6 +1646,26 @@ const AnimClip3D* Model3D::find_clip(std::string_view name, u32 skeleton) const 
         }
     }
     return nullptr;
+}
+
+Status3D apply_clip_morphs(Renderer3D& renderer, const Model3D& model, const AnimClip3D& clip, f32 time, bool loop) {
+    if (clip.morphs.empty())
+        return {};
+    const f32 at = clip_time(clip, time, loop);
+    std::vector<f32> weights;
+    Diagnostics3D errors;
+    for (const MorphChannel3D& channel : clip.morphs) {
+        sample_morph_channel(channel, at, weights);
+        for (f32& w : weights)
+            w = std::isfinite(w) ? std::clamp(w, -1.0f, 1.0f) : 0.0f;
+        for (const u32 part : channel.parts) {
+            if (part >= model.parts.size() || model.parts[part].mesh.morph_target_count() != weights.size())
+                continue;
+            if (const Status3D status = renderer.set_morph_weights(model.parts[part].mesh, weights); !status)
+                errors.insert(errors.end(), status.diagnostics.begin(), status.diagnostics.end());
+        }
+    }
+    return status3d(errors.empty(), std::move(errors));
 }
 
 Mat4f Model3D::part_transform(std::size_t part, std::span<const Mat4f> node_matrices) const {

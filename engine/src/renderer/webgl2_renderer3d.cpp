@@ -48,6 +48,8 @@ struct Level {
 };
 struct Mesh final : IMeshBackend3D {
     GLuint vao = 0, vertices = 0, indices = 0, skin = 0;
+    u32 vertex_count = 0;
+    bool dynamic = false; // made with morph targets: update_mesh_vertices rewrites `vertices`
     std::vector<Level> levels;
     std::shared_ptr<bool> alive;
     ~Mesh() override {
@@ -404,6 +406,7 @@ struct WebGLRenderer3D::Impl {
         for (u32 unit = 0; unit < names.size(); ++unit)
             glUniform1i(uniform(names[unit]), GLint(unit));
         caps.depth_bits = 24;
+        caps.morph_targets = true;
         caps.max_spot_lights = 0; // the initial mesh path draws no spot lights (and the first 16 point lights)
         const bool unmasked =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "WEBGL_debug_renderer_info");
@@ -924,7 +927,10 @@ std::shared_ptr<IMeshBackend3D> WebGLRenderer3D::create_mesh(const MeshData3D& d
     glBindVertexArray(mesh->vao);
     glGenBuffers(1, &mesh->vertices);
     glBindBuffer(GL_ARRAY_BUFFER, mesh->vertices);
-    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(vertices.size() * sizeof(MeshVertex3D)), vertices.data(), GL_STATIC_DRAW);
+    mesh->dynamic = data.morphed();
+    mesh->vertex_count = u32(data.vertices.size());
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(vertices.size() * sizeof(MeshVertex3D)), vertices.data(),
+                 mesh->dynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
     if (data.skinned()) {
         std::vector<Skin> skin;
         skin.reserve(data.skin.size());
@@ -939,6 +945,15 @@ std::shared_ptr<IMeshBackend3D> WebGLRenderer3D::create_mesh(const MeshData3D& d
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(indices.size() * sizeof(u32)), indices.data(), GL_STATIC_DRAW);
     mesh_layout(*mesh, _impl->instances);
     return mesh;
+}
+bool WebGLRenderer3D::update_mesh_vertices(IMeshBackend3D& backend, std::span<const MeshVertex3D> vertices) {
+    auto* mesh = dynamic_cast<Mesh*>(&backend);
+    if (!mesh || !mesh->dynamic || !mesh->alive || !*mesh->alive || vertices.size() != mesh->vertex_count)
+        return false;
+    _impl->renderer.before_3d();
+    glBindBuffer(GL_ARRAY_BUFFER, mesh->vertices);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, GLsizeiptr(vertices.size_bytes()), vertices.data());
+    return true;
 }
 std::shared_ptr<IViewBackend3D> WebGLRenderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
     if (options.hdr || options.bloom > 0 || options.pick) {

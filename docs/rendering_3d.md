@@ -1335,6 +1335,66 @@ Memory: a layer is `side`^2 x 4 bytes (a spot 4 MiB at 1024, 1 MiB at 512), a po
 and gives them back after 120 idle renders. Not done: shadows from custom material shaders' own light, contact shadows for spots, a light
 cone's in-scattering in fog (a lamp in mist shows no beam), soft shadows by light size (the filter is a fixed width).
 
+### Decals
+
+`Scene3D::draw_decal(Decal3D)` projects a picture onto the opaque surfaces inside a box: scorch marks, paint,
+dirt, footprints, posters, bullet holes (in the ECS: `DecalRenderer3D`, below). The box is the unit cube `[-0.5, 0.5]^3` placed by `transform`; the picture
+lies on its X/Z sides (u along +X, v along +Z, the picture's top at -Z) and is projected along -Y, from the box's top
+face down through its depth. Decals are drawn after the scene's opaque meshes and before the sky and the blended
+meshes, in the order of their `order` (lower first, so higher lies over lower where they overlap; 0 by default), and
+lit as a custom material is: the sun and its shadows, the fill light, ambient or
+environment light with the ambient occlusion, point and spot lights (the first 16, as custom shaders have) and their
+shadows, and fog. `clear()` takes them away.
+
+```cpp
+const kin::Texture scorch = renderer.create_texture_from_rgba(pixels, 256, 256); // colour and coverage (alpha)
+scene.draw_decal({.transform = kin::Mat4f::trs({x, 0, z}, kin::Quatf::axis_angle({0, 1, 0}, 30), {2, 1, 2}),
+                  .texture = scorch});
+// Onto a wall facing +Z: the box's +Y turned toward +Z; a normal map (tangent space, green up) for relief.
+scene.draw_decal({.transform = kin::Mat4f::trs({x, y, wall_z}, kin::Quatf::axis_angle({1, 0, 0}, 90), {0.2f, 0.3f, 0.2f}),
+                  .texture = hole, .normal = hole_normals});
+```
+
+`color` multiplies the texture (alpha too); `roughness`, `metallic` and `emission` (the colour as light of its own)
+describe the paint; `normal_strength` scales the normal map. Surfaces turned away from the projection fade: fully
+drawn where the cosine between their normal and the box's +Y is above `normal_fade` (0.3), to nothing at 0, never
+onto a surface facing away, so a floor decal does not smear down the walls. `depth_fade` (0.25) fades it toward the
+box's top and bottom faces. `wrap` is the picture's sampler (clamped by default).
+
+`Material3D::receives_decals` (true; `"receives_decals"` in `.kinmaterials`) turned off keeps decals off a mesh: such
+meshes are drawn after the decals, over them, so a character walking through a scorch mark's box is not painted
+with it (the decal's work under its pixels is simply covered).
+
+In the ECS a `DecalRenderer3D` places one at its entity: the box is the entity's space scaled by `size` (the picture's
+width along X, the depth it reaches along Y, its height along Z), projected along the entity's -Y. Scene files and
+prefabs author it, its images by path (`resolve_render3d_assets` binds them: the texture as colour, the normal map as
+data; a failed load keeps the pictures bound before, and the session reloads them when the files change):
+
+```json
+{"id": "scorch", "components": {
+    "Transform3D": {"position": [2, 0, -3], "rotation": [0, 0.26, 0, 0.97]},
+    "DecalRenderer3D": {"texture": "decals/scorch.png", "size": [2, 1, 2], "normal_fade": 0.4, "order": 0}}}
+```
+
+A decal reads the pre-pass's depth and normals (the mesh's normal, before its own normal map), so a scene with decals
+always runs the pre-pass (with TAA, the main pass then no longer writes the velocity itself). It lands on what the
+pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not custom-shader, blended or unlit meshes,
+particles or the overlay; opaque meshes whose material has `receives_decals` off are drawn over them. Seen from outside its box, a decal's front faces are depth-tested against the scene, so
+what stands in front of the box hides it; from inside the box (or within twice the near plane of it) its back faces
+are drawn untested. Decals whose box is out of the view are skipped (`debug_stats().decals_culled`).
+
+The others are batched: their placings and settings go to the GPU in one buffer a frame, and the decals of one
+`order` that share their pictures (texture, normal map, wrap) are drawn together, as one instanced draw of 36
+vertices a box (`debug_stats().decals_drawn`, `decal_draws`), whatever order they were added in. Pictures are drawn in
+the order each first appears among its `order`'s decals, so when two decals of different pictures overlap and one
+must lie over the other, give it a higher `order` (a decal of a picture already drawn earlier in its order would
+otherwise join that picture's draw, under the other). 256 decals of one picture are one draw (`render()` 0.18 ms of
+CPU against 0.26 drawing them one by one; `kin_render3d_surface_bench`), 256 of four pictures four draws. A pixel
+costs four extra depth reads (the texture's gradients come from the neighbours on the same surface, so edges of what stands in
+front do not pick the smallest mip level). `capabilities().decals` says whether the device can; where not (or on
+WebGL2), decals are not drawn, said once. Not supported: `render_surface`/`prepare` graphs, and clustered
+(many-decal) culling.
+
 ### Particles and weather
 
 Off by default; off, the picture and the cost are those without them. Particles have their own shaders;
@@ -1833,8 +1893,8 @@ map (and its scale), occlusion map (and its strength) and emissive map.
 `scene.draw(model, transform)` draws its parts. A `kin::ModelFile3D` keeps one
 loaded after the first successful `poll()`, then reloads on source edits.
 Construction does no I/O; check each returned result. Skins and animations
-are read too (see Skinned meshes below). The [tested glTF/export profile](gltf_profile3d.md)
-defines supported content and the export recipe. Morph geometry/channels, multiple
+are read too (see Skinned meshes below), and morph targets with their weight animations (see Morph targets).
+The [tested glTF/export profile](gltf_profile3d.md) defines supported content and the export recipe. Multiple
 distinct skin palettes and mixed skin/plain-node animation reject the whole asset.
 Texture transforms and a selected UV set are supported when all of a material's
 maps agree on that placement; incompatible per-map placements reject the asset.
@@ -1984,7 +2044,7 @@ the whole model before it becomes a usable asset; split the export into models.
 four influences per vertex. Finite positive sums are normalized; missing usable
 weights, out-of-range joints, extra influence sets and oversized skins are asset
 errors, rather than a partly static character. Translation/rotation/scale clips
-support Linear, Step and CubicSpline. Morph targets/channels and models needing
+support Linear, Step and CubicSpline, as do morph weight channels. Models needing
 both a skin pose and a separate visible plain-node pose are rejected. Plain-node
 animation by itself remains supported. A rigid mesh under a joint is attached to
 that palette with full weight and follows it normally.
@@ -2053,6 +2113,79 @@ copy matched by order with a changed count is a guess (give it an id); D3D12 and
 held at the ends), each clip at the same phase of its own length. The base's `time()` is then a phase (0 to 1) that advances by
 `dt * speed / (the duration blended at the parameter now)`, so a walk and a run step in time and a changing parameter never jumps.
 Fades, root motion and layers work as for a clip.
+
+## Morph targets
+
+Shapes a mesh blends toward (glTF's morph targets, Blender's shape keys): a face's expressions, a creature's squash
+and stretch, a door's dent. `MeshData3D::morph_targets` holds, for each target, a position offset for every vertex
+(and optionally a normal offset); `morph_weights` the weights the mesh starts at (none: all 0). The mesh then shows
+each vertex at `position + sum(w[t] * positions[t])`, its normal `normalize(normal + sum(w[t] * normals[t]))`.
+
+```cpp
+kin::MeshData3D blob = kin::meshes::sphere(0.5f, 48, 24);
+kin::MorphTarget3D squash{"squash"};
+for (const auto& v : blob.vertices)
+    squash.positions.push_back({v.position.x * 0.3f, -(v.position.y + 0.5f) * 0.5f, v.position.z * 0.3f});
+blob.morph_targets = {std::move(squash)};
+kin::Mesh3D mesh = r3d.create_mesh(blob).value_or({});
+const float weights[] = {0.8f};
+r3d.set_morph_weights(mesh, weights);   // from the next render on; every copy drawn shows it
+kin::Mesh3D other = r3d.copy_mesh(mesh).value_or({}); // a second one with weights of its own
+```
+
+`Renderer3D::set_morph_weights(mesh, weights)` takes one weight for each target (`Mesh3D::morph_target_count`,
+`morph_target_name`, `find_morph_target`), each within [-1, 1]; weights equal to the current ones cost nothing. On
+native devices the blend runs on the GPU (`morph_blend.comp`, recorded into the frame's commands: the call itself
+takes about 5 microseconds whatever the size, against 0.12 to 1.3 ms for an 8,000-vertex mesh blended on the CPU
+with 8 to 52 targets changing; `kin_render3d_surface_bench`): the mesh keeps its vertices at rest and every target's
+offsets on the GPU (24 bytes a vertex a target), shared by its copies. WebGL2 blends on the CPU (skipping targets of
+weight 0) and uploads the vertices. Either way the vertices are cycled: a frame still drawing the old ones keeps
+them. All passes see the new shape: shadows (the shadow caches notice it), the pre-pass and
+its occlusion, decals, picking. A skinned mesh is blended first, then skinned. `Mesh3D::bounds()` of such a mesh
+holds it at any weights within [-1, 1], so culling never drops a blended copy. Since the weights belong to the mesh,
+copies drawn of it share them: `copy_mesh` gives another mesh (its own GPU vertices, the same targets) for another
+character. A mesh with targets has no levels of detail or clusters (asked for, it is made without them, with a warning in the log),
+keeps its vertices and targets on the CPU, and has a vertex buffer of its own. Where the GPU blends, temporal anti-aliasing sees a changing shape's own motion: the first blend of a frame keeps the
+shape the frame before drew, and the velocity pre-pass reads its positions from there (the pre-pass always runs with
+TAA when such a mesh is drawn; `debug_stats().morph_velocity_draws`). Set weights before rendering the frame that
+shows them: a shape changed after a frame's render moves without velocity in the next. Meshes with a moving surface
+shader (a world-position offset), and WebGL2, keep the copy's own motion only. Global illumination is not told that the shape
+changed (its scene follows when something else makes it voxelize again; area-light shadows keep the first shape).
+`capabilities().morph_targets` is true on every native device and on WebGL2.
+
+`blend_morph_targets(data, weights, out)` and `morph_bounds(data)` are the same on the CPU, for tools.
+`Scene3D::draw_skinned(model, ..., node_matrices, history_id, meshes)` draws a model with some parts' meshes replaced
+(an entity's own copies).
+
+**Animation.** `AnimationPlayer3D::morph_weights()` (by model part; an empty entry is a part no playing clip moves)
+blends the playing clips' weight channels as the pose is blended: crossfades (a fade in the middle of another fades out
+the held weights), 1D blends, layers by their weight (additive ones add their change from their first frame) and the
+action. A model needs a skeleton (a skin or animated nodes) for the player; weights-only animations of a model with
+neither are applied with `apply_clip_morphs`.
+
+**Entities.** A `MorphWeights3D` on an entity with a `SkinnedMeshRenderer3D` or `ModelRenderer3D` gives it weights of
+its own: `WorldRenderState3D::apply_morphs(renderer)` (SceneFrame3D calls it before collecting; call it after
+`animate()` in a hand-made loop) makes the entity copies of the model's parts with targets (once a model, and again for
+an entity the component was copied to) and sets them from the model's weights, then the clips its `Animator3D` plays
+(unless `animated` is off), then the targets named in `weights`. `collect()` draws the copies; entities without the
+component draw the shared meshes. Authored as `{"MorphWeights3D": {"weights": "smile=0.8, blink=1"}}`; from C++
+`get_mut<MorphWeights3D>()->set("smile", 0.8f)` / `erase("smile")`; from Lua `scene3d.set_morph_weight(entity, "smile",
+0.8)` (adds the component when the entity has none), `scene3d.morph_weight(entity, "smile")` (nil when not set) and
+`scene3d.clear_morph_weight(entity, "smile")`.
+`MeshData3D::append` meets targets by name (a target only one side has moves the other side's vertices by nothing).
+
+**glTF.** A primitive's `targets` (POSITION and NORMAL offsets; sparse accessors are read; TANGENT and other
+attributes are ignored), the mesh's `extras.targetNames` (else `target0`, `target1`, ...) and the node's, else the
+mesh's, `weights` are read into each part's mesh. An animation channel of a node's `weights` becomes a
+`MorphChannel3D` (`parts`: the parts made from that node's mesh, `targets` weights a key; step, linear and cubic
+spline) in `AnimClip3D::morphs`, on every clip of that animation; an animation of weights alone is a clip of its own
+with no joint channels. `apply_clip_morphs(r3d, model, clip, time, loop)` sets them all for a moment of the clip,
+`sample_morph_channel` samples one:
+
+```cpp
+player.update(dt);
+kin::apply_clip_morphs(r3d, model, *model.find_clip("Talk"), talk_time);
+```
 
 ## Inverse kinematics
 
@@ -2317,6 +2450,8 @@ Initial registered authored fields:
 | `CharacterController3D` | capsule dimensions, movement/jump/grounding settings, layer/mask, up/facing |
 | `CharacterAnimationLink3D` | animation parameter names, foot constraint name, ground-query mask |
 | `ParticleEmitter3D` | seed/emission/capacity, shape/ranges/forces/lifetime curves, texture/atlas/blend/facing, enabled/emitting |
+| `DecalRenderer3D` | texture and normal images, box size, colour, roughness/metallic, normal strength, emission, normal/depth fade, drawing order, visible |
+| `MorphWeights3D` | morph target weights by name (`"smile=0.8, blink=1"`), whether the animator's clips set the others |
 
 Vectors accept arrays or `x/y/z` objects; rotations use `x/y/z/w` order and must be
 finite unit quaternions. Enum adapters reject unknown names through normal patches.
@@ -2475,7 +2610,7 @@ health bars) and `camera.ray(point, rect)` (what a click points at;
 
 ## Views
 
-`Renderer3D::create_view(size, {.samples, .background, .hdr, .exposure,
+`Renderer3D::create_view(size, {.samples, .background, .hdr, .exposure, .auto_exposure,
 .bloom, .bloom_threshold, .pick})`: `samples` is MSAA (1, 2, 4 or 8, fewer where the
 device has fewer); `background` shows where nothing is drawn (transparent lets
 the 2D under the view show).
@@ -2502,8 +2637,29 @@ encoded like the same glow over geometry, so it is as bright.
 `bloom` (its strength; it turns `hdr` on) glows
 round what is brighter than `bloom_threshold`: emissive materials past 1,
 lit by strong lights. The glow belongs to the view, so 2D drawn over it
-(a HUD) stays crisp. `render(view,
-scene)` draws the scene into it, recorded between the 2D drawn before and
+(a HUD) stays crisp.
+
+`auto_exposure` (`AutoExposure3D`, off by default) makes the exposure follow the picture, as eyes and cameras do:
+walk from a dark room into the sun and the view is too bright for a moment, then settles. Each render meters the
+view's HDR picture on the GPU before the bloom is added: a histogram of the log2 luminance of every 2 x 2 block
+(128 bins over 28 stops), the darkest `low` (0.1) and the brightest past `high` (0.9) shares of the pixels left out,
+so a lamp or a patch of sky does not darken everything. The exposure that brings the average of the rest to `key`
+(0.18, mid-grey) plus `compensation_ev`, clamped to `2^min_ev .. 2^max_ev` (-4 to 6 stops), is approached
+exponentially: `speed_up` (1 per second) while it rises (after going into the dark), `speed_down` (3) while it falls,
+as eyes adapt to light faster than to dark. `centre_weight` (0 to 1) makes the middle of the view count more. The
+result multiplies `exposure`, which stays as a manual factor. Nothing goes through the CPU: the adapted exposure
+stays in a small storage buffer of the view's that the output shader reads, so there is no read-back stall, and three
+small compute dispatches (two after the first render) are all it costs (`debug_stats().exposure_dispatches`). The
+time between renders is `Scene3D::time`'s step when it moves forward (by at most a second), else the wall clock's
+(at most a quarter of a second); a new view, and one after `reset_history()`, starts at its target. It works where
+the view tonemaps (`hdr` or `bloom`, out to an 8-bit 2D pipeline; an HDR 2D pipeline tonemaps the frame itself) and
+`capabilities().auto_exposure` is true (not on WebGL2, whose views have no HDR yet).
+`Renderer3D::exposure(view)` gives the game the adapted exposure (the multiplier, 2^ev) without stalling: each render
+copies it out, and it arrives once that frame's GPU work is done (a frame or two behind the picture; nullopt until the
+first copy arrives, and for views without auto exposure). Use it for a HUD, or for gameplay that reacts to how
+dazzled the player is.
+
+`render(view, scene)` draws the scene into it, recorded between the 2D drawn before and
 after; a view keeps its picture until rendered again, so a still model needs
 no rendering each frame. `resize(view, size)` gives it a new size and texture.
 `view.reset_history()` drops the history temporal anti-aliasing keeps.
@@ -2553,7 +2709,7 @@ staging buffer its size). kin-render-studio's kiln (5.15 million triangles)
 draws in 6-8 ms at 1280x800 with 4x MSAA, against 70 ms or more on the CPU
 (see the plan's M4).
 
-Not yet: morph targets (the plan's later stages list what else).
+Morph targets are supported (see Morph targets below); the plan's later stages list what else is not yet.
 
 
 ### Clusters
