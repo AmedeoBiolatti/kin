@@ -199,9 +199,23 @@ void test_params() {
     for (int i = 0; i < 16; ++i)
         assert(material.shader_params[i] == f32(i + 1));
     assert(material.shader_params[16] == 0.1f && material.shader_params[17] == 0.75f);
+    assert(material.shader_params[18] == 1.0f && material.shader_params[19] == 1.0f); // the whole picture
     std::array<f32, 8> short_params{};
     planar_view_params(short_params, m); // too short: left alone
     assert(short_params[0] == 0);
+    // A picture filling part of its texture (View3D::set_render_size): the projector reads that part, from the top-left
+    // (kin_planar_uv's u = 0.5 + 0.5 x / w, v = 0.5 - 0.5 y / w), and the share is in the parameters for the reads.
+    const Mat4f identity;
+    planar_view_params(material.shader_params, identity, 0.0f, 1.0f, {0.5f, 0.25f});
+    Mat4f part;
+    std::copy_n(material.shader_params.begin(), 16, part.m);
+    const auto uv = [&](f32 x, f32 y) {
+        const Vec4f c = part * Vec4f{x, y, 0, 1};
+        return Vec2f{0.5f + 0.5f * c.x / c.w, 0.5f - 0.5f * c.y / c.w};
+    };
+    assert(near(uv(-1, 1).x, 0) && near(uv(-1, 1).y, 0));         // the picture's top-left: the texture's
+    assert(near(uv(1, -1).x, 0.5f) && near(uv(1, -1).y, 0.25f));  // its bottom-right: the share's
+    assert(material.shader_params[18] == 0.5f && material.shader_params[19] == 0.25f);
 }
 
 // --- The pictures ---
@@ -310,6 +324,56 @@ void test_draw_clip(Gpu& g) {
     assert(scene.draw_instanced(g.box, std::span(&copy, 1), unlit(colors::white), DrawClip3D::whole));
     assert(scene.draws().size() == 2 && scene.draws()[1].count == 2);
     std::cout << "planar: draw clip\n";
+}
+
+// Rendering part of a view (View3D::set_render_size): a lit scene (the sun, ambient occlusion, screen-space
+// reflections on a glossy floor, the sky, fog) drawn into the top-left 96 x 64 of the 160 x 120 view is the picture a
+// 96 x 64 view of its own shows, to a level or so; a resize renders the whole again; a scene with temporal
+// anti-aliasing cannot render a part.
+void test_render_part(Gpu& g) {
+    constexpr Vec2i part{96, 64};
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({3, 3, 6}, {0, 0.5f, 0});
+    scene.lights.sun.direction = normalize(Vec3f{-0.4f, -1, -0.3f});
+    scene.ambient_occlusion.enabled = true;
+    scene.ssr.enabled = true;
+    scene.sky.enabled = true;
+    scene.fog.enabled = true;
+    assert(scene.draw(g.floor, Mat4f{}, Material3D{.color = Color::rgb(90, 90, 100), .roughness = 0.1f}));
+    assert(scene.draw(g.box, at({0, 0.5f, 0}), Material3D{.color = Color::rgb(220, 60, 40), .roughness = 0.5f}));
+    assert(scene.draw(g.box, at({-1.5f, 0.5f, -1}), Material3D{.color = Color::rgb(40, 160, 220)}));
+    View3D own = g.r3d.create_view(part, {.samples = 1, .background = colors::black}).value_or({});
+    assert(own && g.r3d.can_render_part(g.main, scene));
+    assert(g.main.set_render_size(part) && g.main.render_size() == part && g.main.size() == extent);
+    const auto read = [&](View3D& view) {
+        g.r.clear(colors::black);
+        for (int i = 0; i < 3; ++i) // (the reflections read the frame before's picture)
+            assert(g.r3d.render(view, scene));
+        const Vec2i size = view.size();
+        g.r.draw_texture(view.texture(), {0, 0, f32(size.x), f32(size.y)});
+        std::vector<u8> pixels;
+        Vec2i read_size;
+        assert(g.r.read_rgba({0, 0, f32(part.x), f32(part.y)}, pixels, read_size) && read_size == part);
+        g.r.present();
+        return pixels;
+    };
+    const auto whole = read(own), in_part = read(g.main);
+    int worst = 0;
+    for (std::size_t i = 0; i < whole.size(); ++i)
+        worst = std::max(worst, std::abs(int(whole[i]) - int(in_part[i])));
+    std::cerr << "render part: the worst channel " << worst << " off its own view's\n";
+    assert(worst <= 2);
+    // Not left at the corner: the box is in it.
+    const auto p = scene.camera.project({0, 0.5f, 0.5f}, {0, 0, f32(part.x), f32(part.y)});
+    assert(p);
+    const u8* red = &in_part[std::size_t(int(p->pos.y) * part.x + int(p->pos.x)) * 4];
+    assert(red[0] > red[2] + 40);
+    // A resize renders the whole again.
+    assert(g.r3d.resize(g.main, {161, 120}) && g.r3d.resize(g.main, extent) && g.main.render_size() == extent);
+    // What cannot render a part says so.
+    scene.taa.enabled = true;
+    assert(!g.r3d.can_render_part(g.main, scene));
+    std::cout << "planar: render part\n";
 }
 
 // A mirror floor under a red box: the floor shows the reflection view's picture (the box, and its blue background).
@@ -468,6 +532,7 @@ int main() {
     test_clip_plane(g);
     test_draw_clip(g);
     test_draw_again(g);
+    test_render_part(g);
     test_mirror(g, reflection);
     test_portal(g, portal);
 }

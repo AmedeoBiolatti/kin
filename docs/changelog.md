@@ -67,11 +67,13 @@ releases may change APIs.
   jump, run) through the portals, and `--autoplay SECONDS` plays it by a bot through the real input and reports falls,
   escapes, stuck spots, missed portals, frame and GPU times and memory (exit 2 on a gameplay failure, or on memory
   still growing over the second half of a run of 4 minutes or more).
-- Planar views (mirrors, water, portals) resize their views a tenth as often as the eye moves: a view grows with an
-  eighth (or 64 pixels) of room and shrinks only after three seconds of being a quarter larger than its pictures.
-  Walking through the atrium resized views about 13 times a second (hundreds of textures), and the process's memory
-  grew without end (about 0.5 MiB a second); it now levels off within minutes (SDL_GPU's descriptor caches filling).
-  The pictures are a little larger: about 0.7 ms more GPU a frame in the atrium on an RTX 4080 laptop.
+- A view can render a part of itself (`View3D::set_render_size`, `render_size`; `Renderer3D::can_render_part`): renders
+  fill only that many pixels from its top-left, where the GPU backend can (no HDR, picking, temporal AA, GI, fog
+  shafts, occlusion culling, contact shadows or overlay). Planar views (mirrors, water, portals) use it: each picture
+  is drawn at its own size into a view that only grows, so a moving eye no longer resizes views (with all their
+  targets) about 13 times a second; after the first seconds, none. It is pixel for pixel the picture of a view of that
+  size. `planar_view_params` / `planar_refraction_params` take the part's `share`, and the planar surfaces keep their
+  reads in it; water's own colour no longer comes from its refraction picture.
 - 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
   allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
   fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).

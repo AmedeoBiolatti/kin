@@ -274,9 +274,17 @@ public:
         _taa_reset_asked = true;
         _occ_reset = true;
     }
+    Vec2i render_size() const override { return extent(); }
+    bool set_render_size(Vec2i size) override {
+        _extent = size.x > 0 && size.y > 0 ? Vec2i{std::min(size.x, _size.x), std::min(size.y, _size.y)} : Vec2i{};
+        return true;
+    }
 
 private:
     friend class GpuRenderer3D;
+    // What a render fills, from the top-left (set_render_size): the whole when unset.
+    Vec2i extent() const { return _extent.x > 0 ? _extent : _size; }
+    Vec2i _extent{};
     // Scene3D::time of its frame and of the frame before (a moving surface's previous position, for the velocity).
     f32 _offset_clock[2] = {0.0f, 0.0f};
     bool _offset_clock_seen = false;
@@ -299,6 +307,8 @@ private:
     std::shared_ptr<GpuBuffer> _ssr_buffer;
     Mat4f _ssr_prior{};
     f32 _ssr_prior_y = 1.0f; // its projection's [1][1] (how wide a world unit shows at a depth)
+    Vec2i _ssr_prior_grid{}; // the pyramid's level 0 (the half-size grid of the part rendered then)
+    u32 _ssr_prior_levels = 0;
     bool _ssr_seen = false;
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
     GpuTexture _pick, _pick_depth; // with ViewOptions3D::pick: position and id a pixel
@@ -516,6 +526,7 @@ public:
                                                       std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
+    bool renders_part(const IViewBackend3D& view, const Scene3D& scene) const override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
     bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) override;
     std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,

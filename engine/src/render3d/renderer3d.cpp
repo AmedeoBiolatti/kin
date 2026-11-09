@@ -202,6 +202,10 @@ View3D Renderer3D::create_view_operation(Vec2i size, const ViewOptions3D& option
     return View3D{std::make_shared<FallbackView>(std::move(target), options)};
 }
 
+bool Renderer3D::can_render_part(const View3D& view, const Scene3D& scene) const {
+    return _backend && view.backend() && _backend->renders_part(*view.backend(), scene);
+}
+
 Status3D Renderer3D::resize(View3D& view, Vec2i size) {
     auto value = resize_operation(view, size);
     return status3d(std::move(value), _errors);
