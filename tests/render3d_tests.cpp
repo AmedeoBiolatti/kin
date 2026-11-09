@@ -4984,6 +4984,35 @@ void test_gpu_material_graph() {
             assert(top(up) < top(flat) - 3 && "the offset lifts the sphere");
         }
 
+        // The local position: a pattern on the copy, not in the world. Moved (and seen from as far), the same picture;
+        // turned half round, its sides swapped.
+        {
+            const auto local = graph("local", "",
+                                     R"({"id": "half", "type": "multiply", "inputs": {"a": "local_position", "b": 0.5}},
+                   {"id": "shown", "type": "add", "inputs": {"a": "half", "b": 0.5}})",
+                                     R"("base_color": "shown")");
+            kin::Material3D painted{.unlit = true};
+            painted.surface = local.surface;
+            const auto placed = [&](const Mat4f& model, kin::Vec3f eye_shift) {
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at(kin::Vec3f{0.0f, 0.0f, 6.0f} + eye_shift, eye_shift, 30.0f);
+                (void)scene.draw(sphere, model, painted);
+                Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            const Pixels home = placed(Mat4f::identity(), {});
+            const Pixels moved = placed(Mat4f::translation({2.0f, 0.0f, 0.0f}), {2.0f, 0.0f, 0.0f});
+            const Pixels turned = placed(Mat4f::rotation_y(180.0f), {});
+            const auto near = [](Color a, Color b) {
+                return std::abs(a.r - b.r) <= 2 && std::abs(a.g - b.g) <= 2 && std::abs(a.b - b.b) <= 2;
+            };
+            for (const int x : {60, 80, 100})
+                assert(near(moved.at(x, 60), home.at(x, 60)) && "moved, the local position is the same");
+            assert(home.at(100, 60).r > home.at(60, 60).r + 20 && "its +x side is to the right");
+            assert(turned.at(100, 60).r + 20 < turned.at(60, 60).r && "turned half round, its +x side is to the left");
+        }
+
         const auto broken = dir / "broken.kingraph.json";
         std::ofstream{broken} << R"({"schema": "kin.material-graph/1", "nodes": [{"id": "bad", "type": "warp"}],
                                     "outputs": {"base_color": "bad"}})";

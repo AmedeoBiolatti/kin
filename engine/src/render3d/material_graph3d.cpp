@@ -413,6 +413,8 @@ constexpr BuiltIn built_ins[] = {
     {"camera_distance", "length(frame.eye.xyz - vWorld)", Type::Float},
     {"object_position", "kin_object_position()",
      Type::Vec3}, // the copy's origin (a flat varying; at a vertex, its own)
+    {"local_position", "kin_local_position()",
+     Type::Vec3}, // the point in the copy's own space (a varying; at a vertex, through its model matrix)
 };
 struct Field {
     const char* name;
@@ -670,6 +672,8 @@ private:
             return make("length(kin_vs.eye.xyz - kin_v_world)", Type::Float);
         if (name == "object_position")
             return make("kin_object_position()", Type::Vec3);
+        if (name == "local_position")
+            return make("kin_local_position()", Type::Vec3);
         return std::nullopt;
     }
     // A built-in input's value in the cut-out passes (kin_surface_alpha's arguments and the cut-out block), or none.

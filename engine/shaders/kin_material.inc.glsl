@@ -33,6 +33,12 @@ layout(location = 10) flat in vec3 vObject;
 vec3 kin_object_position() {
     return vObject;
 }
+// The point in the copy's own space (the mesh's, posed when skinned; before an offset moves it): a surface's local
+// position, which moves and turns with the copy (as the offset's, at a vertex, through its model matrix).
+layout(location = 11) in vec3 vLocal;
+vec3 kin_local_position() {
+    return vLocal;
+}
 #endif
 
 layout(set = 2, binding = 0) uniform sampler2D uBase;         // white when the material has none

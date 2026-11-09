@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Material graphs: a `local_position` built-in input, the point in the copy's own space (posed when skinned), from the
+  mesh's vertex shader (at a vertex, through the inverse model matrix). A pattern on it moves and turns with the copy,
+  where `position`'s stays in the world (noise on a rolling ball slid over it).
 - 3D auto exposure, decals and morph targets (native renderers; WebGL2 has morph targets only).
   `ViewOptions3D::auto_exposure` (`AutoExposure3D`) meters an HDR view on the GPU (a log-luminance histogram with
   the darkest and brightest shares left out) and adapts its exposure over time, faster toward light than toward dark,

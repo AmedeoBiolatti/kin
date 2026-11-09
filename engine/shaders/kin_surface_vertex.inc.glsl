@@ -137,6 +137,10 @@ vec3 kin_graph_object_to_world(vec3 v, float w) {
 vec3 kin_graph_world_to_object(vec3 v, float w) {
     return (inverse(kin_v_model) * vec4(v, w)).xyz;
 }
+// The vertex in the copy's own space (the fragments' kin_local_position(): from vLocal).
+vec3 kin_local_position() {
+    return kin_graph_world_to_object(kin_v_world, 1.0);
+}
 
 // The graph's offset, in the world (kin's axes, metres): defined after this.
 vec3 kin_surface_offset();

@@ -57,6 +57,7 @@ layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vWorld;
 layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none)
 layout(location = 10) flat out vec3 vObject; // the copy's origin in the world (a surface's kin_object_position())
+layout(location = 11) out vec3 vLocal; // the point in the copy's own space (a surface's kin_local_position())
 #ifdef KIN_DRAW_MATERIALS
 layout(location = 9) flat out uint vMaterial;
 #endif
@@ -78,10 +79,12 @@ void main() {
 #ifdef KIN_SKIN
     // The vertex posed by its joints, in the model's space; the copy's transform places that.
     const mat4 skin = skin_matrix(instance_at(draw.first.x + uint(gl_InstanceIndex)));
-    vec4 world = instance.model * (skin * vec4(aPos, 1.0));
+    const vec4 local = skin * vec4(aPos, 1.0);
 #else
-    vec4 world = instance.model * vec4(aPos, 1.0);
+    const vec4 local = vec4(aPos, 1.0);
 #endif
+    vLocal = local.xyz;
+    vec4 world = instance.model * local;
 #ifdef KIN_SURFACE_VERTEX
     // A surface's World Position Offset (kin_surface_vertex.inc.glsl), at this frame's time.
     world.xyz = kin_vertex_offset(world.xyz, mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal,
