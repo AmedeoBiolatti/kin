@@ -104,6 +104,20 @@ releases may change APIs.
   skinned one in its pose, a batch's as a plain one) and PlanarViews3D drawing every kind of copy half-way through;
   `portal_straddle` takes things up to the opening's diagonal (a character's T-pose bounds). The atrium has a walking
   survivor (Kenney, CC0) and `--camera 5`.
+- Physics through portals: `PortalTraveller3D` marks an entity that physics carries through a portal, after each
+  physics step of a `SceneSession3D` (`PortalTravel3D` for a game's own loop), by
+  `WorldPhysicsState3D::carry` (a character's feet, velocity, facing, command and state turned; a body's velocities).
+  Lua's `scene3d.character_input` takes a `facing`. `planar_atrium` plays a physics character (WASD, mouse camera,
+  jump, run) through the portals, and `--autoplay SECONDS` plays it by a bot through the real input and reports falls,
+  escapes, stuck spots, missed portals, frame and GPU times and memory (exit 2 on a gameplay failure).
+- Planar views (mirrors, water, portals) resize their views a tenth as often as the eye moves: a view grows with an
+  eighth (or 64 pixels) of room and shrinks only after three seconds of being a quarter larger than its pictures.
+  Walking through the atrium resized views about 13 times a second (hundreds of textures), and memory below kin grew
+  with each resize (about 45 KB, in SDL_GPU or the driver; still open). The pictures are a little larger: about 0.7 ms
+  more GPU a frame in the atrium on an RTX laptop.
+- 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
+  allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
+  fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds

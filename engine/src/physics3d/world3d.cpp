@@ -1,6 +1,3 @@
-#include <kin/physics3d/world3d.hpp>
-#include <kin/platform/log.hpp>
-
 #include "character3d_impl.hpp"
 #include "jolt_runtime.hpp"
 #include "ragdoll3d_impl.hpp"
@@ -36,7 +33,6 @@
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/StateRecorder.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -44,12 +40,15 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <kin/physics3d/world3d.hpp>
+#include <kin/platform/log.hpp>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kin {
@@ -63,8 +62,12 @@ constexpr u32 tree_static = 0;
 constexpr u32 tree_moving = 1;
 constexpr u32 tree_count = 2;
 
-bool finite(Vec3f v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
-bool finite(Quatf q) { return std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) && std::isfinite(q.w); }
+bool finite(Vec3f v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+bool finite(Quatf q) {
+    return std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) && std::isfinite(q.w);
+}
 
 // Layer 0 is the static tree; everything else shares the moving one.
 class BroadPhaseLayers final : public JPH::BroadPhaseLayerInterface {
@@ -110,27 +113,57 @@ private:
 };
 
 // Scratch memory: a block taken once, with the heap behind it when a step needs
-// more (Jolt's own allocator would abort).
+// more (Jolt's own allocator would abort). Jolt asks for the same buffers every
+// step (the contact constraints' is max_contact_constraints times about 1 KiB:
+// 20 MiB by default), so the largest one taken from the heap is kept for the
+// next step instead of going back (a malloc and free of it a step otherwise).
 class TempMemory final : public JPH::TempAllocator {
 public:
     explicit TempMemory(std::size_t bytes) : _block(bytes) {}
+    TempMemory(const TempMemory&) = delete;
+    TempMemory& operator=(const TempMemory&) = delete;
+    ~TempMemory() override {
+        if (_spare != nullptr) {
+            _heap.Free(_spare, _spare_size);
+        }
+    }
     void* Allocate(JPH::uint size) override {
         if (_block.CanAllocate(size)) {
             return _block.Allocate(size);
         }
+        if (_spare != nullptr && _spare_size >= size && _lent == nullptr) {
+            _lent = std::exchange(_spare, nullptr);
+            _lent_size = _spare_size;
+            return _lent;
+        }
         return _heap.Allocate(size);
     }
     void Free(void* address, JPH::uint size) override {
-        if (address != nullptr && !_block.OwnsMemory(address)) {
-            _heap.Free(address, size);
+        if (address == nullptr || _block.OwnsMemory(address)) {
+            _block.Free(address, size);
             return;
         }
-        _block.Free(address, size);
+        if (address == _lent) {
+            size = _lent_size;
+            _lent = nullptr;
+        }
+        if (_spare == nullptr || size > _spare_size) {
+            if (_spare != nullptr) {
+                _heap.Free(_spare, _spare_size);
+            }
+            _spare = address;
+            _spare_size = size;
+            return;
+        }
+        _heap.Free(address, size);
     }
 
 private:
     JPH::TempAllocatorImpl _block;
     JPH::TempAllocatorMalloc _heap;
+    void* _spare = nullptr; // kept from the heap for the next step
+    void* _lent = nullptr;  // the spare, given out again
+    JPH::uint _spare_size = 0, _lent_size = 0;
 };
 
 // Jolt's jobs on kin's job system. A job is queued on a worker; the thread that
@@ -138,9 +171,7 @@ private:
 // that is busy, or has no free background slot, only makes a step slower.
 class KinJobs final : public JPH::JobSystemWithBarrier {
 public:
-    explicit KinJobs(kin::JobSystem& jobs)
-        : JPH::JobSystemWithBarrier(JPH::cMaxPhysicsBarriers)
-        , _jobs(jobs) {
+    explicit KinJobs(kin::JobSystem& jobs) : JPH::JobSystemWithBarrier(JPH::cMaxPhysicsBarriers), _jobs(jobs) {
         _free_list.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsJobs);
     }
     ~KinJobs() override {
@@ -256,10 +287,13 @@ private:
     bool _failed = false;
 };
 
-
 constexpr f32 pi_f = 3.14159265358979323846f;
-f32 to_radians(f32 degrees) { return degrees * pi_f / 180.0f; }
-f32 to_degrees(f32 radians) { return radians * 180.0f / pi_f; }
+f32 to_radians(f32 degrees) {
+    return degrees * pi_f / 180.0f;
+}
+f32 to_degrees(f32 radians) {
+    return radians * 180.0f / pi_f;
+}
 
 // Which body a Jolt body is: its number (slot) and the id that slot holds, so that a stale id (a body that was
 // destroyed and whose index Jolt reused) is told from the live one.
@@ -271,42 +305,55 @@ struct BodyEntry {
 // What a contact callback saw, before it is turned into events after the step (the callbacks arrive from several
 // threads in any order: nothing here may depend on that order).
 struct RawContact {
-    u32 a = 0, b = 0;             // slots, a < b
-    u32 sub_a = 0, sub_b = 0;     // sub shape ids as Jolt gave them (swapped with the bodies)
-    u8 kind = 0;                  // 0 added, 1 persisted, 2 removed
+    u32 a = 0, b = 0;         // slots, a < b
+    u32 sub_a = 0, sub_b = 0; // sub shape ids as Jolt gave them (swapped with the bodies)
+    u8 kind = 0;              // 0 added, 1 persisted, 2 removed
     bool sensor = false;
     Vec3f point{};
     Vec3f normal{};
     f32 closing = 0.0f;
     u32 points = 0;
     friend bool operator<(const RawContact& x, const RawContact& y) {
-        if (x.a != y.a) return x.a < y.a;
-        if (x.b != y.b) return x.b < y.b;
-        if (x.kind != y.kind) return x.kind < y.kind;
-        if (x.sub_a != y.sub_a) return x.sub_a < y.sub_a;
-        if (x.sub_b != y.sub_b) return x.sub_b < y.sub_b;
+        if (x.a != y.a)
+            return x.a < y.a;
+        if (x.b != y.b)
+            return x.b < y.b;
+        if (x.kind != y.kind)
+            return x.kind < y.kind;
+        if (x.sub_a != y.sub_a)
+            return x.sub_a < y.sub_a;
+        if (x.sub_b != y.sub_b)
+            return x.sub_b < y.sub_b;
         // A pair can be reported in several collision steps. Break every remaining tie by the payload, including
         // float bits (also a total order for signed zero and NaN), so worker arrival never selects the manifold.
         const auto payload = [](const RawContact& r) {
-            return std::array<u32, 9>{r.sensor, r.points, std::bit_cast<u32>(r.closing),
-                std::bit_cast<u32>(r.point.x), std::bit_cast<u32>(r.point.y), std::bit_cast<u32>(r.point.z),
-                std::bit_cast<u32>(r.normal.x), std::bit_cast<u32>(r.normal.y), std::bit_cast<u32>(r.normal.z)};
+            return std::array<u32, 9>{r.sensor,
+                                      r.points,
+                                      std::bit_cast<u32>(r.closing),
+                                      std::bit_cast<u32>(r.point.x),
+                                      std::bit_cast<u32>(r.point.y),
+                                      std::bit_cast<u32>(r.point.z),
+                                      std::bit_cast<u32>(r.normal.x),
+                                      std::bit_cast<u32>(r.normal.y),
+                                      std::bit_cast<u32>(r.normal.z)};
         };
         return payload(x) < payload(y);
     }
 };
 
-// Which bodies never collide with which, beyond the layer table: per slot (Body3DDesc::group, ignore_static, ignore_all).
+// Which bodies never collide with which, beyond the layer table: per slot (Body3DDesc::group, ignore_static,
+// ignore_all).
 struct CollisionRule {
     u32 group = 0;
     u8 flags = 0; // 1: not with static bodies, 2: with nothing, 4: collides within its group
 };
 
 // Collects Jolt's contact callbacks into a vector under a lock; nothing else happens on Jolt's threads.
-// Bodies that woke or fell asleep (World3DConfig::activation_events). Jolt calls it with its lock held, from the thread that
-// made the change: between steps (and in step() around the simulation) that is the stepping thread, in the order of its
-// calls, and `now` makes the event at once; in the simulation it is any job's, so the change is kept under a lock and
-// sorted afterwards (by body number: which bodies change is deterministic, the order the jobs find them is not).
+// Bodies that woke or fell asleep (World3DConfig::activation_events). Jolt calls it with its lock held, from the thread
+// that made the change: between steps (and in step() around the simulation) that is the stepping thread, in the order
+// of its calls, and `now` makes the event at once; in the simulation it is any job's, so the change is kept under a
+// lock and sorted afterwards (by body number: which bodies change is deterministic, the order the jobs find them is
+// not).
 class ActivationCollector final : public JPH::BodyActivationListener {
 public:
     struct Raw {
@@ -350,7 +397,8 @@ public:
             if (r1 < rules->size() && r2 < rules->size()) {
                 const CollisionRule& a = (*rules)[r1];
                 const CollisionRule& b = (*rules)[r2];
-                if (((a.flags | b.flags) & 2u) != 0 || (a.group != 0 && a.group == b.group && ((a.flags & b.flags & 4u) == 0)) ||
+                if (((a.flags | b.flags) & 2u) != 0 ||
+                    (a.group != 0 && a.group == b.group && ((a.flags & b.flags & 4u) == 0)) ||
                     ((a.flags & 1u) != 0 && b2.IsStatic()) || ((b.flags & 1u) != 0 && b1.IsStatic())) {
                     return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
                 }
@@ -464,15 +512,15 @@ private:
     Layer3DMask _mask;
 };
 
-// A query's own filter: the body it ignores, and with it every body of that body's group (a character's own ragdoll), unless
-// the group is 0; and sensors only when asked for.
+// A query's own filter: the body it ignores, and with it every body of that body's group (a character's own ragdoll),
+// unless the group is 0; and sensors only when asked for.
 class QueryBodyFilter final : public JPH::BodyFilter {
 public:
     QueryBodyFilter(JPH::BodyID ignore, bool sensors, u32 group = 0, const std::vector<CollisionRule>* rules = nullptr,
-                    const std::vector<BodyEntry>* entries = nullptr, u64 ignore_user=0,
-                    const void* owner=nullptr,u64 (*user_of)(const void*,JPH::BodyID)=nullptr)
+                    const std::vector<BodyEntry>* entries = nullptr, u64 ignore_user = 0, const void* owner = nullptr,
+                    u64 (*user_of)(const void*, JPH::BodyID) = nullptr)
         : _ignore(ignore), _sensors(sensors), _group(group), _rules(rules), _entries(entries),
-          _ignore_user(ignore_user),_owner(owner),_user_of(user_of) {}
+          _ignore_user(ignore_user), _owner(owner), _user_of(user_of) {}
     bool ShouldCollide(const JPH::BodyID& id) const override {
         if (id == _ignore) {
             return false;
@@ -486,7 +534,8 @@ public:
         return true;
     }
     bool ShouldCollideLocked(const JPH::Body& body) const override {
-        return (_sensors || !body.IsSensor())&&(!_ignore_user||!_user_of||_user_of(_owner,body.GetID())!=_ignore_user);
+        return (_sensors || !body.IsSensor()) &&
+               (!_ignore_user || !_user_of || _user_of(_owner, body.GetID()) != _ignore_user);
     }
 
 private:
@@ -497,7 +546,7 @@ private:
     const std::vector<BodyEntry>* _entries;
     u64 _ignore_user;
     const void* _owner;
-    u64 (*_user_of)(const void*,JPH::BodyID);
+    u64 (*_user_of)(const void*, JPH::BodyID);
 };
 
 constexpr u32 state_magic = 0x33444B33u; // "1K D3"-ish tag; the content is what is checked
@@ -538,8 +587,8 @@ struct World3D::Impl {
         HoldDesc3D hold{};
         // Added mass for the next step (cleared by the step).
         f32 extra_mass = 0.0f;
-        // The shape the game gave it (create_body, set_shape), which shape() hands back; empty for a character's inner body, whose
-        // shape the character changes (crouching) and shape() reads from Jolt.
+        // The shape the game gave it (create_body, set_shape), which shape() hands back; empty for a character's inner
+        // body, whose shape the character changes (crouching) and shape() reads from Jolt.
         Shape3D shape;
     };
 
@@ -562,11 +611,8 @@ struct World3D::Impl {
 
     explicit Impl(const World3DConfig& cfg)
         // Jolt's allocator must be registered before any member below allocates.
-        : config((physics3d_detail::ensure_jolt_runtime(), cfg))
-        , broad_phase()
-        , object_vs_broad_phase(table)
-        , object_vs_object(table)
-        , temp(cfg.temp_memory_bytes) {
+        : config((physics3d_detail::ensure_jolt_runtime(), cfg)), broad_phase(), object_vs_broad_phase(table),
+          object_vs_object(table), temp(cfg.temp_memory_bytes) {
         // Everything collides with everything, bar sensors with sensors.
         table.fill(0xFFFFFFFFu);
         table[layers3d::Sensor] &= ~layer_bit(layers3d::Sensor);
@@ -640,36 +686,37 @@ struct World3D::Impl {
         if ((owner_warned & bit) == 0) {
             owner_warned |= bit;
             const char* what = s.owner == BodyOwner3D::Character ? "a character's own body (destroy_character)"
-                             : s.owner == BodyOwner3D::Ragdoll  ? "a ragdoll's bone (destroy_ragdoll)"
-                                                                : "a rope's segment (destroy_rope, set_rope_length)";
-            KIN_LOG_WARN("physics3d", std::string("3D: ") + call + " refused: the body is " + what +
-                                        "; said once a world");
+                               : s.owner == BodyOwner3D::Ragdoll ? "a ragdoll's bone (destroy_ragdoll)"
+                                                                 : "a rope's segment (destroy_rope, set_rope_length)";
+            KIN_LOG_WARN("physics3d",
+                         std::string("3D: ") + call + " refused: the body is " + what + "; said once a world");
         }
         return true;
     }
 
-    // A body a live setter (set_mass, set_friction, ...) may change: a live one that belongs to nothing (an owned body is
-    // refused and said once, as refused() does).
+    // A body a live setter (set_mass, set_friction, ...) may change: a live one that belongs to nothing (an owned body
+    // is refused and said once, as refused() does).
     Slot* settable(Body3D body, const char* call) {
         Slot* s = find(body);
         return s != nullptr && !refused(*s, call) ? s : nullptr;
     }
-    // A number that is not finite or out of range, given to a call that refuses it: said once a world (a game that keeps
-    // sending one must not fill the log). Returns false, for the call to return.
+    // A number that is not finite or out of range, given to a call that refuses it: said once a world (a game that
+    // keeps sending one must not fill the log). Returns false, for the call to return.
     bool bad_value(const char* call) {
         if (!value_warned) {
             value_warned = true;
-            KIN_LOG_WARN("physics3d", std::string("3D: ") + call + " refused a number that is not finite or out of range; "
-                                    "said once a world");
+            KIN_LOG_WARN("physics3d", std::string("3D: ") + call +
+                                          " refused a number that is not finite or out of range; "
+                                          "said once a world");
         }
         return false;
     }
     // shape_cast_all's sweep (in its place in the file).
     template <class Add>
-    bool cast_every(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement, const QueryFilter3D& filter,
-                    Add&& add) const;
-    // Wakes whatever touches or overlaps a body's (slightly grown) box, in body-number order so that the order of activation
-    // is the same in every run: Jolt does not wake what a removed or changed static body held up.
+    bool cast_every(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
+                    const QueryFilter3D& filter, Add&& add) const;
+    // Wakes whatever touches or overlaps a body's (slightly grown) box, in body-number order so that the order of
+    // activation is the same in every run: Jolt does not wake what a removed or changed static body held up.
     void wake_touching(const JPH::BodyID& id);
 
     ConstraintSlot* find(Constraint3D c) {
@@ -706,9 +753,10 @@ struct World3D::Impl {
         const u32 slot = s != nullptr ? static_cast<u32>(s - slots.data()) : UINT32_MAX;
         const u32 group = slot < rules.size() ? rules[slot].group : 0u;
         return QueryBodyFilter(s != nullptr ? s->id : JPH::BodyID(), filter.sensors, group, &rules, &entries,
-            filter.ignore_user_id,this,[](const void* owner,JPH::BodyID id) {
-                const auto* slot=static_cast<const Impl*>(owner)->slot_of(id);return slot?slot->user_id:u64{0};
-            });
+                               filter.ignore_user_id, this, [](const void* owner, JPH::BodyID id) {
+                                   const auto* slot = static_cast<const Impl*>(owner)->slot_of(id);
+                                   return slot ? slot->user_id : u64{0};
+                               });
     }
 
     // Turns the callbacks of the step just done into events, in a fixed order, and updates which pairs touch.
@@ -723,8 +771,8 @@ struct World3D::Impl {
         }
         events.push_back(e);
     }
-    // A body woke or fell asleep: an event when it is one of the world's (a body being destroyed, or a character's capsule
-    // being made, is not yet or no longer one).
+    // A body woke or fell asleep: an event when it is one of the world's (a body being destroyed, or a character's
+    // capsule being made, is not yet or no longer one).
     void add_activation(const JPH::BodyID& id, bool active) {
         const u32 slot = slot_index(id);
         if (slot == UINT32_MAX || slots[slot].owner == BodyOwner3D::Character) {
@@ -768,7 +816,8 @@ struct World3D::Impl {
     // Jolt's body index to our slot (see BodyEntry).
     std::vector<BodyEntry> entries;
     ContactCollector collector;
-    // Touching pairs: key (a << 32 | b) to how many sub shape contacts they have. Ordered, so that anything made from it is.
+    // Touching pairs: key (a << 32 | b) to how many sub shape contacts they have. Ordered, so that anything made from
+    // it is.
     std::map<u64, i32> touching;
     // Pairs that went to sleep together: still touching, no longer simulated (see ContactEvent3D). The value counts the
     // steps in which a member was awake and the pair was not seen again.
@@ -789,11 +838,11 @@ struct World3D::Impl {
         rules[slot] = rule;
         rules_active += (now ? 1u : 0u) - (was ? 1u : 0u);
     }
-    std::vector<ContactEvent3D> events;    // since the last drain
+    std::vector<ContactEvent3D> events; // since the last drain
     ActivationCollector activation;
     std::vector<ActivationEvent3D> activation_events; // since the last drain
-    std::vector<ContactEvent3D> queued;    // from destroyed bodies, joined to the next step's batch
-    std::vector<ContactEvent3D> event_batch; // scratch retained across steps
+    std::vector<ContactEvent3D> queued;               // from destroyed bodies, joined to the next step's batch
+    std::vector<ContactEvent3D> event_batch;          // scratch retained across steps
     u64 dropped = 0;
     // What the last step had to leave out, the steps that did since the world was made, and which overflows
     // (EPhysicsUpdateError bits) and owners (BodyOwner3D bits) were logged already.
@@ -838,8 +887,7 @@ Body3D World3D::Impl::register_body(const JPH::BodyID& id, u64 user_id) {
     return {index, slot.generation};
 }
 
-World3D::World3D(World3DConfig config)
-    : _impl(std::make_unique<Impl>(config)) {
+World3D::World3D(World3DConfig config) : _impl(std::make_unique<Impl>(config)) {
     Impl& m = *_impl;
     m.self = this;
     physics3d_detail::CharacterEnv env;
@@ -885,7 +933,9 @@ bool World3D::cross_platform_deterministic() {
 #endif
 }
 
-const World3DConfig& World3D::config() const { return _impl->config; }
+const World3DConfig& World3D::config() const {
+    return _impl->config;
+}
 
 void World3D::set_gravity(Vec3f gravity) {
     if (finite(gravity)) {
@@ -894,7 +944,9 @@ void World3D::set_gravity(Vec3f gravity) {
     }
 }
 
-Vec3f World3D::gravity() const { return from_jolt(_impl->system.GetGravity()); }
+Vec3f World3D::gravity() const {
+    return from_jolt(_impl->system.GetGravity());
+}
 
 StepReport3D World3D::step(f32 dt) {
     if (!(dt > 0.0f) || !std::isfinite(dt)) {
@@ -903,8 +955,8 @@ StepReport3D World3D::step(f32 dt) {
     Impl& m = *_impl;
     const i32 collision_steps = std::max(1, m.config.collision_steps);
     m.collector.clear();
-    // Ropes (their length moves toward its target) and ragdolls (blends advance, kinematic bodies follow the clip) first, as
-    // they are things the characters then meet.
+    // Ropes (their length moves toward its target) and ragdolls (blends advance, kinematic bodies follow the clip)
+    // first, as they are things the characters then meet.
     if (m.ropes->count() > 0) {
         m.ropes->pre_step(dt);
     }
@@ -922,10 +974,12 @@ StepReport3D World3D::step(f32 dt) {
     const u32 errors = static_cast<u32>(m.system.Update(dt, collision_steps, &m.temp, m.job_system));
     m.activation.simulating = false;
     if (!m.activation.raw.empty()) {
-        // A body changes once in a simulation step (one woken has its sleep timer reset): by body number, ties as found.
-        std::ranges::stable_sort(m.activation.raw, [&](const ActivationCollector::Raw& a, const ActivationCollector::Raw& b) {
-            return m.slot_index(a.id) < m.slot_index(b.id);
-        });
+        // A body changes once in a simulation step (one woken has its sleep timer reset): by body number, ties as
+        // found.
+        std::ranges::stable_sort(m.activation.raw,
+                                 [&](const ActivationCollector::Raw& a, const ActivationCollector::Raw& b) {
+                                     return m.slot_index(a.id) < m.slot_index(b.id);
+                                 });
         for (const ActivationCollector::Raw& r : m.activation.raw) {
             m.add_activation(r.id, r.active);
         }
@@ -942,15 +996,15 @@ StepReport3D World3D::step(f32 dt) {
         m.overflow_warned |= errors;
         if ((fresh & static_cast<u32>(JPH::EPhysicsUpdateError::ManifoldCacheFull)) != 0) {
             KIN_LOG_WARN("physics3d", "3D: contacts dropped in a step: the contact cache is full (raise "
-                                    "World3DConfig::max_contact_constraints); said once a world");
+                                      "World3DConfig::max_contact_constraints); said once a world");
         }
         if ((fresh & static_cast<u32>(JPH::EPhysicsUpdateError::BodyPairCacheFull)) != 0) {
             KIN_LOG_WARN("physics3d", "3D: contacts dropped in a step: too many body pairs (raise "
-                                    "World3DConfig::max_body_pairs); said once a world");
+                                      "World3DConfig::max_body_pairs); said once a world");
         }
         if ((fresh & static_cast<u32>(JPH::EPhysicsUpdateError::ContactConstraintsFull)) != 0) {
             KIN_LOG_WARN("physics3d", "3D: contacts dropped in a step: too many contact constraints (raise "
-                                    "World3DConfig::max_contact_constraints); said once a world");
+                                      "World3DConfig::max_contact_constraints); said once a world");
         }
     }
     // Added masses last one step.
@@ -982,14 +1036,16 @@ StepReport3D World3D::step(f32 dt) {
         m.dropped += m.ragdolls->cap_events(m.config.max_events);
     }
     m.dropped += m.ropes->cap_events(m.config.max_events);
-    if (m.constraint_events.size()>m.config.max_events) {
-        m.dropped += m.constraint_events.size()-m.config.max_events;
+    if (m.constraint_events.size() > m.config.max_events) {
+        m.dropped += m.constraint_events.size() - m.config.max_events;
         m.constraint_events.resize(m.config.max_events);
     }
     return m.last_step;
 }
 
-const StepReport3D& World3D::last_step() const { return _impl->last_step; }
+const StepReport3D& World3D::last_step() const {
+    return _impl->last_step;
+}
 
 void World3D::Impl::collect_events() {
     std::vector<RawContact>& raw = collector.raw();
@@ -1086,10 +1142,14 @@ void World3D::Impl::collect_events() {
         }
     }
     std::ranges::sort(batch, [](const ContactEvent3D& x, const ContactEvent3D& y) {
-        if (x.a.index != y.a.index) return x.a.index < y.a.index;
-        if (x.b.index != y.b.index) return x.b.index < y.b.index;
-        if (x.kind != y.kind) return x.kind < y.kind;
-        if (x.a.generation != y.a.generation) return x.a.generation < y.a.generation;
+        if (x.a.index != y.a.index)
+            return x.a.index < y.a.index;
+        if (x.b.index != y.b.index)
+            return x.b.index < y.b.index;
+        if (x.kind != y.kind)
+            return x.kind < y.kind;
+        if (x.a.generation != y.a.generation)
+            return x.a.generation < y.a.generation;
         return x.b.generation < y.b.generation;
     });
     for (const ContactEvent3D& e : batch) {
@@ -1172,8 +1232,8 @@ void World3D::Impl::check_breaks(f32 step_dt) {
 
 Body3D World3D::create_body(const Body3DDesc& d) {
     Impl& m = *_impl;
-    if (!d.shape.valid() || !finite(d.position) || !finite(d.rotation) || !finite(d.linear_velocity)
-        || !finite(d.angular_velocity) || !std::isfinite(d.mass) || !std::isfinite(d.density)) {
+    if (!d.shape.valid() || !finite(d.position) || !finite(d.rotation) || !finite(d.linear_velocity) ||
+        !finite(d.angular_velocity) || !std::isfinite(d.mass) || !std::isfinite(d.density)) {
         return {};
     }
     const Shape3DKind kind = d.shape.kind();
@@ -1183,8 +1243,9 @@ Body3D World3D::create_body(const Body3DDesc& d) {
     }
     u8 layer = d.layer;
     if (layer == layers3d::Auto) {
-        layer = d.motion == Body3DMotion::Static ? layers3d::Static
-              : d.motion == Body3DMotion::Kinematic ? layers3d::Kinematic : layers3d::Dynamic;
+        layer = d.motion == Body3DMotion::Static      ? layers3d::Static
+                : d.motion == Body3DMotion::Kinematic ? layers3d::Kinematic
+                                                      : layers3d::Dynamic;
     }
     if (layer >= layers3d::Count || (layer == layers3d::Static && d.motion != Body3DMotion::Static)) {
         return {};
@@ -1193,9 +1254,9 @@ Body3D World3D::create_body(const Body3DDesc& d) {
         return {};
     }
 
-    const JPH::EMotionType motion = d.motion == Body3DMotion::Static ? JPH::EMotionType::Static
-                                  : d.motion == Body3DMotion::Kinematic ? JPH::EMotionType::Kinematic
-                                                                        : JPH::EMotionType::Dynamic;
+    const JPH::EMotionType motion = d.motion == Body3DMotion::Static      ? JPH::EMotionType::Static
+                                    : d.motion == Body3DMotion::Kinematic ? JPH::EMotionType::Kinematic
+                                                                          : JPH::EMotionType::Dynamic;
     JPH::BodyCreationSettings settings(d.shape._data->shape.GetPtr(), to_jolt(d.position),
                                        to_jolt(d.rotation.normalized()), motion, JPH::ObjectLayer(layer));
     settings.mLinearVelocity = to_jolt(d.linear_velocity);
@@ -1210,8 +1271,8 @@ Body3D World3D::create_body(const Body3DDesc& d) {
     settings.mMotionQuality = d.continuous ? JPH::EMotionQuality::LinearCast : JPH::EMotionQuality::Discrete;
     f32 mass = 0.0f;
     // A kinematic body gets its mass too, for set_motion to make it dynamic with: Jolt gives a kinematic body motion
-    // properties and keeps them through a change of motion type, and its solver never reads a kinematic body's mass. One
-    // without (a mesh or height field, no volume) is still made, and stays kinematic.
+    // properties and keeps them through a change of motion type, and its solver never reads a kinematic body's mass.
+    // One without (a mesh or height field, no volume) is still made, and stays kinematic.
     if (d.motion == Body3DMotion::Dynamic || (d.motion == Body3DMotion::Kinematic && !surface)) {
         mass = d.mass > 0.0f ? d.mass : d.density * d.shape.volume();
         if (!(mass > 0.0f)) {
@@ -1403,30 +1464,40 @@ void World3D::Impl::retire_body(Body3D body, bool jolt) {
     --m.live;
 }
 
-bool World3D::contains(Body3D body) const { return _impl->find(body) != nullptr; }
-i32 World3D::body_count() const { return _impl->live; }
+bool World3D::contains(Body3D body) const {
+    return _impl->find(body) != nullptr;
+}
+i32 World3D::body_count() const {
+    return _impl->live;
+}
 i32 World3D::active_body_count() const {
     return static_cast<i32>(_impl->system.GetNumActiveBodies(JPH::EBodyType::RigidBody));
 }
 
 void World3D::set_position(Body3D body, Vec3f position) {
     if (const auto* s = _impl->find_free(body); s != nullptr && finite(position)) {
-        if (_impl->bi().GetPosition(s->id) == to_jolt(position)) return;
+        if (_impl->bi().GetPosition(s->id) == to_jolt(position))
+            return;
         const bool supported = _impl->bi().GetMotionType(s->id) != JPH::EMotionType::Dynamic;
-        if (supported) _impl->wake_touching(s->id);
+        if (supported)
+            _impl->wake_touching(s->id);
         _impl->bi().SetPosition(s->id, to_jolt(position), JPH::EActivation::Activate);
-        if (_impl->bi().GetMotionType(s->id)==JPH::EMotionType::Static) _impl->wake_touching(s->id);
+        if (_impl->bi().GetMotionType(s->id) == JPH::EMotionType::Static)
+            _impl->wake_touching(s->id);
     }
 }
 
 void World3D::set_rotation(Body3D body, Quatf rotation) {
     if (const auto* s = _impl->find_free(body); s != nullptr && finite(rotation)) {
         const JPH::Quat target = to_jolt(rotation.normalized());
-        if (_impl->bi().GetRotation(s->id) == target) return;
+        if (_impl->bi().GetRotation(s->id) == target)
+            return;
         const bool supported = _impl->bi().GetMotionType(s->id) != JPH::EMotionType::Dynamic;
-        if (supported) _impl->wake_touching(s->id);
+        if (supported)
+            _impl->wake_touching(s->id);
         _impl->bi().SetRotation(s->id, target, JPH::EActivation::Activate);
-        if (_impl->bi().GetMotionType(s->id)==JPH::EMotionType::Static) _impl->wake_touching(s->id);
+        if (_impl->bi().GetMotionType(s->id) == JPH::EMotionType::Static)
+            _impl->wake_touching(s->id);
     }
 }
 
@@ -1515,9 +1586,12 @@ Body3DMotion World3D::motion(Body3D body) const {
         return Body3DMotion::Static;
     }
     switch (_impl->bi().GetMotionType(s->id)) {
-    case JPH::EMotionType::Kinematic: return Body3DMotion::Kinematic;
-    case JPH::EMotionType::Dynamic: return Body3DMotion::Dynamic;
-    default: return Body3DMotion::Static;
+    case JPH::EMotionType::Kinematic:
+        return Body3DMotion::Kinematic;
+    case JPH::EMotionType::Dynamic:
+        return Body3DMotion::Dynamic;
+    default:
+        return Body3DMotion::Static;
     }
 }
 
@@ -1562,8 +1636,8 @@ bool World3D::set_mass(Body3D body, f32 mass) {
     if (sub == JPH::EShapeSubType::Mesh || sub == JPH::EShapeSubType::HeightField) {
         return false;
     }
-    // As create_body made it: the shape's inertia at that mass, with this step's added mass on top (the step takes that off
-    // again from the mass stored here).
+    // As create_body made it: the shape's inertia at that mass, with this step's added mass on top (the step takes that
+    // off again from the mass stored here).
     s->mass = mass;
     JPH::MassProperties mp = b->GetShape()->GetMassProperties();
     mp.ScaleToMass(mass + (b->IsDynamic() ? s->extra_mass : 0.0f));
@@ -1643,9 +1717,9 @@ bool World3D::set_friction(Body3D body, f32 friction) {
     if (b == nullptr) {
         return false;
     }
-    // Jolt combines the two bodies' frictions for every contact at every step, cached ones too: the next step uses it. What
-    // rests on the body may be asleep and held by the old friction (a crate on a slope that turns to ice): it is woken, a
-    // dynamic body by itself (what it touches wakes with it), a static or kinematic one by what overlaps it.
+    // Jolt combines the two bodies' frictions for every contact at every step, cached ones too: the next step uses it.
+    // What rests on the body may be asleep and held by the old friction (a crate on a slope that turns to ice): it is
+    // woken, a dynamic body by itself (what it touches wakes with it), a static or kinematic one by what overlaps it.
     b->SetFriction(friction);
     if (b->IsDynamic()) {
         m.bi().ActivateBody(s->id);
@@ -1709,7 +1783,8 @@ Shape3D World3D::shape(Body3D body) const {
     if (s == nullptr) {
         return out;
     }
-    // The handle the game gave: no allocation, and equal to the one it holds. The debug view asks for every body every frame.
+    // The handle the game gave: no allocation, and equal to the one it holds. The debug view asks for every body every
+    // frame.
     if (s->shape.valid()) {
         return s->shape;
     }
@@ -1717,14 +1792,30 @@ Shape3D World3D::shape(Body3D body) const {
     auto data = std::make_shared<physics3d_detail::ShapeData>();
     data->shape = _impl->bi().GetShape(s->id);
     switch (data->shape->GetSubType()) {
-    case JPH::EShapeSubType::Box: data->kind = Shape3DKind::Box; break;
-    case JPH::EShapeSubType::Sphere: data->kind = Shape3DKind::Sphere; break;
-    case JPH::EShapeSubType::Capsule: data->kind = Shape3DKind::Capsule; break;
-    case JPH::EShapeSubType::Cylinder: data->kind = Shape3DKind::Cylinder; break;
-    case JPH::EShapeSubType::ConvexHull: data->kind = Shape3DKind::ConvexHull; break;
-    case JPH::EShapeSubType::Mesh: data->kind = Shape3DKind::TriangleMesh; break;
-    case JPH::EShapeSubType::HeightField: data->kind = Shape3DKind::HeightField; break;
-    default: data->kind = Shape3DKind::Compound; break;
+    case JPH::EShapeSubType::Box:
+        data->kind = Shape3DKind::Box;
+        break;
+    case JPH::EShapeSubType::Sphere:
+        data->kind = Shape3DKind::Sphere;
+        break;
+    case JPH::EShapeSubType::Capsule:
+        data->kind = Shape3DKind::Capsule;
+        break;
+    case JPH::EShapeSubType::Cylinder:
+        data->kind = Shape3DKind::Cylinder;
+        break;
+    case JPH::EShapeSubType::ConvexHull:
+        data->kind = Shape3DKind::ConvexHull;
+        break;
+    case JPH::EShapeSubType::Mesh:
+        data->kind = Shape3DKind::TriangleMesh;
+        break;
+    case JPH::EShapeSubType::HeightField:
+        data->kind = Shape3DKind::HeightField;
+        break;
+    default:
+        data->kind = Shape3DKind::Compound;
+        break;
     }
     out._data = std::move(data);
     return out;
@@ -1781,17 +1872,21 @@ Layer3DMask World3D::collision_mask(u8 layer) const {
     return layer < 32 ? _impl->table[layer] : 0;
 }
 
-void World3D::optimize_broad_phase() { _impl->system.OptimizeBroadPhase(); }
+void World3D::optimize_broad_phase() {
+    _impl->system.OptimizeBroadPhase();
+}
 
 // --- helpers for driven bodies ---
 
 void World3D::teleport(Body3D body, Vec3f position, Quatf rotation) {
     if (const auto* s = _impl->find_free(body); s != nullptr && finite(position) && finite(rotation)) {
         const bool supported = _impl->bi().GetMotionType(s->id) != JPH::EMotionType::Dynamic;
-        if (supported) _impl->wake_touching(s->id);
+        if (supported)
+            _impl->wake_touching(s->id);
         _impl->bi().SetPositionAndRotation(s->id, to_jolt(position), to_jolt(rotation.normalized()),
                                            JPH::EActivation::Activate);
-        if (_impl->bi().GetMotionType(s->id)==JPH::EMotionType::Static) _impl->wake_touching(s->id);
+        if (_impl->bi().GetMotionType(s->id) == JPH::EMotionType::Static)
+            _impl->wake_touching(s->id);
         _impl->bi().SetLinearAndAngularVelocity(s->id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
     }
 }
@@ -1808,7 +1903,8 @@ void World3D::follow_transform(Body3D body, Vec3f position, Quatf rotation, f32 
         m.bi().MoveKinematic(s->id, to_jolt(position), to_jolt(target), dt);
         return;
     case JPH::EMotionType::Static:
-        if (m.bi().GetPosition(s->id) == to_jolt(position) && m.bi().GetRotation(s->id) == to_jolt(target)) return;
+        if (m.bi().GetPosition(s->id) == to_jolt(position) && m.bi().GetRotation(s->id) == to_jolt(target))
+            return;
         m.wake_touching(s->id);
         m.bi().SetPositionAndRotation(s->id, to_jolt(position), to_jolt(target), JPH::EActivation::DontActivate);
         m.wake_touching(s->id);
@@ -1834,14 +1930,15 @@ void World3D::follow_transform(Body3D body, Vec3f position, Quatf rotation, f32 
 
 bool World3D::set_layer(Body3D body, u8 layer) {
     Impl& m = *_impl;
-    const auto* s = m.settable(body,"set_layer");
+    const auto* s = m.settable(body, "set_layer");
     if (s == nullptr) {
         return false;
     }
     const bool is_static = m.bi().GetMotionType(s->id) == JPH::EMotionType::Static;
     if (layer == layers3d::Auto) {
-        layer = is_static ? layers3d::Static
-              : m.bi().GetMotionType(s->id) == JPH::EMotionType::Kinematic ? layers3d::Kinematic : layers3d::Dynamic;
+        layer = is_static                                                    ? layers3d::Static
+                : m.bi().GetMotionType(s->id) == JPH::EMotionType::Kinematic ? layers3d::Kinematic
+                                                                             : layers3d::Dynamic;
     }
     if (layer >= layers3d::Count || (layer == layers3d::Static && !is_static)) {
         return false;
@@ -1861,8 +1958,9 @@ bool World3D::is_sensor(Body3D body) const {
 }
 
 void World3D::set_sensor(Body3D body, bool sensor) {
-    if (const auto* s = _impl->settable(body,"set_sensor")) {
-        if (_impl->bi().IsSensor(s->id) == sensor) return;
+    if (const auto* s = _impl->settable(body, "set_sensor")) {
+        if (_impl->bi().IsSensor(s->id) == sensor)
+            return;
         _impl->wake_touching(s->id);
         _impl->bi().SetIsSensor(s->id, sensor);
         _impl->bi().InvalidateContactCache(s->id);
@@ -1892,7 +1990,8 @@ bool World3D::owner_set_shape(Body3D body, const Shape3D& shape) {
     }
     m.wake_touching(s->id);
     m.bi().SetShape(s->id, shape._data->shape.GetPtr(), false, JPH::EActivation::Activate);
-    if (m.bi().GetMotionType(s->id)==JPH::EMotionType::Static) m.wake_touching(s->id);
+    if (m.bi().GetMotionType(s->id) == JPH::EMotionType::Static)
+        m.wake_touching(s->id);
     s->shape = shape;
     // A kinematic body with a mass keeps it for set_motion too (a mesh or height field cannot be made dynamic).
     if (dynamic || (s->mass > 0.0f && !surface)) {
@@ -1971,7 +2070,7 @@ std::optional<RayHit3D> World3D::raycast(Vec3f from, Vec3f to, const QueryFilter
     out.fraction = hit.mFraction;
     out.distance = hit.mFraction * length(d);
     out.sub_shape = child_index(ts.mShape.GetPtr(), hit.mSubShapeID2);
-    out.sub_shape_id=hit.mSubShapeID2.GetValue();
+    out.sub_shape_id = hit.mSubShapeID2.GetValue();
     return out;
 }
 
@@ -2010,12 +2109,15 @@ std::vector<RayHit3D> World3D::raycast_all(Vec3f from, Vec3f to, const QueryFilt
         k.hit.fraction = hit.mFraction;
         k.hit.distance = hit.mFraction * len;
         k.hit.sub_shape = child_index(ts.mShape.GetPtr(), hit.mSubShapeID2);
-        k.raw_sub = hit.mSubShapeID2.GetValue();k.hit.sub_shape_id=k.raw_sub;
+        k.raw_sub = hit.mSubShapeID2.GetValue();
+        k.hit.sub_shape_id = k.raw_sub;
         keyed.push_back(k);
     }
     std::ranges::sort(keyed, [](const Keyed& x, const Keyed& y) {
-        if (x.hit.fraction != y.hit.fraction) return x.hit.fraction < y.hit.fraction;
-        if (x.hit.body.index != y.hit.body.index) return x.hit.body.index < y.hit.body.index;
+        if (x.hit.fraction != y.hit.fraction)
+            return x.hit.fraction < y.hit.fraction;
+        if (x.hit.body.index != y.hit.body.index)
+            return x.hit.body.index < y.hit.body.index;
         return x.raw_sub < y.raw_sub;
     });
     out.reserve(keyed.size());
@@ -2025,39 +2127,74 @@ std::vector<RayHit3D> World3D::raycast_all(Vec3f from, Vec3f to, const QueryFilt
     return out;
 }
 
-BoundedQueryResult3D World3D::raycast_all(Vec3f from,Vec3f to,std::span<RayHit3D> output,const QueryFilter3D& filter)const {
-    return raycast_into(from,to,{output.data(),output.size(),[](void* data,std::size_t i)->RayHit3D&{return static_cast<RayHit3D*>(data)[i];}},filter);
+BoundedQueryResult3D World3D::raycast_all(Vec3f from, Vec3f to, std::span<RayHit3D> output,
+                                          const QueryFilter3D& filter) const {
+    return raycast_into(from, to,
+                        {output.data(), output.size(),
+                         [](void* data, std::size_t i) -> RayHit3D& { return static_cast<RayHit3D*>(data)[i]; }},
+                        filter);
 }
-BoundedQueryResult3D World3D::raycast_into(Vec3f from,Vec3f to,detail::QueryOutput3D<RayHit3D> output,const QueryFilter3D& filter)const {
-    const auto delta=to-from;const float distance=length(delta);
-    if(!finite(from)||!finite(to)||!std::isfinite(distance)||!(distance>0))return {.valid=false};
-    const auto& m=*_impl;const JPH::RRayCast ray(to_jolt(from),to_jolt(delta));
-    struct Collector final:JPH::CastRayCollector {
-        const Impl& world;const JPH::RRayCast& ray;float distance;
-        detail::QueryOutput3D<RayHit3D> output;BoundedQueryResult3D result;
-        Collector(const Impl& world,const JPH::RRayCast& ray,float distance,detail::QueryOutput3D<RayHit3D> output)
-            :world(world),ray(ray),distance(distance),output(output){}
-        void AddHit(const JPH::RayCastResult& raw)override {
-            const auto slot=world.slot_index(raw.mBodyID);if(slot==UINT32_MAX)return;
-            if(!output.capacity){result.overflow=true;ForceEarlyOut();return;}
-            RayHit3D hit;hit.body=world.handle(slot);hit.user_id=world.slots[slot].user_id;
-            const auto point=ray.GetPointOnRay(raw.mFraction);const auto shape=world.bi().GetTransformedShape(raw.mBodyID);
-            hit.point=from_jolt(point);hit.normal=from_jolt(shape.GetWorldSpaceSurfaceNormal(raw.mSubShapeID2,point));
-            hit.fraction=raw.mFraction;hit.distance=raw.mFraction*distance;
-            hit.sub_shape=child_index(shape.mShape.GetPtr(),raw.mSubShapeID2);hit.sub_shape_id=raw.mSubShapeID2.GetValue();
-            const auto less=[](const auto& a,const auto& b) {
-                if(a.fraction!=b.fraction)return a.fraction<b.fraction;
-                if(a.body.index!=b.body.index)return a.body.index<b.body.index;
-                return a.sub_shape_id<b.sub_shape_id;
+BoundedQueryResult3D World3D::raycast_into(Vec3f from, Vec3f to, detail::QueryOutput3D<RayHit3D> output,
+                                           const QueryFilter3D& filter) const {
+    const auto delta = to - from;
+    const float distance = length(delta);
+    if (!finite(from) || !finite(to) || !std::isfinite(distance) || !(distance > 0))
+        return {.valid = false};
+    const auto& m = *_impl;
+    const JPH::RRayCast ray(to_jolt(from), to_jolt(delta));
+    struct Collector final : JPH::CastRayCollector {
+        const Impl& world;
+        const JPH::RRayCast& ray;
+        float distance;
+        detail::QueryOutput3D<RayHit3D> output;
+        BoundedQueryResult3D result;
+        Collector(const Impl& world, const JPH::RRayCast& ray, float distance, detail::QueryOutput3D<RayHit3D> output)
+            : world(world), ray(ray), distance(distance), output(output) {}
+        void AddHit(const JPH::RayCastResult& raw) override {
+            const auto slot = world.slot_index(raw.mBodyID);
+            if (slot == UINT32_MAX)
+                return;
+            if (!output.capacity) {
+                result.overflow = true;
+                ForceEarlyOut();
+                return;
+            }
+            RayHit3D hit;
+            hit.body = world.handle(slot);
+            hit.user_id = world.slots[slot].user_id;
+            const auto point = ray.GetPointOnRay(raw.mFraction);
+            const auto shape = world.bi().GetTransformedShape(raw.mBodyID);
+            hit.point = from_jolt(point);
+            hit.normal = from_jolt(shape.GetWorldSpaceSurfaceNormal(raw.mSubShapeID2, point));
+            hit.fraction = raw.mFraction;
+            hit.distance = raw.mFraction * distance;
+            hit.sub_shape = child_index(shape.mShape.GetPtr(), raw.mSubShapeID2);
+            hit.sub_shape_id = raw.mSubShapeID2.GetValue();
+            const auto less = [](const auto& a, const auto& b) {
+                if (a.fraction != b.fraction)
+                    return a.fraction < b.fraction;
+                if (a.body.index != b.body.index)
+                    return a.body.index < b.body.index;
+                return a.sub_shape_id < b.sub_shape_id;
             };
-            std::size_t at=0;while(at<result.count&&!less(hit,output[at]))++at;
-            if(result.count==output.capacity){result.overflow=true;if(at==result.count)return;}
-            else ++result.count;
-            for(auto i=result.count-1;i>at;--i)output[i]=output[i-1];output[at]=hit;
+            std::size_t at = 0;
+            while (at < result.count && !less(hit, output[at]))
+                ++at;
+            if (result.count == output.capacity) {
+                result.overflow = true;
+                if (at == result.count)
+                    return;
+            } else
+                ++result.count;
+            for (auto i = result.count - 1; i > at; --i)
+                output[i] = output[i - 1];
+            output[at] = hit;
         }
-    } collector{m,ray,distance,output};
-    JPH::RayCastSettings settings;settings.mBackFaceModeTriangles=JPH::EBackFaceMode::CollideWithBackFaces;
-    m.system.GetNarrowPhaseQueryNoLock().CastRay(ray,settings,collector,{},MaskLayerFilter(filter.mask),m.query_filter(filter));
+    } collector{m, ray, distance, output};
+    JPH::RayCastSettings settings;
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+    m.system.GetNarrowPhaseQueryNoLock().CastRay(ray, settings, collector, {}, MaskLayerFilter(filter.mask),
+                                                 m.query_filter(filter));
     return collector.result;
 }
 
@@ -2084,8 +2221,7 @@ std::optional<ShapeHit3D> World3D::shape_cast(const Shape3D& shape, Vec3f positi
     }
     JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
     m.system.GetNarrowPhaseQueryNoLock().CastShape(cast, settings, JPH::RVec3::sZero(), collector, {},
-                                                   MaskLayerFilter(filter.mask),
-                                                   m.query_filter(filter));
+                                                   MaskLayerFilter(filter.mask), m.query_filter(filter));
     if (!collector.HadHit()) {
         return std::nullopt;
     }
@@ -2111,15 +2247,17 @@ namespace {
 
 // shape_cast_all's order: by fraction, then body number, then native sub-shape key.
 bool cast_before(const ShapeHit3D& a, const ShapeHit3D& b) {
-    if (a.fraction != b.fraction) return a.fraction < b.fraction;
-    if (a.body.index != b.body.index) return a.body.index < b.body.index;
+    if (a.fraction != b.fraction)
+        return a.fraction < b.fraction;
+    if (a.body.index != b.body.index)
+        return a.body.index < b.body.index;
     return a.sub_shape_id < b.sub_shape_id;
 }
 
 } // namespace
 
-// The sweep of shape_cast_all, set up as shape_cast's (the same settings), every hit handed to `add` in kin's terms. False,
-// casting nothing, for input shape_cast refuses.
+// The sweep of shape_cast_all, set up as shape_cast's (the same settings), every hit handed to `add` in kin's terms.
+// False, casting nothing, for input shape_cast refuses.
 template <class Add>
 bool World3D::Impl::cast_every(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
                                const QueryFilter3D& filter, Add&& add) const {
@@ -2170,8 +2308,8 @@ bool World3D::Impl::cast_every(const Shape3D& shape, Vec3f position, Quatf rotat
     return true;
 }
 
-std::vector<ShapeHit3D> World3D::shape_cast_all(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
-                                                const QueryFilter3D& filter) const {
+std::vector<ShapeHit3D> World3D::shape_cast_all(const Shape3D& shape, Vec3f position, Quatf rotation,
+                                                Vec3f displacement, const QueryFilter3D& filter) const {
     std::vector<ShapeHit3D> out;
     _impl->cast_every(shape, position, rotation, displacement, filter, [&](const ShapeHit3D& hit) {
         out.push_back(hit);
@@ -2179,11 +2317,13 @@ std::vector<ShapeHit3D> World3D::shape_cast_all(const Shape3D& shape, Vec3f posi
     });
     // Each body once, at its first hit: sorted, the first of each body is its earliest.
     std::ranges::sort(out, [](const ShapeHit3D& a, const ShapeHit3D& b) {
-        if (a.body.index != b.body.index) return a.body.index < b.body.index;
+        if (a.body.index != b.body.index)
+            return a.body.index < b.body.index;
         return cast_before(a, b);
     });
-    out.erase(std::unique(out.begin(), out.end(), [](const ShapeHit3D& a, const ShapeHit3D& b) { return a.body == b.body; }),
-              out.end());
+    out.erase(
+        std::unique(out.begin(), out.end(), [](const ShapeHit3D& a, const ShapeHit3D& b) { return a.body == b.body; }),
+        out.end());
     std::ranges::sort(out, cast_before);
     return out;
 }
@@ -2191,8 +2331,8 @@ std::vector<ShapeHit3D> World3D::shape_cast_all(const Shape3D& shape, Vec3f posi
 BoundedQueryResult3D World3D::shape_cast_all(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
                                              std::span<ShapeHit3D> output, const QueryFilter3D& filter) const {
     BoundedQueryResult3D result;
-    // Kept in order as the hits come, a body once (its earliest): a later, earlier hit of a body that is kept moves it up; a
-    // body put out to make room is one that was met and is not returned (overflow), even if it comes back.
+    // Kept in order as the hits come, a body once (its earliest): a later, earlier hit of a body that is kept moves it
+    // up; a body put out to make room is one that was met and is not returned (overflow), even if it comes back.
     const bool cast = _impl->cast_every(shape, position, rotation, displacement, filter, [&](const ShapeHit3D& hit) {
         if (output.empty()) {
             result.overflow = true;
@@ -2264,14 +2404,15 @@ std::vector<OverlapHit3D> World3D::overlap(const Shape3D& shape, Vec3f position,
         const u32 raw_sub = r.mSubShapeID2.GetValue();
         auto [it, inserted] = by_body.try_emplace(slot);
         Deepest& d = it->second;
-        if (inserted || r.mPenetrationDepth > d.hit.penetration
-            || (r.mPenetrationDepth == d.hit.penetration && raw_sub < d.raw_sub)) {
+        if (inserted || r.mPenetrationDepth > d.hit.penetration ||
+            (r.mPenetrationDepth == d.hit.penetration && raw_sub < d.raw_sub)) {
             d.hit.body = m.handle(slot);
             d.hit.user_id = m.slots[slot].user_id;
             d.hit.penetration = r.mPenetrationDepth;
             d.hit.point = from_jolt(r.mContactPointOn2);
             d.hit.normal = normalize(-from_jolt(r.mPenetrationAxis));
-            d.raw_sub = raw_sub;d.hit.sub_shape_id=raw_sub;
+            d.raw_sub = raw_sub;
+            d.hit.sub_shape_id = raw_sub;
             d.hit.sub_shape = child_index(m.bi().GetShape(r.mBodyID2).GetPtr(), r.mSubShapeID2);
         }
     }
@@ -2281,37 +2422,70 @@ std::vector<OverlapHit3D> World3D::overlap(const Shape3D& shape, Vec3f position,
     return out;
 }
 
-BoundedQueryResult3D World3D::overlap(const Shape3D& shape,Vec3f position,Quatf rotation,std::span<OverlapHit3D> output,const QueryFilter3D& filter)const {
-    return overlap_into(shape,position,rotation,{output.data(),output.size(),[](void* data,std::size_t i)->OverlapHit3D&{return static_cast<OverlapHit3D*>(data)[i];}},filter);
+BoundedQueryResult3D World3D::overlap(const Shape3D& shape, Vec3f position, Quatf rotation,
+                                      std::span<OverlapHit3D> output, const QueryFilter3D& filter) const {
+    return overlap_into(
+        shape, position, rotation,
+        {output.data(), output.size(),
+         [](void* data, std::size_t i) -> OverlapHit3D& { return static_cast<OverlapHit3D*>(data)[i]; }},
+        filter);
 }
-BoundedQueryResult3D World3D::overlap_into(const Shape3D& shape,Vec3f position,Quatf rotation,detail::QueryOutput3D<OverlapHit3D> output,const QueryFilter3D& filter)const {
-    if(!shape.valid()||!finite(position)||!finite(rotation))return {.valid=false};
-    const auto& m=*_impl;const auto* jolt=shape._data->shape.GetPtr();
-    const auto transform=JPH::RMat44::sRotationTranslation(to_jolt(rotation.normalized()),to_jolt(position)).PreTranslated(jolt->GetCenterOfMass());
-    struct Collector final:JPH::CollideShapeCollector {
-        const Impl& world;detail::QueryOutput3D<OverlapHit3D> output;BoundedQueryResult3D result;
-        Collector(const Impl& world,detail::QueryOutput3D<OverlapHit3D> output):world(world),output(output){}
-        void AddHit(const JPH::CollideShapeResult& raw)override {
-            const auto slot=world.slot_index(raw.mBodyID2);if(slot==UINT32_MAX)return;
-            if(!output.capacity){result.overflow=true;ForceEarlyOut();return;}
-            std::size_t at=0;while(at<result.count&&output[at].body.index<slot)++at;
-            const auto key=raw.mSubShapeID2.GetValue();
-            if(at<result.count&&output[at].body.index==slot) {
-                if(raw.mPenetrationDepth<output[at].penetration||
-                    (raw.mPenetrationDepth==output[at].penetration&&key>=output[at].sub_shape_id))return;
-            } else {
-                if(result.count==output.capacity){result.overflow=true;if(at==result.count)return;}
-                else ++result.count;
-                for(auto i=result.count-1;i>at;--i)output[i]=output[i-1];
+BoundedQueryResult3D World3D::overlap_into(const Shape3D& shape, Vec3f position, Quatf rotation,
+                                           detail::QueryOutput3D<OverlapHit3D> output,
+                                           const QueryFilter3D& filter) const {
+    if (!shape.valid() || !finite(position) || !finite(rotation))
+        return {.valid = false};
+    const auto& m = *_impl;
+    const auto* jolt = shape._data->shape.GetPtr();
+    const auto transform = JPH::RMat44::sRotationTranslation(to_jolt(rotation.normalized()), to_jolt(position))
+                               .PreTranslated(jolt->GetCenterOfMass());
+    struct Collector final : JPH::CollideShapeCollector {
+        const Impl& world;
+        detail::QueryOutput3D<OverlapHit3D> output;
+        BoundedQueryResult3D result;
+        Collector(const Impl& world, detail::QueryOutput3D<OverlapHit3D> output) : world(world), output(output) {}
+        void AddHit(const JPH::CollideShapeResult& raw) override {
+            const auto slot = world.slot_index(raw.mBodyID2);
+            if (slot == UINT32_MAX)
+                return;
+            if (!output.capacity) {
+                result.overflow = true;
+                ForceEarlyOut();
+                return;
             }
-            auto& hit=output[at];hit.body=world.handle(slot);hit.user_id=world.slots[slot].user_id;
-            hit.penetration=raw.mPenetrationDepth;hit.point=from_jolt(raw.mContactPointOn2);
-            hit.normal=normalize(-from_jolt(raw.mPenetrationAxis));hit.sub_shape_id=key;
+            std::size_t at = 0;
+            while (at < result.count && output[at].body.index < slot)
+                ++at;
+            const auto key = raw.mSubShapeID2.GetValue();
+            if (at < result.count && output[at].body.index == slot) {
+                if (raw.mPenetrationDepth < output[at].penetration ||
+                    (raw.mPenetrationDepth == output[at].penetration && key >= output[at].sub_shape_id))
+                    return;
+            } else {
+                if (result.count == output.capacity) {
+                    result.overflow = true;
+                    if (at == result.count)
+                        return;
+                } else
+                    ++result.count;
+                for (auto i = result.count - 1; i > at; --i)
+                    output[i] = output[i - 1];
+            }
+            auto& hit = output[at];
+            hit.body = world.handle(slot);
+            hit.user_id = world.slots[slot].user_id;
+            hit.penetration = raw.mPenetrationDepth;
+            hit.point = from_jolt(raw.mContactPointOn2);
+            hit.normal = normalize(-from_jolt(raw.mPenetrationAxis));
+            hit.sub_shape_id = key;
             hit.sub_shape = child_index(world.bi().GetShape(raw.mBodyID2).GetPtr(), raw.mSubShapeID2);
         }
-    } collector{m,output};
-    JPH::CollideShapeSettings settings;settings.mBackFaceMode=JPH::EBackFaceMode::CollideWithBackFaces;
-    m.system.GetNarrowPhaseQueryNoLock().CollideShape(jolt,JPH::Vec3::sReplicate(1.f),transform,settings,JPH::RVec3::sZero(),collector,{},MaskLayerFilter(filter.mask),m.query_filter(filter));
+    } collector{m, output};
+    JPH::CollideShapeSettings settings;
+    settings.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+    m.system.GetNarrowPhaseQueryNoLock().CollideShape(jolt, JPH::Vec3::sReplicate(1.f), transform, settings,
+                                                      JPH::RVec3::sZero(), collector, {}, MaskLayerFilter(filter.mask),
+                                                      m.query_filter(filter));
     return collector.result;
 }
 
@@ -2347,10 +2521,9 @@ std::optional<ClosestPoint3D> World3D::closest_point(Vec3f point, f32 max_distan
     settings.mMaxSeparationDistance = max_distance;
     settings.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
     JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
-    m.system.GetNarrowPhaseQueryNoLock().CollideShape(&sphere, JPH::Vec3::sReplicate(1.0f),
-                                                      JPH::RMat44::sTranslation(to_jolt(point)), settings,
-                                                      JPH::RVec3::sZero(), collector, {}, MaskLayerFilter(filter.mask),
-                                                      m.query_filter(filter));
+    m.system.GetNarrowPhaseQueryNoLock().CollideShape(
+        &sphere, JPH::Vec3::sReplicate(1.0f), JPH::RMat44::sTranslation(to_jolt(point)), settings, JPH::RVec3::sZero(),
+        collector, {}, MaskLayerFilter(filter.mask), m.query_filter(filter));
     std::optional<ClosestPoint3D> best;
     u32 best_sub = 0;
     for (const JPH::CollideShapeResult& r : collector.mHits) {
@@ -2369,9 +2542,9 @@ std::optional<ClosestPoint3D> World3D::closest_point(Vec3f point, f32 max_distan
             c.distance = std::max(0.0f, length(c.point - point));
         }
         const u32 raw_sub = r.mSubShapeID2.GetValue();
-        if (!best || c.distance < best->distance
-            || (c.distance == best->distance
-                && (c.body.index < best->body.index || (c.body.index == best->body.index && raw_sub < best_sub)))) {
+        if (!best || c.distance < best->distance ||
+            (c.distance == best->distance &&
+             (c.body.index < best->body.index || (c.body.index == best->body.index && raw_sub < best_sub)))) {
             best = c;
             best_sub = raw_sub;
         }
@@ -2381,7 +2554,9 @@ std::optional<ClosestPoint3D> World3D::closest_point(Vec3f point, f32 max_distan
 
 // --- events ---
 
-std::span<const ContactEvent3D> World3D::events() const { return _impl->events; }
+std::span<const ContactEvent3D> World3D::events() const {
+    return _impl->events;
+}
 
 std::vector<ContactEvent3D> World3D::drain_events() {
     std::vector<ContactEvent3D> out = std::move(_impl->events);
@@ -2394,7 +2569,9 @@ void World3D::drain_events(std::vector<ContactEvent3D>& output) {
     _impl->events.clear();
 }
 
-std::span<const ActivationEvent3D> World3D::activation_events() const { return _impl->activation_events; }
+std::span<const ActivationEvent3D> World3D::activation_events() const {
+    return _impl->activation_events;
+}
 
 std::vector<ActivationEvent3D> World3D::drain_activation_events() {
     std::vector<ActivationEvent3D> out = std::move(_impl->activation_events);
@@ -2407,8 +2584,12 @@ void World3D::drain_activation_events(std::vector<ActivationEvent3D>& output) {
     _impl->activation_events.clear();
 }
 
-u64 World3D::dropped_events() const { return _impl->dropped; }
-u64 World3D::overflowed_steps() const { return _impl->overflowed; }
+u64 World3D::dropped_events() const {
+    return _impl->dropped;
+}
+u64 World3D::overflowed_steps() const {
+    return _impl->overflowed;
+}
 
 std::vector<ConstraintEvent3D> World3D::drain_constraint_events() {
     std::vector<ConstraintEvent3D> out = std::move(_impl->constraint_events);
@@ -2430,14 +2611,14 @@ Constraint3D World3D::create_constraint(const Constraint3DDesc& d) {
     if (sb == nullptr || (d.a.valid() && sa == nullptr) || d.a == d.b) {
         return {};
     }
-    if (!finite(d.point) || !finite(d.point_b) || !finite(d.axis) || !std::isfinite(d.min_distance)
-        || !std::isfinite(d.max_distance) || !std::isfinite(d.spring_frequency) || !std::isfinite(d.spring_damping)
-        || !std::isfinite(d.min_angle) || !std::isfinite(d.max_angle) || !std::isfinite(d.swing_angle)
-        || !std::isfinite(d.max_friction) || !std::isfinite(d.break_force) || !std::isfinite(d.break_torque)) {
+    if (!finite(d.point) || !finite(d.point_b) || !finite(d.axis) || !std::isfinite(d.min_distance) ||
+        !std::isfinite(d.max_distance) || !std::isfinite(d.spring_frequency) || !std::isfinite(d.spring_damping) ||
+        !std::isfinite(d.min_angle) || !std::isfinite(d.max_angle) || !std::isfinite(d.swing_angle) ||
+        !std::isfinite(d.max_friction) || !std::isfinite(d.break_force) || !std::isfinite(d.break_torque)) {
         return {};
     }
-    const bool needs_axis = d.kind == Constraint3DKind::Hinge || d.kind == Constraint3DKind::Cone
-                            || d.kind == Constraint3DKind::Slider;
+    const bool needs_axis =
+        d.kind == Constraint3DKind::Hinge || d.kind == Constraint3DKind::Cone || d.kind == Constraint3DKind::Slider;
     JPH::Vec3 axis = to_jolt(d.axis);
     if (needs_axis) {
         if (axis.LengthSq() < 1e-12f) {
@@ -2559,10 +2740,10 @@ Constraint3D World3D::create_constraint(const Constraint3DDesc& d) {
     };
     c.local_a = local(body_a, d.point);
     c.local_b = local(body_b, d.kind == Constraint3DKind::Distance ? d.point_b : d.point);
-    c.local_axis = needs_axis ? (body_a == &JPH::Body::sFixedToWorld
-                                    ? from_jolt(axis)
-                                    : from_jolt(body_a->GetRotation().Conjugated() * axis))
-                              : Vec3f{};
+    c.local_axis = needs_axis
+                       ? (body_a == &JPH::Body::sFixedToWorld ? from_jolt(axis)
+                                                              : from_jolt(body_a->GetRotation().Conjugated() * axis))
+                       : Vec3f{};
     c.break_force = std::max(0.0f, d.break_force);
     c.break_torque = std::max(0.0f, d.break_torque);
     c.user_id = d.user_id;
@@ -2603,8 +2784,12 @@ void World3D::destroy_constraint(Constraint3D constraint) {
     --m.constraints_live;
 }
 
-bool World3D::contains(Constraint3D constraint) const { return _impl->find(constraint) != nullptr; }
-i32 World3D::constraint_count() const { return _impl->constraints_live; }
+bool World3D::contains(Constraint3D constraint) const {
+    return _impl->find(constraint) != nullptr;
+}
+i32 World3D::constraint_count() const {
+    return _impl->constraints_live;
+}
 
 Constraint3DInfo World3D::constraint_info(Constraint3D constraint) const {
     const Impl& m = *_impl;
@@ -2615,15 +2800,17 @@ Constraint3DInfo World3D::constraint_info(Constraint3D constraint) const {
     }
     const auto world_point = [&](Body3D body, Vec3f local) {
         const auto* s = m.find(body);
-        return s != nullptr ? from_jolt(JPH::Vec3(m.bi().GetPosition(s->id)) + m.bi().GetRotation(s->id) * to_jolt(local))
-                            : local;
+        return s != nullptr
+                   ? from_jolt(JPH::Vec3(m.bi().GetPosition(s->id)) + m.bi().GetRotation(s->id) * to_jolt(local))
+                   : local;
     };
     out.kind = c->kind;
     out.a = c->a;
     out.b = c->b;
     out.point_a = world_point(c->a, c->local_a);
     out.point_b = world_point(c->b, c->local_b);
-    if (c->kind == Constraint3DKind::Hinge || c->kind == Constraint3DKind::Cone || c->kind == Constraint3DKind::Slider) {
+    if (c->kind == Constraint3DKind::Hinge || c->kind == Constraint3DKind::Cone ||
+        c->kind == Constraint3DKind::Slider) {
         const auto* sa = c->a.valid() ? m.find(c->a) : nullptr;
         out.axis = sa != nullptr ? from_jolt(m.bi().GetRotation(sa->id) * to_jolt(c->local_axis)) : c->local_axis;
     }
@@ -2640,7 +2827,8 @@ Constraint3DInfo World3D::constraint_info(Constraint3D constraint) const {
     case Constraint3DKind::Distance:
         out.value = length(out.point_b - out.point_a);
         break;
-    default: break;
+    default:
+        break;
     }
     return out;
 }
@@ -2650,8 +2838,9 @@ void World3D::set_constraint_motor(Constraint3D constraint, Motor3DMode mode, f3
     if (c == nullptr || !std::isfinite(target) || !std::isfinite(max_force)) {
         return;
     }
-    const JPH::EMotorState state = mode == Motor3DMode::Off ? JPH::EMotorState::Off
-                                 : mode == Motor3DMode::Velocity ? JPH::EMotorState::Velocity : JPH::EMotorState::Position;
+    const JPH::EMotorState state = mode == Motor3DMode::Off        ? JPH::EMotorState::Off
+                                   : mode == Motor3DMode::Velocity ? JPH::EMotorState::Velocity
+                                                                   : JPH::EMotorState::Position;
     if (mode != Motor3DMode::Off && !(max_force > 0.0f)) {
         return;
     }
@@ -2659,7 +2848,8 @@ void World3D::set_constraint_motor(Constraint3D constraint, Motor3DMode mode, f3
         auto* h = static_cast<JPH::HingeConstraint*>(c->constraint.GetPtr());
         if (mode != Motor3DMode::Off) {
             h->GetMotorSettings().SetTorqueLimit(max_force);
-            h->GetMotorSettings().mSpringSettings = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, 10.0f, 1.0f);
+            h->GetMotorSettings().mSpringSettings =
+                JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, 10.0f, 1.0f);
             if (mode == Motor3DMode::Velocity) {
                 h->SetTargetAngularVelocity(to_radians(target));
             } else {
@@ -2671,7 +2861,8 @@ void World3D::set_constraint_motor(Constraint3D constraint, Motor3DMode mode, f3
         auto* sl = static_cast<JPH::SliderConstraint*>(c->constraint.GetPtr());
         if (mode != Motor3DMode::Off) {
             sl->GetMotorSettings().SetForceLimit(max_force);
-            sl->GetMotorSettings().mSpringSettings = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, 10.0f, 1.0f);
+            sl->GetMotorSettings().mSpringSettings =
+                JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, 10.0f, 1.0f);
             if (mode == Motor3DMode::Velocity) {
                 sl->SetTargetVelocity(target);
             } else {
@@ -2719,15 +2910,33 @@ Character3D World3D::create_character(const CharacterDesc3D& desc) {
     }
     return _impl->characters->create(desc);
 }
-void World3D::destroy_character(Character3D c) { _impl->characters->destroy(c); }
-bool World3D::contains(Character3D c) const { return _impl->characters->contains(c); }
-i32 World3D::character_count() const { return _impl->characters->count(); }
-std::vector<Character3D> World3D::characters() const { return _impl->characters->list(); }
-void World3D::set_character_input(Character3D c, const CharacterInput3D& input) { _impl->characters->set_input(c, input); }
-CharacterInput3D World3D::character_input(Character3D c) const { return _impl->characters->input(c); }
-CharacterState3D World3D::character(Character3D c) const { return _impl->characters->state(c); }
-std::vector<CharacterContact3D> World3D::character_contacts(Character3D c) const { return _impl->characters->contacts(c); }
-void World3D::teleport_character(Character3D c, Vec3f feet) { _impl->characters->teleport(c, feet); }
+void World3D::destroy_character(Character3D c) {
+    _impl->characters->destroy(c);
+}
+bool World3D::contains(Character3D c) const {
+    return _impl->characters->contains(c);
+}
+i32 World3D::character_count() const {
+    return _impl->characters->count();
+}
+std::vector<Character3D> World3D::characters() const {
+    return _impl->characters->list();
+}
+void World3D::set_character_input(Character3D c, const CharacterInput3D& input) {
+    _impl->characters->set_input(c, input);
+}
+CharacterInput3D World3D::character_input(Character3D c) const {
+    return _impl->characters->input(c);
+}
+CharacterState3D World3D::character(Character3D c) const {
+    return _impl->characters->state(c);
+}
+std::vector<CharacterContact3D> World3D::character_contacts(Character3D c) const {
+    return _impl->characters->contacts(c);
+}
+void World3D::teleport_character(Character3D c, Vec3f feet) {
+    _impl->characters->teleport(c, feet);
+}
 void World3D::add_character_impulse(Character3D c, Vec3f impulse) {
     if (!finite(impulse)) {
         _impl->bad_value("add_character_impulse");
@@ -2742,21 +2951,40 @@ void World3D::set_character_velocity(Character3D c, Vec3f velocity) {
     }
     _impl->characters->set_velocity(c, velocity);
 }
-void World3D::set_character_up(Character3D c, Vec3f up, bool instant) { _impl->characters->set_up(c, up, instant); }
-bool World3D::set_character_crouch(Character3D c, bool crouch) { return _impl->characters->set_crouch(c, crouch); }
-void World3D::set_character_desc(Character3D c, const CharacterDesc3D& desc) { _impl->characters->set_desc(c, desc); }
-void World3D::set_character_enabled(Character3D c, bool enabled) { _impl->characters->set_enabled(c, enabled); }
-bool World3D::character_enabled(Character3D c) const { return _impl->characters->enabled(c); }
-void World3D::set_traversal_input(Character3D c, const TraversalInput3D& input) { _impl->characters->set_traversal_input(c, input); }
-TraversalInput3D World3D::traversal_input(Character3D c) const { return _impl->characters->traversal_input(c); }
-TraversalState3D World3D::traversal(Character3D c) const { return _impl->characters->traversal(c); }
-void World3D::set_traversal_resource(Character3D c, f32 value) { _impl->characters->set_traversal_resource(c, value); }
+void World3D::set_character_up(Character3D c, Vec3f up, bool instant) {
+    _impl->characters->set_up(c, up, instant);
+}
+bool World3D::set_character_crouch(Character3D c, bool crouch) {
+    return _impl->characters->set_crouch(c, crouch);
+}
+void World3D::set_character_desc(Character3D c, const CharacterDesc3D& desc) {
+    _impl->characters->set_desc(c, desc);
+}
+void World3D::set_character_enabled(Character3D c, bool enabled) {
+    _impl->characters->set_enabled(c, enabled);
+}
+bool World3D::character_enabled(Character3D c) const {
+    return _impl->characters->enabled(c);
+}
+void World3D::set_traversal_input(Character3D c, const TraversalInput3D& input) {
+    _impl->characters->set_traversal_input(c, input);
+}
+TraversalInput3D World3D::traversal_input(Character3D c) const {
+    return _impl->characters->traversal_input(c);
+}
+TraversalState3D World3D::traversal(Character3D c) const {
+    return _impl->characters->traversal(c);
+}
+void World3D::set_traversal_resource(Character3D c, f32 value) {
+    _impl->characters->set_traversal_resource(c, value);
+}
 
 // --- grab and climb: what a body is to a hand ---
 
 void World3D::set_surface_material(Body3D body, const SurfaceMaterial3D& material) {
     Impl::Slot* s = _impl->find(body);
-    if (s == nullptr || !std::isfinite(material.grip) || !std::isfinite(material.slip) || !std::isfinite(material.drain)) {
+    if (s == nullptr || !std::isfinite(material.grip) || !std::isfinite(material.slip) ||
+        !std::isfinite(material.drain)) {
         return;
     }
     s->material = material;
@@ -2769,13 +2997,14 @@ SurfaceMaterial3D World3D::surface_material(Body3D body) const {
 
 bool World3D::set_hold(Body3D body, const HoldDesc3D& hold) {
     Impl::Slot* s = _impl->find(body);
-    if (s == nullptr || !std::isfinite(hold.quality) || !std::isfinite(hold.drain) || !finite(hold.anchor)
-        || !finite(hold.anchor_normal)) {
+    if (s == nullptr || !std::isfinite(hold.quality) || !std::isfinite(hold.drain) || !finite(hold.anchor) ||
+        !finite(hold.anchor_normal)) {
         return false;
     }
     s->is_hold = true;
     s->hold = hold;
-    s->hold.anchor_normal = normalize(hold.anchor_normal) == Vec3f{} ? Vec3f{0.0f, 0.0f, 1.0f} : normalize(hold.anchor_normal);
+    s->hold.anchor_normal =
+        normalize(hold.anchor_normal) == Vec3f{} ? Vec3f{0.0f, 0.0f, 1.0f} : normalize(hold.anchor_normal);
     return true;
 }
 
@@ -2796,10 +3025,15 @@ HoldDesc3D World3D::hold(Body3D body) const {
     return s != nullptr && s->is_hold ? s->hold : HoldDesc3D{};
 }
 
-std::span<const CharacterEvent3D> World3D::character_events() const { return _impl->characters->events(); }
-std::vector<CharacterEvent3D> World3D::drain_character_events() { return _impl->characters->drain_events(); }
-void World3D::drain_character_events(std::vector<CharacterEvent3D>& output) { _impl->characters->drain_events(output); }
-
+std::span<const CharacterEvent3D> World3D::character_events() const {
+    return _impl->characters->events();
+}
+std::vector<CharacterEvent3D> World3D::drain_character_events() {
+    return _impl->characters->drain_events();
+}
+void World3D::drain_character_events(std::vector<CharacterEvent3D>& output) {
+    _impl->characters->drain_events(output);
+}
 
 // --- motion, added mass, groups, anchors ---
 
@@ -2821,12 +3055,14 @@ bool World3D::owner_set_motion(Body3D body, Body3DMotion motion) {
     if (now == JPH::EMotionType::Static) {
         return false;
     }
-    const JPH::EMotionType want = motion == Body3DMotion::Kinematic ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic;
+    const JPH::EMotionType want =
+        motion == Body3DMotion::Kinematic ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic;
     if (now == want) {
         return true;
     }
     if (want == JPH::EMotionType::Dynamic) {
-        // Made without a mass (a shape of no volume), or a mesh or height field now (set_shape): nothing to be dynamic with.
+        // Made without a mass (a shape of no volume), or a mesh or height field now (set_shape): nothing to be dynamic
+        // with.
         const JPH::EShapeSubType sub = m.bi().GetShape(s->id)->GetSubType();
         if (!(s->mass > 0.0f) || sub == JPH::EShapeSubType::Mesh || sub == JPH::EShapeSubType::HeightField) {
             return false;
@@ -2868,7 +3104,7 @@ void World3D::set_group(Body3D body, u32 group) {
         s && (s->owner == BodyOwner3D::Character || !_impl->refused(*s, "set_group")))
         owner_set_group(body, group);
 }
-void World3D::owner_set_group(Body3D body,u32 group) {
+void World3D::owner_set_group(Body3D body, u32 group) {
     Impl& m = *_impl;
     if (const auto* s = m.find(body)) {
         const u32 slot = static_cast<u32>(s - m.slots.data());
@@ -2893,7 +3129,8 @@ u32 World3D::group(Body3D body) const {
 }
 
 void World3D::set_no_collisions(Body3D body, bool no_collisions) {
-    if (_impl->settable(body,"set_no_collisions")) owner_set_no_collisions(body,no_collisions);
+    if (_impl->settable(body, "set_no_collisions"))
+        owner_set_no_collisions(body, no_collisions);
 }
 
 void World3D::owner_set_no_collisions(Body3D body, bool no_collisions) {
@@ -2952,52 +3189,132 @@ Vec3f World3D::constraint_impulse(Constraint3D constraint) const {
 RagdollHandle3D World3D::create_ragdoll(const RagdollDesc& desc, std::span<const Mat4f> bone_world, f32 scale) {
     return _impl->ragdolls->create(desc, bone_world, scale);
 }
-void World3D::destroy_ragdoll(RagdollHandle3D r) { _impl->ragdolls->destroy(r); }
-bool World3D::contains(RagdollHandle3D r) const { return _impl->ragdolls->contains(r); }
-i32 World3D::ragdoll_count() const { return _impl->ragdolls->count(); }
-std::vector<RagdollHandle3D> World3D::ragdolls() const { return _impl->ragdolls->list(); }
-std::vector<Body3D> World3D::ragdoll_bodies(RagdollHandle3D r) const { return _impl->ragdolls->bodies(r); }
-bool World3D::ragdoll_has_body(RagdollHandle3D r,Body3D body)const {return contains(body)&&_impl->ragdolls->has_body(r,body);}
-const RagdollDesc* World3D::ragdoll_desc(RagdollHandle3D r) const { return _impl->ragdolls->desc(r); }
-void World3D::set_ragdoll_targets(RagdollHandle3D r, std::span<const Mat4f> bone_world) { _impl->ragdolls->set_targets(r, bone_world); }
-void World3D::start_ragdoll(RagdollHandle3D r, const RagdollStart3D& start) { _impl->ragdolls->start(r, start); }
-void World3D::blend_ragdoll(RagdollHandle3D r, f32 alpha, f32 seconds) { _impl->ragdolls->blend(r, alpha, seconds); }
-void World3D::ragdoll_get_up(RagdollHandle3D r, f32 seconds) { _impl->ragdolls->get_up(r, seconds); }
-void World3D::animate_ragdoll(RagdollHandle3D r) { _impl->ragdolls->animate(r); }
-void World3D::set_ragdoll_bone_weights(RagdollHandle3D r, std::span<const f32> weights) { _impl->ragdolls->set_weights(r, weights); }
-void World3D::set_ragdoll_subtree(RagdollHandle3D r, i32 bone, f32 weight) { _impl->ragdolls->set_subtree(r, bone, weight); }
-RagdollState3D World3D::ragdoll_state(RagdollHandle3D r) const { return _impl->ragdolls->state(r); }
-void World3D::ragdoll_pose(RagdollHandle3D r, std::vector<RagdollBonePose3D>& out) const { _impl->ragdolls->pose(r, out); }
-RagdollPlace3D World3D::ragdoll_get_up_place(RagdollHandle3D r, Vec3f up, Layer3DMask mask, f32 max_distance, Body3D ignore) const {
+void World3D::destroy_ragdoll(RagdollHandle3D r) {
+    _impl->ragdolls->destroy(r);
+}
+bool World3D::contains(RagdollHandle3D r) const {
+    return _impl->ragdolls->contains(r);
+}
+i32 World3D::ragdoll_count() const {
+    return _impl->ragdolls->count();
+}
+std::vector<RagdollHandle3D> World3D::ragdolls() const {
+    return _impl->ragdolls->list();
+}
+std::vector<Body3D> World3D::ragdoll_bodies(RagdollHandle3D r) const {
+    return _impl->ragdolls->bodies(r);
+}
+bool World3D::ragdoll_has_body(RagdollHandle3D r, Body3D body) const {
+    return contains(body) && _impl->ragdolls->has_body(r, body);
+}
+const RagdollDesc* World3D::ragdoll_desc(RagdollHandle3D r) const {
+    return _impl->ragdolls->desc(r);
+}
+void World3D::set_ragdoll_targets(RagdollHandle3D r, std::span<const Mat4f> bone_world) {
+    _impl->ragdolls->set_targets(r, bone_world);
+}
+void World3D::start_ragdoll(RagdollHandle3D r, const RagdollStart3D& start) {
+    _impl->ragdolls->start(r, start);
+}
+void World3D::blend_ragdoll(RagdollHandle3D r, f32 alpha, f32 seconds) {
+    _impl->ragdolls->blend(r, alpha, seconds);
+}
+void World3D::ragdoll_get_up(RagdollHandle3D r, f32 seconds) {
+    _impl->ragdolls->get_up(r, seconds);
+}
+void World3D::animate_ragdoll(RagdollHandle3D r) {
+    _impl->ragdolls->animate(r);
+}
+void World3D::set_ragdoll_bone_weights(RagdollHandle3D r, std::span<const f32> weights) {
+    _impl->ragdolls->set_weights(r, weights);
+}
+void World3D::set_ragdoll_subtree(RagdollHandle3D r, i32 bone, f32 weight) {
+    _impl->ragdolls->set_subtree(r, bone, weight);
+}
+RagdollState3D World3D::ragdoll_state(RagdollHandle3D r) const {
+    return _impl->ragdolls->state(r);
+}
+void World3D::ragdoll_pose(RagdollHandle3D r, std::vector<RagdollBonePose3D>& out) const {
+    _impl->ragdolls->pose(r, out);
+}
+RagdollPlace3D World3D::ragdoll_get_up_place(RagdollHandle3D r, Vec3f up, Layer3DMask mask, f32 max_distance,
+                                             Body3D ignore) const {
     return _impl->ragdolls->place(r, up, mask, max_distance, ignore);
 }
-std::span<const RagdollEvent3D> World3D::ragdoll_events() const { return _impl->ragdolls->events(); }
-std::vector<RagdollEvent3D> World3D::drain_ragdoll_events() { return _impl->ragdolls->drain_events(); }
-void World3D::drain_ragdoll_events(std::vector<RagdollEvent3D>& output) { _impl->ragdolls->drain_events(output); }
+std::span<const RagdollEvent3D> World3D::ragdoll_events() const {
+    return _impl->ragdolls->events();
+}
+std::vector<RagdollEvent3D> World3D::drain_ragdoll_events() {
+    return _impl->ragdolls->drain_events();
+}
+void World3D::drain_ragdoll_events(std::vector<RagdollEvent3D>& output) {
+    _impl->ragdolls->drain_events(output);
+}
 
-RopeHandle3D World3D::create_rope(const RopeDesc3D& desc) { return _impl->ropes->create(desc); }
-void World3D::destroy_rope(RopeHandle3D r) { _impl->ropes->destroy(r); }
-bool World3D::contains(RopeHandle3D r) const { return _impl->ropes->contains(r); }
-i32 World3D::rope_count() const { return _impl->ropes->count(); }
-std::vector<RopeHandle3D> World3D::ropes() const { return _impl->ropes->list(); }
-std::vector<RopePoint3D> World3D::rope_points(RopeHandle3D r) const { return _impl->ropes->points(r); }
-void World3D::rope_points(RopeHandle3D r,std::vector<RopePoint3D>& output)const { _impl->ropes->points(r,output); }
-bool World3D::constraint_broken(Constraint3D c)const { const auto* slot=_impl->find(c);return slot && slot->broken; }
-std::vector<RopeSegment3D> World3D::rope_segments(RopeHandle3D r) const { return _impl->ropes->segments(r); }
-RopeState3D World3D::rope_state(RopeHandle3D r) const { return _impl->ropes->state(r); }
-std::optional<RopeClosest3D> World3D::rope_closest_point(RopeHandle3D r, Vec3f point) const { return _impl->ropes->closest(r, point); }
+RopeHandle3D World3D::create_rope(const RopeDesc3D& desc) {
+    return _impl->ropes->create(desc);
+}
+void World3D::destroy_rope(RopeHandle3D r) {
+    _impl->ropes->destroy(r);
+}
+bool World3D::contains(RopeHandle3D r) const {
+    return _impl->ropes->contains(r);
+}
+i32 World3D::rope_count() const {
+    return _impl->ropes->count();
+}
+std::vector<RopeHandle3D> World3D::ropes() const {
+    return _impl->ropes->list();
+}
+std::vector<RopePoint3D> World3D::rope_points(RopeHandle3D r) const {
+    return _impl->ropes->points(r);
+}
+void World3D::rope_points(RopeHandle3D r, std::vector<RopePoint3D>& output) const {
+    _impl->ropes->points(r, output);
+}
+bool World3D::constraint_broken(Constraint3D c) const {
+    const auto* slot = _impl->find(c);
+    return slot && slot->broken;
+}
+std::vector<RopeSegment3D> World3D::rope_segments(RopeHandle3D r) const {
+    return _impl->ropes->segments(r);
+}
+RopeState3D World3D::rope_state(RopeHandle3D r) const {
+    return _impl->ropes->state(r);
+}
+std::optional<RopeClosest3D> World3D::rope_closest_point(RopeHandle3D r, Vec3f point) const {
+    return _impl->ropes->closest(r, point);
+}
 bool World3D::rope_point_at(RopeHandle3D r, u32 segment, f32 fraction, Vec3f& point, Vec3f& tangent) const {
     return _impl->ropes->point_at(r, segment, fraction, point, tangent);
 }
-std::optional<RopeSegmentRef3D> World3D::rope_segment_of(Body3D body) const { return _impl->ropes->segment_of(body); }
-Body3D World3D::rope_segment_body(RopeHandle3D r, u32 segment) const { return _impl->ropes->segment_body(r, segment); }
-f32 World3D::rope_radius(RopeHandle3D r) const { return _impl->ropes->radius(r); }
-Vec3f World3D::rope_anchor_force(RopeHandle3D r, RopeEnd3D end) const { return _impl->ropes->anchor_force(r, end); }
-f32 World3D::rope_tension(RopeHandle3D r, RopeEnd3D end) const { return _impl->ropes->tension(r, end); }
-void World3D::set_rope_length(RopeHandle3D r, f32 length) { _impl->ropes->set_length(r, length); }
-void World3D::reel_rope(RopeHandle3D r, f32 target, f32 speed) { _impl->ropes->reel(r, target, speed); }
-std::vector<RopeEvent3D> World3D::drain_rope_events() { return _impl->ropes->drain_events(); }
-void World3D::drain_rope_events(std::vector<RopeEvent3D>& output) { _impl->ropes->drain_events(output); }
+std::optional<RopeSegmentRef3D> World3D::rope_segment_of(Body3D body) const {
+    return _impl->ropes->segment_of(body);
+}
+Body3D World3D::rope_segment_body(RopeHandle3D r, u32 segment) const {
+    return _impl->ropes->segment_body(r, segment);
+}
+f32 World3D::rope_radius(RopeHandle3D r) const {
+    return _impl->ropes->radius(r);
+}
+Vec3f World3D::rope_anchor_force(RopeHandle3D r, RopeEnd3D end) const {
+    return _impl->ropes->anchor_force(r, end);
+}
+f32 World3D::rope_tension(RopeHandle3D r, RopeEnd3D end) const {
+    return _impl->ropes->tension(r, end);
+}
+void World3D::set_rope_length(RopeHandle3D r, f32 length) {
+    _impl->ropes->set_length(r, length);
+}
+void World3D::reel_rope(RopeHandle3D r, f32 target, f32 speed) {
+    _impl->ropes->reel(r, target, speed);
+}
+std::vector<RopeEvent3D> World3D::drain_rope_events() {
+    return _impl->ropes->drain_events();
+}
+void World3D::drain_rope_events(std::vector<RopeEvent3D>& output) {
+    _impl->ropes->drain_events(output);
+}
 
 u64 World3D::state_hash() const {
     const Impl& m = *_impl;
@@ -3122,9 +3439,10 @@ std::vector<u8> World3D::save_state() const {
 
 bool World3D::restore_state(std::span<const u8> state) {
     Impl& m = *_impl;
-    // All or nothing. Jolt's restore changes the bodies as it reads and stops part way when the stream runs out (and the
-    // ropes, ragdolls and characters must be put in their saved shapes, anchors and motion types before it), so a stream
-    // that was cut short or damaged is refused here, before anything is touched; the checks below refuse another set.
+    // All or nothing. Jolt's restore changes the bodies as it reads and stops part way when the stream runs out (and
+    // the ropes, ragdolls and characters must be put in their saved shapes, anchors and motion types before it), so a
+    // stream that was cut short or damaged is refused here, before anything is touched; the checks below refuse another
+    // set.
     constexpr std::size_t footer = 2 * sizeof(u64);
     if (state.size() < footer) {
         return false;
@@ -3157,8 +3475,8 @@ bool World3D::restore_state(std::span<const u8> state) {
         in.ReadBytes(&motions[i], sizeof(u8));
         in.ReadBytes(&extra_masses[i], sizeof(f32));
         if (in.IsFailed() || generation != m.slots[i].generation || (alive != 0) != m.slots[i].alive ||
-            motions[i] > static_cast<u8>(JPH::EMotionType::Dynamic) ||
-            !std::isfinite(extra_masses[i]) || extra_masses[i] < 0.0f) {
+            motions[i] > static_cast<u8>(JPH::EMotionType::Dynamic) || !std::isfinite(extra_masses[i]) ||
+            extra_masses[i] < 0.0f) {
             return false;
         }
     }
@@ -3172,8 +3490,8 @@ bool World3D::restore_state(std::span<const u8> state) {
         u32 generation = 0;
         in.ReadBytes(&generation, sizeof generation);
         in.ReadBytes(&constraint_flags[i], sizeof(u32));
-        if (in.IsFailed() || generation != m.constraint_slots[i].generation
-            || ((constraint_flags[i] & 1u) != 0) != m.constraint_slots[i].alive) {
+        if (in.IsFailed() || generation != m.constraint_slots[i].generation ||
+            ((constraint_flags[i] & 1u) != 0) != m.constraint_slots[i].alive) {
             return false;
         }
     }
@@ -3214,8 +3532,8 @@ bool World3D::restore_state(std::span<const u8> state) {
         return false;
     }
     in.skip(static_cast<std::size_t>(cursor - (in.bytes().data() + in.read_position())));
-    // Ragdolls and ropes: the same sets, their state, which must be in place (shapes, anchors, motion types) before Jolt
-    // puts the bodies back.
+    // Ragdolls and ropes: the same sets, their state, which must be in place (shapes, anchors, motion types) before
+    // Jolt puts the bodies back.
     const u8* cursor2 = in.bytes().data() + in.read_position();
     std::unique_ptr<physics3d_detail::RagdollSet::Parsed> ragdolls = m.ragdolls->parse_header(cursor2, end);
     if (ragdolls == nullptr) {
@@ -3236,11 +3554,13 @@ bool World3D::restore_state(std::span<const u8> state) {
     m.added.clear();
     for (u32 i = 0; i < count; ++i) {
         auto& slot = m.slots[i];
-        if (!slot.alive) continue;
+        if (!slot.alive)
+            continue;
         const auto motion = static_cast<JPH::EMotionType>(motions[i]);
         m.bi().SetMotionType(slot.id, motion, JPH::EActivation::DontActivate);
         slot.extra_mass = extra_masses[i];
-        if (slot.extra_mass > 0.0f) m.added.push_back(i);
+        if (slot.extra_mass > 0.0f)
+            m.added.push_back(i);
         if (slot.mass > 0.0f && motion != JPH::EMotionType::Static) {
             JPH::MassProperties mp = m.bi().GetShape(slot.id)->GetMassProperties();
             mp.ScaleToMass(slot.mass + (motion == JPH::EMotionType::Dynamic ? slot.extra_mass : 0.0f));

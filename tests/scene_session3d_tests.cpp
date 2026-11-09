@@ -963,6 +963,78 @@ void headless() {
 // pick names the entity drawn under a pixel of the last render (its index, or a renderer id of its own), with the point
 // there; nothing over the background; and says why without ViewOptions3D::pick, which an environment's view settings do
 // not turn off.
+// Physics through portals (PortalTraveller3D, carried after the physics step): a character walking into a portal comes
+// out of its exit, turned with it (the exit faces +X, the entry +Z: walking -Z, it comes out walking +X), its facing,
+// velocity and reported state turned; a ball thrown through keeps its speed, turned; neither is taken for a teleport.
+void portal_travel() {
+    App app{{.mode = AppMode::Headless}};
+    auto& window =
+        app.create_window({.title = "scene-session-portal-travel", .width = 64, .height = 64, .hidden = true});
+    Renderer2D renderer{window};
+    Renderer3D r3d{renderer};
+    Scratch scratch;
+    write(scratch.path / "travel.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"floor","components":{"Transform3D":{"position":[10,-0.1,0]},"Collider3D":{"kind":"box","half_extents":[20,0.1,20]}}},
+      {"id":"entry","components":{"Transform3D":{"position":[0,1.5,0]},"Portal3D":{"size":[2,3],"exit":"exit"}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,1.5,0],"rotation":[0,0.7071068,0,0.7071068]},
+        "Portal3D":{"size":[2,3],"exit":"entry"}}},
+      {"id":"walker","components":{"Transform3D":{"position":[0,0,2],"rotation":[0,1,0,0]},
+        "CharacterController3D":{"radius":0.25,"height":1.8,"walk_speed":3,"facing":[0,1,0,0]},
+        "PortalTraveller3D":{"height":1}}},
+      {"id":"ball","components":{"Transform3D":{"position":[0.6,2,3]},"Collider3D":{"kind":"sphere","radius":0.1},
+        "RigidBody3D":{"gravity_factor":0,"linear_velocity":[0,0,-4]},"PortalTraveller3D":{"height":0}}}]})");
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.warm_up = false;
+    options.physics = World3DConfig{.max_bodies = 16,
+                                    .max_body_pairs = 64,
+                                    .max_contact_constraints = 64,
+                                    .temp_memory_bytes = 1024 * 1024,
+                                    .single_threaded = true};
+    SceneSession3D session{r3d, assets, options};
+    const auto ok = [&](bool result, const char* why) {
+        if (!result)
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        check(result, why);
+    };
+    ok(bool(session.load("travel.kinscene")), "portal travel scene failed");
+    auto walker = session.entity("walker"), ball = session.entity("ball");
+    bool walker_through = false, ball_through = false;
+    for (int i = 0; i < 120 && !(walker_through && ball_through); ++i) {
+        auto* controller = walker.get_mut<CharacterController3D>();
+        controller->input.move = {0, 1};
+        controller->input.forward = controller->facing.rotate({0, 0, 1});
+        ok(bool(session.step(1.0f / 60.0f)), "portal travel step failed");
+        const Vec3f at = walker.get<Transform3D>()->position;
+        if (!walker_through && at.x > 10) {
+            walker_through = true;
+            const auto& state = walker.get<CharacterController3D>()->state;
+            check(std::abs(state.position.x - at.x) < 1e-3f && std::abs(state.position.z - at.z) < 1e-3f,
+                  "a carried character's state is not where it was carried");
+            check(state.velocity.x > 1 && std::abs(state.velocity.z) < 0.5f,
+                  "a carried character's velocity is not turned with the portal");
+            check(walker.get<CharacterController3D>()->facing.rotate({0, 0, 1}).x > 0.9f,
+                  "a carried character's facing is not turned with the portal");
+            check(at.x > 20 && at.x < 21 && std::abs(at.z) < 1 && at.y > -0.1f,
+                  "a carried character is not just out of the exit, on the floor");
+        }
+        if (!ball_through && ball.get<Transform3D>()->position.x > 10)
+            ball_through = true;
+    }
+    check(walker_through && ball_through, "physics did not carry the character and the ball through the portal");
+    // Out of the exit, they go on the way it faces (+X) and stay this side.
+    for (int i = 0; i < 30; ++i) {
+        walker.get_mut<CharacterController3D>()->input.forward = {1, 0, 0};
+        ok(bool(session.step(1.0f / 60.0f)), "portal travel step failed");
+    }
+    const Vec3f walked = walker.get<Transform3D>()->position, flew = ball.get<Transform3D>()->position;
+    const Vec3f flying = session.physics()->linear_velocity(session.bodies()->body_of(ball.raw()));
+    check(walked.x > 21 && std::abs(walked.z) < 1, "the character did not walk on out of the exit");
+    check(flew.x > 21 && std::abs(flying.x - 4) < 0.05f && std::abs(flying.z) < 0.05f,
+          "the ball did not keep its speed out of the exit, turned");
+    std::cout << "portal travel: a character and a ball carried through\n";
+}
 void gpu_pick(Renderer2D& renderer) {
     Scratch scratch;
     std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
@@ -1464,6 +1536,7 @@ int main(int argc, char** argv) {
         cpu();
         animators();
         headless();
+        portal_travel();
         std::cout << "Headless scene session checks passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

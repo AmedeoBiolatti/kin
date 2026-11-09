@@ -2810,20 +2810,29 @@ view_size, view_options)` draws the surfaces into the collected scene and render
 - **`Portal3D`**: `exit` (an entity: the portal it opens onto, or any entity, whose placing is the exit's), `depth`
   (levels of portals in portals), `resolution`, and `stand_in` (an unlit colour: its deepest level, and what it shows in
   other planar views' pictures, and everywhere without the planar surfaces).
-- **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64 so
-  that its view keeps its size while it moves a little); a portal's levels while the level before sees it, each of
+- **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64; its
+  view grows with a little room, an eighth or 64 pixels, and shrinks only after three seconds of being a quarter larger
+  than its pictures, so that a moving eye resizes views, all their targets made again, a tenth as often); a portal's levels while the level before sees it, each of
   where it shows within the level before, deepest first; each with the other planar surfaces as stand-ins (a mirror as kin's own metal) and without the scene's overlay
   (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). Views are kept from frame to frame and
   dropped with their entities. `PlanarViews3D::views_rendered()` and `views_skipped()` count them. Whatever is
   half-way through a portal is drawn at its exit too (`portal_straddle`, `Scene3D::draw_again`): every copy of the
   scene's draws whose bounds straddle an opening, plain, skinned (a character walking through: its pose as it is) or an
   instance batch's, with its id, whole, and an opaque one again where it is, whole, in the pictures only (`DrawClip3D`).
-  The atrium's survivor (Kenney's, CC0) walks through its portals: yours to steer from behind in `planar_atrium` (W/S
-  walk, A/D turn, Shift runs; the camera follows it through a portal, seeing it through the other one), or walking its
-  round (`--camera 5`).
+  The atrium's survivor (Kenney's, CC0) walks through its portals: yours to play from behind in `planar_atrium` (a
+  physics capsule: WASD walk in the camera's frame, the mouse turns the camera, Space jumps, Shift runs; the camera
+  follows it through a portal, seeing it through the other one), or walking its round by itself (`--camera 5`).
 - **Going through.** `portal_step(world, from, to)` (Lua `scene3d.portal_step(from, to)`) tests a step against every
   enabled portal: where it ends, out of the exit, and the turn to give its facing and velocity (`turn`, a quaternion),
   or nothing (nil). `portal_poses(entity)` gives an entity's portal and its exit as the camera3d.hpp helpers take them.
+- **Physics through portals.** `PortalTraveller3D` (`enabled`, `height`: the point tested, above the entity's origin;
+  a character's feet are its origin) marks what physics carries through: after each physics step a `SceneSession3D`
+  (or a game's own `PortalTravel3D::step(world, physics)`) tests each traveller's point from the step before to now
+  and, where it went through, carries it: `WorldPhysicsState3D::carry(entity, position, turn)` moves a character (its
+  feet, its velocity, `CharacterController3D::facing`, its command's `forward` and its state, turned) or a body (its
+  velocities turned) without taking it for a teleport, or, with neither, moves its Transform3D. `crossings()` lists
+  this step's. The wall a portal stands in needs an opening in its colliders as large as the portal, to the floor
+  (the atrium's walls are three boxes round each), or the capsule meets the wall before its point meets the portal.
 - **The surfaces.** `kin_planar_surfaces(<target>)` (`cmake/kin_embed.cmake`) builds both into a target, and
   `create_planar_surfaces(r3d, planar_surfaces)` makes them; `compile_planar_surfaces(r3d)` compiles them now with
   glslc (development builds). Without them a session still draws the surfaces: mirrors as kin's metal, portals as their
@@ -3364,7 +3373,9 @@ Handles expose no mutable body IDs and retain no world.
 `character_input` replaces the whole `CharacterInput3D`, with defaults for omitted
 fields; it does not patch the previous command. `move` is `{x,y}` (right/forward),
 `forward` is a world `{x,y,z}` direction (default -Z), and `jump`, `crouch`, `sprint`
-are booleans. The native controller clamps movement length to one. Jump is a held
+are booleans; `facing`, a unit quaternion, turns the character (`CharacterController3D::facing`,
+written to its Transform3D when `apply_facing`; omitted, it keeps facing as it was). The native controller clamps
+movement length to one. Jump is a held
 level with native edge detection. Submit each fixed step, including a neutral command
 when movement stops. Commands persist until replaced. The call does not step physics:
 `update`/Input/PrePhysics commands affect that frame's native Physics stage; commands

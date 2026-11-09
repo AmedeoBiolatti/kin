@@ -14,8 +14,29 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 namespace kin {
+
+class WorldPhysicsState3D;
+
+// Things going through portals (PortalTraveller3D): after each physics step, each traveller whose point crossed an
+// opening since the step before is put at the exit, turned (WorldPhysicsState3D::carry for a character or a body).
+// `crossings()` are the last step's: who, through which portal, and the turn (a camera following it turns with it).
+class PortalTravel3D {
+public:
+    struct Crossing {
+        EcsEntity traveller, portal, exit;
+        Quatf turn{};
+    };
+    Status3D step(EcsWorld& world, WorldPhysicsState3D* physics);
+    std::span<const Crossing> crossings() const { return _crossings; }
+
+private:
+    std::unordered_map<u64, Vec3f> _points; // each traveller's point after the step before
+    std::vector<Crossing> _crossings;
+};
 
 // kin's planar surfaces (engine/shaders/planar_reflection.surface.glsl and planar_window.surface.glsl): not in the
 // engine (a surface's variants are about a megabyte), but built by the game that uses them. Without them, mirrors are
