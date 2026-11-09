@@ -207,8 +207,9 @@ struct Portal3D {
 // the glossy surfaces inside its box reflect, parallax-corrected, in place of the environment. Its boxes are round the
 // entity (plus `box_offset`), turned and scaled as it is. Captured when it first shows, when it moves, when `recapture`
 // changes, every `interval` seconds (0: not on a clock) or every frame (`every_frame`: a shiny thing's own probe, with
-// `hide_self`, the entity's own copies left out of its picture). SceneSession3D captures and places them
-// (ReflectionProbes3D, kin/scene/reflection_probes3d.hpp).
+// `hide_self`, the entity's own copies left out of its picture). With `baked` (a Radiance .hdr panorama in the content:
+// ReflectionProbes3D::bake writes them) it is loaded from there instead, and captured only when `recapture` changes.
+// SceneSession3D captures and places them (ReflectionProbes3D, kin/scene/reflection_probes3d.hpp).
 struct ReflectionProbe3D {
     bool enabled = true;
     Vec3f extent{5.0f, 5.0f, 5.0f};
@@ -225,6 +226,7 @@ struct ReflectionProbe3D {
     bool hide_self = false;
     f32 z_near = 0.05f;
     u32 recapture = 0;
+    ComponentAssetRef baked;
 };
 
 struct SkinnedMeshRenderer3D {

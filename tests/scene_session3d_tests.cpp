@@ -17,6 +17,7 @@
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/planar_views3d.hpp>
+#include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
@@ -1215,7 +1216,38 @@ void gpu_probes(Renderer2D& renderer) {
     session.entity("room").get_mut<Transform3D>()->position = {0, 1.5f, 0};
     frame();
     check(captures({0, 1.5f, 0}) == 3, "moving the room's probe did not capture it again");
-    std::cout << "probe session: placed, captured when needed\n";
+    // Baked: every probe captured and written to the content (probes/<authored id>.hdr), its `baked` set; a scene
+    // naming that picture loads it instead of capturing it, and moving it does not capture it again.
+    ReflectionProbes3D baker{r3d, scratch.path};
+    check(baker.bake(*session.world(), *session.scene(), scratch.path), "bake failed");
+    check(std::filesystem::exists(scratch.path / "probes" / "room.hdr") &&
+              session.entity("room").get<ReflectionProbe3D>()->baked.id == "probes/room.hdr",
+          "the room's probe was not baked");
+    write(scratch.path / "baked.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,0.5,0]},"ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"room","components":{"Transform3D":{"position":[0,1,0]},
+        "ReflectionProbe3D":{"extent":[6,3,6],"resolution":32,"baked":"probes/room.hdr"}}}]})");
+    SceneSession3D baked{r3d, assets, options};
+    check(baked.load("baked.kinscene"), "baked scene failed");
+    const auto baked_frame = [&] {
+        renderer.clear();
+        if (!baked.render())
+            for (const auto& e : baked.diagnostics())
+                std::cerr << e << '\n';
+        renderer.present();
+        return r3d.debug_stats();
+    };
+    check(baked_frame().reflection_probes == 1, "the baked probe was not read");
+    const auto& baked_placed = baked.scene()->lights.reflection_probes;
+    check(baked_placed.size() == 1 && baked_placed[0].capture.backend()->generation() == 1,
+          "the baked probe was captured instead of loaded");
+    baked.entity("room").get_mut<Transform3D>()->position = {0, 1.5f, 0};
+    baked_frame();
+    check(baked.scene()->lights.reflection_probes[0].capture.backend()->generation() == 1,
+          "moving a baked probe captured it");
+    std::cout << "probe session: placed, captured when needed, baked\n";
 }
 
 // The same over a game-owned world (SceneFrame3D::collect, no session): the authored SceneEnvironment3D sets the

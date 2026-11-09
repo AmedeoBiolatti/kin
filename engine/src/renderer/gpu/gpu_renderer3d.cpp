@@ -2358,6 +2358,32 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
 
 namespace {
 
+// The float an IEEE half holds.
+f32 from_half(u16 h) {
+    const u32 sign = static_cast<u32>(h >> 15) << 31;
+    const u32 exponent = (h >> 10) & 31u, mantissa = h & 1023u;
+    u32 bits;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else { // subnormal: normalised
+            u32 e = 113, m = mantissa;
+            while (!(m & 1024u)) {
+                m <<= 1;
+                --e;
+            }
+            bits = sign | (e << 23) | ((m & 1023u) << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7F800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    }
+    f32 x;
+    std::memcpy(&x, &bits, sizeof(x));
+    return x;
+}
+
 // An IEEE half of `x` (round to nearest, clamped to what a half holds).
 u16 to_half(f32 x) {
     u32 bits;
@@ -2822,7 +2848,27 @@ std::shared_ptr<IReflectionCaptureBackend3D> GpuRenderer3D::create_reflection_ca
 bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3D& scene, Vec3f position,
                                        const ReflectionCaptureOptions3D& options, RenderDebugStats3D& stats) {
     auto* capture = dynamic_cast<GpuReflectionCapture3D*>(&base);
-    auto* view = capture ? dynamic_cast<GpuView3D*>(capture->view.get()) : nullptr;
+    if (!capture)
+        return false;
+    // A capture loaded from a picture (create_reflection_capture_from) gets its view and faces the first time it is
+    // captured: a face a quarter of its panorama's width.
+    if (!capture->view) {
+        try {
+            const u32 side = std::max(16u, capture->source.width() / 4);
+            ViewOptions3D view_options;
+            view_options.samples = 1;
+            view_options.hdr = true;
+            view_options.background = colors::black;
+            capture->view = create_view({static_cast<i32>(side), static_cast<i32>(side)}, view_options);
+            capture->faces = reflection_texture(*_device, side, side, 6, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            capture->side = side;
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: reflection capture's views not made",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+            return false;
+        }
+    }
+    auto* view = dynamic_cast<GpuView3D*>(capture->view.get());
     if (!view)
         return false;
     // Six square views, 90 degrees each, without the overlay, temporal anti-aliasing (each face would be one jittered
@@ -10750,6 +10796,59 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     view._ssr_prior = ctx.view_projections[0];
     view._ssr_prior_y = ctx.scene.camera.projection_matrix(ctx.aspect).at(1, 1);
     view._ssr_seen = true;
+}
+
+bool GpuRenderer3D::read_reflection_capture(IReflectionCaptureBackend3D& base, std::vector<f32>& rgb, Vec2i& size) {
+    auto* capture = dynamic_cast<GpuReflectionCapture3D*>(&base);
+    if (!capture || !capture->source || capture->captured == 0)
+        return false;
+    // What is recorded so far (the capture's renders among it) goes to the GPU first, as before a pick's read-back.
+    if (_owner->_frame) {
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    const u32 w = capture->source.width(), h = capture->source.height();
+    std::vector<u8> texels;
+    if (!_device->read_texture_region(capture->source, 0, 0, w, h, 8, texels) || texels.size() < std::size_t(w) * h * 8)
+        return false;
+    rgb.resize(std::size_t(w) * h * 3);
+    for (std::size_t i = 0; i < std::size_t(w) * h; ++i)
+        for (std::size_t c = 0; c < 3; ++c) {
+            u16 half;
+            std::memcpy(&half, &texels[i * 8 + c * 2], sizeof(half));
+            rgb[i * 3 + c] = from_half(half);
+        }
+    size = {static_cast<i32>(w), static_cast<i32>(h)};
+    return true;
+}
+
+std::shared_ptr<IReflectionCaptureBackend3D> GpuRenderer3D::create_reflection_capture_from(Vec2i size,
+                                                                                           std::span<const f32> rgb) {
+    if (!_panorama_pipeline || !_filter_pipeline || !_environment_sampler || !_lights_available)
+        return {};
+    try {
+        const u32 w = static_cast<u32>(size.x), h = static_cast<u32>(size.y);
+        auto capture = std::make_shared<GpuReflectionCapture3D>();
+        capture->source = reflection_texture(*_device, w, h, 1, GpuDevice::complete_mip_levels(w, h),
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        std::vector<u16> texels(std::size_t(w) * h * 4);
+        for (std::size_t i = 0; i < std::size_t(w) * h; ++i) {
+            for (std::size_t c = 0; c < 3; ++c)
+                texels[i * 4 + c] = to_half(rgb[i * 3 + c]);
+            texels[i * 4 + 3] = to_half(1.0f);
+        }
+        _device->update_texture(capture->source.handle(), 0, 0, w, h, reinterpret_cast<const u8*>(texels.data()), 8,
+                                true);
+        _device->generate_mipmaps(capture->source.handle());
+        capture->captured = 1; // (as if captured: the renders that use it filter it)
+        return capture;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: reflection capture not loaded",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
 }
 
 void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {

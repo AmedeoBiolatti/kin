@@ -279,6 +279,11 @@ public:
                                     RenderDebugStats3D&) {
         return false;
     }
+    // A capture's panorama read back (linear RGB floats, rows top to bottom), and one made from such a picture (2:1).
+    virtual bool read_reflection_capture(IReflectionCaptureBackend3D&, std::vector<f32>&, Vec2i&) { return false; }
+    virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i, std::span<const f32>) {
+        return {};
+    }
     // Null when the SPIR-V can't be made into a fragment shader.
     virtual std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) = 0;
     // A surface shader from its variants' SPIR-V (SurfaceVariant3D order); null where surface shaders aren't

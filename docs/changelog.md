@@ -47,6 +47,9 @@ releases may change APIs.
 - Reflection probes light what is inside their boxes too (`ReflectionProbeSource3D::diffuse`, the component's
   `diffuse`, on by default): the probe's irradiance, a level more in its layer, in place of the environment's or the
   hemisphere's ambient light (global illumination's probes still win where they reach).
+- Reflection probes baked to disk: `Renderer3D::save_reflection_capture` (a Radiance .hdr panorama) and
+  `load_reflection_capture` (any 2:1 panorama, through the content), the component's `baked` (loaded instead of
+  captured) and `ReflectionProbes3D::bake` (captures and writes every probe, setting `baked`).
 - `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
   authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds

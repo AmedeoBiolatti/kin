@@ -2625,7 +2625,7 @@ bool SceneSession3D::render_operation(f32 alpha) {
     // The reflection probes first: the mirrors' and portals' pictures reflect them too.
     if (state.probes || state.world.raw().count<ReflectionProbe3D>() > 0) {
         if (!state.probes)
-            state.probes = std::make_unique<ReflectionProbes3D>(_data->renderer);
+            state.probes = std::make_unique<ReflectionProbes3D>(_data->renderer, _data->assets.root());
         const auto probes = state.probes->update(state.world, state.scene);
         if (!probes) {
             _data->errors = probes.diagnostics;

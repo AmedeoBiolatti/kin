@@ -147,7 +147,10 @@ void register_render3d_components(EcsWorld& world) {
             .units("m")
             .description("What is nearer to it than this is not in its picture.")
             .field("recapture", &ReflectionProbe3D::recapture)
-            .description("Change it to capture it again.");
+            .description("Change it to capture it again.")
+            .field("baked", &ReflectionProbe3D::baked)
+            .asset_type("ReflectionProbe")
+            .description("Its picture baked (a Radiance .hdr panorama): loaded instead of captured at run time.");
     if (!registry.find("AnimatorAsset3D"))
         registry.native<AnimatorAsset3D>("AnimatorAsset3D")
             .field("asset", &AnimatorAsset3D::asset)

@@ -3,6 +3,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -93,6 +95,7 @@ void test_parallax(Renderer2D& r, Renderer3D& r3d) {
     };
     ReflectionCapture3D capture = r3d.create_reflection_capture(64).value_or({});
     assert(capture);
+    assert(!r3d.save_reflection_capture(capture, std::filesystem::temp_directory_path() / "kin-probe-empty.hdr"));
     Scene3D scene;
     room(scene);
     assert(r3d.capture_reflection(capture, scene, {0, 1, 0}));
@@ -136,6 +139,25 @@ void test_parallax(Renderer2D& r, Renderer3D& r3d) {
     std::cout << "probes: infinite " << infinite.r << " " << infinite.g << " " << infinite.b << "\n";
     assert(infinite.r < 140 && std::abs(infinite.r - infinite.g) < 30); // the grey ceiling
     std::cout << "probes: parallax\n";
+    // Baked: the capture written as a Radiance .hdr panorama and loaded back reads the same (the red patch where the
+    // parallax puts it), without a capture.
+    const auto file = std::filesystem::temp_directory_path() / "kin-probe-room.hdr";
+    assert(r3d.save_reflection_capture(capture, file));
+    {
+        std::ifstream in(file, std::ios::binary);
+        std::string head(10, '\0');
+        assert(in.read(head.data(), 10) && head == "#?RADIANCE");
+    }
+    ReflectionCapture3D loaded = r3d.load_reflection_capture(file).value_or({});
+    assert(loaded && loaded.backend()->generation() == 1);
+    capture = loaded;
+    const auto [baked, unused_baked, third] = frame(true);
+    std::cerr << "probes: baked " << baked.r << " " << baked.g << " " << baked.b << "\n";
+    assert(third.reflection_filters == 1 && baked.r > 150 && baked.g < 80);
+    // A missing picture is refused.
+    assert(!r3d.load_reflection_capture(std::filesystem::temp_directory_path() / "kin-probe-missing.hdr"));
+    std::filesystem::remove(file);
+    std::cout << "probes: baked to disk\n";
 }
 
 // Camera3D::hidden_id: the copies with that pick id are not drawn by the camera (a shiny thing in its own probe's

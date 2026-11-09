@@ -2,6 +2,7 @@
 // A world's reflection probes (the ReflectionProbe3D component, kin/ecs/render3d.hpp): captured when they need it and
 // placed in the scene's lights (Lights3D::reflection_probes), each frame, after the scene is composed and before the
 // pictures that read it (SceneSession3D does it; a game that renders scene() itself runs one).
+#include <filesystem>
 #include <kin/ecs/world.hpp>
 #include <kin/render3d/errors3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -11,7 +12,8 @@ namespace kin {
 
 class ReflectionProbes3D {
 public:
-    explicit ReflectionProbes3D(Renderer3D& renderer);
+    // `content`: where baked pictures' paths (ReflectionProbe3D::baked) start (empty: as given).
+    explicit ReflectionProbes3D(Renderer3D& renderer, std::filesystem::path content = {});
     ~ReflectionProbes3D();
     ReflectionProbes3D(ReflectionProbes3D&&) noexcept;
     ReflectionProbes3D& operator=(ReflectionProbes3D&&) noexcept;
@@ -20,6 +22,11 @@ public:
     // moved, resized, `recapture` changed, their `interval` past by Scene3D::time, or `every_frame`). The captures are
     // six renders each of `scene` as it is (its camera put back after).
     Status3D update(EcsWorld& world, Scene3D& scene);
+    // Captures every enabled probe of `world` now (each seeing the others as they stand) and writes its picture to
+    // `content` / `folder` / <its entity's authored id, name or id>.hdr, setting its `baked` to that path in the
+    // content (save the scene to keep it). The probes then load those pictures instead of capturing at run time.
+    Status3D bake(EcsWorld& world, Scene3D& scene, const std::filesystem::path& content,
+                  const std::filesystem::path& folder = "probes");
     // The probes the last update placed and the captures it made.
     u32 probes() const;
     u32 captures() const;
