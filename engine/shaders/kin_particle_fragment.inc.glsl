@@ -96,12 +96,13 @@ void main() {
     }
     if (frag.flags.x > 0.5) {
         // Encoded straight, as the meshes are: encode(colour) times alpha. Premultiplied colour is taken back to
-        // straight.
-        if (alpha > 1e-4) {
-            colour = encode(colour / alpha) * alpha;
-        } else {
-            colour = encode(colour);
-        }
+        // straight. (Compressed first: ViewOptions3D::compress.)
+        vec3 straight = alpha > 1e-4 ? colour / alpha : colour;
+        if (frag.flags.x > 1.5)
+            straight = straight / (1.0 + max(straight, vec3(0.0)));
+        if (frag.flags.x < 2.5)
+            straight = encode(straight);
+        colour = alpha > 1e-4 ? straight * alpha : straight;
     }
     FragColor = vec4(colour, frag.flags.z > 0.5 && frag.flags.z < 1.5 ? 0.0 : alpha);
 #ifdef KIN_REACTIVE

@@ -268,10 +268,11 @@ void test_ssr(Renderer2D& r, Renderer3D& r3d) {
                   << turned.b << "\n";
         assert(turned_traces == 1 && turned.r < turned.g + 40);
         // A mild one (8 degrees toward the tangent): the reflection turns about 16 and its hit, about 1.3 away, moves
-        // about 0.36. The floor's points whose flat reflections meet the box's face 0.05 in from its sides, top and
-        // bottom (the face's points mirrored under the floor, the lines to them from the eye crossing it): flat, all
-        // red; bumped, some now pass beside, over or under the box (which, by the tangent's way).
-        probe_points = {{-0.3f, 0, 5.0f / 3.0f}, {0.3f, 0, 5.0f / 3.0f}, {0, 0, 2.205f}, {0, 0, 0.667f}};
+        // about 0.36. The floor's points whose flat reflections meet the box's face 0.05 in from its sides and bottom
+        // and 0.1 in from its top (the face's points mirrored under the floor, the lines to them from the eye crossing
+        // it; the top's 0.05 is under a pixel of this view from its edge, which a trace a texel a pixel can miss):
+        // flat, all red; bumped, some now pass beside, over or under the box (which, by the tangent's way).
+        probe_points = {{-0.3f, 0, 5.0f / 3.0f}, {0.3f, 0, 5.0f / 3.0f}, {0, 0, 2.158f}, {0, 0, 0.667f}};
         const auto red = [](Rgb c) { return c.r > c.g + 80; };
         (void)frame(true);
         (void)frame(true);

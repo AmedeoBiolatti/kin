@@ -278,6 +278,9 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     // would tonemap the reflection again. In linear light, clamped at white, the view tonemaps it once.
     options.hdr = false;
     options.exposure = 1;
+    // And what is past white kept (x / (1 + x)): a sun glint in a mirror or through a portal stays as bright as the
+    // view would show it (it was cut to white, then tonemapped grey, and did not bloom).
+    options.compress = true;
 
     struct Mirror {
         EcsId id;
@@ -436,7 +439,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 m.real.surface = d.surfaces.reflection;
                 m.real.emissive_texture = m.view->texture();
                 planar_view_params(m.real.shader_params, m.seen.projector, c.distortion,
-                                   std::clamp(c.strength, 0.0f, 1.0f), Data::part_of(*m.view));
+                                   std::clamp(c.strength, 0.0f, 1.0f), Data::part_of(*m.view), true);
                 // Water you see into: what is below the surface, in a picture of the same place, in its base colour
                 // map. Its murk is a height fog thickening fast under the surface (level water: its base height the
                 // surface's), about two thirds gone looking straight down `murk_depth` deep.
@@ -447,7 +450,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                     crop_planar_view(m.below, picture.window, f32(picture.size.x) / f32(picture.size.y), false);
                     m.real.texture = m.below_view->texture();
                     planar_refraction_params(m.real.shader_params, m.below.projector, c.refraction_distortion,
-                                             std::clamp(c.refraction, 0.0f, 1.0f), Data::part_of(*m.below_view));
+                                             std::clamp(c.refraction, 0.0f, 1.0f), Data::part_of(*m.below_view), true);
                     const f32 k = 3.0f / std::max(c.murk_depth, 0.01f);
                     m.murk = Fog3D{.enabled = true,
                                    .height_density = k / (std::exp(3.0f) - 1.0f),
@@ -508,7 +511,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
             level.color = colors::white;
             level.surface = d.surfaces.window;
             level.emissive_texture = p.views[k]->texture();
-            planar_view_params(level.shader_params, p.chain[k].projector, 0.0f, 1.0f, Data::part_of(*p.views[k]));
+            planar_view_params(level.shader_params, p.chain[k].projector, 0.0f, 1.0f, Data::part_of(*p.views[k]), true);
             p.levels.push_back(std::move(level));
         }
         // A box behind the opening, so that a camera a little way into it still sees through.
@@ -548,7 +551,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 shown.color = colors::white;
                 shown.surface = d.surfaces.window;
                 shown.emissive_texture = view->texture();
-                planar_view_params(shown.shader_params, level.projector, 0.0f, 1.0f, Data::part_of(*view));
+                planar_view_params(shown.shader_params, level.projector, 0.0f, 1.0f, Data::part_of(*view), true);
                 m.through.push_back({i, view, level.camera, std::move(shown)});
             }
         }

@@ -261,28 +261,38 @@ void put_clip(f32 (&clip)[4], const Camera3D& camera) {
 // Where the screen-space reflections' buffer keeps what: the trace's grid (half the view's size, three words a texel),
 // then the previous frame's picture as a pyramid from the grid's size down (each level half the one before, at most
 // six), two words a texel.
+// The shaders' output flag (FrameUniforms flags.x): 0 as it is, 1 sRGB-encoded (a gamma target), 2 compressed
+// (ViewOptions3D::compress: x / (1 + x)) then encoded, 3 compressed only.
+f32 output_flag(bool encode, bool compress) {
+    return compress ? (encode ? 2.0f : 3.0f) : (encode ? 1.0f : 0.0f);
+}
 struct SsrLayout {
-    u32 w = 1, h = 1, levels = 0, pyramid_word = 0, words = 0;
+    u32 w = 1, h = 1;   // the trace's grid: a texel a pixel of the part rendered
+    u32 pw = 1, ph = 1; // the pyramid's level 0: half that
+    u32 levels = 0, pyramid_word = 0, words = 0;
 };
-// The reflections' buffer for a view `size` rendering `part` of it (View3D::set_render_size): the trace's half-size
-// grid and the pyramid's levels are the part's, where they sit and the buffer's words the whole's, so that a pyramid
-// kept one frame is where the next reads it whatever part that one renders (it reads it at the grid it was kept at).
+// The reflections' buffer for a view `size` rendering `part` of it (View3D::set_render_size): the trace's grid (a texel
+// a pixel: a half-size one stepped every reflected edge in twos) and the pyramid's levels (from half the part: it is
+// read blurred) are the part's, where they sit and the buffer's words the whole's, so that a pyramid kept one frame is
+// where the next reads it whatever part that one renders (it reads it at the grid it was kept at).
 SsrLayout ssr_layout(Vec2i size, Vec2i part) {
+    const auto whole = [](i32 v) { return std::max(1u, static_cast<u32>(v)); };
     const auto half = [](i32 v) { return std::max(1u, (static_cast<u32>(v) + 1) / 2); };
     SsrLayout l;
-    l.w = half(std::min(part.x, size.x));
-    l.h = half(std::min(part.y, size.y));
-    const u32 whole_w = half(size.x), whole_h = half(size.y);
-    l.pyramid_word = whole_w * whole_h * 3;
+    l.w = whole(std::min(part.x, size.x));
+    l.h = whole(std::min(part.y, size.y));
+    l.pw = half(std::min(part.x, size.x));
+    l.ph = half(std::min(part.y, size.y));
+    l.pyramid_word = whole(size.x) * whole(size.y) * 3;
     l.words = l.pyramid_word;
-    for (u32 w = whole_w, h = whole_h, levels = 0; levels < 6; ++levels) {
+    for (u32 w = half(size.x), h = half(size.y), levels = 0; levels < 6; ++levels) {
         l.words += w * h * 2;
         if (w == 1 && h == 1)
             break;
         w = std::max(1u, w / 2);
         h = std::max(1u, h / 2);
     }
-    for (u32 w = l.w, h = l.h; l.levels < 6;) {
+    for (u32 w = l.pw, h = l.ph; l.levels < 6;) {
         ++l.levels;
         if (w == 1 && h == 1)
             break;
@@ -5717,7 +5727,9 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         ParticleFragUniforms f{};
         const LinearRgb tint = mix(LinearRgb{1.0f, 1.0f, 1.0f}, light_tint, std::clamp(look.lit, 0.0f, 1.0f));
         put_color(f.tint, tint, reactive && (receive || lit_locally) ? (ctx.shadow_changed ? 1.f : 0.f) : 1.f);
-        put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, static_cast<f32>(static_cast<u32>(look.blend))},
+        put(f.flags,
+            {output_flag(encode, ctx.view->_options.compress && !ctx.view->_hdr), decode ? 1.0f : 0.0f,
+             static_cast<f32>(static_cast<u32>(look.blend))},
             textured ? 1.0f : 0.0f);
         put(f.disc, {look.softness, look.ring, soft ? look.soft_distance : 0.0f},
             receive ? std::clamp(look.lit, 0.0f, 1.0f) : 0.0f);
@@ -10666,7 +10678,9 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     put_color(f.fill_color, fill ? lights.fill.color : LinearRgb{}, 0.0f);
     const bool lit_by_sun_shadow = ctx.shadows && s == 0;
     const std::size_t points = std::min<std::size_t>(ctx.chosen.size(), max_lights);
-    put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, lit_by_sun_shadow ? 1.0f : 0.0f},
+    put(f.flags,
+        {output_flag(encode, view->_options.compress && !view->_hdr), decode ? 1.0f : 0.0f,
+         lit_by_sun_shadow ? 1.0f : 0.0f},
         static_cast<f32>(points));
     // The light grid lights the scene's own pass (the overlay's lights are carried into its space: its fixed blocks).
     if (s == 0 && ctx.grid_cells > 0) {
@@ -10831,7 +10845,7 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     SDL_GPUCommandBuffer* commands = ctx.commands;
     const PassMarker marker{commands, _gpu_markers, "kin3d.ssr_picture"};
     // Level 0 from the picture, each level after from the one before: a pass each (each reads the one before's writes).
-    u32 w = layout.w, h = layout.h, first = layout.pyramid_word, before = first, bw = w, bh = h;
+    u32 w = layout.pw, h = layout.ph, first = layout.pyramid_word, before = first, bw = w, bh = h;
     for (u32 level = 0; level < layout.levels; ++level) {
         const SDL_GPUStorageBufferReadWriteBinding output{.buffer = view._ssr_buffer->handle()};
         SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &output, 1);
@@ -10850,7 +10864,7 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
                                 encoded ? 1.0f : 0.0f,
                                 share_x,
                                 share_y,
-                                0.0f,
+                                view._options.compress && !view._hdr && !ctx.taa ? 1.0f : 0.0f,
                                 0.0f};
         SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
         SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
@@ -10864,7 +10878,7 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     }
     view._ssr_prior = ctx.view_projections[0];
     view._ssr_prior_y = ctx.scene.camera.projection_matrix(ctx.aspect).at(1, 1);
-    view._ssr_prior_grid = {static_cast<i32>(layout.w), static_cast<i32>(layout.h)};
+    view._ssr_prior_grid = {static_cast<i32>(layout.pw), static_cast<i32>(layout.ph)};
     view._ssr_prior_levels = layout.levels;
     view._ssr_seen = true;
 }

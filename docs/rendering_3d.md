@@ -595,7 +595,9 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   bright: sampled at one pixel and missed at the next as the eye moves, it
   flickers, and bloom makes the flicker a blob changing size. The atrium's
   chrome ball, circled: its highlight's saturated pixels went 505 to 762 frame
-  to frame; now 747 to 761. Rougher surfaces are as before.
+  to frame; now 747 to 761. Rougher surfaces are as before. The point and spot
+  lights alike: a light `size` across, `d` away, spans size / d, and its
+  highlight is never sharper (a lamp on rippled water, a glossy ring far off).
 - `Scene3D::specular_multiscatter` (on by default): the light a rough
   specular surface reflects more than once among its microfacets, which single
   scattering leaves out, put back (Fdez-Aguera's fit, in the lights' highlights
@@ -2755,7 +2757,7 @@ every probe, writes `probes/<authored id>.hdr` and sets their `baked` (save the 
 
 ## Screen-space reflections
 
-`scene.ssr.enabled` traces each pixel's mirror reflection through the depth pre-pass (on a grid half the view's size)
+`scene.ssr.enabled` traces each pixel's mirror reflection through the depth pre-pass
 and reads what it meets from the previous frame's picture: a polished floor shows the columns standing on it, a wet
 road the cars, where they are on the screen. They take over from the reflection probes and the environment where the
 trace finds something; a mirror's or a portal's picture still wins where it shows.
@@ -2768,14 +2770,15 @@ scene.ssr.max_distance = 40.0f; // how far a ray goes
 scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refinement
 ```
 
-- **How.** A compute pass after the pre-pass (which runs for it) marches each grid texel's reflected ray, its steps
-  growing with the distance, through the pre-pass's depth; where the ray passes behind what it holds by less than the
-  thickness it has hit, and five halvings find where. It keeps how far the hit is, not its colour. After each frame's
+- **How.** A compute pass after the pre-pass (which runs for it) marches each pixel's reflected ray (a texel a pixel: a
+  half-size grid stepped every reflected edge in twos), its steps growing with the distance, through the pre-pass's
+  depth; where the ray passes behind what it holds by less than the thickness, or crosses it between two steps (a ray
+  along a surface), it has hit, five halvings find where, and the hit counts if that point is on the surface. It keeps
+  how far the hit is, not its colour. After each frame's
   temporal resolve the frame's picture is kept as a pyramid (half size, then each level half the one before; linear,
   or decoded where the view's output is sRGB) in the same buffer. The main pass's stock lit shaders take the hit
-  distance of the grid texels round each pixel that traced its own surface (by their depth: glass and the overlay, not
-  in the pre-pass, get none), follow the fragment's own reflection (its normal map's) that far, and read the previous
-  picture there at the pyramid level as wide as the reflection's lobe is at that distance: a rough surface reflects a
+  distance its pixel traced, if it traced its own surface (by its depth: glass and the overlay, not in the pre-pass,
+  get none), follow the fragment's own reflection (its normal map's) that far, and read the previous picture there at the pyramid level as wide as the reflection's lobe is at that distance: a rough surface reflects a
   blurred picture. With temporal anti-aliasing each pixel starts its march at a different point (averaged over
   frames); without, all start alike (no noise, some banding).
 - **Where they fade.** Toward the screen's edges, toward the end of the rays, for rays that come back toward the camera
@@ -2783,8 +2786,8 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
   across the screen (a small curved thing: its neighbours' hits are not its own), where the normal map turns the
   reflection more than about 20 degrees from the face's own (the hit's distance was found along that one), and wherever
   a thing's own reflection probe (one without parallax, captured from its centre: a chrome ball) reflects it.
-- **Costs.** About 0.2 to 0.25 ms of the GPU at 1280 x 720 (RTX 4080 Laptop), the pre-pass it needs included; a buffer
-  a view of 12 bytes a grid texel plus about 11 for the picture's pyramid.
+- **Costs.** About 0.3 to 0.45 ms of the GPU at 1280 x 720 (RTX 4080 Laptop), the pre-pass it needs included (the
+  half-size trace was 0.1 to 0.2 ms less); a buffer a view of 12 bytes a pixel plus about 3 for the picture's pyramid.
 - **Limits.** Only what is on screen, as last frame showed it (what just appeared reflects a frame late; what is off
   screen is the probes'). A normal map's detail is followed with the face's hit distance: close for bumps, off for steep
   ones (which fade to the probes). The stock lit shaders, material graphs and surfaces (the light variants: a scene
@@ -2815,6 +2818,11 @@ whose size changes from frame to frame (a mirror's: where it shows) is then draw
 large as the largest, without resizing the view (making all its targets again) every few frames; it is the picture a
 view of that size would show. Whoever draws `view.texture()` reads the picture from UV (0, 0) to
 `render_size() / size()` (the planar surfaces do: `planar_view_params`' `share`).
+
+`compress` (for a view that is not `hdr`) keeps the light as x / (1 + x) in the picture, each channel, so that what is
+past white (a sun glint, a lamp) survives an 8-bit picture for a reader that takes it back, x / (1 - x): kin's planar
+views' pictures are compressed, and the planar surfaces read them back, so a glint in a mirror or through a portal is as
+bright as the view seeing it would show it (and blooms there), not cut to white and tonemapped to grey.
 
 `hdr` draws into a float picture that keeps light past white, then exposes
 and tonemaps it (ACES: brights roll off, the darkest tones darken a little)

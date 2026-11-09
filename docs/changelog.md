@@ -76,8 +76,16 @@ releases may change APIs.
   reads in it; water's own colour no longer comes from its refraction picture.
 - A portal seen in a mirror (or in water) shows what is beyond it: PlanarViews3D renders it a picture from the mirror's
   camera through the portal and draws it on the portal in the mirror's picture (it showed its stand-in colour).
-- The sun's highlight is the size of its disc (the specular lobe's alpha at least its angular radius): a chrome
-  surface's highlight no longer flickers as the eye moves.
+- The sun's highlight is the size of its disc (the specular lobe's alpha at least its angular radius), and a point or
+  spot light's the size it spans (`size` over its distance): a chrome or rippled surface's highlights no longer
+  flicker as the eye or the light moves.
+- Screen-space reflections trace a texel a pixel (a half-size grid stepped every reflected edge in twos, plainly so in
+  a large window), a ray crossing a surface between two steps counts (once its point is checked on the surface), and
+  the reflections' pyramid stays half size. About 0.1 to 0.2 ms more at 1280 x 720.
+- `ViewOptions3D::compress`: a view that is not HDR keeps its light as x / (1 + x), so that what is past white survives
+  an 8-bit picture; planar views' pictures use it and their surfaces take it back (`planar_view_params` /
+  `planar_refraction_params` `compressed`): a sun glint seen in a mirror or through a portal is as bright as seen
+  directly (it was cut to white, then tonemapped grey).
 - planar_atrium: the brass ring's patina and brushing turn with it (its own graph, the pattern from the ring's rest
   position: it was in world space, so the ring turned through it); both portal lights are the trims' teal (walking
   through, the light went from teal to magenta).

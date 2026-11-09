@@ -1,5 +1,5 @@
 #version 450 core
-// kin's screen-space reflections (Scene3D::ssr): from each texel of a half-size grid over the view, the mirror
+// kin's screen-space reflections (Scene3D::ssr): from each pixel of the view, the mirror
 // reflection of the pre-pass's surface there, marched through the pre-pass's depth. The march's steps grow with the
 // distance (finer near the surface, where most hits are); where the ray
 // passes behind what the depth holds, by less than the thickness, it has hit, and a few halvings find where (the start
@@ -21,7 +21,7 @@ layout(set = 2, binding = 0) uniform Params {
     // The inverse projection, without its zeroes (as in gtao.comp).
     vec4 unproject_xy; // a, b, c, d
     vec4 unproject_zw; // e, f, g, h
-    vec4 sizes;        // xy: the grid's (half the view's), zw: the depth's
+    vec4 sizes;        // xy: the grid's (the view's part rendered), zw: the depth's
     vec4 shape;        // x: thickness, y: the farthest a ray goes, z: steps, w: intensity
     vec4 colour;       // z: 1 to start each pixel's march at a different point (temporal anti-aliasing averages it)
 } params;
@@ -53,7 +53,7 @@ void main() {
     }
     const uint at = uint(xy.y * size.x + xy.x);
     const ivec2 full = ivec2(params.sizes.zw);
-    const ivec2 pixel = min(xy * 2, full - 1);
+    const ivec2 pixel = min(xy, full - 1);
     const float depth = texelFetch(uDepth, pixel, 0).r;
     if (depth <= 0.0) {
         write(at, 0.0, 0.0, 0.0);
@@ -76,7 +76,10 @@ void main() {
     const float far = params.shape.y;
     const int steps = int(params.shape.z);
     const float jitter = params.colour.z > 0.5 ? noise(vec2(xy)) : 0.5;
+    // A step behind what the depth holds by less than the thickness has hit; so has one that was in front the step
+    // before (a ray along a surface, crossing it between two long steps: checked once found).
     float before = 0.0, hit = -1.0;
+    bool front = true;
     for (int i = 1; i <= steps; ++i) {
         const float s = (float(i) - 1.0 + jitter) / float(steps);
         const float t = s * s * far;
@@ -85,13 +88,12 @@ void main() {
         if (at_screen.z <= 1e-4 || any(lessThan(at_screen.xy, vec2(0.0))) || any(greaterThanEqual(at_screen.xy, vec2(1.0))))
             break; // behind the camera, or off the screen: nothing known
         const float scene = texelFetch(uDepth, min(ivec2(at_screen.xy * params.sizes.zw), full - 1), 0).r;
-        if (scene > 0.0) {
-            const float behind = view_z(scene) - q.z; // how far the ray is behind the surface there
-            if (behind > 0.0 && behind < thickness + t * 0.02) {
-                hit = t;
-                break;
-            }
+        const float behind = scene > 0.0 ? view_z(scene) - q.z : -1.0; // how far the ray is behind the surface there
+        if (behind > 0.0 && (behind < thickness + t * 0.02 || front)) {
+            hit = t;
+            break;
         }
+        front = behind <= 0.0;
         before = t;
     }
     if (hit < 0.0) {
@@ -112,7 +114,8 @@ void main() {
     const vec3 found = to_screen(start + r * hi);
     const ivec2 hit_pixel = min(ivec2(found.xy * params.sizes.zw), full - 1);
     const float hit_depth = texelFetch(uDepth, hit_pixel, 0).r;
-    if (hit_depth <= 0.0) {
+    // (On the surface there: a ray that went behind a thin thing, from in front of it to far behind, did not meet it.)
+    if (hit_depth <= 0.0 || view_z(hit_depth) - (start + r * hi).z > thickness + hi * 0.02) {
         write(at, 0.0, 0.0, -p.z);
         return;
     }

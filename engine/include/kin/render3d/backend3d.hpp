@@ -102,6 +102,10 @@ struct ViewOptions3D {
     // What is under each pixel kept too (Renderer3D::pick): one more pass
     // over the scene's opaque meshes.
     bool pick = false;
+    // Without `hdr`: the light kept as x / (1 + x) (Reinhard's, each channel) in the picture, so that what is past
+    // white (a sun glint, a lamp) survives an 8-bit picture, for a reader that takes it back (x / (1 - x)): kin's
+    // planar views' pictures (a mirror's, a portal's), which the view seeing them tonemaps (and blooms) as its own.
+    bool compress = false;
 };
 
 // Single-sample data attachments. Depth is reverse Z (0 background/far, 1 near),
