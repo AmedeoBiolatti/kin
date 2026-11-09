@@ -341,7 +341,14 @@ private:
     SDL_GPUTextureFormat _output_format = SDL_GPU_TEXTUREFORMAT_INVALID; // the 2D pipeline's, followed
     GpuTexture _colour; // multisampled; empty with one sample (drawn into the resolved one)
     GpuTexture _depth;
-    GpuTexture _scene;             // HDR: the resolved float picture
+    GpuTexture _scene; // HDR: the resolved float picture
+    // Screen-space reflections (ssr_trace): the half-size grid's results (three words a texel), the previous frame's
+    // picture (half size, linear, mipmapped) and the camera it was seen with (unjittered); `_ssr_seen` when it holds
+    // one.
+    std::shared_ptr<GpuBuffer> _ssr_buffer;
+    GpuTexture _ssr_colour;
+    Mat4f _ssr_prior{};
+    bool _ssr_seen = false, _ssr_encoded = false;
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
     // ViewOptions3D::auto_exposure: the histogram and the adapted exposure (exposure_histogram/adapt.comp), whether it
     // holds a metered exposure yet, and the clocks the time between renders is measured with.
@@ -833,6 +840,10 @@ private:
     // copied, the layers after it the probes' chosen this render, each filtered when its capture changed; their records
     // in ctx (push_frame_uniforms). Nothing without an environment or probes.
     void prepare_reflections(FrameCtx& ctx);
+    // Screen-space reflections: the trace (after the pre-pass, its compute with the others), and the copy of the
+    // frame's lit picture the next frame's trace reads (after the temporal resolve).
+    bool ssr_trace(FrameCtx& ctx);
+    void ssr_keep_picture(FrameCtx& ctx);
     // G5, global illumination (gpu_gi3d.cpp). make_gi: the GI scene's pipelines, with the renderer (where the device
     // cannot, absent and RendererCapabilities3D::global_illumination false). gi_scene: the view's GI scene for `scene`,
     // built (compute passes into `commands`) when it has none or what it is made of changed; true when the view has one
@@ -1228,6 +1239,8 @@ private:
     SDL_GPUSampler* _environment_sampler = nullptr;       // wraps round, clamps at the poles, mipmapped
     SDL_GPUComputePipeline* _filter_pipeline = nullptr;   // env_filter.comp
     SDL_GPUComputePipeline* _panorama_pipeline = nullptr; // probe_panorama.comp
+    SDL_GPUComputePipeline* _ssr_pipeline = nullptr;      // ssr_trace.comp
+    std::shared_ptr<GpuBuffer> _ssr_dummy;                // bound where a light variant reads no reflections
     // The reflection array (prepare_reflections): equirectangular layers the environment's specular size (or 256 x
     // 128 without one), a level a roughness; layer 0 the environment's, then one a probe. What each holds.
     GpuTexture _reflections;

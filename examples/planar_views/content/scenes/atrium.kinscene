@@ -53,7 +53,8 @@
      "fog_enabled": true,
      "fog_density": 0.0025,
      "fog_color_from_sky": true,
-     "anisotropy": 8
+     "anisotropy": 8,
+     "ssr_enabled": true
     }
    }
   },

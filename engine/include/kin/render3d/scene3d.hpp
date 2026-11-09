@@ -546,6 +546,20 @@ struct ContactShadows3D {
 // A camera cut should call View3D::reset_history(). Moving meshes are matched
 // from one frame to the next by draw order or MeshInstance3D::id: see
 // docs/rendering_3d.md for how, and what it cannot do.
+// Screen-space reflections (docs/rendering_3d.md, "Screen-space reflections"): each pixel's mirror reflection traced
+// against the depth pre-pass (half size), its colour read from the previous frame's picture. A glossy surface reflects
+// what is on screen where the trace finds it, in place of the reflection probes' or the environment's, fading out
+// toward the screen's edges, where the trace misses, and as it roughens (to `max_roughness`); a mirror's or portal's
+// picture still wins. The stock lit shaders only; off on WebGL2. The pre-pass runs for it.
+struct ScreenSpaceReflections3D {
+    bool enabled = false;
+    f32 max_roughness = 0.5f; // none on rougher surfaces (they keep the probes' or the environment's)
+    f32 thickness = 0.3f;     // how deep (world units) what the pre-pass sees is taken to be, behind its front
+    f32 max_distance = 40.0f; // how far (world units) a ray goes
+    u32 steps = 48;           // marching steps a ray (8 to 128), then a refinement
+    f32 intensity = 1.0f;
+};
+
 struct TemporalAA3D {
     bool enabled = false;
     f32 blend = 0.9f; // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
@@ -790,6 +804,7 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    ScreenSpaceReflections3D ssr{};
     // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
     // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
     f32 time = 0.0f;

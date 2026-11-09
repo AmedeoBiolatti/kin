@@ -1166,7 +1166,7 @@ void gpu_probes(Renderer2D& renderer) {
     std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
     write(scratch.path / "probes.kinscene", R"({"schema":"kin.scene/1","entities":[
       {"id":"camera","components":{"Transform3D":{"position":[0,1,6]},"SceneCamera3D":{"fov":60}}},
-      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"ssr_enabled":true,"ssr_steps":24}}},
       {"id":"box","components":{"Transform3D":{"position":[0,0.5,0]},"ModelRenderer3D":{"asset":"parts.glb"}}},
       {"id":"room","components":{"Transform3D":{"position":[0,1,0]},
         "ReflectionProbe3D":{"extent":[6,3,6],"resolution":32}}},
@@ -1202,9 +1202,12 @@ void gpu_probes(Renderer2D& renderer) {
     const auto captures = [&](Vec3f at) { return probe(at).capture.backend()->generation(); };
     check(probe({0, 1, 0}).extent == Vec3f{6, 3, 6}, "the room's probe's box is not its entity's");
     check(first.reflection_probes == 2, "the render did not read both probes");
+    // The authored screen-space reflections: traced from the second frame (the first keeps a picture to read).
+    check(session.scene()->ssr.enabled && session.scene()->ssr.steps == 24, "ssr settings were not applied");
+    check(first.ssr_traces == 0, "screen-space reflections traced without a picture to read");
     check(captures({0, 1, 0}) == 1 && captures({2, 1, 0}) == 1, "the probes were not captured once");
     // The room's again only when asked or moved; the shiny one's every frame.
-    frame();
+    check(frame().ssr_traces == 1, "screen-space reflections were not traced");
     check(captures({0, 1, 0}) == 1 && captures({2, 1, 0}) == 2, "the probes were captured at the wrong times");
     session.entity("room").get_mut<ReflectionProbe3D>()->recapture = 1;
     frame();

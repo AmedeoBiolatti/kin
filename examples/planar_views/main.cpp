@@ -50,6 +50,7 @@ struct Options {
     int bench = 0;      // frames to time (0: none)
     bool planar = true; // render the planar views
     bool probes = true; // the reflection probes: the courtyard's, and the chrome ball's own
+    bool ssr = true;    // screen-space reflections
     u32 depth = 3;      // a portal's levels: portals seen through portals
 };
 
@@ -440,6 +441,7 @@ private:
     // arches and surfaces, and things to see in them; the planar surfaces drawn with the materials given.
     void compose(const Material3D& mirror, const Material3D& water, std::array<const Material3D*, 2> portals) {
         _scene.clear();
+        _scene.ssr.enabled = _o.ssr;
         const auto draw = [&](const Mesh3D& m, const Mat4f& at, const Material3D& material) {
             (void)_scene.draw(m, at, material);
         };
@@ -577,6 +579,8 @@ int main(int argc, char** argv) {
                 o.planar = value() != "off";
             else if (a == "--probes")
                 o.probes = value() != "off";
+            else if (a == "--ssr")
+                o.ssr = value() != "off";
             else if (a == "--depth")
                 o.depth = u32(std::clamp(std::stoi(value()), 1, 8));
             else

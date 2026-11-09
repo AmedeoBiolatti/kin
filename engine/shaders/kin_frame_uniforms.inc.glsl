@@ -37,4 +37,6 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     // box's half extents and blend; the parallax box's half extents (0: none) and the intensity; where it was
     // captured and its layer of uEnvSpecular.
     vec4 probe[16 * 6];
+    vec4 ssr;           // screen-space reflections (Scene3D::ssr): x: 1 when this pass reads them, yz: their grid's
+                        // size (half the view's), w: the roughness past which there are none
 } frame;
