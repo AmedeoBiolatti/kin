@@ -82,22 +82,30 @@ sudo apt-get install build-essential cmake ninja-build pkg-config \
     libdbus-1-dev libudev-dev libibus-1.0-dev
 ```
 
-Configure, build, and test:
+Configure a development build and build the sample you want to run:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure -j 8
+cmake --preset dev
+cmake --build --preset dev --target hex_demo
 ```
 
 On Windows, run these from a Visual Studio developer prompt. Executables land in
-`build/bin/` (`build/bin/Release/` with multi-config generators). To run the
+`out/build/dev/bin/`. To run the
 tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 `SDL_AUDIO_DRIVER=dummy`.
 
-For the edit/build/run loop, use `cmake --preset dev` (or `dev-3d`) and
-`cmake --build --preset dev --target hex_demo`. These enable precompiled
-headers and optional compiler-cache discovery. See [faster development builds](docs/build_times.md)
+The `dev` and `dev-3d` presets enable precompiled headers, optional
+compiler-cache discovery and on-demand targets in
+`out/build/<preset>/`. Tests, games and tools build only when requested (or needed
+as dependencies). For a focused test run:
+
+```sh
+cmake --build --preset dev --target kin_scene_tests
+ctest --preset dev -R '^kin-scene$'
+```
+
+Reuse one compatible build per worktree. See [testing](docs/testing.md) for full
+validation and [faster development builds](docs/build_times.md)
 for games using Kin as a subproject, cache setup, and measurements.
 On Linux, `dev-clang` and `dev-3d-clang` offer the same settings with Clang.
 
@@ -107,6 +115,7 @@ On Linux, `dev-clang` and `dev-3d-clang` offer the same settings with Clang.
 | `KIN_BUILD_EXAMPLES` | top-level only | Performance examples in `examples/` |
 | `KIN_BUILD_BENCHMARKS` | top-level only | `kin_bench` and other benchmark runners |
 | `KIN_BUILD_TESTS` | top-level only | Engine tests (with `BUILD_TESTING`) |
+| `KIN_BUILD_ON_DEMAND` | `OFF` (`ON` in development presets) | Keep tools, samples and tests out of the default build; request their targets explicitly |
 | `KIN_SHIPPING` | `OFF` | A build to give to players ([docs/shipping.md](docs/shipping.md)); the `ship` preset sets it, which turns off release profiling, the render probe, the determinism check and the agent server |
 | `KIN_ENABLE_PROFILING` | `OFF` | Manual profiling macros ([docs/profiling.md](docs/profiling.md)) |
 | `KIN_ENABLE_RELEASE_PROFILING` | `ON` | Profiling macros in Release builds |
@@ -138,7 +147,8 @@ On Linux, `dev-clang` and `dev-3d-clang` offer the same settings with Clang.
 Try the agent interface on a demo:
 
 ```sh
-./build/bin/ecs_systems_demo --headless --frames=120 --seed=7 --report=-
+cmake --build --preset dev --target ecs_systems_demo
+./out/build/dev/bin/ecs_systems_demo --headless --frames=120 --seed=7 --report=-
 ```
 
 ## Using kin in a game

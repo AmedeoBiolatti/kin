@@ -8,9 +8,10 @@
   "configurePresets": [
     {
       "name": "dev",
-      "displayName": "Development: 2D, precompiled headers and optional compiler cache",
+      "displayName": "Development: 2D, build targets on demand",
+      "description": "Reuse out/build/dev and request a game, tool or test target explicitly. Examples and benchmarks remain opt-in.",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-dev",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
@@ -19,6 +20,7 @@
         "KIN_DEV_FAST_SCRIPTING": "OFF",
         "KIN_COMPILER_CACHE": "auto",
         "KIN_ENABLE_LTO": "OFF",
+        "KIN_BUILD_ON_DEMAND": "ON",
         "KIN_BUILD_EXAMPLES": "OFF",
         "KIN_BUILD_2D_WORKFLOW": "OFF",
         "KIN_BUILD_BENCHMARKS": "OFF"
@@ -28,7 +30,6 @@
       "name": "dev-3d",
       "displayName": "Development: experimental 3D",
       "inherits": "dev",
-      "binaryDir": "${sourceDir}/build-dev-3d",
       "cacheVariables": {
         "KIN_EXPERIMENTAL_3D": "ON"
       }
@@ -38,7 +39,6 @@
       "displayName": "Development: Linux Clang",
       "description": "Release development build with Clang (clang and clang++ must be on PATH), PCH and optional compiler cache.",
       "inherits": "dev",
-      "binaryDir": "${sourceDir}/build-dev-clang",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -53,7 +53,6 @@
       "name": "dev-3d-clang",
       "displayName": "Development: experimental 3D, Linux Clang",
       "inherits": "dev-clang",
-      "binaryDir": "${sourceDir}/build-dev-3d-clang",
       "cacheVariables": {
         "KIN_EXPERIMENTAL_3D": "ON"
       }
@@ -63,7 +62,6 @@
       "displayName": "Development: Linux, faster scripting compilation",
       "description": "Uses -O1 for scene/entity Lua bindings; trades some binding runtime speed for shorter builds. Other targets retain their usual optimization.",
       "inherits": "dev",
-      "binaryDir": "${sourceDir}/build-dev-fast",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -78,7 +76,6 @@
       "displayName": "Development: Linux Clang, faster scripting compilation",
       "description": "Uses -O1 for scene/entity Lua bindings; trades some binding runtime speed for shorter builds.",
       "inherits": "dev-clang",
-      "binaryDir": "${sourceDir}/build-dev-clang-fast",
       "cacheVariables": {
         "KIN_DEV_FAST_SCRIPTING": "ON"
       }

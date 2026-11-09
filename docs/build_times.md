@@ -14,11 +14,22 @@ cmake --build --preset dev --target hex_demo
 ```
 
 `dev-3d` enables the experimental 3D engine. Both presets use Release
-optimization, four build jobs, stable precompiled headers (PCH), and optional
-compiler-cache discovery. They omit examples and benchmarks; tests remain
-available as explicit targets. Choose the game target for the edit/build/run
-loop instead of rebuilding all games and tests. Use the shipping presets for
-packages and the existing CI presets for full validation.
+optimization, four build jobs, stable precompiled headers (PCH), optional
+compiler-cache discovery, and `KIN_BUILD_ON_DEMAND=ON`. Tools, games and tests
+remain available as explicit targets but are excluded from the default build.
+Examples and benchmarks are disabled; enable them in the same build when needed.
+Choose the affected target for the edit/build/run loop. Use the shipping presets
+for packages and the existing CI presets for full validation.
+
+Development presets use `out/build/<preset>/`. Existing `build-dev*` directories
+are not moved or removed automatically: keep using a compatible existing build
+via `cmake -S . -B <existing-dir> -DKIN_BUILD_ON_DEMAND=ON` and
+`cmake --build <existing-dir> --target <target>` rather than creating a duplicate
+just to adopt the new path. Reuse a build for multiple samples/tests. A second
+directory is for configurations that must coexist, such as different compilers,
+platforms or sanitizers. Keep task captures in `out/runs/<task>/`; see
+[AGENTS.md](../AGENTS.md) for the shared workflow and
+[testing](testing.md) for focused and full validation commands.
 
 PCHs occupy additional disk space and take time to create on the first build.
 They help subsequent source edits by avoiding repeated header processing.

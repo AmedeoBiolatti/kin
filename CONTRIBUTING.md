@@ -13,14 +13,21 @@ are all welcome.
 
 ## Building and testing
 
-See [Building](README.md#building) in the README. Before sending a pull request,
-run the full suite:
+See [Building](README.md#building) in the README. For normal development, reuse
+one build directory and build only the targets affected by your change:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure -j 8
+cmake --preset dev
+cmake --build --preset dev --target kin_scene_tests
+ctest --preset dev -R '^kin-scene$'
 ```
+
+Choose relevant existing suites and add focused regression coverage for behavior
+changes. Documentation-only edits do not need compilation. Broaden validation
+for shared contracts, build configuration, cross-module changes or uncertainty;
+full local suites are useful for integration and release work. CI runs the full
+platform matrix before merge. See [the agent workflow](AGENTS.md) for output and
+validation conventions shared by automated contributors.
 
 The required checks are `Linux GCC`, `Linux Clang`, `Windows MSVC` and
 `Linux GPU (lavapipe)` (a job that passes when the Release and `render3d` GPU
@@ -40,7 +47,9 @@ uses and how to keep tests fast and deterministic.
 - Public headers live in `engine/include/kin/<module>/`, sources in
   `engine/src/<module>/`. Keep modules independent: a subsystem should be usable
   and testable on its own.
-- Add or update a test for every behaviour change. Prefer pure engine tests;
+- Extend existing suites for meaningful behaviour changes and regressions. Add
+  another executable only when dependencies, isolation or configuration require
+  it. Prefer pure engine tests;
   create SDL windows only when the behaviour depends on them.
 - Headless runs must stay deterministic: fixed timestep, explicit seed, no wall
   clock or unseeded randomness in simulation code.
