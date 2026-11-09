@@ -989,10 +989,17 @@ vec3 kin_lit_surface(KinSurface surface) {
             lit *= contact_shadow();
 #endif
         }
+        // The sun is a disc (frame.sun_direction.w: its angular radius), not a point: no highlight is sharper than it.
+        // A near-mirror's point-light peak is thinner than a pixel and very bright: sampled at one pixel and missed at
+        // the next as the eye moves, it flickers (and blooms as it does).
+        Surface sun_surface = s;
+        sun_surface.alpha = max(s.alpha, frame.sun_direction.w);
+        sun_surface.coat_alpha = max(s.coat_alpha, frame.sun_direction.w);
 #ifdef KIN_DIRECT_LIGHT
-        light += kin_direct_light(s, frame.sun_direction.xyz, frame.sun_color.rgb, lit, KIN_LIGHT_SUN, vec3(0.0), 0.0);
+        light += kin_direct_light(sun_surface, frame.sun_direction.xyz, frame.sun_color.rgb, lit, KIN_LIGHT_SUN,
+                                  vec3(0.0), 0.0);
 #else
-        light += shade(s, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
+        light += shade(sun_surface, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
 #endif
     }
     if (dot(frame.fill_color.rgb, vec3(1.0)) > 0.0) {

@@ -11423,7 +11423,10 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // textures stored encoded
     FrameUniforms f{};
     const Mat4f to_space = s == 0 ? Mat4f{} : ctx.scenes[1]->camera.view().inverse() * scene.camera.view();
-    put(f.sun_direction, normalize(to_space.apply_vector(normalize(lights.sun.direction))), 0.0f);
+    // The sun's disc: the sky's where it draws one, else the real sun's (0.53 degrees across).
+    const f32 sun_degrees = scene.sky.enabled ? std::clamp(scene.sky.sun_size, 0.0f, 20.0f) : 0.53f;
+    put(f.sun_direction, normalize(to_space.apply_vector(normalize(lights.sun.direction))),
+        0.5f * sun_degrees * (3.14159265f / 180.0f));
     put_color(f.sun_color, lights.sun.color, 0.0f);
     put_color(f.ambient, lights.ambient, 0.0f);
     put_color(f.ground_ambient, (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient), 0.0f);

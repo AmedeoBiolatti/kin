@@ -1413,7 +1413,7 @@
      "asset": "models/torus.glb"
     },
     "ModelMaterials3D": {
-     "asset": "materials/brass.kinmaterials"
+     "asset": "materials/ring.kinmaterials"
     }
    }
   },
@@ -1857,9 +1857,9 @@
     },
     "PointLight3D": {
      "color": [
+      0.3,
       2.2,
-      0.4,
-      1.4
+      2.0
      ],
      "radius": 7,
      "size": 0.3

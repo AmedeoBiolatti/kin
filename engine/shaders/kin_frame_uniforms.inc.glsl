@@ -5,7 +5,7 @@
 const int MAX_LIGHTS = 16;
 // The frame's, pushed once a pass.
 layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
-    vec4 sun_direction; // xyz: toward the sun, length 1
+    vec4 sun_direction; // xyz: toward the sun, length 1; w: its disc's angular radius (radians)
     vec4 sun_color;     // linear
     vec4 ambient;       // linear: from above
     vec4 ground_ambient; // linear: from below (the same as ambient: even all round)
