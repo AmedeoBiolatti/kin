@@ -163,6 +163,9 @@ struct RenderDebugStats3D : RenderStats3D {
     bool sky_drawn = false;
     bool fog_applied = false;
     bool fog_sun_shadowed = false; // Fog3D::sun_shadows: the share of the fog's air the sun reaches was walked
+    bool fog_volume = false;       // Fog3D::volumetric: the lights' light in the fog's air was lit and added
+    u32 fog_volume_lights = 0;     // the lights it was lit by
+    u32 fog_volume_cells = 0;      // its cells (across x down x slices)
     bool sky_env_regenerated = false;
     u32 sky_env_generations = 0;
     f64 sky_env_cpu_ms = 0.0;

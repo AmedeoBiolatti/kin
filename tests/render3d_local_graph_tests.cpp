@@ -461,11 +461,13 @@ void validation(Fixture& f) {
     const auto all = f.r3d.render_local_shadows(f.array, p, maximum, size).value_or({});
     assert(all.maps.size() == 10 && f.r3d.debug_stats().local_shadow_maps == 20 &&
            f.r3d.render_surface(f.target, p, {.local_shadows = &all}));
-    const std::array too_many_points{
-        LocalShadowRequest3D{.kind = LocalShadowKind3D::Point, .light = 0},
-        LocalShadowRequest3D{.kind = LocalShadowKind3D::Point, .light = 1, .first_layer = 6},
-        LocalShadowRequest3D{.kind = LocalShadowKind3D::Point, .light = 2, .first_layer = 12}};
-    assert(!f.r3d.render_local_shadows(f.array, p, too_many_points, size));
+    // One cube more than max_point_shadow_maps.
+    f.scene.lights.points.resize(max_point_shadow_maps + 1, f.scene.lights.points[0]);
+    const auto more = f.r3d.prepare(f.scene).value_or({});
+    std::vector<LocalShadowRequest3D> too_many_points;
+    for (u32 i = 0; i <= max_point_shadow_maps; ++i)
+        too_many_points.push_back({.kind = LocalShadowKind3D::Point, .light = i, .first_layer = 6 * i});
+    assert(!f.r3d.render_local_shadows(f.array, more, too_many_points, size));
     maximum.clear();
     for (u32 i = 0; i < 9; ++i)
         maximum.push_back({.light = i, .first_layer = i});

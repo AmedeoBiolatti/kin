@@ -7,6 +7,21 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Lights in the fog (`Fog3D::volumetric`, off by default): the point and spot lights' light scattered by the fog's
+  air, through their shadow maps (beams, a lamp's glow), lit in a volume of cells over the view's near distance with a
+  history, summed along the rays and added after the main pass. Each light's `volumetric` scales its share (0: none).
+  `SceneEnvironment3D`'s `fog_volumetric*`; `debug_stats().fog_volume`. With `sun_and_moon` (on) the sun and the fill light
+  (the moon) scatter in the volume through their shadows too (at the fog's `sun_scatter`), replacing `sun_shadows`' walk.
+  The light is added between the opaque and the blended draws, so glass and smoke dim it as they dim what is behind them,
+  and blended stock and surface materials add the air's light in front of them (the fog variants' new last sampler,
+  `uFogVolume`).
+- Lights in the fog, cheaper at the same picture: cells behind every visible surface are not lit (each column's farthest
+  surface from the pre-pass, `RenderDebugOptions3D::fog_volume_cull` to compare), and `VolumetricFog3D::tile` 0 (the new
+  default) keeps cells of one angle at any size (8 pixels at 720p, 16 at 1440p): at 2560 x 1440 in A Lovely Night of
+  Terror 0.5 to 1.2 ms of GPU less a frame (about 0.1 to 0.3 ms left), and 22 MB of volumes instead of 88.
+- Up to 8 point lights with shadows a frame (`Lights3D::max_shadowed_points`, was 2): the local maps are packed into the
+  array's layers (a 256-texel cube takes six sixteenths of a 1024 layer), and a cube's faces are derived from its light in the
+  shader, which keeps the block under SDL_GPU's 4 KiB.
 - 3D auto exposure, decals and morph targets (native renderers; WebGL2 has morph targets only).
   `ViewOptions3D::auto_exposure` (`AutoExposure3D`) meters an HDR view on the GPU (a log-luminance histogram with
   the darkest and brightest shares left out) and adapts its exposure over time, faster toward light than toward dark,

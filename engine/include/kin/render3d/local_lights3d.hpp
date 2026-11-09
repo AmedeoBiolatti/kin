@@ -13,11 +13,12 @@
 
 namespace kin {
 
-constexpr u32 max_spot_lights = 16;     // spot lights a frame (as Lights3D::points' 16)
-constexpr u32 max_spot_shadow_maps = 8; // Lights3D::max_shadowed_spots is clamped to this
-constexpr u32 max_point_shadow_maps = 2;
+constexpr u32 max_spot_lights = 16;      // spot lights a frame (as Lights3D::points' 16)
+constexpr u32 max_spot_shadow_maps = 8;  // Lights3D::max_shadowed_spots is clamped to this
+constexpr u32 max_point_shadow_maps = 8; // Lights3D::max_shadowed_points is clamped to this
 constexpr u32 cube_faces = 6;
-// The layers of the shared array: a layer a spot's map, then six a point light's.
+// The maps of a frame: a spot's, then six a point light's. Renderer3D::render_local_shadows draws each into a layer of
+// its own; the renderer's own array packs them, several to a layer when they are smaller than its side.
 constexpr u32 max_local_shadow_layers = max_spot_shadow_maps + cube_faces * max_point_shadow_maps;
 // A map's guard band: the view reaches this many texels past the cone's edge (or a cube face's), so that the filter's
 // taps at the edge read the map and not the clamp.
