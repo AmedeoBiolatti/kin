@@ -32,6 +32,9 @@ struct Camera3D {
     // nothing is. The default (0, 0, 0, 1) keeps everything. WebGL2 does not clip (it says so once).
     Vec4f clip_plane{0.0f, 0.0f, 0.0f, 1.0f};
     bool clipped() const { return clip_plane.x != 0.0f || clip_plane.y != 0.0f || clip_plane.z != 0.0f; }
+    // The copies this camera does not see, by their pick id (MeshInstance3D::id; 0: none): a shiny thing left out of
+    // its own reflection probe's picture (ReflectionCaptureOptions3D::hidden_id). They still cast their shadows.
+    u32 hidden_id = 0;
     // The part of the camera's frame a view shows (0..1 across and down; the default all of it): a view of that part
     // alone, as a camera of the same frame would show it, its pixels as dense as the frame's at the view's size over
     // the window's. The frame's aspect is then the view's times window.h / window.w. What a mirror's or a portal's

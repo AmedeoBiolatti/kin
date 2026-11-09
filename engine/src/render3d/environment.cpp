@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -76,6 +77,45 @@ Environment3D Renderer3D::load_environment_operation(const std::filesystem::path
     else
         _errors.clear();
     return environment;
+}
+
+Result3D<ReflectionCapture3D> Renderer3D::create_reflection_capture(u32 side) {
+    _errors.clear();
+    const auto fail = [&](const std::string& why) {
+        fail3d(_errors, "Renderer3D::create_reflection_capture", why);
+        return result3d(ReflectionCapture3D{}, _errors);
+    };
+    if (!_backend)
+        return fail("3D is not available");
+    if (side < 16 || side > 1024)
+        return fail("a side of " + std::to_string(side) + " (16 to 1024)");
+    auto backend = _backend->create_reflection_capture(side);
+    if (!backend)
+        return fail("not supported here (needs the GPU renderer and compute)");
+    return result3d(ReflectionCapture3D{std::move(backend)}, _errors);
+}
+
+Status3D Renderer3D::capture_reflection(ReflectionCapture3D& capture, Scene3D& scene, Vec3f position,
+                                        const ReflectionCaptureOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* why) {
+        fail3d(_errors, "Renderer3D::capture_reflection", why);
+        return status3d(false, _errors);
+    };
+    if (!capture || !_backend)
+        return fail("an empty capture");
+    if (!scene.diagnostics().empty()) {
+        _errors = scene.diagnostics();
+        return status3d(false, _errors);
+    }
+    if (!(std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z)) ||
+        !(options.z_near > 0.0f) || !(options.z_far >= 0.0f) ||
+        (options.z_far > 0.0f && options.z_far <= options.z_near))
+        return fail("a position, or near and far, that is not finite and in order");
+    if (!_backend->capture_reflection(*capture.backend(), scene, position, options, _stats))
+        return fail("the device refused it");
+    return status3d(true, _errors);
 }
 
 Result3D<MaterialShader3D> Renderer3D::create_material_shader(std::span<const u8> spirv) {

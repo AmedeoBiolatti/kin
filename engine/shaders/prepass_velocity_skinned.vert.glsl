@@ -47,7 +47,7 @@ void main() {
     const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
-    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w);
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0));
     vPrevious = (draw.prior * previous_world).xyw;

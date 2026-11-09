@@ -18,7 +18,7 @@ void main() {
     const uint at = instance_at(draw.first.x + uint(gl_InstanceIndex));
     const vec4 world = instances[at].model * vec4(aPos, 1.0);
     gl_Position = draw.view_projection * world;
-    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instances[at].normal1.w);
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instances[at].normal1.w, draw.first.z, instances[at].normal0.w);
     vColor = instances[at].color * vec4(decode(aColor.rgb), aColor.a);
 #ifdef KIN_UNLIT_TEXTURED
     vUV = aUV;

@@ -2482,6 +2482,8 @@ occlusion, fog, contact shadows and temporal anti-aliasing work as ever; the cop
 CPU as those out of view are (`stats().culled`; the GPU cut culls by the six frustum planes and leaves the seventh to
 the vertex shaders). Shadows are not clipped (a wall behind the mirror still shades what is in front of it), and the
 sky shows where nothing is drawn. `kin::plane_through(point, normal)` makes one. WebGL2 does not clip; it says so once.
+`camera.hidden_id` (a `MeshInstance3D::id`; 0: none) leaves the copies with that id out of the camera's picture, their
+shadows kept: a shiny thing in its own reflection probe's capture.
 A draw can be left whole by it: `scene.draw_instanced(mesh, copies, material, clip)` with `DrawClip3D::whole` (never
 cut nor culled by it) or `DrawClip3D::whole_if_cut` (the same, and drawn only by cameras that have a clip plane: the
 copy appears in the pictures alone); draws merge only with draws that say the same (`Scene3D::Draw::clip`). WebGL2
@@ -2634,6 +2636,71 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   `create_planar_surfaces(r3d, planar_surfaces)` makes them; `compile_planar_surfaces(r3d)` compiles them now with
   glslc (development builds). Without them a session still draws the surfaces: mirrors as kin's metal, portals as their
   stand-in.
+
+## Reflection probes
+
+A reflection probe is the scene seen all round from a point, captured into a picture filtered as the environment is
+(a level a roughness), which the glossy surfaces inside the probe's box reflect in place of the environment: a polished
+floor shows the room's walls and windows, not the sky. The reflection is parallax-corrected: the reflected ray meets
+the probe's parallax box (the room's walls) and the picture is read toward that point from where it was captured, so
+the far wall shows where it is on the floor instead of as if it were infinitely far away.
+
+```cpp
+// Once: a capture (64 to 256 pixels a face is plenty), filled from the scene.
+kin::ReflectionCapture3D hall = r3d.create_reflection_capture(128).value_or({});
+r3d.capture_reflection(hall, scene, {0, 1.5f, 0}); // again when the room changes
+// Each frame, with the lights:
+scene.lights.reflection_probes.push_back({.position = {0, 1.5f, 0}, // where it was captured
+                                          .extent = {8, 2, 6},       // the room's half extents
+                                          .capture = hall});
+```
+
+- **Capturing.** `capture_reflection(capture, scene, position, {z_near, z_far})` renders six square 90-degree views
+  (as `render` draws them: sky, lights, shadows, fog, the probes already there; without temporal anti-aliasing, the
+  overlay or global illumination, whose light is a view's own and settles over frames) into a panorama, in world space.
+  It costs six renders at the capture's side; `debug_stats().reflection_captures` counts them. The renders that use a
+  capture filter it into a layer of the renderer's reflection array once a capture (`reflection_filters`).
+- **The boxes.** `extent` is the influence box's half extents, round `position + box_offset`, turned by `rotation`; a
+  surface inside it reflects the probe, fading out over `blend` (world units) inside its faces toward the probes it
+  overlaps or the environment. `parallax_extent` (zero: the influence box's) is the box the picture is taken to lie on;
+  `parallax = false` reads it as if infinitely far, as the environment is. Where boxes overlap, the higher `priority`
+  first, then the smaller box: each takes its weight of what the ones before it left. `reflection_probe_weight` and
+  `reflection_probe_direction` do the shader's arithmetic on the CPU.
+- **What reads them.** The stock lit shaders (the light variants: a scene with probes draws with them, as with global
+  illumination), material graphs and surface shaders; custom material shaders keep the environment. A mirror's or a
+  portal's picture still wins where it shows (`KinSurface::reflection`), and with global illumination the probes' light
+  replaces the GI's specular where their boxes reach. Diffuse light is not the probes': it stays the environment's or the
+  GI's.
+- **Curved mirrors.** A shiny ball, a vase, a helmet: a probe at its centre captured every frame, without parallax (the
+  centre is the right point to see the world from), with the thing left out of its own picture (`{.hidden_id = id}`,
+  its copies' `MeshInstance3D::id`: `Camera3D::hidden_id`), a small box round it and a higher priority than the room's.
+  Two shiny things see each other a frame late. No self-reflection (a concave shape does not see itself); close to a
+  large curved surface the reflection's parallax is off. `examples/planar_views` (its chrome ball, `--probes off` to
+  compare) and the atrium's polished statue do it.
+- **Costs** (RTX 4080 Laptop): a capture of six 64-pixel faces, about 0.4 ms of the GPU; filtering it into its layer
+  (the next render that reads it) about 0.3 ms more at the sky's 256 x 128. A probe captured once costs that once; a
+  live one every frame.
+- **Limits.** At most `max_reflection_probes3d` (16) a render: those whose boxes reach the view, by priority, then the
+  nearest. Their layers are the environment's specular size (256 x 128 without one; a 1024-wide environment makes each
+  probe's layer about 5.6 MB with its levels). WebGL2 has none.
+
+### Reflection probes on entities
+
+A `ReflectionProbe3D` component (`kin/ecs/render3d.hpp`; scene files, Lua's component access) makes the entity a probe,
+captured from its place, its boxes round it (plus `box_offset`), turned and scaled as it is. `SceneSession3D` captures
+and places them (`ReflectionProbes3D`, `kin/scene/reflection_probes3d.hpp`, for a game that renders `scene()` itself),
+before the mirrors' and portals' pictures, which reflect them too. A probe is captured when it first shows, when it
+moves, when `recapture` changes, every `interval` seconds (of `Scene3D::time`) or `every_frame`; `hide_self` leaves the
+entity's own copies out of its picture (a shiny statue's own probe):
+
+```json
+{"id": "hall_probe", "components": {"Transform3D": {"position": [0, 2, 0]},
+  "ReflectionProbe3D": {"extent": [11.5, 3.5, 10.5], "box_offset": [0, 1, 0.5], "parallax_extent": [11.5, 3, 10.5]}}},
+{"id": "chrome_statue", "components": {"Transform3D": {"position": [6.5, 1.75, 5.5]},
+  "ModelRenderer3D": {"asset": "models/sphere.glb"}, "ModelMaterials3D": {"asset": "materials/chrome.kinmaterials"},
+  "ReflectionProbe3D": {"extent": [0.6, 0.6, 0.6], "parallax": false, "every_frame": true, "hide_self": true,
+                        "resolution": 64, "priority": 1}}}
+```
 
 ## Views
 

@@ -10393,3 +10393,37 @@ D3D12 and Metal were not tested locally.
 See [particle rendering](rendering_3d.md). Task snapshots, logs, shader identity
 checks, mutation results and the isolated patch are in
 /home/bamedeo/kin-bench/particle-shadows3d/. Changes are uncommitted.
+
+## Reflections: probes, curved mirrors, screen-space reflections — plan (2026-11-09)
+
+Kin reflects one environment for the whole scene (an HDR picture or the procedural sky, filtered by roughness), dimmed
+by the GI probes where something is in the way; planar views (mirrors, still water, portals; PR #130) are exact but
+flat. Missing: reflections of the scene round a glossy surface that is not flat or not one of those. Each layer below
+takes over where it has an answer and leaves the rest to the one under it, through `KinSurface::reflection`'s alpha:
+planar picture, then screen-space reflection, then reflection probes, then the environment (dimmed by GI).
+
+Decisions (2026-11-09): stacked branches on `feat/planar-views` (#130): `feat/reflection-probes` (R1, R2), then
+`feat/ssr` (R3). Probes are octahedral maps, layers of one 2D array texture with a mip a roughness (kin's samplers and
+filters stay 2D; `env_filter.comp` gets an octahedral mode). Probes are captured at run time; baking them to disk is R4.
+
+- **R1 — reflection probes, box-projected.** `ReflectionProbeSource3D` (position, influence box with rotation and blend
+  distance, parallax box, intensity, resolution, near/far, update: once / on request / every N frames / every frame) in
+  `Lights3D`. Capture: six square 90-degree views into a linear HDR target (a view option: no tonemap, bloom, TAA or
+  grain); live probes may take a face a frame. Filter into the probe's layer, a mip a roughness. Per pixel: up to 2-3
+  probes from a small list (or the light grid), weighed by their influence boxes; the reflection ray meets the parallax
+  box from the pixel's world position and reads there; what the boxes do not cover falls back to the environment.
+  Specular only. ECS component, scene files, Lua, debug drawing of the boxes, stats. Tests: box projection math, a red
+  box seen at the parallax-correct place on a smooth floor, fallback outside, smooth blending of two probes. The atrium
+  and courtyard get probes; measured against the Bistro (Godot uses 15 there).
+- **R2 — curved mirrors.** A probe attached to an entity, updated every frame, with no parallax box (a sphere's centre
+  is the right point); `Material3D` names the probe it reads, in place of the blend; the object is left out of its own
+  capture (a per-render hidden id). Two shiny things see each other a frame late, for free. Limits: no
+  self-reflection (concave shapes), parallax errors close to a large curved surface.
+- **R3 — screen-space reflections.** The pre-pass also writes roughness (normal target to RGBA) and a nearest-depth
+  pyramid (next to the farthest one occlusion uses). Last frame's HDR colour (TAA's history, or a copy), reprojected.
+  Traced in compute after the pre-pass and before the main pass, at half size (hierarchical march, rays jittered by
+  roughness), resolved (cone-sized reads, spatial then temporal filter); the main pass reads it as a reflection with a
+  confidence, so Fresnel and roughness stay the material's. Fades at the screen's edges, by thickness, by roughness
+  (off past ~0.6). `Scene3D::ssr` settings, stats, debug view. Off on WebGL2; glass gets none.
+- **R4 — later.** Probes baked to disk as assets (and a bake button in kin-studio), probe gizmos, normalising probes by
+  the GI's light, water refraction and depth fade on SSR's colour.

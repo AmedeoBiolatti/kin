@@ -57,7 +57,7 @@ void main() {
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
-    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w);
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
     vCurrent = (draw.current * world).xyw;
     vPrevious = (draw.prior * previous_world).xyw;
     vOldInCurrent = (draw.current * previous_world).xyw;

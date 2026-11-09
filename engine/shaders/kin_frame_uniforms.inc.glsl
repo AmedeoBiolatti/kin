@@ -32,4 +32,9 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 grid_size;     // x, y: tiles across and down, z: slices, w: cells (where the lists start)
     vec4 time;          // x: Scene3D::time (seconds), for materials that move;
                         // y: 1 without Scene3D::specular_multiscatter
+    vec4 probes;        // x: the reflection probes this pass reads (Lights3D::reflection_probes), y: their last level
+    // Six a probe (kin_probe_reflection): the boxes' world-to-local rows (xyz) with their centre (w); the influence
+    // box's half extents and blend; the parallax box's half extents (0: none) and the intensity; where it was
+    // captured and its layer of uEnvSpecular.
+    vec4 probe[16 * 6];
 } frame;

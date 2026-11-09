@@ -273,6 +273,12 @@ public:
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).
     virtual std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
+    // Reflection probes' pictures (render3d/reflection_probes3d.hpp): none where unsupported.
+    virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32) { return {}; }
+    virtual bool capture_reflection(IReflectionCaptureBackend3D&, Scene3D&, Vec3f, const ReflectionCaptureOptions3D&,
+                                    RenderDebugStats3D&) {
+        return false;
+    }
     // Null when the SPIR-V can't be made into a fragment shader.
     virtual std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) = 0;
     // A surface shader from its variants' SPIR-V (SurfaceVariant3D order); null where surface shaders aren't
