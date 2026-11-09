@@ -887,6 +887,23 @@ private:
     // material layout's twelve samplers as the pass binds them (the shadow maps, environment, occlusion); each decal
     // puts its own picture and normal map in their places.
     void draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass, std::array<SDL_GPUTextureSamplerBinding, 12> shared);
+    // Before the frame's passes: the decals in the view, as records in one storage buffer (decal.vert's KinDecal) and
+    // runs of them that share their pictures, sampler and pipeline (one instanced draw each, in the order added).
+    void prepare_decals(FrameCtx& ctx);
+    struct DecalRecord {
+        f32 model[16], to_decal[16], colour[4], surface[4], fade[4];
+    };
+    static_assert(sizeof(DecalRecord) == 176);
+    struct DecalRun {
+        u32 first = 0, count = 0;
+        Texture texture, normal;
+        Wrap3D wrap = Wrap3D::Clamp;
+        bool inside = false, mirrored = false;
+    };
+    std::vector<DecalRecord> _decal_records;
+    std::vector<u32> _decal_order, _decal_group; // the drawing order, and each decal's picture group
+    std::vector<DecalRun> _decal_runs;
+    std::shared_ptr<GpuBuffer> _decal_buffer;
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to
     // the instance buffer; draw_particles() then records them into the main pass.
     struct ParticleSource {

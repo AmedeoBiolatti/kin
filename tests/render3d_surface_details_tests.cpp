@@ -335,6 +335,30 @@ void decals(Fixture& f) {
     const std::array<Decal3D, 2> both{centre, Decal3D{.transform = centre.transform, .texture = green_texture}};
     c = Fixture::at(picture(both), 48, 48);
     assert(c[1] > 200 && c[1] > c[0] + 120);
+    assert(f.r3d.debug_stats().decal_draws == 2 && f.r3d.debug_stats().decals_drawn == 2);
+    // Batched: decals of one order sharing their pictures are one instanced draw, wherever they were added; pictures
+    // are drawn in the order each first appears, and a higher `order` lies over a lower one. Out of the view: culled.
+    std::vector<Decal3D> row;
+    for (int i = 0; i < 5; ++i)
+        row.push_back(
+            {.transform = Mat4f::trs({-1.0f + 0.5f * f32(i), 0, 0}, onto_wall, {0.4f, 1, 0.4f}), .texture = red});
+    p = picture(row);
+    assert(f.r3d.debug_stats().decal_draws == 1 && f.r3d.debug_stats().decals_drawn == 5);
+    for (int i = 0; i < 5; ++i)
+        assert(Fixture::at(p, 48 + int(std::lround((-1.0f + 0.5f * f32(i)) * 20.8f)), 48)[0] > 200);
+    row.insert(row.begin() + 2, Decal3D{.transform = row[2].transform, .texture = green_texture});
+    row.push_back({.transform = Mat4f::trs({0, 40, 0}, onto_wall, {1, 1, 1}), .texture = red}); // out of the view
+    c = Fixture::at(picture(row), 48, 48);
+    assert(f.r3d.debug_stats().decal_draws == 2 && f.r3d.debug_stats().decals_drawn == 6 &&
+           f.r3d.debug_stats().decals_culled == 1);
+    assert(c[1] > c[0] + 120); // the reds as one draw, then the green (its picture appeared later) over them
+    row[2].order = -1;         // the green under the reds
+    c = Fixture::at(picture(row), 48, 48);
+    assert(f.r3d.debug_stats().decal_draws == 2 && c[0] > c[1] + 120);
+    row[2].order = 0;
+    row[3].order = 1; // the red at the same place as the green, over it: a run of its own
+    c = Fixture::at(picture(row), 48, 48);
+    assert(f.r3d.debug_stats().decal_draws == 3 && c[0] > c[1] + 120);
     // With temporal anti-aliasing (the pre-pass's velocity variant and a float picture): still there.
     View3D taa_view = f.r3d.create_view(extent, {.samples = 1}).value_or({});
     if (f.r3d.capabilities().temporal_aa) {

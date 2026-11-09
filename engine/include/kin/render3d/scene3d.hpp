@@ -734,7 +734,8 @@ private:
 // box (scorch marks, paint, dirt, footprints, posters), lit with them. The box is the unit cube [-0.5, 0.5]^3 placed by
 // `transform`: the picture lies on its X/Z sides (u along +X, v along +Z, the picture's top at -Z) and is projected
 // along -Y, from its top face down through its depth. Drawn after the opaque meshes and before the blended ones, in
-// the order given; reads the pre-pass's depth and normals (RendererCapabilities3D::decals; the pre-pass runs whenever
+// order of their `order`, then by picture (one instanced draw for the decals sharing one); reads the pre-pass's depth
+// and normals (RendererCapabilities3D::decals; the pre-pass runs whenever
 // a scene has decals). Lands on what the pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not
 // custom-shader, blended or unlit ones, nor the overlay.
 struct Decal3D {
@@ -752,6 +753,11 @@ struct Decal3D {
     // The share of the box's half depth over which the decal fades out toward its top and bottom faces (0: hard).
     f32 depth_fade = 0.25f;
     Wrap3D wrap = Wrap3D::Clamp;
+    // Drawing order: lower first, so a higher one lies over a lower one where they overlap. Decals of the same order
+    // are drawn together by picture (texture, normal map, wrap), in the order each picture first appears, so that the
+    // decals sharing a picture are one draw: give overlapping decals of different pictures different orders when one
+    // must lie over the other.
+    i32 order = 0;
 };
 
 class Scene3D {
@@ -900,7 +906,8 @@ public:
     Status3D draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites, u64 history_id = 0);
     // The system's live particles with its desc's look.
     Status3D draw_particles(const ParticleSystem3D& system, u64 history_id = 0);
-    // A decal (Decal3D), drawn in the order added; clear() takes them away. The overlay's are not drawn.
+    // A decal (Decal3D), drawn by its `order`, then grouped by picture; clear() takes them away. The overlay's are not
+    // drawn.
     Status3D draw_decal(const Decal3D& decal);
     std::span<const Decal3D> decals() const { return _decals; }
     void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }

@@ -98,6 +98,12 @@ void register_surface_details3d_components(EcsWorld& world) {
         scalar("emission", &Decal3D::emission, 0, 1e4f);
         scalar("normal_fade", &Decal3D::normal_fade, 0, 1);
         scalar("depth_fade", &Decal3D::depth_fade, 0, 1);
+        b.property<i32>(
+            "order", [](const DecalRenderer3D& d) { return d.decal.order; },
+            [](DecalRenderer3D& d, const i32& order) {
+                d.decal.order = order;
+                return true;
+            });
     }
 }
 

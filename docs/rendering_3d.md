@@ -1341,7 +1341,8 @@ cone's in-scattering in fog (a lamp in mist shows no beam), soft shadows by ligh
 dirt, footprints, posters, bullet holes (in the ECS: `DecalRenderer3D`, below). The box is the unit cube `[-0.5, 0.5]^3` placed by `transform`; the picture
 lies on its X/Z sides (u along +X, v along +Z, the picture's top at -Z) and is projected along -Y, from the box's top
 face down through its depth. Decals are drawn after the scene's opaque meshes and before the sky and the blended
-meshes, in the order added, and lit as a custom material is: the sun and its shadows, the fill light, ambient or
+meshes, in the order of their `order` (lower first, so higher lies over lower where they overlap; 0 by default), and
+lit as a custom material is: the sun and its shadows, the fill light, ambient or
 environment light with the ambient occlusion, point and spot lights (the first 16, as custom shaders have) and their
 shadows, and fog. `clear()` takes them away.
 
@@ -1372,7 +1373,7 @@ data; a failed load keeps the pictures bound before, and the session reloads the
 ```json
 {"id": "scorch", "components": {
     "Transform3D": {"position": [2, 0, -3], "rotation": [0, 0.26, 0, 0.97]},
-    "DecalRenderer3D": {"texture": "decals/scorch.png", "size": [2, 1, 2], "normal_fade": 0.4}}}
+    "DecalRenderer3D": {"texture": "decals/scorch.png", "size": [2, 1, 2], "normal_fade": 0.4, "order": 0}}}
 ```
 
 A decal reads the pre-pass's depth and normals (the mesh's normal, before its own normal map), so a scene with decals
@@ -1380,8 +1381,16 @@ always runs the pre-pass (with TAA, the main pass then no longer writes the velo
 pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not custom-shader, blended or unlit meshes,
 particles or the overlay; opaque meshes whose material has `receives_decals` off are drawn over them. Seen from outside its box, a decal's front faces are depth-tested against the scene, so
 what stands in front of the box hides it; from inside the box (or within twice the near plane of it) its back faces
-are drawn untested. Decals whose box is out of the view are skipped (`debug_stats().decals_culled`); each other
-one is one draw of 36 vertices (`debug_stats().decals_drawn`); a pixel costs four extra depth reads (the texture's gradients come from the neighbours on the same surface, so edges of what stands in
+are drawn untested. Decals whose box is out of the view are skipped (`debug_stats().decals_culled`).
+
+The others are batched: their placings and settings go to the GPU in one buffer a frame, and the decals of one
+`order` that share their pictures (texture, normal map, wrap) are drawn together, as one instanced draw of 36
+vertices a box (`debug_stats().decals_drawn`, `decal_draws`), whatever order they were added in. Pictures are drawn in
+the order each first appears among its `order`'s decals, so when two decals of different pictures overlap and one
+must lie over the other, give it a higher `order` (a decal of a picture already drawn earlier in its order would
+otherwise join that picture's draw, under the other). 256 decals of one picture are one draw (`render()` 0.18 ms of
+CPU against 0.26 drawing them one by one; `kin_render3d_surface_bench`), 256 of four pictures four draws. A pixel
+costs four extra depth reads (the texture's gradients come from the neighbours on the same surface, so edges of what stands in
 front do not pick the smallest mip level). `capabilities().decals` says whether the device can; where not (or on
 WebGL2), decals are not drawn, said once. Not supported: `render_surface`/`prepare` graphs, and clustered
 (many-decal) culling.
@@ -2441,7 +2450,7 @@ Initial registered authored fields:
 | `CharacterController3D` | capsule dimensions, movement/jump/grounding settings, layer/mask, up/facing |
 | `CharacterAnimationLink3D` | animation parameter names, foot constraint name, ground-query mask |
 | `ParticleEmitter3D` | seed/emission/capacity, shape/ranges/forces/lifetime curves, texture/atlas/blend/facing, enabled/emitting |
-| `DecalRenderer3D` | texture and normal images, box size, colour, roughness/metallic, normal strength, emission, normal/depth fade, visible |
+| `DecalRenderer3D` | texture and normal images, box size, colour, roughness/metallic, normal strength, emission, normal/depth fade, drawing order, visible |
 | `MorphWeights3D` | morph target weights by name (`"smile=0.8, blink=1"`), whether the animator's clips set the others |
 
 Vectors accept arrays or `x/y/z` objects; rotations use `x/y/z/w` order and must be

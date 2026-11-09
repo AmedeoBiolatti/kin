@@ -6,6 +6,7 @@
 //
 // Needs the GPU (KIN_RENDER_BACKEND is not read: SDL_GPU is asked for). Medians; a quiet machine matters.
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -33,10 +34,12 @@ struct Config {
     bool exposure = false;
     int decals = 0;
     f32 decal_size = 2.0f;
+    int pictures = 1; // decal i shows picture i % pictures
     std::vector<f64> gpu, cpu;
+    std::vector<u32> draws;
 };
 
-Texture splat(Renderer2D& r) {
+Texture splat(Renderer2D& r, u8 tint = 40) {
     constexpr int side = 256;
     std::vector<u8> p(side * side * 4);
     for (int y = 0; y < side; ++y)
@@ -44,7 +47,7 @@ Texture splat(Renderer2D& r) {
             const f32 u = (x + 0.5f) / side * 2 - 1, v = (y + 0.5f) / side * 2 - 1;
             const f32 a = std::clamp(1.0f - std::sqrt(u * u + v * v), 0.0f, 1.0f);
             u8* o = &p[(y * side + x) * 4];
-            o[0] = 40, o[1] = 30, o[2] = 25, o[3] = static_cast<u8>(a * 255);
+            o[0] = tint, o[1] = 30, o[2] = 25, o[3] = static_cast<u8>(a * 255);
         }
     Texture t = r.create_texture_from_rgba(p.data(), side, side);
     r.set_scale_mode(t, ScaleMode::Mipmapped);
@@ -100,13 +103,14 @@ int main(int argc, char** argv) {
 
     Mesh3D floor = r3d.create_mesh(meshes::box({40, 0.2f, 40})).value_or({});
     Mesh3D box = r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
-    const Texture texture = splat(r);
+    const std::array<Texture, 4> textures{splat(r, 40), splat(r, 90), splat(r, 140), splat(r, 190)};
     std::vector<Config> configs = {{"plain"},
                                    {"auto exposure", true},
                                    {"16 decals 2 m", false, 16},
                                    {"64 decals 2 m", false, 64},
                                    {"256 decals 2 m", false, 256},
-                                   {"64 decals 8 m", false, 64, 8.0f}};
+                                   {"64 decals 8 m", false, 64, 8.0f},
+                                   {"256 decals x4 pic", false, 256, 2.0f, 4}};
     const auto scene_for = [&](const Config& c) {
         Scene3D scene;
         scene.camera = Camera3D::look_at({0, 14, 18}, {0, 0, 0}, 60);
@@ -121,7 +125,7 @@ int main(int argc, char** argv) {
             (void)scene.draw_decal({.transform = Mat4f::trs({r * std::cos(a), 0, r * std::sin(a)},
                                                             Quatf::axis_angle({0, 1, 0}, f32(i) * 37.0f),
                                                             {c.decal_size, 1.0f, c.decal_size}),
-                                    .texture = texture});
+                                    .texture = textures[std::size_t(i % c.pictures)]});
         }
         return scene;
     };
@@ -148,6 +152,7 @@ int main(int argc, char** argv) {
                 if (f >= 10 && stats.gpu_frames_sampled != sampled) { // (the first frames of a config warm up)
                     c.gpu.push_back(stats.last_gpu_frame_ms);
                     c.cpu.push_back(cpu);
+                    c.draws.push_back(r3d.debug_stats().decal_draws);
                 }
                 sampled = stats.gpu_frames_sampled;
             }
@@ -155,6 +160,7 @@ int main(int argc, char** argv) {
     }
     const f64 base = median(configs[0].gpu);
     for (const Config& c : configs)
-        std::printf("%-16s GPU %6.2f ms (%+.2f)   render() CPU %5.2f ms   (%zu frames)\n", c.name.c_str(),
-                    median(c.gpu), median(c.gpu) - base, median(c.cpu), c.gpu.size());
+        std::printf("%-18s GPU %6.2f ms (%+.2f)   render() CPU %5.2f ms   decal draws %3u   (%zu frames)\n",
+                    c.name.c_str(), median(c.gpu), median(c.gpu) - base, median(c.cpu),
+                    c.draws.empty() ? 0u : c.draws.back(), c.gpu.size());
 }

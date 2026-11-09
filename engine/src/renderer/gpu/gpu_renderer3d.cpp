@@ -23,6 +23,7 @@
 #include <kin/render3d/taa3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -1150,8 +1151,9 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _ao_available = true;
         // Decals read the pre-pass's depth and normals: made with it.
         try {
-            _decal_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "decal.vert.spv",
-                                                            /*uniform_buffers=*/1, /*samplers=*/0);
+            _decal_vertex_shader =
+                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "decal.vert.spv",
+                                         /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
             _decal_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "decal.frag.spv",
                                                      /*uniform_buffers=*/4, /*samplers=*/14);
             _capabilities.decals = true;
@@ -11942,12 +11944,96 @@ void GpuRenderer3D::overlay_velocity(FrameCtx& ctx) {
     }
 }
 
+void GpuRenderer3D::prepare_decals(FrameCtx& ctx) {
+    _decal_runs.clear();
+    _decal_records.clear();
+    if (!ctx.decals)
+        return;
+    const Scene3D& scene = ctx.scene;
+    const Camera3D& camera = scene.camera;
+    // The drawing order: by `order`, then by picture (each picture where it first appears among its order's decals),
+    // then as added. Stable, so equal keys keep the order given.
+    const auto decals = scene.decals();
+    _decal_order.resize(decals.size());
+    _decal_group.resize(decals.size());
+    std::map<std::tuple<i32, const void*, const void*, Wrap3D>, u32> first_of;
+    for (u32 i = 0; i < decals.size(); ++i) {
+        const Decal3D& d = decals[i];
+        _decal_order[i] = i;
+        _decal_group[i] =
+            first_of.try_emplace({d.order, d.texture.backend().get(), d.normal.backend().get(), d.wrap}, i)
+                .first->second;
+    }
+    std::stable_sort(_decal_order.begin(), _decal_order.end(), [&](u32 a, u32 b) {
+        return decals[a].order != decals[b].order ? decals[a].order < decals[b].order
+                                                  : _decal_group[a] < _decal_group[b];
+    });
+    for (const u32 index : _decal_order) {
+        const Decal3D& decal = decals[index];
+        // Out of the view: the sphere round its box.
+        const Mat4f& m = decal.transform;
+        const f32 reach = 0.5f * std::sqrt(m.at(0, 0) * m.at(0, 0) + m.at(1, 0) * m.at(1, 0) + m.at(2, 0) * m.at(2, 0) +
+                                           m.at(0, 1) * m.at(0, 1) + m.at(1, 1) * m.at(1, 1) + m.at(2, 1) * m.at(2, 1) +
+                                           m.at(0, 2) * m.at(0, 2) + m.at(1, 2) * m.at(1, 2) + m.at(2, 2) * m.at(2, 2));
+        if (!sphere_in(ctx.frustums[0], {m.at(0, 3), m.at(1, 3), m.at(2, 3)}, reach)) {
+            ++ctx.stats.decals_culled;
+            continue;
+        }
+        const Mat4f to_decal = decal.transform.inverse();
+        // Inside: the camera within the box grown by its near plane (in the box's units, along each axis).
+        const Vec3f eye = to_decal.apply(camera.position);
+        const f32 near = std::max(camera.z_near, 0.0f) * 2.0f;
+        bool inside = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            const Vec3f column{m.at(0, axis), m.at(1, axis), m.at(2, axis)};
+            const f32 scale = std::max(length(column), 1e-6f);
+            const f32 e = axis == 0 ? eye.x : axis == 1 ? eye.y : eye.z;
+            inside = inside && std::abs(e) <= 0.5f + near / scale;
+        }
+        const bool mirrored = m.determinant() < 0.0f;
+        DecalRecord record{};
+        std::memcpy(record.model, m.m, sizeof(record.model));
+        std::memcpy(record.to_decal, to_decal.m, sizeof(record.to_decal));
+        const LinearColor c = to_linear(decal.color);
+        put(record.colour, {c.r, c.g, c.b}, c.a);
+        put(record.surface,
+            {decal.roughness, std::clamp(decal.metallic, 0.0f, 1.0f), decal.normal ? decal.normal_strength : 0.0f},
+            std::max(decal.emission, 0.0f));
+        put(record.fade, {std::clamp(decal.normal_fade, 0.0f, 1.0f), std::clamp(decal.depth_fade, 0.0f, 1.0f), 0.0f},
+            0.0f);
+        // A run: decals one after another (in the drawing order) with the same pictures, sampler and pipeline.
+        const u32 at = static_cast<u32>(_decal_records.size());
+        _decal_records.push_back(record);
+        DecalRun* last = _decal_runs.empty() ? nullptr : &_decal_runs.back();
+        if (last && last->texture == decal.texture && last->normal == decal.normal && last->wrap == decal.wrap &&
+            last->inside == inside && last->mirrored == mirrored) {
+            ++last->count;
+        } else {
+            _decal_runs.push_back({at, 1, decal.texture, decal.normal, decal.wrap, inside, mirrored});
+            for (const Texture* t : {&decal.texture, &decal.normal}) {
+                if (*t) {
+                    _owner->retain(*t);
+                    if (const auto* gpu = dynamic_cast<const GpuTextureBackend*>(t->backend().get()))
+                        gpu->mark_material_read(_owner->_frame_serial);
+                }
+            }
+        }
+    }
+    // One upload of the frame's records, before its passes (cycled: a frame still drawing reads its own).
+    if (!_decal_records.empty()) {
+        const u32 bytes = static_cast<u32>(_decal_records.size() * sizeof(DecalRecord));
+        ensure_buffer(_decal_buffer, bytes, 64 * sizeof(DecalRecord), SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+        _device->upload_storage_buffer(_decal_buffer->handle(), 0, bytes, _decal_records.data(), true);
+    }
+}
+
 void GpuRenderer3D::draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass,
                                 std::array<SDL_GPUTextureSamplerBinding, 12> shared) {
     GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
     SDL_GPUCommandBuffer* commands = ctx.commands;
-    if (!view->_ao_depth || !view->_ao_normals || !_decal_shader || !_decal_vertex_shader)
+    if (_decal_runs.empty() || !_decal_buffer || !view->_ao_depth || !view->_ao_normals || !_decal_shader ||
+        !_decal_vertex_shader)
         return;
     const SDL_GPUTextureFormat format = ctx.taa ? hdr_format : view->_format;
     const SDL_GPUSampleCount samples = sample_count(ctx.taa ? 1u : view->_samples);
@@ -11985,14 +12071,13 @@ void GpuRenderer3D::draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass,
                                    ctx.fog ? sizeof(CustomFogUniforms)
                                            : sizeof(CustomUniforms) + sizeof(FogParamUniforms));
     push_local_lights(ctx, 0, 3);
-    struct DecalUniforms {
-        f32 view_projection[16], model[16], to_decal[16], to_world[16];
-        f32 colour[4], surface[4], fade[4];
+    struct DecalDraw {
+        f32 view_projection[16], to_world[16];
+        u32 first[4];
     } u{};
     std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
     const Mat4f to_world = ctx.drawn[0].inverse();
     std::memcpy(u.to_world, to_world.m, sizeof(u.to_world));
-    const Camera3D& camera = scene.camera;
     std::array<SDL_GPUTextureSamplerBinding, 14> samplers{};
     std::copy(shared.begin(), shared.end(), samplers.begin());
     const SDL_GPUTextureSamplerBinding white{_owner->_white.handle(), _owner->_sampler_linear};
@@ -12000,55 +12085,24 @@ void GpuRenderer3D::draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass,
     samplers[12] = {view->_ao_depth.handle(), _point_sampler};
     samplers[13] = {view->_ao_normals.handle(), _point_sampler};
     SDL_GPUGraphicsPipeline* bound = nullptr;
-    for (const Decal3D& decal : scene.decals()) {
-        // Out of the view: the sphere round its box.
-        const Mat4f& m = decal.transform;
-        const f32 reach = 0.5f * std::sqrt(m.at(0, 0) * m.at(0, 0) + m.at(1, 0) * m.at(1, 0) + m.at(2, 0) * m.at(2, 0) +
-                                           m.at(0, 1) * m.at(0, 1) + m.at(1, 1) * m.at(1, 1) + m.at(2, 1) * m.at(2, 1) +
-                                           m.at(0, 2) * m.at(0, 2) + m.at(1, 2) * m.at(1, 2) + m.at(2, 2) * m.at(2, 2));
-        if (!sphere_in(ctx.frustums[0], {m.at(0, 3), m.at(1, 3), m.at(2, 3)}, reach)) {
-            ++ctx.stats.decals_culled;
-            continue;
-        }
-        const Mat4f to_decal = decal.transform.inverse();
-        // Inside: the camera within the box grown by its near plane (in the box's units, along each axis).
-        const Vec3f eye = to_decal.apply(camera.position);
-        const f32 near = std::max(camera.z_near, 0.0f) * 2.0f;
-        bool inside = true;
-        for (int axis = 0; axis < 3; ++axis) {
-            const Vec3f column{decal.transform.at(0, axis), decal.transform.at(1, axis), decal.transform.at(2, axis)};
-            const f32 scale = std::max(length(column), 1e-6f);
-            const f32 e = axis == 0 ? eye.x : axis == 1 ? eye.y : eye.z;
-            inside = inside && std::abs(e) <= 0.5f + near / scale;
-        }
-        SDL_GPUGraphicsPipeline* p = pipeline_for(inside, decal.transform.determinant() < 0.0f);
+    SDL_GPUBuffer* const records = _decal_buffer->handle();
+    for (const DecalRun& run : _decal_runs) {
+        SDL_GPUGraphicsPipeline* p = pipeline_for(run.inside, run.mirrored);
         if (!p)
             continue;
         if (p != bound) {
             SDL_BindGPUGraphicsPipeline(pass, p);
+            SDL_BindGPUVertexStorageBuffers(pass, 0, &records, 1);
             bound = p;
         }
-        samplers[0] = texture_binding(decal.texture, decal.wrap, decal.wrap, std::nullopt);
-        samplers[3] = texture_binding(decal.normal, decal.wrap, decal.wrap, std::nullopt);
-        for (const Texture* t : {&decal.texture, &decal.normal}) {
-            if (*t) {
-                _owner->retain(*t);
-                if (const auto* gpu = dynamic_cast<const GpuTextureBackend*>(t->backend().get()))
-                    gpu->mark_material_read(_owner->_frame_serial);
-            }
-        }
+        samplers[0] = texture_binding(run.texture, run.wrap, run.wrap, std::nullopt);
+        samplers[3] = texture_binding(run.normal, run.wrap, run.wrap, std::nullopt);
         SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
-        std::memcpy(u.model, decal.transform.m, sizeof(u.model));
-        std::memcpy(u.to_decal, to_decal.m, sizeof(u.to_decal));
-        const LinearColor c = to_linear(decal.color);
-        put(u.colour, {c.r, c.g, c.b}, c.a);
-        put(u.surface,
-            {decal.roughness, std::clamp(decal.metallic, 0.0f, 1.0f), decal.normal ? decal.normal_strength : 0.0f},
-            std::max(decal.emission, 0.0f));
-        put(u.fade, {std::clamp(decal.normal_fade, 0.0f, 1.0f), std::clamp(decal.depth_fade, 0.0f, 1.0f), 0.0f}, 0.0f);
+        u.first[0] = run.first;
         SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-        SDL_DrawGPUPrimitives(pass, 36, 1, 0, 0);
-        ++ctx.stats.decals_drawn;
+        SDL_DrawGPUPrimitives(pass, 36, run.count, 0, 0);
+        ctx.stats.decals_drawn += run.count;
+        ++ctx.stats.decal_draws;
         ++ctx.stats.draws;
     }
 }
@@ -13069,6 +13123,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
         if (!ctx.decals)
             warn_once(_decals_warned, "3D: decals asked for, but this device cannot draw them: not drawn");
     }
+    prepare_decals(ctx);
     fit_sun_shadow(ctx);
     choose_point_lights(ctx);
     choose_local_lights(ctx);
