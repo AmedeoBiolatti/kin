@@ -1556,7 +1556,9 @@ environment too, the layer below dimmed by the coat's Fresnel), `specular` (0.5:
 0.08 times it, 4% by default, as Unreal's Specular; 0: no highlight, no reflection) and `diffuse_wrap` (0: Lambert's
 diffuse; 0.5: the light's first two spherical harmonic bands, 1/4 + n.l / 2, lighting the side facing away a little, as
 Unreal's directional volume lighting of translucency; 1: the first alone, 1/4 from every side, the ambient light the mean
-of both sides'). After the function, kin lights it
+of both sides'), and `reflection` (0 as kin's material makes it: rgb a reflection of its own in linear light, a how much
+of the surface's reflection it is, in place of the environment's or the probes': a mirror's picture, Mirrors and
+portals). After the function, kin lights it
 (`kin_lit_surface(s)`; `kin_lit(base, n, metallic, roughness, occlusion)` for a surface without either) and adds the emission, or, for an `unlit` material, shows its colour plus
 its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
 (`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,
@@ -2472,6 +2474,166 @@ Between the view and 2D, in the coordinates of the rectangle the view is laid
 into: `camera.project(world, rect)` (where a point shows, for labels and
 health bars) and `camera.ray(point, rect)` (what a click points at;
 `kin::hit_plane_y` meets it with the ground).
+
+`camera.clip_plane` (a `Vec4f`: a point p is drawn where `dot(xyz, p) + w >= 0`; the default `(0, 0, 0, 1)` keeps
+everything) cuts the view at a plane: what a mirror's or a portal's view needs (below). It is clipped in the vertex
+shaders (`gl_ClipDistance`, which SDL_GPU enables on every backend), so the depth stays the camera's own and ambient
+occlusion, fog, contact shadows and temporal anti-aliasing work as ever; the copies wholly behind it are culled on the
+CPU as those out of view are (`stats().culled`; the GPU cut culls by the six frustum planes and leaves the seventh to
+the vertex shaders). Shadows are not clipped (a wall behind the mirror still shades what is in front of it), and the
+sky shows where nothing is drawn. `kin::plane_through(point, normal)` makes one. WebGL2 does not clip; it says so once.
+A draw can be left whole by it: `scene.draw_instanced(mesh, copies, material, clip)` with `DrawClip3D::whole` (never
+cut nor culled by it) or `DrawClip3D::whole_if_cut` (the same, and drawn only by cameras that have a clip plane: the
+copy appears in the pictures alone); draws merge only with draws that say the same (`Scene3D::Draw::clip`). WebGL2
+leaves out the `whole_if_cut` draws, as it cuts nothing.
+
+## Mirrors and portals
+
+A mirror, still water or a portal is a surface that shows a picture of the scene from somewhere else: a second view
+(`View3D`), rendered from a camera of its own each frame before the view that sees the surface, whose texture the
+surface's material reads where each of its points shows in that picture. Kin gives the cameras and the surfaces; the
+game owns the views (`examples/planar_views`: a mirror, a basin of rippled water and two portals; `planar_atrium`: the
+same as an authored scene, `examples/planar_views/content/scenes/atrium.kinscene`, with material graphs and a Lua
+script flying an orb through the portals).
+
+```cpp
+// Once: a view for the reflection (half size is plenty), and the mirror's material.
+kin::View3D reflection = r3d.create_view(size / 2, {.samples = 1}).value_or({});
+kin::Material3D mirror{.color = kin::colors::white, .metallic = 1, .roughness = 0.045f};
+mirror.surface = planar_reflection;            // engine/shaders/planar_reflection.surface.glsl, built (below)
+mirror.emissive_texture = reflection.texture(); // its picture (`emissive` stays 0)
+
+// Each frame, from the camera that sees the mirror.
+const kin::PlanarView3D seen = kin::mirror_view(scene.camera, kin::plane_through(at, normal), aspect);
+kin::planar_view_params(mirror.shader_params, seen.projector);
+// ... draw the scene, the mirror with `mirror` ...
+const kin::Camera3D eye = scene.camera;
+scene.camera = seen.camera;
+r3d.render(reflection, scene); // first: the picture
+scene.camera = eye;
+r3d.render(view, scene);       // then the view that sees the mirror
+```
+
+- **`mirror_view(camera, plane, aspect, offset = 0.005)`**: the camera's reflection in the plane (behind the mirror,
+  looking out through it; the camera's side of the plane is the front, whichever way the plane faces), with its
+  `clip_plane` at the mirror, `offset` (world units) in front of it so the mirror's own surface is not in its picture.
+  `projector` takes a point of the mirror to that view's clip space. A camera cannot turn a picture inside out as a
+  reflection does: this one sees the reflection flipped left to right, and the projector reads it the right way.
+- **`portal_view(camera, entry, exit, aspect, offset = 0.005)`**: what the camera sees through the portal `entry`
+  (`PortalPose3D`: a position and a rotation; the surface in its XY plane, its front its +Z): the camera taken through
+  the portals (in at the entry's front, out of the exit's front, turned half round), clipped at the exit, and the
+  projector for the entry's surface (the same as the eye's own projection, for a portal). `portal_point` and
+  `portal_rotation` do the same to anything else that goes through (a body, a bullet, the player's camera when it
+  crosses).
+- **The surfaces.** `engine/shaders/planar_reflection.surface.glsl` (a mirror, water, a polished floor: the picture is
+  the surface's reflection, in place of the environment's or the probes', weighed by its Fresnel, roughness and
+  specular occlusion as theirs would be; its highlights stay. Water reflects little head on and much at a glance; a
+  metal all of it; past a roughness of 0.4 it gives way, by 0.7, to the environment's, blurred on the way) and
+  `planar_window.surface.glsl` (a portal or a screen: the picture is the colour of an `unlit` material). Each reads its
+  picture from the material's emissive map and its parameters from `shader_params` (`planar_view_params(params,
+  projector, distortion, strength)`: the projector's 16 floats, then `distortion`, world units the read moves with the
+  normal map's bend, 0.25 for rippled water, and `strength`). They are not in the engine (a surface's variants are about
+  a megabyte): a game builds the ones it uses, `kin_compile_surface_shader(spv OUTPUT_DIR <dir> SOURCE
+  ${KIN_SHADER_INCLUDE_DIR}/planar_reflection.surface.glsl)`, embeds them and makes them with
+  `create_surface_shader`, as the example does, or compiles them at run time with `compile_surface_shader`
+  (development). A surface of its own can call the same functions (`kin_planar_reflect`, `kin_planar_show`,
+  `kin_planar_uv`, `kin_planar_read`) with a picture and projector of its choosing, and `KinSurface::reflection` takes
+  any reflection a surface computes.
+- **A view's own picture.** A material whose map is the picture its view is drawing into reads white there (it may not
+  read the texture it writes); with the clip plane's offset the mirror is not drawn in its own view anyway.
+- **Planar surfaces in each other's pictures.** A mirror's picture is made for the camera that sees the mirror; seen
+  in another planar view (a portal in the mirror, the mirror in the water), it would show the picture made for the
+  main camera, which is wrong there. Draw planar surfaces with stand-ins in the planar views (the example: kin's own
+  reflections for the mirror and the water, a dim film for the portals), or give such a pair a view of its own.
+- **Portals in portals.** `portal_chain(camera, entry, exit, aspect, depth)` gives `depth` views, each through the
+  entry again from the one before. View k draws the entry's surface with view k + 1's picture and projector (the last
+  with a stand-in); render the last first. Two portals facing each other show their corridor to that depth. Stop a
+  chain where `planar_on_screen(chain[k].camera, ...)` says the entry is out of view (the example does).
+- **Going through.** `PortalPose3D::size` is the opening. `portal_crossing(entry, from, to)` says whether a step
+  (a player's, a body's, a frame's) goes in through the entry's front within the opening, and how much of the step
+  was taken before it: move the rest from the exit, `portal_point` for the place, `portal_rotation` for the facing
+  and the velocity (the example's orb and its walking camera, `--camera 5`). `ray_through_portal(ray, entry, exit)`
+  continues an aim, a bullet or a line of sight out of the exit (again for each portal it meets).
+  `portal_straddle(entry, exit, centre, radius)`: while a thing is half-way through (its bounds closer to the entry's
+  plane than its radius and the views' clip offset, its centre within the opening and its bounds no larger than the
+  opening: not the wall or the floor round it), the transform to its image at the exit; draw
+  it there too, before it is moved through and after. The part that has gone through then shows beyond the exit, and
+  the part that has not still shows before the entry. Draw neither cut by the pictures' clip planes, or a closed mesh
+  cut open shows the rim of its inside where the halves meet (a crescent, a thin ring, a small hole as it leaves): the
+  image with `DrawClip3D::whole` and the thing again, where it is, with `DrawClip3D::whole_if_cut`
+  (`scene.draw_instanced(mesh, copies, material, clip)`; see Cameras). Physics is the
+  game's: a body half-way through is the game's to mirror at the exit (a second, kinematic copy) and to let through
+  the wall round the opening.
+- **Close up.** Kin's views clamp depth at the near plane rather than clip there, so a flat portal stays whole however
+  close the camera comes. A camera that passes the plane before the game moves it through (an eye ahead of the body
+  whose crossing moves it) has the flat surface behind it; draw the surface as the box `portal_surface_transform(entry,
+  depth)` places (`meshes::box({1, 1, 1})`, its material `double_sided`): inside it the camera sees its faces, which
+  read their own pixels of the picture (a portal's projector is the camera's own projection).
+- **Which views to render.** `planar_on_screen(camera, aspect, centre, rotation, size)` gives where a mirror or a
+  portal shows on screen (0..1), or nothing when it is out of view or seen from behind: its view need not be rendered
+  then. **Only where it shows:** `Camera3D::window` makes a view of part of a camera's frame (an off-centre
+  projection: what a camera of the whole frame would show there, its pixels as dense as the frame's at the view's size
+  over the window's), and `crop_planar_view(view, window, aspect, mirrored, through)` cuts a planar view to it (a
+  mirror's window turned left to right: its camera sees the frame flipped). A mirror covering a fifth of the screen
+  then costs about a fifth of a view, as sharp as the view: `PlanarViews3D` does so, with the view's samples. Depth,
+  the light grid, fog, ambient occlusion and culling follow the projection; the sun's cascades are fitted to the whole
+  frame, and levels of detail to the window's denser pixels.
+- **Cost.** Each view is a whole render: its shadows, ambient occlusion and the rest, as the main view's. A small view
+  (`examples/planar_views --scale`) and the clip plane's culling (half the scene is behind a mirror on a wall) keep it
+  down; a view not seen this frame (planar_on_screen) need not be rendered. `examples/planar_views`
+  (a 1280 x 720 view, four planar views at 640 x 360, about 40 copies; RTX 4080 Laptop, `--bench 330 --profile`): each
+  planar view about 0.16 ms of GPU time (median; the scopes' resolution is about 0.1 ms) and 0.03 to 0.15 ms of CPU
+  recording, the main view 0.2 to 0.5 ms. Orbiting with portals three deep, 5.2 planar views a frame on average (3.2 one
+  deep; those not on screen skipped): the whole frame's GPU time 2.4 ms (median), 2.1 one deep. Temporal
+  anti-aliasing in a planar view keeps its own history; on the main view the picture moves as the surface does, so a
+  reflection's parallax can smear for a frame when the camera moves fast.
+- **Colours.** The picture is read as the material's maps are (decoded where the 2D pipeline keeps textures encoded).
+  Give the planar views the main view's colour handling: both LDR, or both HDR in an HDR 2D pipeline (an LDR main view
+  over an `hdr` planar view would tonemap the reflection twice). The portal's picture is fogged in its view; the
+  window's unlit surface is fogged again at its own distance.
+
+
+### Mirrors and portals on entities
+
+`Mirror3D` and `Portal3D` (`kin/ecs/render3d.hpp`; authored in scenes and prefabs, shown by the inspector like any
+reflected component) put them on entities: each is a surface in the entity's XY plane, centred on it, its front its +Z,
+`size` wide and high times the entity's scale. `SceneSession3D::render` draws them and renders their pictures after
+`compose`, given kin's planar surfaces (`SceneSession3DOptions::planar_surfaces`); a game that collects its own world
+runs a `PlanarViews3D` (`kin/scene/planar_views3d.hpp`) before rendering the view: `planar.render(world, scene,
+view_size, view_options)` draws the surfaces into the collected scene and renders the pictures they need.
+
+```json
+{"id": "pond", "components": {"Transform3D": {"position": [0, 0.3, 0], "rotation": [-0.7071068, 0, 0, 0.7071068]},
+  "Mirror3D": {"size": [4, 4], "color": [10, 28, 34, 255], "metallic": 0, "roughness": 0.06,
+               "normal": "textures/ripples.png", "uv_scale": [1.5, 1.5], "flow": [0.02, 0.013], "distortion": 0.25}}},
+{"id": "west", "components": {"Transform3D": {"position": [-9, 1.4, 1], "rotation": [0, 0.7071068, 0, 0.7071068]},
+  "Portal3D": {"size": [1.8, 2.8], "exit": "east", "depth": 3}}},
+{"id": "east", "components": {"Transform3D": {"position": [9, 1.4, 1], "rotation": [0, -0.7071068, 0, 0.7071068]},
+  "Portal3D": {"size": [1.8, 2.8], "exit": "west", "depth": 3}}}
+```
+
+- **`Mirror3D`**: `color`, `metallic`, `roughness` as a material's (a silver mirror by default: white, metallic 1,
+  roughness 0.045; water: a dark colour, metallic 0); `normal` (an image of the content, read as linear data: ripples)
+  repeated `uv_scale` times and moving by `flow` a second (Scene3D::time); `distortion`, `strength`, and `resolution`
+  (its pictures' sharpness, a share of the view's: 1, as sharp, each covering only where it shows).
+- **`Portal3D`**: `exit` (an entity: the portal it opens onto, or any entity, whose placing is the exit's), `depth`
+  (levels of portals in portals), `resolution`, and `stand_in` (an unlit colour: its deepest level, and what it shows in
+  other planar views' pictures, and everywhere without the planar surfaces).
+- **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64 so
+  that its view keeps its size while it moves a little); a portal's levels while the level before sees it, each of
+  where it shows within the level before, deepest first; each with the other planar surfaces as stand-ins (a mirror as kin's own metal) and without the scene's overlay
+  (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). Views are kept from frame to frame and
+  dropped with their entities. `PlanarViews3D::views_rendered()` and `views_skipped()` count them. Whatever is
+  half-way through a portal is drawn at its exit too (`portal_straddle`): every copy of the scene's draws whose bounds
+  straddle an opening, with its id (not instance batches' or skinned copies'), whole, and an opaque one again where it
+  is, whole, in the pictures only (`DrawClip3D`).
+- **Going through.** `portal_step(world, from, to)` (Lua `scene3d.portal_step(from, to)`) tests a step against every
+  enabled portal: where it ends, out of the exit, and the turn to give its facing and velocity (`turn`, a quaternion),
+  or nothing (nil). `portal_poses(entity)` gives an entity's portal and its exit as the camera3d.hpp helpers take them.
+- **The surfaces.** `kin_planar_surfaces(<target>)` (`cmake/kin_embed.cmake`) builds both into a target, and
+  `create_planar_surfaces(r3d, planar_surfaces)` makes them; `compile_planar_surfaces(r3d)` compiles them now with
+  glslc (development builds). Without them a session still draws the surfaces: mirrors as kin's metal, portals as their
+  stand-in.
 
 ## Views
 

@@ -19,6 +19,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Previous {
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
     uvec4 first;          // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
     mat4 current;         // without the jitter, this frame's camera
     mat4 prior;           // and the last frame's
 }
@@ -46,6 +47,7 @@ void main() {
     const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w);
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0));
     vPrevious = (draw.prior * previous_world).xyw;

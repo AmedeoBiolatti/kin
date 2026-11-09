@@ -486,7 +486,7 @@ if(KIN_EXPERIMENTAL_3D)
             src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp
             src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp
             src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp
-            src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp
+            src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/scene/planar_views3d.cpp
             src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp)
     endif()
     option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)

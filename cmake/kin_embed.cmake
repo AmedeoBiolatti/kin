@@ -18,6 +18,13 @@
 #     defining kin_surface_alpha) the cut-out passes' five after those.
 #     Needs glslc (no KIN_SPIRV_DIR form yet).
 #
+#   kin_planar_surfaces(<target>)
+#     kin's planar surfaces (mirrors and portals: engine/shaders/planar_reflection.surface.glsl and
+#     planar_window.surface.glsl) compiled as kin_compile_surface_shader compiles a surface and built into <target>
+#     (kin_embed_files, NAME planar_surfaces): create_planar_surfaces(r3d, planar_surfaces) makes them
+#     (kin/scene/planar_views3d.hpp). About 2 MB, which is why the engine does not carry them. Needs glslc; sets
+#     KIN_PLANAR_SURFACES on <target> when it built them.
+#
 #   kin_cook_material_graph(<out_var> SOURCE <graph> [OUTPUT <file>])
 #     A material graph (kin.material-graph/1) cooked at build time by the
 #     kin_material_graph tool (glslc): its layout and every variant's SPIR-V in
@@ -289,4 +296,14 @@ ${close_ns}")
         VERBATIM)
     target_sources(${target} PRIVATE "${source}")
     target_include_directories(${target} PRIVATE "${dir}")
+endfunction()
+
+function(kin_planar_surfaces target)
+    set(dir "${CMAKE_CURRENT_BINARY_DIR}/kin_planar_surfaces/${target}")
+    kin_compile_surface_shader(reflection OUTPUT_DIR "${dir}" SOURCE "${KIN_SHADER_INCLUDE_DIR}/planar_reflection.surface.glsl")
+    kin_compile_surface_shader(window OUTPUT_DIR "${dir}" SOURCE "${KIN_SHADER_INCLUDE_DIR}/planar_window.surface.glsl")
+    if(reflection AND window)
+        kin_embed_files(${target} NAME planar_surfaces FILES ${reflection} ${window})
+        target_compile_definitions(${target} PRIVATE KIN_PLANAR_SURFACES)
+    endif()
 endfunction()

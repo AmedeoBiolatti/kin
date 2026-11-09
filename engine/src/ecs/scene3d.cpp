@@ -62,6 +62,55 @@ void register_render3d_components(EcsWorld& world) {
             .description("How long a new clip fades in over the last.")
             .field("apply_root_motion", &Animator3D::apply_root_motion)
             .field("remove_root_motion", &Animator3D::remove_root_motion);
+    if (!registry.find("Mirror3D"))
+        registry.native<Mirror3D>("Mirror3D")
+            .field("enabled", &Mirror3D::enabled)
+            .field("size", &Mirror3D::size)
+            .units("m")
+            .description("How wide and high it is, in the entity's X and Y (its front faces +Z).")
+            .field("color", &Mirror3D::color)
+            .description("What it reflects with: white silver; a dark colour with metallic 0 for water or glass.")
+            .field("metallic", &Mirror3D::metallic)
+            .range(0.0, 1.0)
+            .description("1: a metal mirror, which reflects all of it; 0: water, glass, a floor (more at a glance).")
+            .field("roughness", &Mirror3D::roughness)
+            .range(0.045, 1.0)
+            .description("0.045 sharp; the picture blurs as it grows and gives way to the sky's past 0.4.")
+            .field("normal", &Mirror3D::normal_asset)
+            .asset_type("Image")
+            .description("A normal map (water's ripples); empty: flat.")
+            .field("normal_scale", &Mirror3D::normal_scale)
+            .field("uv_scale", &Mirror3D::uv_scale)
+            .description("How many times the normal map repeats across it.")
+            .field("flow", &Mirror3D::flow)
+            .description("How far the normal map moves a second (its repeats).")
+            .field("distortion", &Mirror3D::distortion)
+            .units("m")
+            .description("How far its ripples move where the reflection is read: 0.25 for water.")
+            .field("strength", &Mirror3D::strength)
+            .range(0.0, 1.0)
+            .description("How much of its reflection the picture is (the rest the sky's).")
+            .field("resolution", &Mirror3D::resolution)
+            .range(0.05, 1.0)
+            .description(
+                "Its picture's sharpness, a share of the view's (1: as sharp; it covers only where it shows).");
+    if (!registry.find("Portal3D"))
+        registry.native<Portal3D>("Portal3D")
+            .field("enabled", &Portal3D::enabled)
+            .field("size", &Portal3D::size)
+            .units("m")
+            .description("Its opening, wide and high, in the entity's X and Y (its front faces +Z).")
+            .field("exit", &Portal3D::exit)
+            .description("The entity it opens onto: in at this one's front, out of the exit's front.")
+            .field("depth", &Portal3D::depth)
+            .range(1.0, 8.0)
+            .description("How many levels of it seen through itself are drawn.")
+            .field("resolution", &Portal3D::resolution)
+            .range(0.05, 1.0)
+            .description(
+                "Its pictures' sharpness, a share of the view's (1: as sharp; each covers only where it shows).")
+            .field("stand_in", &Portal3D::stand_in)
+            .description("What it shows where it has no picture (its deepest level, in mirrors).");
     if (!registry.find("AnimatorAsset3D"))
         registry.native<AnimatorAsset3D>("AnimatorAsset3D")
             .field("asset", &AnimatorAsset3D::asset)
@@ -295,6 +344,36 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
     };
     bind.operator()<ModelRenderer3D>(false);
     bind.operator()<SkinnedMeshRenderer3D>(true);
+    // Mirrors' normal maps (linear data). A failed load keeps the previous map.
+    {
+        std::vector<EcsEntity> mirrors;
+        if (selected.empty())
+            world.each([&](flecs::entity entity, const Mirror3D&) { mirrors.emplace_back(entity); });
+        else
+            for (auto id : selected)
+                if (auto e = world.entity_by_id(id); e && e.has<Mirror3D>())
+                    mirrors.push_back(e);
+        std::sort(mirrors.begin(), mirrors.end(), [](auto a, auto b) { return a.id() < b.id(); });
+        for (auto entity : mirrors) {
+            const std::string path = entity.get<Mirror3D>()->normal_asset.id;
+            if (path.empty() && entity.get<Mirror3D>()->bound_normal.empty())
+                continue; // a C++ map, or none
+            Texture normal;
+            if (!path.empty()) {
+                normal = assets.load_texture(path, false, false).value_or({});
+                if (!normal) {
+                    diagnostics.push_back("entity '" + entity.name() + "' (" + std::to_string(entity.id()) +
+                                          "), Mirror3D normal '" + path +
+                                          "': " + diagnostics3d_text(assets.diagnostics()));
+                    continue;
+                }
+            }
+            auto* mirror = entity.get_mut<Mirror3D>();
+            mirror->normal = std::move(normal);
+            mirror->bound_normal = path;
+            entity.modified<Mirror3D>();
+        }
+    }
     auto material_errors = resolve_materials3d_assets(world, assets, selected).diagnostics;
     diagnostics.insert(diagnostics.end(), material_errors.begin(), material_errors.end());
     auto animation_errors = resolve_animator3d_assets(world, assets.root(), selected).diagnostics;

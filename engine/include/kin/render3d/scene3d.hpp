@@ -310,6 +310,13 @@ struct Material3D {
 
 // One copy of a mesh in a draw_instanced() call. A transform that mirrors
 // (a negative scale) turns its faces inside out: draw it double-sided.
+// How a draw's copies meet the clip plane of the camera that draws them (Camera3D::clip_plane).
+enum class DrawClip3D : u8 {
+    camera,      // cut by it (the default)
+    whole,       // never cut: what is half-way through a portal, at the exit (PlanarViews3D)
+    whole_if_cut // never cut, and drawn only by cameras that have a clip plane: the same, at the entry
+};
+
 struct MeshInstance3D {
     Mat4f transform{};
     Color tint = colors::white;
@@ -790,9 +797,11 @@ public:
     // What is drawn over the scene, in front of everything in it, seen by its
     // own camera and lit by this scene's lights: a first-person gun or hands,
     // which then never sink into a wall. Made on first use; its own overlay
-    // is never drawn.
+    // is never drawn. `show_overlay` false leaves it out of the renders until it is true again (a mirror's picture of a
+    // first-person scene: PlanarViews3D), keeping it.
     Scene3D& overlay();
-    const Scene3D* overlay_if_any() const { return _overlay.get(); }
+    const Scene3D* overlay_if_any() const { return show_overlay ? _overlay.get() : nullptr; }
+    bool show_overlay = true;
 
     // `mesh` placed by `transform`. Draws of the same mesh and material one
     // after another are drawn as one (instanced). history_id follows MeshInstance3D:
@@ -845,6 +854,10 @@ public:
     // Many copies of `mesh`, in one draw.
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
                             const Material3D& material = {});
+    // The same, met by the cameras' clip planes as `clip` says (Draw::clip): one draw only with draws that say the
+    // same.
+    Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances, const Material3D& material,
+                            DrawClip3D clip);
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
     // Retain a handle; batch records need not be copied into instances(). The batch's groups
     // are read at render time, including bounds refreshed by update().
@@ -875,6 +888,10 @@ public:
     // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
     // sun and the ambient light and the weather stay), keeping their room.
     void clear();
+    // The copies of draws()[draw] drawn with `material` from the next render on, their mesh and placing as they are (a
+    // mirror's surface drawn as a stand-in in another mirror's picture, then as itself). Failed for a draw out of
+    // range.
+    Status3D set_draw_material(std::size_t draw, const Material3D& material);
 
     struct Draw {
         Mesh3D mesh;
@@ -887,6 +904,7 @@ public:
         u32 skin_first = 0;
         u32 group_first = 0, group_count = 0; // into instance_groups(); ungrouped gaps use per-copy culling
         InstanceBatch3D batch{};              // if set, first/count refer to batch.instances(), not instances()
+        DrawClip3D clip = DrawClip3D::camera; // draw_instanced(..., clip)
     };
     using InstanceGroup = InstanceGroup3D;
     // A batch of particles (draw_particles): its look and sprites [first, first + count) of particle_sprites().
@@ -967,7 +985,7 @@ private:
     std::span<MeshInstance3D> add_instances_operation(const Mesh3D& mesh, std::size_t count,
                                                       const Material3D& material = {});
     std::span<MeshInstance3D> add_instances(const Mesh3D& mesh, std::size_t count, const Material3D& material,
-                                            bool skinned, u32 skin_first);
+                                            bool skinned, u32 skin_first, DrawClip3D clip = DrawClip3D::camera);
     // One skinned copy whose matrices start at `first_joint` of _joints (already there).
     void add_skinned_copy(const Mesh3D& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material,
                           Color tint, u32 id, u64 history_id = 0);

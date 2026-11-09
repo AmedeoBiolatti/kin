@@ -7,6 +7,32 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Mirrors and portals (3D, native renderers). `Camera3D::clip_plane` cuts a view at a plane (clipped in the vertex
+  shaders, so depth, ambient occlusion, fog and TAA are unchanged; copies behind it are culled on the CPU).
+  `mirror_view` and `portal_view` give the camera of a mirror's or a portal's view and the projector its surface reads
+  the view's picture through; `portal_point`/`portal_rotation` move anything else through a pair of portals.
+  `engine/shaders/planar_reflection.surface.glsl` (the picture replaces the environment's reflection, weighed by the
+  surface's Fresnel and roughness, with normal-map ripples) and `planar_window.surface.glsl` (a portal) are surface
+  shaders a game builds with `kin_compile_surface_shader`; `KinSurface::reflection` lets any surface supply its own
+  reflection. A material reading the texture of the view being drawn reads white there. `examples/planar_views`:
+  a mirror, rippled water and two portals facing each other. Portal gameplay helpers: `PortalPose3D::size`,
+  `portal_crossing` (did a step go through, and how far), `ray_through_portal`, `portal_chain` (portals seen through
+  portals, to a depth), `portal_surface_transform` (a box for the surface, so a camera can step into it), and
+  `planar_on_screen` (skip the views no one sees, size them by screen share). The vertex shaders' draw block grew by
+  a `vec4` (compiled surface vertex variants keep working, without clipping, until rebuilt).
+- Mirrors and portals on entities: `Mirror3D` and `Portal3D` components (authored in scenes and prefabs; a portal's
+  `exit` an entity reference), rendered by `PlanarViews3D` (`kin/scene/planar_views3d.hpp`) and by
+  `SceneSession3D::render` given `SceneSession3DOptions::planar_surfaces` (`kin_planar_surfaces` in CMake builds them;
+  `create_planar_surfaces` / `compile_planar_surfaces` make them). `portal_step` (and Lua `scene3d.portal_step`) moves
+  a step through a world's portals. `Scene3D::set_draw_material` and `Scene3D::show_overlay` (the overlay left out of
+  a render) support them.
+- Portals: things half-way through show on both sides (`portal_straddle`; `PlanarViews3D` draws such copies' images at
+  the exit itself), instead of vanishing or showing as a crescent while crossing, and neither half is cut by the
+  pictures' clip planes, so no rim shows where they meet (`DrawClip3D`, `Scene3D::draw_instanced(..., clip)`). Planar pictures cover only where
+  their surface shows (`Camera3D::window`, `crop_planar_view`, `planar_picture`), as sharp as the view and with its
+  samples (`resolution` 1 by default).
+- `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
+  authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
   with a private six-file cache. It stays off by default because cold/private-header
   rebuilds cost more; see [measurements](build_times.md#private-widget-implementation-pch).
