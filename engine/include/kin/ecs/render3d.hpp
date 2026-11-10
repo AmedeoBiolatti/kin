@@ -213,12 +213,19 @@ struct PortalTraveller3D {
 };
 
 struct Portal3D {
+    // What the surface does to its picture (kin's planar_window surface): nothing; ripples spreading from where things
+    // go through, as on water; a vortex turning round its middle, spun faster by what goes through; a glitching
+    // signal, its picture torn and split in colour, worst where things go through; a liquid membrane, wobbling, a
+    // soap film's colours at a glance, rippled by what goes through. Each with a glow at its rim.
+    enum class Effect : u8 { None, Ripples, Vortex, Glitch, Membrane };
     bool enabled = true;
     Vec2f size{1.8f, 2.8f};
     ComponentEntityRef exit{};
     u32 depth = 1;
     f32 resolution = 1.0f;
     Color stand_in = Color::rgb(24, 40, 52);
+    Effect effect = Effect::None;
+    f32 effect_strength = 1.0f;
 };
 
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the

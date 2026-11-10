@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/scene3d.hpp>
@@ -122,7 +123,27 @@ void register_render3d_components(EcsWorld& world) {
             .description(
                 "Its pictures' sharpness, a share of the view's (1: as sharp; each covers only where it shows).")
             .field("stand_in", &Portal3D::stand_in)
-            .description("What it shows where it has no picture (its deepest level, in mirrors).");
+            .description("What it shows where it has no picture (its deepest level, in mirrors).")
+            .property<std::string>(
+                "effect",
+                [](const Portal3D& portal) {
+                    static constexpr std::array names{"none", "ripples", "vortex", "glitch", "membrane"};
+                    return std::string(names[std::min<std::size_t>(std::size_t(portal.effect), names.size() - 1)]);
+                },
+                [](Portal3D& portal, const std::string& name) {
+                    static constexpr std::array names{"none", "ripples", "vortex", "glitch", "membrane"};
+                    for (std::size_t i = 0; i < names.size(); ++i)
+                        if (name == names[i]) {
+                            portal.effect = Portal3D::Effect(i);
+                            return true;
+                        }
+                    return false;
+                })
+            .choices({"none", "ripples", "vortex", "glitch", "membrane"})
+            .description("What its surface does to its picture; all but none answer what goes through it.")
+            .field("effect_strength", &Portal3D::effect_strength)
+            .range(0.0, 2.0)
+            .description("How strong its effect is.");
     if (!registry.find("PortalTraveller3D"))
         registry.native<PortalTraveller3D>("PortalTraveller3D")
             .field("enabled", &PortalTraveller3D::enabled)

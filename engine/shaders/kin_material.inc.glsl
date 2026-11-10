@@ -682,10 +682,130 @@ void kin_planar_reflection(inout KinSurface s) {
                        mat4(kin_surface_param(5), kin_surface_param(6), kin_surface_param(7), kin_surface_param(8)),
                        below.y, below.x, kin_planar_part(below), kin_planar_compressed().y > 0.5);
 }
+// --- Portal effects (Portal3D::effect: PlanarViews3D writes them into the window surface's parameters): what the
+// surface does to its picture. Parameters: 5, 6, 7 its middle and its x and y axes (world); 11 (effect, strength, its
+// width, its height); 12 to 15 its latest disturbances, where things went through (x, y on it in metres, when:
+// Scene3D::time, how strongly). Each moves the point the picture is read at, on the portal's plane, and colours.
+float kin_portal_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float kin_portal_noise(vec2 p) {
+    const vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(kin_portal_hash(i), kin_portal_hash(i + vec2(1.0, 0.0)), u.x),
+               mix(kin_portal_hash(i + vec2(0.0, 1.0)), kin_portal_hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+// The disturbances' ripples at `at` (metres on the surface): a packet of waves running out from each, `speed` metres a
+// second, `wavelength` long, fading `fade` a second. x: the height, yz: its slope.
+vec3 kin_portal_ripples(vec2 at, float now, float speed, float wavelength, float fade) {
+    vec3 sum = vec3(0.0);
+    for (int k = 0; k < 4; ++k) {
+        const vec4 d = kin_surface_param(12 + k);
+        const float age = now - d.z;
+        if (age < 0.0 || age > 5.0)
+            continue;
+        const vec2 off = at - d.xy;
+        const float r = length(off);
+        const float x = r - age * speed;
+        const float envelope = exp(-x * x / (2.0 * wavelength * wavelength)) * exp(-age * fade) * d.w;
+        const float phase = 6.2831853 * x / wavelength;
+        const vec2 way = r > 1e-4 ? off / r : vec2(0.0);
+        sum += vec3(sin(phase) * envelope, way * (cos(phase) * 6.2831853 / wavelength * envelope));
+    }
+    return sum;
+}
+// How much the disturbances still stir it (each fading `fade` a second), and how much near `at` (within a metre).
+vec2 kin_portal_stir(vec2 at, float now, float fade) {
+    vec2 sum = vec2(0.0);
+    for (int k = 0; k < 4; ++k) {
+        const vec4 d = kin_surface_param(12 + k);
+        const float age = now - d.z;
+        if (age < 0.0 || age > 6.0)
+            continue;
+        const float left = exp(-age * fade) * d.w;
+        sum += vec2(left, left * clamp(1.0 - length(at - d.xy), 0.0, 1.0));
+    }
+    return sum;
+}
+
 void kin_planar_window(inout KinSurface s) {
     const vec4 settings = kin_surface_param(4);
-    kin_planar_show(s, uEmissive, kin_planar_projector(), settings.x, settings.y, kin_planar_part(settings),
-                    kin_planar_compressed().x > 0.5);
+    const vec4 effect = kin_surface_param(11);
+    const vec2 part = kin_planar_part(settings);
+    const bool compressed = kin_planar_compressed().x > 0.5;
+    const int kind = int(effect.x + 0.5);
+    if (kind == 0) {
+        kin_planar_show(s, uEmissive, kin_planar_projector(), settings.x, settings.y, part, compressed);
+        return;
+    }
+    const mat4 projector = kin_planar_projector();
+    const vec3 middle = kin_surface_param(5).xyz, ax = kin_surface_param(6).xyz, ay = kin_surface_param(7).xyz;
+    const float strength = effect.y, now = frame.time.x;
+    const vec2 size = max(effect.zw, vec2(0.01));
+    const vec2 at = vec2(dot(vWorld - middle, ax), dot(vWorld - middle, ay)); // metres from its middle
+    const vec2 unit = at / (0.5 * size);                                        // -1 to 1 across it
+    const float edge = min(1.0 - abs(unit.x), 1.0 - abs(unit.y));                 // 0 at its rim
+    const vec3 teal = vec3(0.25, 0.95, 0.9);
+    vec2 moved = vec2(0.0); // the point read, moved on the surface (metres)
+    vec3 tint = vec3(0.0);  // light added
+    float glow = 0.35;      // the rim's
+    vec3 seen;
+    if (kind == 1) {
+        // Ripples: still water's faint swell, and waves running out from what went through.
+        const vec3 r = kin_portal_ripples(at, now, 1.4, 0.16, 0.8);
+        const float swell = sin(at.x * 7.0 + now * 1.3) * sin(at.y * 5.0 - now * 1.1);
+        moved = -r.yz * 0.007 + vec2(swell * 0.005);
+        tint = teal * max(r.x, 0.0) * 0.35;
+        glow += 0.5 * kin_portal_stir(at, now, 1.5).x;
+    } else if (kind == 2) {
+        // A vortex: turning round its middle, faster toward it, spun up by what goes through.
+        const float stir = kin_portal_stir(at, now, 1.2).x;
+        const float r = length(unit);
+        const float near = pow(clamp(1.0 - r, 0.0, 1.0), 2.0);
+        const float turn = near * (0.7 + 3.0 * stir) + 0.1 * sin(now * 0.7);
+        const float c = cos(turn), sn = sin(turn);
+        moved = mat2(c, sn, -sn, c) * at - at;
+        const float bands = 0.5 + 0.5 * sin(atan(unit.y, unit.x) * 3.0 + r * 9.0 - now * (2.5 + 6.0 * stir));
+        tint = teal * near * bands * (0.25 + 0.5 * stir);
+        glow += 0.4 * stir;
+    } else if (kind == 3) {
+        // A glitching signal: bands of it torn sideways now and then (often, and far, near what goes through), its
+        // colours split, scanlines and sparks.
+        const vec2 stir = kin_portal_stir(at, now, 2.0);
+        const float band = floor((unit.y * 0.5 + 0.5) * 28.0), tick = floor(now * 12.0);
+        const float burst = clamp(stir.y * 1.5 + stir.x * 0.3, 0.0, 1.5);
+        const float torn = kin_portal_hash(vec2(band, tick)) > 0.9 - 0.4 * burst ? 1.0 : 0.0;
+        moved.x = torn * (kin_portal_hash(vec2(band, tick + 7.0)) - 0.5) * (0.12 + 0.5 * burst);
+        const vec2 split = vec2((0.008 + 0.05 * burst) * strength, 0.0);
+        const vec2 base = at + moved * strength;
+        const vec3 r = kin_planar_read(uEmissive, kin_planar_uv(projector, middle + ax * (base.x + split.x) +
+                                                                               ay * base.y),
+                                       part, compressed);
+        const vec3 g = kin_planar_read(uEmissive, kin_planar_uv(projector, middle + ax * base.x + ay * base.y), part,
+                                       compressed);
+        const vec3 b = kin_planar_read(uEmissive, kin_planar_uv(projector, middle + ax * (base.x - split.x) +
+                                                                               ay * base.y),
+                                       part, compressed);
+        seen = vec3(r.r, g.g, b.b) * (0.86 + 0.14 * sin(at.y * 260.0 + now * 30.0));
+        seen += vec3(kin_portal_hash(floor(at * 180.0) + tick) > 0.996 - 0.01 * burst ? 0.8 : 0.0);
+        glow += 0.6 * burst;
+    } else {
+        // A liquid membrane: wobbling slowly, a soap film's colours where it is seen at a slant, big slow ripples from
+        // what goes through.
+        const vec3 r = kin_portal_ripples(at, now, 0.8, 0.35, 0.5);
+        moved = vec2(0.025 * sin(at.y * 4.0 + now * 1.6) + 0.015 * sin(at.x * 3.1 - now * 1.1),
+                     0.02 * sin(at.x * 3.7 + now * 1.3)) -
+                r.yz * 0.02;
+        const float slant = 1.0 - abs(dot(normalize(s.normal), normalize(frame.eye.xyz - vWorld)));
+        const float film = 0.6 + 0.35 * kin_portal_noise(at * 1.7 + now * 0.15) + 0.5 * r.x;
+        const vec3 colours = 0.5 + 0.5 * cos(6.2831853 * (film * vec3(1.0, 1.25, 1.55) + vec3(0.0, 0.33, 0.67)));
+        tint = colours * (0.08 + 0.55 * slant * slant) + teal * max(r.x, 0.0) * 0.25;
+    }
+    if (kind != 3)
+        seen = kin_planar_read(uEmissive, kin_planar_uv(projector, middle + ax * (at.x + moved.x * strength) +
+                                                                       ay * (at.y + moved.y * strength)),
+                               part, compressed);
+    seen += tint * strength + teal * glow * strength * smoothstep(0.12, 0.0, edge);
+    s.base_color = mix(s.base_color, seen, settings.y);
 }
 #endif
 

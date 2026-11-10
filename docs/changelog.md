@@ -136,6 +136,9 @@ releases may change APIs.
 - planar_atrium opens on a loading screen (the step under way, a progress bar, the controls) that fades out over the
   scene's first frames, and its material graphs are cooked at build time (`kin_cook_material_graphs`; `*.kingraph.spv`
   is git-ignored): it starts in about a second, from about 18 (eight graphs compiled with glslc as it started).
+- `Portal3D::effect` (none, ripples, vortex, glitch, membrane) and `effect_strength`: the planar window surface
+  distorts and lights its picture, answering what goes through the portal (where it went through and when, on both
+  surfaces of the pair). planar_atrium: P cycles them.
 - 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
   allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
   fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).

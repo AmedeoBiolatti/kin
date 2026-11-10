@@ -2821,7 +2821,14 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   (its pictures' sharpness, a share of the view's: 1, as sharp, each covering only where it shows).
 - **`Portal3D`**: `exit` (an entity: the portal it opens onto, or any entity, whose placing is the exit's), `depth`
   (levels of portals in portals), `resolution`, and `stand_in` (an unlit colour: its deepest level, and what it shows in
-  other planar views' pictures, and everywhere without the planar surfaces).
+  other planar views' pictures, and everywhere without the planar surfaces). `effect` (authored `"none"`, `"ripples"`,
+  `"vortex"`, `"glitch"`, `"membrane"`) and `effect_strength`: what its surface does to its picture. Ripples run out
+  from where things go through, as on water; a vortex turns round its middle, spun faster by what goes through; a
+  glitching signal tears and splits in colour, worst where things go through; a liquid membrane wobbles, shows a soap
+  film's colours at a slant and ripples slowly. Each glows at its rim. Things going through are those half-way through
+  its opening (as `portal_straddle` finds them) within half a metre of it: the four latest, on both surfaces of the
+  pair, in the window surface's parameters (`planar_window.surface.glsl`, `kin_planar_window`). `planar_atrium`: P
+  cycles them.
 - **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64;
   where the renderer can render part of a view, each picture at its own size into a view that only grows, to the
   largest picture it has shown, so that a moving eye does not resize views, all their targets made again, every few

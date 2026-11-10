@@ -7,7 +7,8 @@
 //                 [--autoplay SECONDS [--autoplay-report report.json]]
 //
 // --camera: 6 (the default) plays: the survivor (an animated character, a physics capsule) is yours, seen from behind
-// (WASD or the arrows walk, the mouse turns the camera, Space jumps, Shift runs; it walks through the portals, carried
+// (WASD or the arrows walk, the mouse turns the camera, Space jumps, Shift runs, P changes the portals' effect: off,
+// ripples, vortex, glitch, membrane, each answering what goes through; it walks through the portals, carried
 // by physics, and the camera follows it; Tab frees the mouse). 0 orbits the
 // atrium, 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the portals, 5 watches the
 // survivor walk its round into the west portal (the keys 0-6 too). --shot renders
@@ -278,6 +279,13 @@ public:
             _bot = std::make_unique<AtriumBot>();
     }
 
+    // P: the portals' next effect (Portal3D::effect), on both: none, ripples, vortex, glitch, membrane.
+    void next_effect() {
+        _effect = (_effect + 1) % 5;
+        _session->world()->each([&](flecs::entity, Portal3D& portal) { portal.effect = Portal3D::Effect(_effect); });
+        _effect_shown = 2.0f;
+    }
+
     // The loading screen: the atrium's name, what loads, how far along, the controls; `opacity` as it fades out over
     // the scene's first frames.
     void loading_screen(SceneContext& ctx, Vec2i size, f32 opacity) {
@@ -303,9 +311,9 @@ public:
         ui2::draw_text_centered(r, what, {w / 2, py - 22}, 2, Color::rgba(200, 210, 212, a(255)));
         r.fill_rect({px, py, pw, 8}, Color::rgba(36, 48, 52, a(255)));
         r.fill_rect({px, py, pw * f32(done) / f32(total), 8}, Color::rgba(60, 220, 210, a(255)));
-        ui2::draw_text_centered(r,
-                                "WASD walk    mouse look    Space jump    Shift run    Tab free the mouse    Esc quit",
-                                {w / 2, h - 40}, 2, Color::rgba(130, 150, 152, a(255)));
+        ui2::draw_text_centered(
+            r, "WASD walk   mouse look   Space jump   Shift run   P portal effect   Tab free mouse   Esc quit",
+            {w / 2, h - 40}, 2, Color::rgba(130, 150, 152, a(255)));
     }
 
     void update(SceneContext& ctx) override {
@@ -325,6 +333,9 @@ public:
                 _camera = i;
                 (*_lua)["atrium_camera"] = i;
             }
+        if (ctx.input.pressed(Key::P))
+            next_effect();
+        _effect_shown = std::max(0.0f, _effect_shown - ctx.dt);
         if (_bot)
             _bot->step(ctx.input, _session->entity("survivor"), _session->entity("camera"), ctx.dt);
         // Playing in a window: the mouse turns the camera (held in the window; Tab lets it go and takes it back).
@@ -359,6 +370,14 @@ public:
             require(_session->diagnostics());
         ctx.renderer.clear();
         ctx.renderer.draw_texture(_session->view()->texture(), {0, 0, f32(size.x), f32(size.y)});
+        if (_effect_shown > 0.0f) {
+            // The portals' effect, named for a moment as P changes it.
+            static constexpr std::array names{"off", "ripples", "vortex", "glitch", "membrane"};
+            const u8 a = u8(255.0f * std::min(1.0f, _effect_shown));
+            ctx.renderer.fill_rect({f32(size.x) / 2 - 190, 18, 380, 40}, Color::rgba(10, 16, 18, u8(a * 0.7f)));
+            ui2::draw_text_centered(ctx.renderer, std::string("Portal effect: ") + names[_effect],
+                                    {f32(size.x) / 2, 38}, 2, Color::rgba(150, 240, 230, a));
+        }
         if (_windowed && _shown < warm_frames + fade_frames) {
             // The scene's first frames behind the screen (its reflection probes captured, the reflections with a frame
             // before to read), then the screen fading away.
@@ -524,6 +543,8 @@ private:
     std::vector<AssetHandle<Model3D>> _models;
     bool _windowed = false;
     int _shown = 0;
+    u32 _effect = 0;          // the portals' (next_effect)
+    f32 _effect_shown = 0.0f; // seconds its name still shows
     std::unique_ptr<AtriumBot> _bot;
     std::chrono::steady_clock::time_point _last_frame = std::chrono::steady_clock::now();
     std::vector<f64> _frame_ms, _cpu_ms, _gpu_ms;
