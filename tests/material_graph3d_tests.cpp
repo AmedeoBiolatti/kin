@@ -470,6 +470,34 @@ void offset_reads_the_object() {
         CHECK(cooked->spirv[i].size() > 20);
 }
 
+// A point in the object's own space: a pattern that moves and turns with the copy (noise on a rolling ball). In a
+// fragment, the mesh's vertex shader's varying; at a vertex (an offset), the world position through the inverse model
+// matrix. Not in the cut-out passes (as the origin isn't). With glslc, its fragment and vertex variants compile.
+void reads_the_local_position() {
+    const std::string text = graph("",
+                                   R"({"id": "scaled", "type": "multiply", "inputs": {"a": "local_position", "b": 4}},
+           {"id": "rust", "type": "fbm", "inputs": {"p": "scaled"}},
+           {"id": "lift", "type": "multiply", "inputs": {"a": "local_position.y", "b": [0, 0.01, 0]}})",
+                                   R"("base_color": "rust", "offset": "lift")");
+    const auto g = compile_material_graph3d(text);
+    for (const auto& e : g.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(g.ok() && g.offset && g.warnings.empty());
+    CHECK(contains(g.surface, "kin_local_position()"));
+    if (!shader_compiler_available())
+        return;
+    std::string why;
+    const auto cooked = cook_material_graph3d(text, &why);
+    if (!cooked)
+        std::cerr << why << '\n';
+    CHECK(cooked.has_value());
+    // Its fragment variants and its offset's vertex ones (no alpha: no cut-out variants).
+    for (u32 i = 0; i < surface_mask_variant3d; ++i)
+        CHECK(cooked->spirv[i].size() > 20);
+    for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+        CHECK(cooked->spirv[i].size() > 20);
+}
+
 // What the GI scene's stand-in needs (SurfaceTraits3D): an emission output of its own unless a constant black; the
 // vertex colour in its colour and alpha where they read it (through any node, a glsl node's vColor, the stock
 // surface's fields) or are not outputs; kept in the layout, and defaults for a layout from before them.
@@ -544,6 +572,7 @@ int main() {
     layers_and_packing();
     offsets();
     offset_reads_the_object();
+    reads_the_local_position();
     traits();
     deep_chains();
     std::cout << "material graph tests passed\n";

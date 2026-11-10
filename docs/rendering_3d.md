@@ -1733,7 +1733,9 @@ shadowed, fogged and GI-lit as kin's own materials are.
 - **Inputs** are references or values. A reference names a node (`"map"`), a component of one (`"map.rgb"`,
   `"map.a"`: swizzles of xyzw or rgba), a parameter, or a built-in input: `uv` (with the material's UV transform),
   `position` (world), `normal` (the mesh's, before maps), `view` (toward the camera), `vertex_color`, `time`
-  (`Scene3D::time`), `screen` (the pixel, 0 to 1), `camera_distance`, and `surface.<field>`: what kin's material makes
+  (`Scene3D::time`), `screen` (the pixel, 0 to 1), `camera_distance`, `object_position` (the copy's origin),
+  `local_position` (the point in the copy's own space, posed when skinned: a pattern that moves and turns with it, where
+  `position`'s stays in the world as the copy moves through it), and `surface.<field>`: what kin's material makes
   of the surface before the graph (`base_color`, `alpha`, `normal`, `metallic`, `roughness`, `occlusion`,
   `emission`). A value is a number or an array of 2 to 4. Types are float, vec2, vec3, vec4: a float widens to any
   vector; a vector narrows to its first components, or widens with 0 (and 1 for the fourth), as Unreal's do.
@@ -1746,7 +1748,8 @@ shadowed, fogged and GI-lit as kin's own materials are.
   vertices alike, and the velocity's previous position takes the view's time of the frame before. At a vertex it reads
   `uv`, `position`, `normal` (the mesh's), `view`, `vertex_color`, `time`, `camera_distance`, the parameters and the
   maps (their top level: a vertex has no derivatives; no tangent frame, nor the environment), and the object's space:
-  `object_position` (the copy's origin; a fragment has it too, flat from the mesh's vertex shader) and, which only a
+  `object_position` (the copy's origin; a fragment has it too, flat from the mesh's vertex shader), `local_position`
+  (the vertex through the copy's inverse model matrix; a fragment's from the mesh's vertex shader) and, which only a
   vertex has, the `object_to_world` / `world_to_object` nodes (a
   point, `w` 1, or a direction, `w` 0, through the copy's model matrix: wind swaying a plant by its height, a vertex
   animation's local offsets; the frame before's matrix for the velocity); `surface.*`, `screen`,

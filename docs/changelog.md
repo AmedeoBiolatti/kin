@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Material graphs: a `local_position` built-in input, the point in the copy's own space (posed when skinned), from the
+  mesh's vertex shader (at a vertex, through the inverse model matrix). A pattern on it moves and turns with the copy,
+  where `position`'s stays in the world (noise on a rolling ball slid over it).
 - Render graphs for tools: `write_resource_graph_json` writes a compiled graph (`kin.render-graph/1`: resources,
   passes with their reads and writes by name, the run's order, culled passes, times); the stock 3D frame's recipe is
   public as `stock_frame_graph3d()`, `RenderDebugStats3D::graph_pass_ms` times each of its passes, and the game server's
