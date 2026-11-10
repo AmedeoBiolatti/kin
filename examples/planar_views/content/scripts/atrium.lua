@@ -6,7 +6,9 @@
 -- "back", "left", "right", "jump" and "sprint", and gives the mouse's motion in `atrium_look_x`, `atrium_look_y`;
 -- seen from behind, the camera orbiting it with the mouse and following it through the portals), 0 orbits the atrium,
 -- 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the portals, round and round, 5 watches
--- the survivor walk its round (by itself, through the same physics) into the west portal.
+-- the survivor walk its round (by itself, through the same physics) into the west portal. `atrium_at` (x, y, z in
+-- metres, yaw and pitch in degrees, as the host's bottom line shows them) holds the camera there in any mode;
+-- `atrium_survivor` (x, y, z, yaw) puts the survivor there once.
 
 local world
 local time = 0
@@ -187,6 +189,13 @@ function update(ctx)
     world:authored("ring"):patch("Transform3D", {rotation = normalized(mul(quat(0, 1, 0, time * 25), quat(1, 0, 0, 68)))})
 
     local mode = atrium_camera or 0
+    if atrium_survivor then
+        local at = atrium_survivor
+        world:authored("survivor"):patch("Transform3D", {position = {x = at.x, y = at.y, z = at.z},
+                                                         rotation = quat(0, 1, 0, at.yaw or 0)})
+        survivor.last = nil
+        atrium_survivor = nil
+    end
     local p, turned, through = where()
     if p then
         survivor.face = survivor.face + turned
@@ -209,7 +218,12 @@ function update(ctx)
         position, target = {x = -6.0, y = 1.7, z = 5.5}, {x = -11.45, y = 1.1, z = 2.0}
     end
     local rotation
-    if mode == 6 and p then
+    if atrium_at then
+        -- (The bottom line's yaw is the way it looks, (sin, cos); a camera looks down its -Z: turned half round more.)
+        local at = atrium_at
+        position, rotation = {x = at.x, y = at.y, z = at.z}, normalized(mul(quat(0, 1, 0, at.yaw + 180),
+                                                                            quat(1, 0, 0, at.pitch)))
+    elseif mode == 6 and p then
         position, rotation = follow(p)
     elseif mode == 4 then
         position, rotation = walker.position, walker.facing

@@ -372,6 +372,8 @@ public:
     const SceneInstance* instance() const;
     Scene3D* scene();
     const View3D* view() const; // null without an active scene, or headless
+    // The options view() was made with (the scene's environment's: exposure, bloom, background); null as view().
+    const ViewOptions3D* view_options() const;
     const std::vector<std::string>& diagnostics() const;
 
 private:

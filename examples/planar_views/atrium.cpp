@@ -4,7 +4,8 @@
 // Lua script (content/scripts/atrium.lua: an orb flying through the portals by scene3d.portal_step).
 //
 //   planar_atrium [--camera N] [--shot picture.png] [--frames N] [--content folder] [--bake-probes]
-//                 [--autoplay SECONDS [--autoplay-report report.json]]
+//                 [--autoplay SECONDS [--autoplay-report report.json]] [--at X Y Z YAW PITCH]
+//                 [--survivor X Y Z [YAW]] [--cycles-snapshot folder]
 //
 // --camera: 6 (the default) plays: the survivor (an animated character, a physics capsule) is yours, seen from behind
 // (WASD or the arrows walk, the mouse turns the camera, Space jumps, Shift runs, F3 hides the camera's and the
@@ -21,7 +22,11 @@
 // both portals, a jump through one, into the open south edge) and reports what a player would meet: falls, escapes from
 // the room, getting stuck, missed portals, the frame times (CPU and GPU, after a warm-up), pipelines made late, the
 // memory every 10 seconds; it fails (exit 2) on any of the first four, and on memory still growing over the second half
-// of a run of 4 minutes or more. Esc: quit.
+// of a run of 4 minutes or more. --at puts the camera where the bottom line (F3) says (centimetres, degrees) and holds
+// it there; --survivor the survivor (centimetres; YAW: the way it faces, degrees round +Y from +Z). --cycles-snapshot
+// renders headless as --shot does (the picture: kin.png in the folder unless --shot names one) and writes the scene
+// as it was rendered into the folder (write_scene_snapshot) for tools/cycles/compare.py to render it with Blender's
+// Cycles and compare. Esc: quit.
 #include "planar_surfaces.hpp"
 
 #include <algorithm>
@@ -39,6 +44,7 @@
 #include <kin/ecs/render3d.hpp>
 #include <kin/platform/window.hpp>
 #include <kin/render3d/assets3d.hpp>
+#include <kin/render3d/snapshot3d.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <kin/scene/planar_views3d.hpp>
 #include <kin/scene/reflection_probes3d.hpp>
@@ -46,10 +52,12 @@
 #include <kin/ui2/text.hpp>
 #include <malloc.h>
 #include <memory>
+#include <optional>
 #include <sol/sol.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -62,6 +70,9 @@ struct Options {
     bool bake = false;
     f32 autoplay = 0; // seconds
     std::filesystem::path autoplay_report;
+    std::optional<std::array<f32, 5>> at;       // --at: x, y, z (cm), yaw, pitch (degrees)
+    std::optional<std::array<f32, 4>> survivor; // --survivor: x, y, z (cm), yaw (degrees)
+    std::filesystem::path snapshot;             // --cycles-snapshot
 };
 
 // The memory the process holds (resident), in MiB (Linux; 0 elsewhere).
@@ -269,6 +280,14 @@ public:
             lua["atrium_camera"] = _camera;
             lua["atrium_look_x"] = 0.0f;
             lua["atrium_look_y"] = 0.0f;
+            // (atrium.lua: the camera held at `atrium_at`, the survivor put at `atrium_survivor` once; metres, degrees)
+            if (_o.at)
+                lua["atrium_at"] = lua.create_table_with("x", (*_o.at)[0] / 100, "y", (*_o.at)[1] / 100, "z",
+                                                         (*_o.at)[2] / 100, "yaw", (*_o.at)[3], "pitch", (*_o.at)[4]);
+            if (_o.survivor)
+                lua["atrium_survivor"] =
+                    lua.create_table_with("x", (*_o.survivor)[0] / 100, "y", (*_o.survivor)[1] / 100, "z",
+                                          (*_o.survivor)[2] / 100, "yaw", (*_o.survivor)[3]);
         };
         _session = std::make_unique<SceneSession3D>(*_renderer, *_assets, options);
         if (!_session->load("scenes/atrium.kinscene"))
@@ -427,6 +446,18 @@ public:
                 !save_image(image, _o.shot))
                 throw std::runtime_error("cannot write " + _o.shot.string());
             std::cout << "planar_atrium: wrote " << _o.shot.string() << '\n';
+            if (!_o.snapshot.empty()) {
+                SnapshotOptions3D options{.reflection = _surfaces.reflection, .window = _surfaces.window};
+                if (const ViewOptions3D* view = _session->view_options())
+                    options.view = *view;
+                const auto written = write_scene_snapshot(*_renderer, *_session->scene(), size, _o.snapshot, options);
+                require(written.diagnostics);
+                std::cout << "planar_atrium: wrote the scene into " << _o.snapshot.string() << " (" << written->objects
+                          << " objects, " << written->baked << " baked into " << written->pages << " pages, "
+                          << written->triangles << " triangles)\n";
+                for (const std::string& note : written->notes)
+                    std::cout << "  note: " << note << '\n';
+            }
             ctx.app.quit();
         }
     }
@@ -616,6 +647,21 @@ int main(int argc, char** argv) {
                 o.autoplay = std::max(15.0f, std::stof(value()));
             else if (a == "--autoplay-report")
                 o.autoplay_report = value();
+            else if (a == "--at") {
+                std::array<f32, 5> at{};
+                for (f32& v : at)
+                    v = std::stof(value());
+                o.at = at;
+            } else if (a == "--survivor") {
+                std::array<f32, 4> place{};
+                for (int k = 0; k < 3; ++k)
+                    place[size_t(k)] = std::stof(value());
+                // (an optional fourth: the way it faces)
+                if (i + 1 < argc && std::string_view(argv[i + 1]).rfind("--", 0) != 0)
+                    place[3] = std::stof(value());
+                o.survivor = place;
+            } else if (a == "--cycles-snapshot")
+                o.snapshot = value();
             else
                 runtime.push_back(argv[i]);
         }
@@ -623,7 +669,10 @@ int main(int argc, char** argv) {
         if (o.autoplay > 0) {
             o.camera = 6;
             o.shot.clear();
+            o.snapshot.clear();
         }
+        if (!o.snapshot.empty() && o.shot.empty())
+            o.shot = o.snapshot / "kin.png";
         if (!o.shot.empty() || o.bake || o.autoplay > 0) {
             headless.enabled = true;
             headless.render = true; // on the GPU

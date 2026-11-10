@@ -292,6 +292,10 @@ public:
     virtual bool global_illumination_lit(IViewBackend3D&) const { return false; }
     // A capture's panorama read back (linear RGB floats, rows top to bottom), and one made from such a picture (2:1).
     virtual bool read_reflection_capture(IReflectionCaptureBackend3D&, std::vector<f32>&, Vec2i&) { return false; }
+    // Read-backs for tools (write_scene_snapshot): a mesh's level 0 as it was made (vertices, indices, skin), and a
+    // render attachment's texels (RGBA16F: four halves each). They wait for the GPU.
+    virtual bool read_mesh(const IMeshBackend3D&, u32 /*vertex_count*/, MeshData3D&) { return false; }
+    virtual bool read_texture(const Texture&, std::vector<u8>&, Vec2i&) { return false; }
     virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i, std::span<const f32>) {
         return {};
     }

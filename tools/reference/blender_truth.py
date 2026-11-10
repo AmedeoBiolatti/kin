@@ -307,4 +307,5 @@ def main():
         json.dump(record, f, indent=1)
 
 
-main()
+if __name__ == "__main__":  # (tools/cycles imports its helpers)
+    main()

@@ -165,6 +165,11 @@ public:
     // load_reflection_capture read), and one loaded from such a picture through the content folder or pack (a baked
     // probe, or any panorama: a room painted or rendered elsewhere). A loaded capture can be captured again.
     Status3D save_reflection_capture(const ReflectionCapture3D& capture, const std::filesystem::path& file);
+    // For tools (write_scene_snapshot, kin/render3d/snapshot3d.hpp): a mesh's level 0 read back from the GPU as it was
+    // made (vertices, indices, skin), and an RGBA16F render attachment's texels as floats (four a texel, rows from the
+    // top). Each waits for the GPU (what is recorded so far is submitted first).
+    Result3D<MeshData3D> read_mesh(const Mesh3D& mesh);
+    Result3D<std::vector<f32>> read_linear_texture(const Texture& texture);
     // Whether `view`'s global illumination has light yet (what capture_reflection's global_illumination borrows).
     bool global_illumination_lit(const View3D& view) const;
     Result3D<ReflectionCapture3D> load_reflection_capture(const std::filesystem::path& path);

@@ -308,6 +308,7 @@ void put_hidden(u32 (&first)[4], const Camera3D& camera) {
 }
 void put_hidden(u32 (&first)[4], const Scene3D* scene) {
     first[2] = scene && scene->camera.hidden_id ? scene->camera.hidden_id + 1 : 0;
+    first[3] = scene && scene->debug.unwrap ? 1u : 0u; // (RenderDebugOptions3D::unwrap: kin_mesh_vertex)
 }
 void put_clip(f32 (&clip)[4], const Scene3D* scene) {
     if (scene) {
@@ -10693,6 +10694,7 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     put(f.eye, ctx.scenes[s]->camera.position, 1.0f);
     f.time[0] = ctx.scenes[s]->time;
     f.time[1] = ctx.scene.specular_multiscatter ? 0.0f : 1.0f; // (0, the block's zero, is kin's own: on)
+    f.time[2] = static_cast<f32>(static_cast<u32>(ctx.scene.debug.surface_channel)); // (a bake's: kin_mesh_main)
     if (ctx.environment) {
         // The picture turned by the light's rotation; in the overlay's space the
         // directions come back to the scene's first.
@@ -10881,6 +10883,63 @@ void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
     view._ssr_prior_grid = {static_cast<i32>(layout.pw), static_cast<i32>(layout.ph)};
     view._ssr_prior_levels = layout.levels;
     view._ssr_seen = true;
+}
+
+bool GpuRenderer3D::read_mesh(const IMeshBackend3D& base, u32 vertex_count, MeshData3D& out) {
+    const auto* mesh = dynamic_cast<const GpuMesh3D*>(&base);
+    if (!mesh || !mesh->vertices || !mesh->indices || mesh->levels.empty() || vertex_count == 0)
+        return false;
+    if (_owner->_frame) { // (what is recorded so far first)
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    std::vector<u8> bytes;
+    if (!_device->read_buffer(mesh->vertices, mesh->vertex_offset, vertex_count * u32(sizeof(GpuMeshVertex)), bytes) ||
+        bytes.size() < std::size_t(vertex_count) * sizeof(GpuMeshVertex))
+        return false;
+    out.vertices.resize(vertex_count);
+    for (u32 i = 0; i < vertex_count; ++i) {
+        GpuMeshVertex v;
+        std::memcpy(&v, bytes.data() + std::size_t(i) * sizeof(GpuMeshVertex), sizeof v);
+        out.vertices[i] = {{v.x, v.y, v.z}, {v.nx, v.ny, v.nz}, {v.u, v.v}, Color::rgba(v.r, v.g, v.b, v.a)};
+    }
+    const GpuMesh3D::Level& level = mesh->levels[0];
+    const u32 count = level.index_count;
+    if (!_device->read_buffer(mesh->indices, mesh->index_offset + level.first_index * u32(sizeof(u32)),
+                              count * u32(sizeof(u32)), bytes) ||
+        bytes.size() < std::size_t(count) * sizeof(u32))
+        return false;
+    out.indices.resize(count);
+    std::memcpy(out.indices.data(), bytes.data(), std::size_t(count) * sizeof(u32));
+    out.skin.clear();
+    if (mesh->skin) {
+        if (!_device->read_buffer(mesh->skin, 0, vertex_count * u32(sizeof(GpuSkinVertex)), bytes) ||
+            bytes.size() < std::size_t(vertex_count) * sizeof(GpuSkinVertex))
+            return false;
+        out.skin.resize(vertex_count);
+        for (u32 i = 0; i < vertex_count; ++i) {
+            GpuSkinVertex s;
+            std::memcpy(&s, bytes.data() + std::size_t(i) * sizeof(GpuSkinVertex), sizeof s);
+            out.skin[i].joints = {s.j0, s.j1, s.j2, s.j3};
+            out.skin[i].weights = {f32(s.w0) / 255.0f, f32(s.w1) / 255.0f, f32(s.w2) / 255.0f, f32(s.w3) / 255.0f};
+        }
+    }
+    return true;
+}
+
+bool GpuRenderer3D::read_texture(const Texture& texture, std::vector<u8>& texels, Vec2i& size) {
+    const auto* own = dynamic_cast<const GpuTextureBackend*>(texture.backend().get());
+    if (!own || !own->texture())
+        return false;
+    if (_owner->_frame) {
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    const u32 w = own->texture().width(), h = own->texture().height();
+    size = {i32(w), i32(h)};
+    return _device->read_texture_region(own->texture(), 0, 0, w, h, 8, texels);
 }
 
 bool GpuRenderer3D::read_reflection_capture(IReflectionCaptureBackend3D& base, std::vector<f32>& rgb, Vec2i& size) {

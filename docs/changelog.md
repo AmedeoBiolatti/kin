@@ -95,6 +95,14 @@ releases may change APIs.
 - `Portal3D::effect` (none, ripples, vortex, glitch, membrane) and `effect_strength`: the planar window surface
   distorts and lights its picture, answering what goes through the portal (where it went through and when, on both
   surfaces of the pair). planar_atrium: P cycles them.
+- planar_atrium shows the camera's and the survivor's places at the bottom (centimetres, yaw and pitch; F3 hides it).
+- Checking a scene against Cycles: `write_scene_snapshot` (`kin/render3d/snapshot3d.hpp`) writes a rendered scene
+  (camera, lights, the sky as a panorama, posed meshes, materials baked per copy into texture pages by kin's own
+  shaders, graphs included) and `tools/cycles/compare.py` renders it with Blender's Cycles and compares.
+  `planar_atrium --at X Y Z YAW PITCH --survivor X Y Z YAW --cycles-snapshot DIR` writes one from a given view. New
+  for it: `RenderDebugOptions3D::unwrap` and `surface_channel` (a surface's channel drawn over its UV square),
+  `Renderer3D::read_mesh` and `read_linear_texture`, `SceneSession3D::view_options`; Radiance .hdr files are written
+  with run-length runs (a flat picture is a fraction of the size).
 - 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
   allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
   fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).

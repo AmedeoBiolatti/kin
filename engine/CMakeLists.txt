@@ -468,7 +468,7 @@ if(KIN_EXPERIMENTAL_3D)
         src/render3d/camera3d.cpp src/render3d/reflection_probes3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
         src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
-        src/render3d/environment.cpp src/render3d/hdr_decode.c)
+        src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/hdr_decode.c)
     if(KIN_HAS_GPU_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
                                           src/renderer/gpu/gpu_area_lights3d.cpp src/renderer/gpu/gpu_area_lights_ltc.cpp

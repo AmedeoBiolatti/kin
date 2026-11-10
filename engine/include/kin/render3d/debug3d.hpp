@@ -11,6 +11,11 @@ namespace kin {
 // light there (what a white surface facing the camera would show). Off, or with no GI scene, the picture is drawn as
 // ever.
 enum class GiView3D : u8 { Off, Albedo, Normal, Emission, Steps, Radiance, Irradiance };
+// A surface's channel drawn in place of its light (RenderDebugOptions3D::surface_channel: a bake's, as
+// write_scene_snapshot makes them): its base colour (linear); its normal (world, as it is: -1 to 1); its occlusion,
+// roughness and metalness (r, g, b); its emission; its alpha (grey). Each opaque where drawn (a blended or cut-out
+// material's alpha is the Alpha channel's).
+enum class SurfaceChannel3D : u8 { Lit, BaseColor, Normal, OcclusionRoughnessMetallic, Emission, Alpha };
 
 // Explicit diagnostic overrides, separate from visual quality and budgets.
 // Defaults preserve normal rendering and never request a blocking readback.
@@ -33,6 +38,12 @@ struct RenderDebugOptions3D {
                                // from the pre-pass's (to compare with it)
     bool gi_sun_map = true;    // false: the GI's voxels take the sun's light by their own march, not its sun map
     GiView3D gi_view = GiView3D::Off;
+    // Bakes (write_scene_snapshot): each lit material draws this channel of its surface instead of its light, and with
+    // `unwrap` each mesh copy is drawn over its UV square (its texture: u right, v down) instead of where the camera
+    // sees it, shaded where it is (its fragments' world places and normals as ever; the surface's own UVs ride in the
+    // vertex colour, 16 bits each over 0 to 1, which the material's uv_scale and uv_offset span: write_scene_snapshot).
+    SurfaceChannel3D surface_channel = SurfaceChannel3D::Lit;
+    bool unwrap = false;
 };
 
 } // namespace kin
