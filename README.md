@@ -9,11 +9,11 @@ inspected and screenshotted from the command line, so a change can be checked by
 reading it. It starts small, stays honest about its scope, and grows alongside the games built with it;
 [the manifest](docs/manifest.md) explains the design philosophy.
 
-| ![Summit at dusk: a climber on a mountain trail beside a camp fire, low-poly pines and mountains in haze](docs/images/summit_dusk.jpg) | ![Signal Siege: a cyan player ship among hundreds of enemies on a dark steel deck](docs/images/signal_siege.png) |
+| ![The Bistro scene in the afternoon: a Parisian street corner with a café, cobblestones, a scooter and sunlit facades](docs/images/bistro_start.jpg) | ![Signal Siege: a cyan player ship among hundreds of enemies on a dark steel deck](docs/images/signal_siege.png) |
 |:-:|:-:|
-| <sub>**Summit** — 3D climbing expedition: Jolt physics, skinned characters, time of day, fires and weather</sub> | <sub>**Signal Siege** — 2D arena survival: 2D lights, particles, bloom, four languages</sub> |
-| ![Industrial yard: a lit warehouse among thousands of crates, barrels and pallets, steam rising](docs/images/industrial_yard.jpg) | ![Run Observatory: a training dashboard with a 10,000-row run list, loss chart and event stream](docs/images/run_observatory.png) |
-| <sub>**Industrial yard** — thousands of PBR objects, skinning and overlapping spot shadows</sub> | <sub>**Run Observatory** — a data app on ui2: virtualized tables, charts, live updates</sub> |
+| <sub>**Bistro** in 3D — physically based materials, sun shadows and global illumination from the sky and sun</sub> | <sub>**Signal Siege** — 2D arena survival: 2D lights, particles, bloom, four languages</sub> |
+| ![The mirror atrium: a checkered marble floor, marble columns, a gold torus, a mirror, two glowing portals and a pool](docs/images/atrium.jpg) | ![Run Observatory: a training dashboard with a 10,000-row run list, loss chart and event stream](docs/images/run_observatory.png) |
+| <sub>**Atrium** — mirrors, portals, water, reflection probes and material graphs (marble, brass, terrazzo)</sub> | <sub>**Run Observatory** — a data app on ui2: virtualized tables, charts, live updates</sub> |
 
 > **Status — v0.2.6, with v0.3.0 in preparation.** Windows and Linux are supported; Android and the browser
 > (WebGL2) are experimental, and so is 3D (`KIN_EXPERIMENTAL_3D`). APIs are young and may change between
@@ -41,14 +41,19 @@ reading it. It starts small, stays honest about its scope, and grows alongside t
 
 ### 3D games (experimental)
 
-| ![Summit at night: the climber on a trail lit by a lantern and a camp fire under moonlit peaks](docs/images/summit_night.jpg) | ![Signal Siege drawn in 3D: the same arena and enemies seen from above at an angle](docs/images/signal_siege_3d.jpg) | ![Signal Breach: first-person view with a gun, purple ring enemies and gold cores over a deck](docs/images/signal_breach.jpg) |
+| ![The Bistro street corner at dusk: low orange sun on the cobblestones and long shadows](docs/images/bistro_start_dusk.jpg) | ![The Bistro terrace: a red awning in shade, café chairs and flower boxes of pansies in the sun](docs/images/bistro_terrace.jpg) | ![The atrium's pool: water reflecting a gold torus and columns, an iridescent ring, a mirror on the far wall](docs/images/atrium_water.jpg) |
 |:-:|:-:|:-:|
-| <sub>**Summit** at night: moonlight, a lantern and fire light, fog</sub> | <sub>**Signal Siege** `--view 3d`: the same simulation, drawn in 3D</sub> | <sub>**Signal Breach**: Signal Siege first person</sub> |
-| ![Blockfield: a voxel landscape of grassy hills and trees under a hazy sky](docs/images/blockfield.jpg) | ![Bunker exit: a concrete bunker with hazard stripes, scorch marks and bullet holes as decals, a jelly sentinel inside](docs/images/bunker_exit.jpg) | ![Summit: the climber on a forested trail heading to the ridge camp, with the expedition HUD](docs/images/summit_trail.jpg) |
-| <sub>**Blockfield**: a streamed voxel sandbox</sub> | <sub>**Bunker exit**: auto exposure, decals, morph targets</sub> | <sub>**Summit**'s expedition: two routes, a cave, a beacon</sub> |
+| <sub>**Bistro** at dusk: the same scene, the sun moved</sub> | <sub>**Bistro**: light bounced into the shade under the awning</sub> | <sub>**Atrium**: rippled water, a mirror, an iridescent glass ring</sub> |
+| ![Sponza: sunlight through an arcade lighting red and blue curtains, banners overhead](docs/images/sponza_gi.jpg) | ![Industrial yard: a lit warehouse among thousands of crates, barrels and pallets, steam rising](docs/images/industrial_yard.jpg) | ![Summit at night: the climber on a trail lit by a lantern and a camp fire under moonlit peaks](docs/images/summit_night.jpg) |
+| <sub>**Sponza**: GI, ambient occlusion, contact shadows, TAA</sub> | <sub>**Industrial yard**: thousands of objects, spot shadows, steam</sub> | <sub>**Summit**: a climbing game at night, fire light and fog</sub> |
+
+<sub>Bistro: Amazon Lumberyard Bistro (CC BY 4.0), via Logan Preshaw's and John James Gutib's ports, drawn by kin
+in the external benchmark port of the scene; the scene's assets are not in this repository. Sponza: Crytek, from the
+Khronos glTF Sample Assets, fetched by `tools/reference/fetch.py`.</sub>
 
 - **Rendering:** physically based materials, sun, point and spot shadows (up to eight shadowed point lights), area
-  lights, voxel global illumination, temporal anti-aliasing, volumetric fog lit by local lights and the sun,
+  lights, voxel global illumination, mirrors, portals, water, reflection probes and screen-space reflections,
+  temporal anti-aliasing, volumetric fog lit by local lights and the sun,
   auto exposure, bloom, decals, skinning and morph targets, clustered level of detail and instanced batches
   ([3D rendering](docs/rendering_3d.md), [render graphs](docs/render_graph.md)).
 - **Materials:** node-based material graphs compiled into the stock shaders, and an importer for Unreal, Unity and
@@ -226,6 +231,7 @@ Larger games and applications in [`examples/`](examples/README.md):
 | **Camp walk**, **Projectile range**, **Lua 3D range** | 3D | Starting points for 3D games on `SceneSession3D`, in C++ and Lua |
 | **Blockfield** | 3D | A streamed, editable voxel world |
 | **Bunker exit** | 3D | Auto exposure, decals and morph targets |
+| **Planar views**, **Atrium** | 3D | Mirrors, portals and water; the atrium adds reflection probes, GI and material graphs |
 | **Industrial yard** | 3D | A large Forward+ workload, shared with a Godot version for comparisons |
 | **Sponza walk**, **Material gallery** | 3D | Renderer and imported-material viewers (assets downloaded separately) |
 
