@@ -44,12 +44,13 @@ reading it. It starts small, stays honest about its scope, and grows alongside t
 | ![The Bistro street corner at dusk: low orange sun on the cobblestones and long shadows](docs/images/bistro_start_dusk.jpg) | ![The Bistro terrace: a red awning in shade, café chairs and flower boxes of pansies in the sun](docs/images/bistro_terrace.jpg) | ![The atrium's pool: water reflecting a gold torus and columns, an iridescent ring, a mirror on the far wall](docs/images/atrium_water.jpg) |
 |:-:|:-:|:-:|
 | <sub>**Bistro** at dusk: the same scene, the sun moved</sub> | <sub>**Bistro**: light bounced into the shade under the awning</sub> | <sub>**Atrium**: rippled water, a mirror, an iridescent glass ring</sub> |
-| ![Sponza: sunlight through an arcade lighting red and blue curtains, banners overhead](docs/images/sponza_gi.jpg) | ![Industrial yard: a lit warehouse among thousands of crates, barrels and pallets, steam rising](docs/images/industrial_yard.jpg) | ![Summit at night: the climber on a trail lit by a lantern and a camp fire under moonlit peaks](docs/images/summit_night.jpg) |
-| <sub>**Sponza**: GI, ambient occlusion, contact shadows, TAA</sub> | <sub>**Industrial yard**: thousands of objects, spot shadows, steam</sub> | <sub>**Summit**: a climbing game at night, fire light and fog</sub> |
+| ![Sponza: sunlight through an arcade lighting red and blue curtains, banners overhead](docs/images/sponza_gi.jpg) | ![Industrial yard: a lit warehouse among thousands of crates, barrels and pallets, steam rising](docs/images/industrial_yard.jpg) | ![A Lovely Night of Terror: a carriage with lit windows before a brick manor at night, lanterns glowing in the fog](docs/images/lovely_night.jpg) |
+| <sub>**Sponza**: GI, ambient occlusion, contact shadows, TAA</sub> | <sub>**Industrial yard**: thousands of objects, spot shadows, steam</sub> | <sub>**A Lovely Night of Terror**: lanterns lighting the night fog</sub> |
 
 <sub>Bistro: Amazon Lumberyard Bistro (CC BY 4.0), via Logan Preshaw's and John James Gutib's ports, drawn by kin
 in the external benchmark port of the scene; the scene's assets are not in this repository. Sponza: Crytek, from the
-Khronos glTF Sample Assets, fetched by `tools/reference/fetch.py`.</sub>
+Khronos glTF Sample Assets, fetched by `tools/reference/fetch.py`. A Lovely Night of Terror is a co-op horror
+game made with kin; it is not in this repository.</sub>
 
 - **Rendering:** physically based materials, sun, point and spot shadows (up to eight shadowed point lights), area
   lights, voxel global illumination, mirrors, portals, water, reflection probes and screen-space reflections,
