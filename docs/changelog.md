@@ -133,6 +133,9 @@ releases may change APIs.
 - planar_atrium: the brass ring's patina and brushing turn with it (its own graph, the pattern from the ring's rest
   position: it was in world space, so the ring turned through it); both portal lights are the trims' teal (walking
   through, the light went from teal to magenta).
+- planar_atrium opens on a loading screen (the step under way, a progress bar, the controls) that fades out over the
+  scene's first frames, and its material graphs are cooked at build time (`kin_cook_material_graphs`; `*.kingraph.spv`
+  is git-ignored): it starts in about a second, from about 18 (eight graphs compiled with glslc as it started).
 - 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
   allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
   fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).
