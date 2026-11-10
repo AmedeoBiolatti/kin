@@ -935,6 +935,46 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, vec2 depth_slope, out vec3 pro
             return false;
         }
     }
+    // A texel whose probes were all hidden from it (a tight spot: under a ball on a plinth, a crease; gi_resolve gave it
+    // little coverage) takes its own surface's light from round it instead, where the probes see it: a safe value like
+    // its neighbours' on the same object, not the ambient light (which differs, and shows as a patch of its own). Its
+    // surface's texels on two rings, two and four texels out, by their depth on this fragment's plane (as above, a
+    // little looser further out), those with more coverage, weighed by it.
+    if (drawn) {
+        const float own = frame.gi.y > 0.5 ? shares.a : shares.r;
+        if (own < 0.9) {
+            vec4 ring_light = vec4(0.0), ring_slope = vec4(0.0), ring_shares = vec4(0.0);
+            float found = 0.0;
+            for (int k = 0; k < 16; ++k) {
+                const float turn = float(k & 7) * 0.7853982 + (k >= 8 ? 0.3926991 : 0.0);
+                const float reach = k >= 8 ? 4.0 : 2.0;
+                const ivec2 q =
+                    clamp(ivec2(floor(gl_FragCoord.xy * 0.5 + vec2(cos(turn), sin(turn)) * reach)), ivec2(0), size - 1);
+                const vec4 there = texelFetch(uGiLight, q, 0);
+                if (there.a <= 0.0)
+                    continue;
+                const float want = depth + dot(depth_slope, vec2(q) * 2.0 + 1.0 - gl_FragCoord.xy);
+                if (abs(there.a - want) > near * (1.0 + 1.5 * reach))
+                    continue;
+                const vec4 its = texelFetch(uGiCoverage, q, 0);
+                const float c = frame.gi.y > 0.5 ? its.a : its.r;
+                if (c <= own + 0.05)
+                    continue;
+                ring_light += c * there;
+                ring_slope += c * texelFetch(uGiSlope, q, 0);
+                ring_shares += c * its;
+                found += c;
+            }
+            // (Only where its own light is a fraction of theirs: a hidden texel's, which its visibility took away; not
+            // a window's edge, whose coverage fades with its light as it is.)
+            const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+            if (found > 0.0 && dot(light.rgb, luma) < 0.25 * dot(ring_light.rgb / found, luma)) {
+                light = ring_light / found;
+                slope = ring_slope / found;
+                shares = ring_shares / found;
+            }
+        }
+    }
     coverage = frame.gi.y > 0.5 ? shares.a : shares.r;
     // The area lights' light fades out with the probes' toward their windows' edges (nothing found past them).
     area = frame.gi.y > 0.5 ? shares.rgb * clamp(shares.a, 0.0, 1.0) : vec3(0.0);

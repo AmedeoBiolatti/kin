@@ -198,7 +198,7 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
     // it (a tight spot the probes are too far apart for: under a ball on a plinth, a crease). Normalizing those tiny
     // weights must not restore the probes' full light there (filtered with a neighbour's, it would leak in): it goes
     // with the confidence. Nor is the answer no light (pitch black where a path tracer finds the sky's light coming in
-    // from the side): the probes say little, and two fifths of their share goes with it, the caller's ambient or
+    // from the side): the probes say little, and seven tenths of their share goes with it, the caller's ambient or
     // environment taking that (a tight spot dimmed as a crease is, not lit as the open floor). Bounce feedback retains
     // its original estimator.
     const float retained = total / max(unoccluded_total, 1e-30);
@@ -206,7 +206,7 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
     for (int j = 0; j < 4; ++j) {
         light[j] *= confidence;
     }
-    coverage *= 0.6 + 0.4 * confidence;
+    coverage *= 0.3 + 0.7 * confidence;
 #endif
     return total > 0.0;
 }

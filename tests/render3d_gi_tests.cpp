@@ -249,10 +249,10 @@ void resolve_contracts(Window& window) {
         float expected = 1, coverage = 1;
         if (name == "blocked") {
             // Bright probes whose moment field completely occludes the receiver must not normalize to full light, and
-            // give up two fifths of their share (the caller's ambient takes that: dim, not black).
+            // give up seven tenths of their share (the caller's ambient takes that: dim, not black).
             f.upload(3, 64, 64, 4, std::vector<float>(64 * 64 * 4 * 2, 0));
             expected = 0;
-            coverage = 0.6f;
+            coverage = 0.3f;
         } else if (name == "dark") {
             f.upload(2, 32, 32, 4, std::vector<float>(32 * 32 * 4 * 4, 0));
             expected = 0;

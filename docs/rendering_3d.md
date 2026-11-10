@@ -1122,8 +1122,15 @@ the plan's G5b results.
   with the current GI coverage in a separate half-resolution R16F target (0.44 MiB at 1280 x 720, 1.76 MiB at
   2560 x 1440; no coverage history), filtered with the same surface/depth choices as the light. Coverage follows the
   current window immediately; old lighting history cannot keep GI alive outside it. The light and slope are
-  filtered: those at its depth (all four, most often), else the nearest in depth (a thin thing between texels); for
-  what the pre-pass did not draw (glass, in front of what it shows) all four; and turns that light to the normal map's
+  filtered: those on its own surface (their depth on the fragment's depth plane: a rim's side, as deep as its top at
+  their edge, is not its top's), else the nearest to it (a thin thing between texels); for what the pre-pass did not
+  draw (glass, in front of what it shows) all four. Where every probe round a point was hidden from it (a tight spot
+  the probes are too far apart for: under a ball on a plinth, a crease) the texel's coverage is low, and the pixel
+  takes its own surface's light from round it (texels on two rings, two and four out, on its plane, with more
+  coverage); failing that, seven tenths of the probes' share goes to the ambient light: dimmed, never pitch black. A
+  room the size of the atrium does best in one window (`side` x `height` x `side` cells over the whole area: it stays,
+  and walking or a portal that carries the camera across does not start the probes over). It turns that light to the
+  normal map's
   normal for the diffuse and to the reflection: a rough surface reflects
   that, a smooth one the environment dimmed by the share of the sky's light that is. (Read by each fragment instead,
   the probes cost the Bistro 13 ms at 2844 x 1600, the overdraw's fragments too; read so, about 1.4.) GTAO and the
