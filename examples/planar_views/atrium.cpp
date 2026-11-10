@@ -7,21 +7,21 @@
 //                 [--autoplay SECONDS [--autoplay-report report.json]]
 //
 // --camera: 6 (the default) plays: the survivor (an animated character, a physics capsule) is yours, seen from behind
-// (WASD or the arrows walk, the mouse turns the camera, Space jumps, Shift runs, P changes the portals' effect: off,
-// ripples, vortex, glitch, membrane, each answering what goes through; it walks through the portals, carried
-// by physics, and the camera follows it; Tab frees the mouse). 0 orbits the
-// atrium, 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the portals, 5 watches the
-// survivor walk its round into the west portal (the keys 0-6 too). --shot renders
-// headless and writes a picture after --frames frames (with KIN_RENDER_BACKEND=gpu). --bake-probes captures the scene's
-// reflection probes after a few frames and writes them to the content's probes/ folder (Radiance .hdr panoramas; name
-// them in a probe's "baked" to load them instead of capturing at run time), then quits. In a window it opens on a
-// loading screen (what loads, how far along, the controls), which fades out over the scene's first frames; its material
-// graphs are cooked at build time (else each is compiled with glslc as it starts, about 2 s). --autoplay plays mode 6
-// headless for SECONDS through the real input (a bot pressing W, Space and Shift and moving the mouse: laps of the
-// atrium, through both portals, a jump through one, into the open south edge) and reports what a player would meet:
-// falls, escapes from the room, getting stuck, missed portals, the frame times (CPU and GPU, after a warm-up),
-// pipelines made late, the memory every 10 seconds; it fails (exit 2) on any of the first four, and on memory still
-// growing over the second half of a run of 4 minutes or more. Esc: quit.
+// (WASD or the arrows walk, the mouse turns the camera, Space jumps, Shift runs, F3 hides the camera's and the
+// survivor's places at the bottom, P changes the portals' effect: off, ripples, vortex, glitch, membrane, each
+// answering what goes through; it walks through the portals, carried by physics, and the camera follows it; Tab frees
+// the mouse). 0 orbits the atrium, 1 looks at the mirror, 2 at the pool, 3 into the west portal, 4 walks through the
+// portals, 5 watches the survivor walk its round into the west portal (the keys 0-6 too). --shot renders headless and
+// writes a picture after --frames frames (with KIN_RENDER_BACKEND=gpu). --bake-probes captures the scene's reflection
+// probes after a few frames and writes them to the content's probes/ folder (Radiance .hdr panoramas; name them in a
+// probe's "baked" to load them instead of capturing at run time), then quits. In a window it opens on a loading screen
+// (what loads, how far along, the controls), which fades out over the scene's first frames; its material graphs are
+// cooked at build time (else each is compiled with glslc as it starts, about 2 s). --autoplay plays mode 6 headless for
+// SECONDS through the real input (a bot pressing W, Space and Shift and moving the mouse: laps of the atrium, through
+// both portals, a jump through one, into the open south edge) and reports what a player would meet: falls, escapes from
+// the room, getting stuck, missed portals, the frame times (CPU and GPU, after a warm-up), pipelines made late, the
+// memory every 10 seconds; it fails (exit 2) on any of the first four, and on memory still growing over the second half
+// of a run of 4 minutes or more. Esc: quit.
 #include "planar_surfaces.hpp"
 
 #include <algorithm>
@@ -279,6 +279,30 @@ public:
             _bot = std::make_unique<AtriumBot>();
     }
 
+    // Small at the bottom: where the camera is (centimetres) and the way it looks (yaw: degrees round +Y from +Z,
+    // pitch: up from level), and where the survivor is, to say where something shows (F3 hides it).
+    void coordinates(SceneContext& ctx, Vec2i size) {
+        const auto camera = _session->entity("camera"), survivor = _session->entity("survivor");
+        const auto* eye = camera ? camera.get<Transform3D>() : nullptr;
+        if (!eye)
+            return;
+        const Vec3f look = eye->rotation.rotate({0, 0, -1});
+        const f32 yaw = std::atan2(look.x, look.z) * 57.29578f,
+                  pitch = std::asin(std::clamp(look.y, -1.0f, 1.0f)) * 57.29578f;
+        // (In centimetres: the pixel font has no decimal point.)
+        const auto cm = [](f32 metres) { return int(std::lround(metres * 100.0f)); };
+        char line[200];
+        int n = std::snprintf(line, sizeof line, "camera x %d y %d z %d cm  yaw %d pitch %d", cm(eye->position.x),
+                              cm(eye->position.y), cm(eye->position.z), int(std::lround(yaw)), int(std::lround(pitch)));
+        if (const auto* body = survivor ? survivor.get<CharacterController3D>() : nullptr)
+            std::snprintf(line + n, sizeof line - std::size_t(n), "    survivor x %d y %d z %d",
+                          cm(body->state.position.x), cm(body->state.position.y), cm(body->state.position.z));
+        const Vec2f extent = ui2::measure_wrapped_text(line, {.scale = 1.5f});
+        ctx.renderer.fill_rect({6, f32(size.y) - extent.y - 12, extent.x + 12, extent.y + 8},
+                               Color::rgba(0, 0, 0, 120));
+        ui2::draw_text(ctx.renderer, line, {12, f32(size.y) - extent.y - 8}, 1.5f, Color::rgba(220, 230, 230, 230));
+    }
+
     // P: the portals' next effect (Portal3D::effect), on both: none, ripples, vortex, glitch, membrane.
     void next_effect() {
         _effect = (_effect + 1) % 5;
@@ -335,6 +359,8 @@ public:
             }
         if (ctx.input.pressed(Key::P))
             next_effect();
+        if (ctx.input.pressed(Key::F3))
+            _coordinates = !_coordinates;
         _effect_shown = std::max(0.0f, _effect_shown - ctx.dt);
         if (_bot)
             _bot->step(ctx.input, _session->entity("survivor"), _session->entity("camera"), ctx.dt);
@@ -370,6 +396,8 @@ public:
             require(_session->diagnostics());
         ctx.renderer.clear();
         ctx.renderer.draw_texture(_session->view()->texture(), {0, 0, f32(size.x), f32(size.y)});
+        if (_windowed && _coordinates)
+            coordinates(ctx, size);
         if (_effect_shown > 0.0f) {
             // The portals' effect, named for a moment as P changes it.
             static constexpr std::array names{"off", "ripples", "vortex", "glitch", "membrane"};
@@ -544,6 +572,7 @@ private:
     bool _windowed = false;
     int _shown = 0;
     u32 _effect = 0;          // the portals' (next_effect)
+    bool _coordinates = true; // the camera's and the survivor's places at the bottom (F3)
     f32 _effect_shown = 0.0f; // seconds its name still shows
     std::unique_ptr<AtriumBot> _bot;
     std::chrono::steady_clock::time_point _last_frame = std::chrono::steady_clock::now();
