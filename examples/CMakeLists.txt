@@ -146,6 +146,13 @@ if(KIN_EXPERIMENTAL_3D)
         target_compile_definitions(planar_atrium PRIVATE
             ATRIUM_CONTENT="${CMAKE_CURRENT_SOURCE_DIR}/planar_views/content")
         kin_planar_surfaces(planar_atrium)
+        # Its material graphs cooked beside them (<graph>.spv, git-ignored), as kin_game cooks a game's: without, each
+        # is compiled with glslc when the atrium starts (about 2 s each).
+        kin_cook_material_graphs(atrium_graphs CONTENT planar_views/content)
+        if(atrium_graphs)
+            add_custom_target(planar_atrium_graphs DEPENDS ${atrium_graphs})
+            add_dependencies(planar_atrium planar_atrium_graphs)
+        endif()
     endif()
     # material_gallery: imported materials (kin_import_material --graphs) on pedestals; content not in the repository.
     add_executable(material_gallery material_gallery/main.cpp)

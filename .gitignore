@@ -42,3 +42,5 @@ Thumbs.db
 desktop.ini
 reference_out/
 __pycache__/
+# Material graphs cooked beside their sources (kin_cook_material_graphs)
+*.kingraph.spv

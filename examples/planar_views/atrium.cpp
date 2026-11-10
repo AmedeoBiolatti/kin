@@ -13,13 +13,14 @@
 // survivor walk its round into the west portal (the keys 0-6 too). --shot renders
 // headless and writes a picture after --frames frames (with KIN_RENDER_BACKEND=gpu). --bake-probes captures the scene's
 // reflection probes after a few frames and writes them to the content's probes/ folder (Radiance .hdr panoramas; name
-// them in a probe's "baked" to load them instead of capturing at run time), then quits. The first run compiles the
-// material graphs with glslc (some seconds). --autoplay plays mode 6 headless for SECONDS through the real input (a bot
-// pressing W, Space and Shift and moving the mouse: laps of the atrium, through both portals, a jump through one, into
-// the open south edge) and reports what a player would meet: falls, escapes from the room, getting stuck, missed
-// portals, the frame times (CPU and GPU, after a warm-up), pipelines made late, the memory every 10 seconds; it fails
-// (exit 2) on any of the first four, and on memory still growing over the second half of a run of 4 minutes or more.
-// Esc: quit.
+// them in a probe's "baked" to load them instead of capturing at run time), then quits. In a window it opens on a
+// loading screen (what loads, how far along, the controls), which fades out over the scene's first frames; its material
+// graphs are cooked at build time (else each is compiled with glslc as it starts, about 2 s). --autoplay plays mode 6
+// headless for SECONDS through the real input (a bot pressing W, Space and Shift and moving the mouse: laps of the
+// atrium, through both portals, a jump through one, into the open south edge) and reports what a player would meet:
+// falls, escapes from the room, getting stuck, missed portals, the frame times (CPU and GPU, after a warm-up),
+// pipelines made late, the memory every 10 seconds; it fails (exit 2) on any of the first four, and on memory still
+// growing over the second half of a run of 4 minutes or more. Esc: quit.
 #include "planar_surfaces.hpp"
 
 #include <algorithm>
@@ -30,6 +31,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <kin/assets/image.hpp>
 #include <kin/ecs/physics3d.hpp>
@@ -40,6 +42,7 @@
 #include <kin/scene/planar_views3d.hpp>
 #include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
+#include <kin/ui2/text.hpp>
 #include <malloc.h>
 #include <memory>
 #include <sol/sol.hpp>
@@ -216,11 +219,47 @@ public:
         for (const auto& [action, keys] : controls)
             for (const Key key : keys)
                 ctx.input.bind(action, key);
-        const auto surfaces = create_planar_surfaces(*_renderer, planar_surfaces);
-        require(surfaces.diagnostics);
+        // What loads, a step a frame behind the loading screen (in a window): the planar surfaces, each material graph
+        // (cooked at build time: a moment; else compiled with glslc, about 2 s each), each model, then the scene (which
+        // finds them all loaded). Headless (a shot, a bake, autoplay) it all loads now.
+        _steps.push_back({"Mirrors and portals", [this] {
+                              const auto surfaces = create_planar_surfaces(*_renderer, planar_surfaces);
+                              require(surfaces.diagnostics);
+                              _surfaces = *surfaces;
+                          }});
+        const auto files = [&](const char* folder, const char* extension) {
+            std::vector<std::filesystem::path> found;
+            std::error_code error;
+            for (auto it = std::filesystem::recursive_directory_iterator(_o.content / folder, error);
+                 !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error))
+                if (it->path().extension() == extension)
+                    found.push_back(std::filesystem::relative(it->path(), _o.content));
+            std::sort(found.begin(), found.end());
+            return found;
+        };
+        for (const auto& graph : files("materials", ".kingraph"))
+            _steps.push_back({"Material: " + graph.stem().string(), [this, graph] {
+                                  // (Held until the scene has loaded: the cache keeps only what is held.)
+                                  if (auto made = _assets->load_material_graph(graph))
+                                      _graphs.push_back(std::move(*made));
+                              }});
+        for (const auto& model : files("models", ".glb"))
+            _steps.push_back({"Model: " + model.stem().string(), [this, model] {
+                                  if (auto made = _assets->load_model(model))
+                                      _models.push_back(std::move(*made));
+                              }});
+        _steps.push_back({"The atrium", [this, &ctx] { open_scene(ctx); }});
+        _windowed = _o.shot.empty() && !_o.bake && _o.autoplay <= 0;
+        if (!_windowed)
+            while (_step < _steps.size())
+                _steps[_step++].second();
+    }
+
+    // The scene, its physics and its script, once what it uses is loaded.
+    void open_scene(SceneContext& ctx) {
         SceneSession3DOptions options;
         options.viewport = ctx.renderer.output_size();
-        options.planar_surfaces = *surfaces;
+        options.planar_surfaces = _surfaces;
         options.physics = World3DConfig{}; // (the survivor's capsule, the atrium's colliders)
         options.scripts.app = &ctx.app;
         options.scripts.input = &ctx.input;
@@ -233,13 +272,53 @@ public:
         _session = std::make_unique<SceneSession3D>(*_renderer, *_assets, options);
         if (!_session->load("scenes/atrium.kinscene"))
             require(_session->diagnostics());
+        _graphs.clear();
+        _models.clear();
         if (_o.autoplay > 0)
             _bot = std::make_unique<AtriumBot>();
+    }
+
+    // The loading screen: the atrium's name, what loads, how far along, the controls; `opacity` as it fades out over
+    // the scene's first frames.
+    void loading_screen(SceneContext& ctx, Vec2i size, f32 opacity) {
+        auto& r = ctx.renderer;
+        const f32 w = f32(size.x), h = f32(size.y);
+        const auto a = [&](u8 alpha) { return u8(std::clamp(opacity, 0.0f, 1.0f) * f32(alpha)); };
+        r.fill_rect({0, 0, w, h}, Color::rgba(12, 18, 20, a(255)));
+        // A portal's glow round the name.
+        const f32 bw = std::min(w * 0.42f, 520.0f), bh = 150, bx = w / 2 - bw / 2, by = h / 2 - 150;
+        for (int i = 0; i < 6; ++i) {
+            const f32 g = f32(6 - i) * 3;
+            r.fill_rect({bx - g, by - g, bw + 2 * g, bh + 2 * g}, Color::rgba(60, 220, 210, a(u8(10 + 4 * i))));
+        }
+        r.fill_rect({bx, by, bw, bh}, Color::rgba(14, 26, 28, a(255)));
+        ui2::draw_text_centered(r, "ATRIUM", {w / 2, by + bh / 2 - 12}, 5, Color::rgba(225, 245, 242, a(255)));
+        ui2::draw_text_centered(r, "mirrors   water   portals", {w / 2, by + bh / 2 + 34}, 2,
+                                Color::rgba(120, 200, 195, a(255)));
+        // How far along: the steps done, the one under way named.
+        const std::size_t total = _steps.size() + 1; // (and the first frames)
+        const std::size_t done = std::min(_step, _steps.size()) + (_session && _shown >= warm_frames ? 1 : 0);
+        const std::string what = _step < _steps.size() ? _steps[_step].first : "Light and reflections";
+        const f32 pw = std::min(w * 0.5f, 600.0f), px = w / 2 - pw / 2, py = by + bh + 70;
+        ui2::draw_text_centered(r, what, {w / 2, py - 22}, 2, Color::rgba(200, 210, 212, a(255)));
+        r.fill_rect({px, py, pw, 8}, Color::rgba(36, 48, 52, a(255)));
+        r.fill_rect({px, py, pw * f32(done) / f32(total), 8}, Color::rgba(60, 220, 210, a(255)));
+        ui2::draw_text_centered(r,
+                                "WASD walk    mouse look    Space jump    Shift run    Tab free the mouse    Esc quit",
+                                {w / 2, h - 40}, 2, Color::rgba(130, 150, 152, a(255)));
     }
 
     void update(SceneContext& ctx) override {
         if (ctx.input.pressed(Key::Escape))
             ctx.app.quit();
+        if (_step < _steps.size()) {
+            // Loading: steps for up to 30 ms a frame, so that the window keeps answering and the screen moves.
+            const auto start = std::chrono::steady_clock::now();
+            do
+                _steps[_step++].second();
+            while (_step < _steps.size() && std::chrono::steady_clock::now() - start < std::chrono::milliseconds(30));
+            return;
+        }
         const std::array keys{Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6};
         for (int i = 0; i < int(keys.size()); ++i)
             if (ctx.input.pressed(keys[size_t(i)]) && _lua) {
@@ -265,9 +344,14 @@ public:
     }
 
     void render(SceneContext& ctx) override {
+        const auto size = ctx.renderer.output_size();
+        if (!_session) {
+            ctx.renderer.clear();
+            loading_screen(ctx, size, 1);
+            return;
+        }
         if (_bot)
             measure(ctx);
-        const auto size = ctx.renderer.output_size();
         if (size != _size && !_session->resize(size))
             require(_session->diagnostics());
         _size = size;
@@ -275,6 +359,13 @@ public:
             require(_session->diagnostics());
         ctx.renderer.clear();
         ctx.renderer.draw_texture(_session->view()->texture(), {0, 0, f32(size.x), f32(size.y)});
+        if (_windowed && _shown < warm_frames + fade_frames) {
+            // The scene's first frames behind the screen (its reflection probes captured, the reflections with a frame
+            // before to read), then the screen fading away.
+            ++_shown;
+            loading_screen(ctx, size,
+                           _shown <= warm_frames ? 1.0f : 1.0f - f32(_shown - warm_frames) / f32(fade_frames));
+        }
         if (_o.bake && ++_baked == 3) { // (a few frames in: the scene and its probes as they stand)
             ReflectionProbes3D baker{*_renderer, _o.content};
             if (!baker.bake(*_session->world(), *_session->scene(), _o.content, "probes", _session->view()))
@@ -424,6 +515,15 @@ private:
     Vec2i _size{};
     int _camera = 0, _frame = 0, _baked = 0;
     bool _free_mouse = false;
+    // Loading (loading_screen): the steps, the next one, what they hold until the scene has loaded, the frames shown.
+    static constexpr int warm_frames = 4, fade_frames = 24;
+    std::vector<std::pair<std::string, std::function<void()>>> _steps;
+    std::size_t _step = 0;
+    PlanarSurfaces3D _surfaces;
+    std::vector<MaterialGraphShader3D> _graphs;
+    std::vector<AssetHandle<Model3D>> _models;
+    bool _windowed = false;
+    int _shown = 0;
     std::unique_ptr<AtriumBot> _bot;
     std::chrono::steady_clock::time_point _last_frame = std::chrono::steady_clock::now();
     std::vector<f64> _frame_ms, _cpu_ms, _gpu_ms;
