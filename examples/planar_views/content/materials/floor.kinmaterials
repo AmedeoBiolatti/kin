@@ -1,6 +1,0 @@
-{
- "schema": "kin.materials3d/1",
- "material": {
-  "graph": "materials/floor.kingraph"
- }
-}

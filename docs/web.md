@@ -1,10 +1,11 @@
 # Experimental WebGL2 builds
 
-The next stages for general 2D games and a playable 3D Summit export are recorded
-in the [WebGL2 implementation plan](web_plan.md).
+The next stages for general 2D games and 3D exports are recorded in the
+[WebGL2 implementation plan](web_plan.md).
 
-The Emscripten exports include the 2D `hex_demo`, a rendering fixture and the
-3D Summit game. They share native gameplay code and render through WebGL2
+The Emscripten exports include the 2D `hex_demo` and a 2D/3D rendering fixture; the
+3D Summit game's export is in the [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery/blob/main/games/summit/web/README.md).
+They share native gameplay code and render through WebGL2
 without WebGPU, pthreads, Asyncify or cross-origin isolation headers.
 
 ## Build and package
@@ -101,8 +102,7 @@ With `KIN_ENABLE_TTF` it also preloads Noto Sans' Latin subset
 (`examples/content/lang/fonts/latin.ttf`, OFL) as `/kin/fonts/ui.ttf`, the UI's
 system font there: a browser has none, and kin's bitmap font has capitals only.
 Native pack creation/cooking, touch controls and Signal Siege remain follow-up
-work. Summit includes bundled images/fonts, gesture-activated audio and persistent
-IndexedDB settings.
+work.
 
 ## First 3D view
 
@@ -171,7 +171,7 @@ to four directional-shadow cascades with depth24 maps and manual PCF. Float data
 textures need no float color-target extension. Sky ambient lighting uses a cached
 CPU hemisphere approximation. Each view owns its cache and respects
 `Sky3D::light_threshold` and `light_interval`; shadow, sky and mesh passes reuse
-that result. Core-quality Summit supplies the same cached hemisphere lighting
+that result. A game can supply the same cached hemisphere lighting
 to either renderer and skips the separate high-resolution time-of-day ambient
 integrals, while sun/moon/fog still update each frame.
 Prefiltered IBL, star fields, spot/local shadows
@@ -183,63 +183,6 @@ and custom material shaders are refused; unsupported spot/particle draws warn.
 SDR output clips bright values and does not apply native HDR exposure/tonemapping.
 Stock GLSL ES is expanded and embedded at build time using shared pure-math
 includes; custom shader assets/reflection and general 2D effects remain pending.
-
-## Summit
-
-```sh
-cmake --preset summit-webgl2
-cmake --build build/summit-webgl2 --target summit_web_package --parallel 4
-python3 -m http.server 8000 --directory build/summit-webgl2/web/summit_web
-```
-
-The upload is `build/summit-webgl2/packages/summit_web-webgl2.zip`. It contains
-root `index.html`, JS, Wasm, preloaded `.data` and third-party/game/font notices.
-It uses the existing Summit scene, simulation, Jolt physics, animation, UI and
-audio, with real bundled terrain, props and survivor assets. Missing bundled
-assets fail startup instead of silently using procedural substitutes. The browser
-profile selects SDR, one sample and two 1024px shadow cascades; native quality
-settings retain their defaults. Native Summit can select the same rendering
-profile with `--quality core --scenery compact`. Both core paths use the same
-cached hemisphere lighting, disable stars/particles/spot lights and retain
-weather's fog/light changes. Browser builds accept only core quality.
-Compact scenery is the browser default, preserving the route and real assets
-with a smaller scenery budget. Native retains dense scenery. To opt into the
-full layout, use `?arg=--scenery&arg=dense`; its rendering performance is unmeasured.
-
-Press R to begin, click to capture the mouse, use W/A/S/D to walk, Space to jump,
-Shift to sprint, mouse buttons to grab and F to pull up. Escape opens the menu;
-click to reacquire capture after leaving it. V switches camera and F2 cycles the
-look. Fullscreen is provided by the host shell. Desktop keyboard/mouse is the
-initial target.
-
-Jolt always selects its serial job system when Kin has no workers, including
-when a world requests the default pooled configuration. The native barrier adapter
-cannot consume a cooperative queue safely. Native worker-backed worlds retain
-the pooled path.
-
-`KIN_WEB_PERSISTENCE=ON` restores `/persistent` from IDBFS before `main()` and
-settings construction. In a browser `user_data_dir()` is under `/persistent`, so
-every game's SaveStore (and so scripts' `save.write`) keeps its files there, and
-SaveStore requests a coalesced asynchronous flush after each successful write or
-delete (`kin::user_data_written()`; a game writing there itself calls it after).
-`Module.kinStorage` reports readiness, availability, pending writes, flush count
-and errors. Storage denial/quota errors leave the game usable with
-in-memory settings; persistence is not guaranteed until a flush succeeds.
-
-Summit preloads a licensed UI font and sets `KIN_UI_FONT_REGULAR` and
-`KIN_UI_FONT_BOLD` before UI construction. The shared UI font lookup honors these
-paths before platform candidates; unset variables retain native discovery.
-The loading overlay stays visible until the first game frame. Before that frame,
-Summit prepares the HUD/menu font metrics and glyph atlases in an offscreen target
-at the current UI size. It repeats preparation after a resize. This moves font
-work into loading/resize rather than the first gameplay interaction. Hidden-tab gaps
-are discarded on resume, and page navigation destroys the owned session while
-its canvas still exists. Context loss requires reload.
-
-The two new 3D build switches default to ON, preserving native presets. The
-scripted scene runtime still requires scripting and 3D physics. Disabling physics
-also omits the coupled 3D ECS/scene adapters; render-only builds use `Scene3D`
-and `Renderer3D` directly. Existing 3D examples require those full adapters.
 
 ## Validation
 
@@ -280,147 +223,6 @@ They also check independent wrapping on a shared texture, nearest/linear/mipmap
 filter changes and sampler state across interleaved 2D/3D renders.
 Sky/fog pixels are compared with native CPU math. Shadow cases cover casters,
 receivers, cutout changes, animated casters and cascade statistics.
-
-Summit's integration check requires regular Chrome, X11 and `xdotool` for real
-native-window focus. Use an isolated display such as Xvfb:
-
-```sh
-xvfb-run -a node tests/webgl2_smoke.mjs --headed --mode summit \
-  --root build/summit-webgl2/web/summit_web --output /tmp/kin-summit-smoke
-xvfb-run -a node tests/webgl2_smoke.mjs --headed --deny-storage --mode summit \
-  --root build/summit-webgl2/web/summit_web --output /tmp/kin-summit-denied
-cmake --build build/summit-webgl2 --target summit_web_simulation_package --parallel 4
-node tests/webgl2_smoke.mjs --mode simulation \
-  --root build/summit-webgl2/web/summit_web_simulation --output /tmp/kin-summit-simulation
-```
-
-The game check verifies real assets/skinning/shadows, keyboard-driven physics
-movement, pointer lock/reacquire, audio activation, settings reload, fullscreen
-and canvas resize. `--deny-storage` uses Chrome's cookie/storage policy to test
-actual IndexedDB refusal and in-memory fallback. The separate simulation export
-runs the existing native Summit and expedition suites in Wasm, including climb,
-fall/ragdoll/recovery, camp respawn/reset, save/replay and complete direct/sheltered
-expeditions on compact/dense levels. It makes no cross-platform bit-identity
-claim. All exports run in the experimental CI workflow.
-
-For a bounded local performance sample, add `--profile` to the Summit check.
-It records up to 1,200 game callbacks, including the first gameplay callback and
-scene/UI spans, in `frame-samples.json` and summarizes them in `result.json`.
-The default still uses SwiftShader; these times include main-thread stalls and
-are not a hardware GPU benchmark or a measurement of displayed FPS. On a real
-X11 desktop, `--headed --hardware --profile` lets Chrome select its normal GPU;
-inspect the reported renderer string because it may still select software.
-Keep resolution, look, route and device fixed when comparing builds.
-For hotspot discovery, add `--cpu-profile` to save the walking segment as
-`gameplay.cpuprofile`, readable in Chrome DevTools' JavaScript Profiler.
-Each build emits `bin/<target>.html.symbols` alongside its Wasm; CI retains this
-sidecar separately from the itch.io ZIP. Preserve the exact matching Wasm and
-symbol map: rebuilding can reorder functions, so another build's map is unsafe.
-Add `--gl-calls` with `--profile` to record selected WebGL API counts per callback
-and their gameplay medians. Run these diagnostics separately from timing runs:
-CPU sampling and API wrappers add overhead. Neither measures GPU execution.
-`Module.kinSummit` exposes `fillMs`, `renderMs`, `uiMs`, `uiWarmupMs` and
-`hudPrepared` for hosted diagnostics. These spans are CPU wall times, not GPU
-queries. Font preparation adds startup work; it does not remove that work.
-
-For a matched native/browser comparison on an NVIDIA Linux machine, build both
-Release targets, stop competing GPU applications and use an isolated X11
-display. The harness keeps the same 640x360 resolution, compact level, font,
-seed, frozen morning look, null audio and real-time sheltered bot route:
-
-```sh
-xvfb-run -a python3 examples/summit/compare_web_native.py \
-  --native build-3d/bin/summit \
-  --web-root build/summit-webgl2/web/summit_web \
-  --output /disk/backed/scratch/summit-native-web --pairs 2
-```
-
-The harness requires `nvidia-smi`, Chrome and Node 22+. It selects the NVIDIA
-Vulkan ICD for native and ANGLE/Vulkan for Chrome, rejects software WebGL, and
-records the actual renderer. It alternates full traversals, checks completion,
-falls/deaths, skinning and cascades, and writes CSVs, browser callback samples,
-GPU process logs, hashes and JSON summaries. Native is capped at 60 Hz by
-`--fps 60`; Chrome retains normal rAF pacing. Check measured intervals before
-assuming those ceilings match. These ceiling-limited runs compare pacing and
-CPU headroom, not maximum FPS.
-
-The default browser `--window app` uses a bounded Chrome app window and a
-viewport matching the game dimensions, while retaining the iframe. The parent
-has no scrollbars. Reports record both viewport and native browser-window
-bounds. Matching only the game's WebGL buffer while leaving a larger browser
-viewport can distort presentation costs on a virtual display. Use
-`--browser-window browser` in the comparison harness, or `--window browser` in
-the browser runner, to reproduce that larger-window diagnostic.
-
-Use `--browser-mode offscreen` to separate browser rendering capacity from
-window presentation. This selects headless Chrome while retaining the hardware
-WebGL renderer, iframe, render resolution and full game route. Its synthetic
-rAF clock does not measure physical display pacing or itch.io FPS. Reports label
-the mode explicitly. Chrome uses its default compositor; forcing the Vulkan
-compositor is an optional `--vulkan-compositor` diagnostic in the browser runner,
-and failed context initialization in headless mode on the tested NVIDIA driver.
-
-For a presentation trace, use a short browser-only run:
-
-```sh
-xvfb-run -a node tests/webgl2_benchmark.mjs \
-  --root build/summit-webgl2/web/summit_web \
-  --output /tmp/summit-pacing --steps 900 --trace
-python3 tools/analyze_webgl_pacing.py /tmp/summit-pacing/browser-trace.json.gz \
-  --frames /tmp/summit-pacing/frames.json --output /tmp/summit-pacing/trace-summary.json
-```
-
-The compressed JSON trace records Chromium renderer/compositor/GPU stages and frame-skipping
-reasons; callback samples also record dispatch delay relative to the rAF clock.
-Tracing adds overhead, so use separate untraced runs for comparisons. Advanced
-controls `--minimal-context` and `--disable-gpu-vsync` are diagnostic overrides,
-not game optimizations or required browser launch flags for players.
-The browser runner also accepts `--cpu-profile` to save `gameplay.cpuprofile`,
-and `--gl-calls` to record selected API counts and buffer upload bytes in
-`frames.json`. Keep these diagnostics separate from timing comparisons and
-retain the exact build's symbol map when inspecting Wasm samples.
-
-Separate 900-step diagnostic runs enable WebGL timer queries and native GPU
-fence timing. Those APIs measure different scopes; do not interpret their
-ratio as a GPU speedup. CPU render-path spans sum scene preparation, 3D
-submission and UI; they exclude simulation updates and final presentation/flush.
-The browser startup span starts in Wasm main and excludes download/compilation.
-The script refuses competing GPU applications by default. `--allow-contention`
-keeps explicitly labeled diagnostic runs with the background activity recorded;
-they do not establish an uncontended performance baseline.
-
-`tests/webgl2_benchmark.mjs` can run the browser half independently;
-`--software --steps 360` exercises the export bridge in CI without a hardware-speed claim.
-This is a local iframe comparison; hosted itch.io and other browsers/devices
-still need separate measurements.
-
-## Local performance reference
-
-Recorded on 2026-10-24 with an RTX 4080 Laptop GPU (driver 580.178.04),
-Chrome/ANGLE Vulkan and native SDL_GPU Vulkan. Six complete traversals alternated
-before/after instance reuse and fresh native runs, with all builds and diagnostic
-instrumentation idle. Both the browser app window and viewport matched the
-640x360 game buffer; a larger browser viewport distorted earlier presentation
-measurements on Xvfb.
-
-| Instance reuse comparison | Median render CPU spans | p95 | Mean 3D submission |
-|---|---:|---:|---:|
-| WebGL before instance reuse | 0.90 ms | 2.00 ms | 0.483 ms |
-| WebGL with instance reuse | 0.80 ms | 1.60 ms | 0.366 ms |
-| Fresh native reference | 0.421 ms | 0.613 ms | 0.191 ms |
-
-Each browser result pools 7,272 measured frames; native pools 7,270. Browser
-median 3D instance record uploads fell from 31,740 to 360 bytes per frame, with
-42,000 bytes median retained instance buffer payload. Both browser runs per
-build completed the same route with the same state hash and no competing GPU
-workload observed. Mean 3D submission fell 24%; total median CPU spans fell 11%.
-Browser timers resolve 0.1 ms, and scene/UI spans also vary between runs; the
-comparison does not establish a maximum-FPS or hosted itch.io speedup. These
-results precede the source cleanup for merge; regenerate them with the harness
-above for a new binary. Local raw results and exact symbol maps are kept under
-`out/webgl2/instances-20261024/`; generated reports and binaries are not tracked.
-Earlier uniform caching, indexed 2D geometry and analytic HUD work reduced the
-browser median from 1.3 to 0.9 ms in separate runs.
 
 Native `kin-platform` tests caller-driven frame accumulation, pause, overload
 and restart. `kin-serial-jobs` tests deferred execution under caller locks,

@@ -28,7 +28,7 @@ bundled content/font, uses serial Jolt, and integrates browser audio and IDBFS
 settings. The rendering fixture has pixel checks for these paths. General 2D
 shader effects, custom shader assets/reflection and advanced 3D fidelity remain
 follow-up work. See [build instructions](web.md) and the
-[Summit compatibility inventory](web_summit.md).
+[Summit compatibility inventory](https://github.com/AmedeoBiolatti/kin-gallery/blob/main/games/summit/web/README.md#compatibility-inventory-2026-10-24).
 
 ## Browser contract
 

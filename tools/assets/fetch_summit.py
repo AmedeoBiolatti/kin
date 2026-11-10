@@ -14,7 +14,7 @@ URL = "https://kenney.nl/media/pages/assets/survival-kit/4065a8185b-1712149243/k
 SHA256 = "c3586341b5932c87eb43d75d915434f47daed168b17ed36a03e8ca9977c7443e"
 MODELS = ("tent-canvas", "campfire-pit", "bedroll", "bedroll-packed", "box", "barrel", "bottle",
           "resource-wood", "tree", "tree-tall", "rock-a", "rock-b", "grass", "grass-large")
-ROOT = Path(__file__).resolve().parents[2] / "examples/summit/content/kenney-survival"
+ROOT = Path(__file__).resolve().parents[2] / "examples/camp_walk/content/kenney-survival"
 
 
 def main():

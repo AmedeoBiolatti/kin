@@ -13,7 +13,7 @@ reading it. It starts small, stays honest about its scope, and grows alongside t
 |:-:|:-:|
 | <sub>**Bistro** in 3D — physically based materials, sun shadows and global illumination from the sky and sun</sub> | <sub>**Signal Siege** — 2D arena survival: 2D lights, particles, bloom, four languages</sub> |
 | ![The mirror atrium: a checkered marble floor, marble columns, a gold torus, a mirror, two glowing portals and a pool](docs/images/atrium.jpg) | ![Run Observatory: a training dashboard with a 10,000-row run list, loss chart and event stream](docs/images/run_observatory.png) |
-| <sub>**Atrium** — mirrors, portals, water, reflection probes and material graphs (marble, brass, terrazzo)</sub> | <sub>**Run Observatory** — a data app on ui2: virtualized tables, charts, live updates</sub> |
+| <sub>**[Atrium](https://github.com/AmedeoBiolatti/kin-gallery)** — mirrors, portals, water, reflection probes and material graphs (marble, brass, terrazzo)</sub> | <sub>**Run Observatory** — a data app on ui2: virtualized tables, charts, live updates</sub> |
 
 > **Status — v0.2.6, with v0.3.0 in preparation.** Windows and Linux are supported; Android and the browser
 > (WebGL2) are experimental, and so is 3D (`KIN_EXPERIMENTAL_3D`). APIs are young and may change between
@@ -50,7 +50,7 @@ reading it. It starts small, stays honest about its scope, and grows alongside t
 <sub>Bistro: Amazon Lumberyard Bistro (CC BY 4.0), via Logan Preshaw's and John James Gutib's ports, drawn by kin
 in the external benchmark port of the scene; the scene's assets are not in this repository. Sponza: Crytek, from the
 Khronos glTF Sample Assets, fetched by `tools/reference/fetch.py`. A Lovely Night of Terror is a co-op horror
-game made with kin; it is not in this repository.</sub>
+game made with kin; it is not in this repository. The atrium and Summit are in the [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery).</sub>
 
 - **Rendering:** physically based materials, sun, point and spot shadows (up to eight shadowed point lights), area
   lights, voxel global illumination, mirrors, portals, water, reflection probes and screen-space reflections,
@@ -170,8 +170,8 @@ cmake --build --preset dev --target lighting_demo
 ./out/build/dev/bin/lighting_demo
 
 cmake --preset dev-3d                             # with the experimental 3D renderer
-cmake --build --preset dev-3d --target summit
-./out/build/dev-3d/bin/summit
+cmake --build --preset dev-3d --target camp_walk
+./out/build/dev-3d/bin/camp_walk
 ```
 
 On Windows, run these from a Visual Studio developer prompt. Executables land in `out/build/<preset>/bin/`. The
@@ -227,14 +227,16 @@ Larger games and applications in [`examples/`](examples/README.md):
 | **Run Observatory** | App | A simulated training dashboard: 10,000-row tables, charts, an event stream |
 | **2D workflow** | 2D | Imported art, rooms, input contexts, asset budgets and Lua scenario tests |
 | **Python garden** | 2D | A platformer whose gameplay is all Python (`KIN_ENABLE_PYTHON`) |
-| **Summit** | 3D | A climbing expedition: characters, climbing, ragdolls, weather, time of day, sound |
 | **Signal Breach** | 3D | Signal Siege in first person |
 | **Camp walk**, **Projectile range**, **Lua 3D range** | 3D | Starting points for 3D games on `SceneSession3D`, in C++ and Lua |
-| **Blockfield** | 3D | A streamed, editable voxel world |
 | **Bunker exit** | 3D | Auto exposure, decals and morph targets |
-| **Planar views**, **Atrium** | 3D | Mirrors, portals and water; the atrium adds reflection probes, GI and material graphs |
+| **Planar views** | 3D | Mirrors, portals and water |
 | **Industrial yard** | 3D | A large Forward+ workload, shared with a Godot version for comparisons |
-| **Sponza walk**, **Material gallery** | 3D | Renderer and imported-material viewers (assets downloaded separately) |
+| **Sponza walk** | 3D | A renderer viewer with every feature switchable (Sponza downloaded separately) |
+
+Larger games made with kin, such as **Summit** (a climbing expedition, also in the browser), **Blockfield** (a voxel
+world), the mirror **Atrium** and the **Material gallery**, are in the [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery). Each builds against kin
+the way your game would.
 
 ## Using kin in a game
 

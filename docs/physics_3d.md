@@ -132,7 +132,7 @@ fails. Transactional preparation temporarily overlaps old/new worlds; identical
 recipes/scales share cooked shapes. No background cooking or per-frame file polling
 is added.
 
-`camp_walk` is a small playable host using Summit's free assets and
+`camp_walk` is a small playable host using the camp's free assets and
 `scenes/camp-play.kinscene`: compound floor, shared convex barrel hulls, hollow mesh
 tent, animated player prefab, movement/jump/crouch, restart and transactional reload.
 The campfire is decorative. Its controls and headless demonstration are in

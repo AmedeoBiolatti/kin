@@ -2503,7 +2503,7 @@ use the same path. Scene prefab placement is an ordinary override:
 `"overrides":{"root":{"Transform3D":{"position":[3,0,-2]}}}`. Asset paths are
 relative to `Assets3D`'s content root, including models referenced by nested prefab files.
 Folders and mounted `.kinpak` archives work through the existing content utilities.
-Summit's `content/prefabs/survivor.kinprefab` exercises this pipeline for its skinned
+The camp content's `prefabs/survivor.kinprefab` (`examples/camp_walk/content`) exercises this pipeline for its skinned
 survivor; its animation graph and IK configuration are also authored. Gameplay supplies
 parameters, targets, raycasts and ragdoll poses.
 
@@ -2621,8 +2621,8 @@ Blend entries are sorted and duplicate positions rejected. Layers also accept sp
 loop and include_root; fades support empty-name wildcards. IK kinds are `two_bone`,
 `foot_placer`, `look_at`, `fabrik`; the initial schema covers named chains, weight/fade,
 model-direction poles, stretch, foot/toe heights, toe joints and foot smoothing/tilt.
-The complete working locomotion and foot/hand rig is in Summit's
-`content/animations/survivor.kinanimator` and `survivor.kinanim`.
+The complete working locomotion and foot/hand rig is in the camp content's
+`animations/survivor.kinanimator` and `survivor.kinanim`.
 
 `resolve_render3d_assets` binds these after model loading. Tools can separately call
 `resolve_animator3d_assets(world, content_root)` with no renderer. Configuration and
@@ -2702,9 +2702,8 @@ leaves out the `whole_if_cut` draws, as it cuts nothing.
 A mirror, still water or a portal is a surface that shows a picture of the scene from somewhere else: a second view
 (`View3D`), rendered from a camera of its own each frame before the view that sees the surface, whose texture the
 surface's material reads where each of its points shows in that picture. Kin gives the cameras and the surfaces; the
-game owns the views (`examples/planar_views`: a mirror, a basin of rippled water and two portals; `planar_atrium`: the
-same as an authored scene, `examples/planar_views/content/scenes/atrium.kinscene`, with material graphs and a Lua
-script flying an orb through the portals).
+game owns the views (`examples/planar_views`: a mirror, a basin of rippled water and two portals; the [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery)'s
+`atrium`: the same as an authored scene, with material graphs and a Lua script flying an orb through the portals).
 
 ```cpp
 // Once: a view for the reflection (half size is plenty), and the mirror's material.
@@ -2847,7 +2846,7 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   its opening (as `portal_straddle` finds them) within half a metre of it: the four latest, on both surfaces of the
   pair, in the window surface's parameters (`planar_window.surface.glsl`, `kin_planar_window`). The effect fades out as
   the camera that sees the surface comes within a metre and a half of its plane (gone by a quarter of a metre): a
-  follow camera at the opening sees the room beyond as it is, not a whole screen of effect. `planar_atrium`: P cycles
+  follow camera at the opening sees the room beyond as it is, not a whole screen of effect. The gallery's `atrium`: P cycles
   them (`--effect N` starts with one).
 - **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64;
   where the renderer can render part of a view, each picture at its own size into a view that only grows, to the
@@ -2865,7 +2864,7 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   half-way through a portal is drawn at its exit too (`portal_straddle`, `Scene3D::draw_again`): every copy of the
   scene's draws whose bounds straddle an opening, plain, skinned (a character walking through: its pose as it is) or an
   instance batch's, with its id, whole, and an opaque one again where it is, whole, in the pictures only (`DrawClip3D`).
-  The atrium's survivor (Kenney's, CC0) walks through its portals: yours to play from behind in `planar_atrium` (a
+  The atrium's survivor (Kenney's, CC0) walks through its portals: yours to play from behind in the gallery's `atrium` (a
   physics capsule: WASD walk in the camera's frame, the mouse turns the camera, Space jumps, Shift runs; the camera
   follows it through a portal, seeing it through the other one), or walking its round by itself (`--camera 5`).
 - **Going through.** `portal_step(world, from, to)` (Lua `scene3d.portal_step(from, to)`) tests a step against every
@@ -2963,7 +2962,7 @@ entity's own copies out of its picture (a shiny statue's own probe). With global
 lends its GI to the captures, and a probe captured before that GI settled (`ReflectionProbes3D::gi_settle` updates of
 light, 60) is captured once more when it has. With `baked` (a picture in the content) it is loaded
 from there instead and captured only when `recapture` changes; `ReflectionProbes3D::bake(world, scene, content)` captures
-every probe, writes `probes/<authored id>.hdr` and sets their `baked` (save the scene to keep it; `planar_atrium
+every probe, writes `probes/<authored id>.hdr` and sets their `baked` (save the scene to keep it; the gallery's `atrium
 --bake-probes` does it for the atrium):
 
 ```json
@@ -3241,10 +3240,10 @@ if (rendered) renderer2d.draw_texture(session.view()->texture(), {0, 0, 960, 540
 else report(kin::diagnostics3d_text(rendered.diagnostics));
 ```
 
-The complete camp scene lives in `examples/summit/content/scenes/camp.kinscene`.
+The complete camp scene lives in `examples/camp_walk/content/scenes/camp.kinscene`.
 It combines existing free Kenney props, the animated survivor prefab, a camera,
 procedural environment and a primitive floor collider. It is a standalone loading
-example; Summit's expedition retains its game-specific presentation loop.
+example.
 
 `load` is `prepare` followed by `activate`. For a frame-boundary handoff, call them
 separately: preparation validates a candidate world, binds assets/configurations,
@@ -3555,7 +3554,7 @@ Changes after preparation remain detectable after activation.
 Build `lua_range`: WASD moves, Space jumps, Shift sprints, C crouches, E launches,
 F plays the pickup action, R reloads and Escape exits. The C++ host in
 `examples/lua_range/main.cpp` owns services/presentation; gameplay is
-`scripts/lua-range.lua` and `scenes/lua-range.kinscene` under Summit content,
+`scripts/lua-range.lua` and `scenes/lua-range.kinscene` under the camp content (`examples/camp_walk/content`),
 sharing its existing CC0 crate and survivor art. Headless runs automatically walk,
 jump, launch crates and play an action; the report includes contacts and markers.
 The script prepares and warms an eight-slot crate pool, then acquires/returns
@@ -4193,7 +4192,7 @@ textures. An image also used by the imported model can require that model to be 
 to update its original material handles. Existing consumers stay valid throughout.
 Folders and mounted content packs use the same loaders and relative paths.
 
-Summit's authored camp uses `prefabs/camp-barrel.kinprefab` twice: the default brass
+The authored camp (`scenes/camp.kinscene`) uses `prefabs/camp-barrel.kinprefab` twice: the default brass
 variant and a blue variant selected by a standard prefab override. Both share one
 barrel model. The fire pit selects the ember variant from the same material asset.
 The expedition's existing imported appearance remains unchanged.
@@ -5094,10 +5093,10 @@ of the world. `SnapshotOptions3D::reflection` and `window` (the planar surfaces)
 refracting surface, and portals holes the comparison leaves out. Fog, particles and the overlay are not written; kin's
 bloom is not in the truth.
 
-`planar_atrium` writes one from where its bottom line (F3) says the camera is:
+The gallery's `atrium` writes one from where its bottom line (F3) says the camera is:
 
 ```sh
-KIN_RENDER_BACKEND=gpu planar_atrium --at X Y Z YAW PITCH [--survivor X Y Z YAW] --cycles-snapshot out/runs/cycles/view
+KIN_RENDER_BACKEND=gpu atrium --at X Y Z YAW PITCH [--survivor X Y Z YAW] --cycles-snapshot out/runs/cycles/view
 python3 tools/cycles/compare.py out/runs/cycles/view --samples 512 --denoise
 ```
 

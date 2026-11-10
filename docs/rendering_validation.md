@@ -108,7 +108,7 @@ The [CI workflow](../.github/workflows/ci.yml) runs on pull requests, main and
 | Release software Vulkan | Entire configured CTest suite, then the 21 rendering cases under core and synchronization validation |
 | Debug software Vulkan | Scene/physics checks plus graph, visibility, bounds, material and lifetime cases with assertions enabled |
 | Rendering ASAN/UBSAN | Rendering-only Debug build, the same 21 integration cases on software Vulkan, fail-fast sanitizer errors; LeakSanitizer disabled |
-| [WebGL2 workflow](../.github/workflows/webgl2.yml) | Packaged browser fixture, Hex and Summit smoke checks, including storage-denied behavior and simulation |
+| [WebGL2 workflow](../.github/workflows/webgl2.yml) | Packaged browser fixture and Hex smoke checks (Summit's browser checks run in the kin gallery's CI) |
 
 GPU/validation/sanitizer jobs upload JUnit and verbose evidence even after
 failures. Inspect the run for the exact reviewed commit; a previous commit's
