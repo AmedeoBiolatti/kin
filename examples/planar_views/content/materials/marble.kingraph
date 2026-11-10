@@ -1,0 +1,263 @@
+{
+ "schema": "kin.material-graph/1",
+ "name": "Marble",
+ "parameters": [
+  {
+   "name": "base",
+   "type": "color",
+   "default": [
+    0.92,
+    0.9,
+    0.86,
+    1
+   ]
+  },
+  {
+   "name": "vein",
+   "type": "color",
+   "default": [
+    0.38,
+    0.36,
+    0.35,
+    1
+   ]
+  },
+  {
+   "name": "scale",
+   "type": "float",
+   "default": 1.3
+  },
+  {
+   "name": "gloss",
+   "type": "float",
+   "default": 0.14
+  }
+ ],
+ "nodes": [
+  {
+   "id": "p",
+   "type": "multiply",
+   "inputs": {
+    "a": "position",
+    "b": "scale"
+   }
+  },
+  {
+   "id": "n",
+   "type": "fbm",
+   "inputs": {
+    "p": "p",
+    "scale": 1.0,
+    "octaves": 5,
+    "lacunarity": 2.0,
+    "gain": 0.5
+   }
+  },
+  {
+   "id": "nw",
+   "type": "multiply",
+   "inputs": {
+    "a": "n",
+    "b": 2.6
+   }
+  },
+  {
+   "id": "a_along",
+   "type": "dot",
+   "inputs": {
+    "a": "p",
+    "b": [
+     0.8,
+     0.45,
+     0.35
+    ]
+   }
+  },
+  {
+   "id": "a_warp",
+   "type": "add",
+   "inputs": {
+    "a": "a_along",
+    "b": "nw"
+   }
+  },
+  {
+   "id": "a_freq",
+   "type": "multiply",
+   "inputs": {
+    "a": "a_warp",
+    "b": 2.2
+   }
+  },
+  {
+   "id": "a_wave",
+   "type": "sin",
+   "inputs": {
+    "x": "a_freq"
+   }
+  },
+  {
+   "id": "a_abs",
+   "type": "abs",
+   "inputs": {
+    "x": "a_wave"
+   }
+  },
+  {
+   "id": "a_line",
+   "type": "one_minus",
+   "inputs": {
+    "x": "a_abs"
+   }
+  },
+  {
+   "id": "a_v",
+   "type": "power",
+   "inputs": {
+    "a": "a_line",
+    "b": 6.0
+   }
+  },
+  {
+   "id": "b_along",
+   "type": "dot",
+   "inputs": {
+    "a": "p",
+    "b": [
+     -0.3,
+     0.7,
+     0.6
+    ]
+   }
+  },
+  {
+   "id": "b_warp",
+   "type": "add",
+   "inputs": {
+    "a": "b_along",
+    "b": "nw"
+   }
+  },
+  {
+   "id": "b_freq",
+   "type": "multiply",
+   "inputs": {
+    "a": "b_warp",
+    "b": 6.0
+   }
+  },
+  {
+   "id": "b_wave",
+   "type": "sin",
+   "inputs": {
+    "x": "b_freq"
+   }
+  },
+  {
+   "id": "b_abs",
+   "type": "abs",
+   "inputs": {
+    "x": "b_wave"
+   }
+  },
+  {
+   "id": "b_line",
+   "type": "one_minus",
+   "inputs": {
+    "x": "b_abs"
+   }
+  },
+  {
+   "id": "b_v",
+   "type": "power",
+   "inputs": {
+    "a": "b_line",
+    "b": 14.0
+   }
+  },
+  {
+   "id": "fine",
+   "type": "multiply",
+   "inputs": {
+    "a": "b_v",
+    "b": 0.35
+   }
+  },
+  {
+   "id": "all",
+   "type": "add",
+   "inputs": {
+    "a": "a_v",
+    "b": "fine"
+   }
+  },
+  {
+   "id": "amount",
+   "type": "saturate",
+   "inputs": {
+    "x": "all"
+   }
+  },
+  {
+   "id": "cloud",
+   "type": "fbm",
+   "inputs": {
+    "p": "p",
+    "scale": 0.35,
+    "octaves": 4,
+    "lacunarity": 2.0,
+    "gain": 0.5
+   }
+  },
+  {
+   "id": "shade",
+   "type": "remap",
+   "inputs": {
+    "x": "cloud",
+    "in_min": 0.0,
+    "in_max": 1.0,
+    "out_min": 0.9,
+    "out_max": 1.05
+   }
+  },
+  {
+   "id": "veined",
+   "type": "mix",
+   "inputs": {
+    "a": "base.rgb",
+    "b": "vein.rgb",
+    "t": "amount"
+   }
+  },
+  {
+   "id": "colour",
+   "type": "multiply",
+   "inputs": {
+    "a": "veined",
+    "b": "shade"
+   }
+  },
+  {
+   "id": "rough_v",
+   "type": "add",
+   "inputs": {
+    "a": "gloss",
+    "b": 0.12
+   }
+  },
+  {
+   "id": "rough",
+   "type": "mix",
+   "inputs": {
+    "a": "gloss",
+    "b": "rough_v",
+    "t": "amount"
+   }
+  }
+ ],
+ "outputs": {
+  "base_color": "colour",
+  "roughness": "rough",
+  "metallic": 0.0
+ }
+}

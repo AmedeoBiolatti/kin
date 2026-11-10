@@ -35,15 +35,17 @@ class GpuTextureBackend;
 
 // A view's bounding planes (xyz the normal, inward, length 1; w the offset),
 // from its view-projection matrix; an infinite far plane is left out.
+// A view's bounding planes: its six (five with no far plane), and a seventh for a camera's clip plane (Camera3D::
+// clip_plane: a mirror's or a portal's view culls what is behind it as it culls what is out of view).
 struct GpuFrustum {
-    std::array<Vec4f, 6> planes{};
+    std::array<Vec4f, 7> planes{};
     u32 count = 0;
 };
 
 // One mesh instance as mesh.vert reads it (std430): 128 bytes.
 struct GpuInstance3D {
     f32 model[16];
-    f32 normal[12]; // three columns of the normals' matrix, each padded to four
+    f32 normal[12]; // three columns of the normals' matrix, each padded to four (w: the pick id, the DrawClip3D)
     f32 color[4];   // linear, straight alpha
 };
 static_assert(sizeof(GpuInstance3D) == 128);
@@ -185,6 +187,20 @@ public:
     GpuTexture irradiance; // equirectangular, small: what a diffuse surface facing each way receives
     u32 levels = 1;
     bool filtered = false;
+    u64 generation = 0; // counts the filterings (the reflection array copies the specular again when it changes)
+};
+
+// A reflection probe's picture (render3d/reflection_probes3d.hpp): the view it is captured with (square, 90 degrees,
+// float), its six faces, and the panorama made of them, mipmapped, as an environment's picture is. The renderer
+// filters the panorama into a layer of its reflection array (GpuRenderer3D::prepare_reflections).
+class GpuReflectionCapture3D final : public IReflectionCaptureBackend3D {
+public:
+    u64 generation() const override { return captured; }
+    std::shared_ptr<IViewBackend3D> view;
+    GpuTexture faces;  // 6 layers, the views' float pictures
+    GpuTexture source; // the panorama, 4 x 2 faces' sides, mipmapped
+    u32 side = 0;
+    u64 captured = 0; // captures so far
 };
 
 // A material's own fragment shader (Material3D::shader).
@@ -307,9 +323,17 @@ public:
         _exposure_valid = false;
         _fog_volume_valid = false;
     }
+    Vec2i render_size() const override { return extent(); }
+    bool set_render_size(Vec2i size) override {
+        _extent = size.x > 0 && size.y > 0 ? Vec2i{std::min(size.x, _size.x), std::min(size.y, _size.y)} : Vec2i{};
+        return true;
+    }
 
 private:
     friend class GpuRenderer3D;
+    // What a render fills, from the top-left (set_render_size): the whole when unset.
+    Vec2i extent() const { return _extent.x > 0 ? _extent : _size; }
+    Vec2i _extent{};
     // Scene3D::time of its frame and of the frame before (a moving surface's previous position, for the velocity).
     f32 _offset_clock[2] = {0.0f, 0.0f};
     bool _offset_clock_seen = false;
@@ -325,7 +349,16 @@ private:
     SDL_GPUTextureFormat _output_format = SDL_GPU_TEXTUREFORMAT_INVALID; // the 2D pipeline's, followed
     GpuTexture _colour; // multisampled; empty with one sample (drawn into the resolved one)
     GpuTexture _depth;
-    GpuTexture _scene;             // HDR: the resolved float picture
+    GpuTexture _scene; // HDR: the resolved float picture
+    // Screen-space reflections (ssr_trace): the half-size grid's results (three words a texel), then the previous
+    // frame's picture as a pyramid (ssr_keep_picture: two words a texel, half size down), and the camera it was seen
+    // with (unjittered); `_ssr_seen` when the pyramid holds one.
+    std::shared_ptr<GpuBuffer> _ssr_buffer;
+    Mat4f _ssr_prior{};
+    f32 _ssr_prior_y = 1.0f; // its projection's [1][1] (how wide a world unit shows at a depth)
+    Vec2i _ssr_prior_grid{}; // the pyramid's level 0 (the half-size grid of the part rendered then)
+    u32 _ssr_prior_levels = 0;
+    bool _ssr_seen = false;
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
     // ViewOptions3D::auto_exposure: the histogram and the adapted exposure (exposure_histogram/adapt.comp), whether it
     // holds a metered exposure yet, and the clocks the time between renders is measured with.
@@ -554,6 +587,16 @@ public:
     std::shared_ptr<IMeshBackend3D> copy_mesh(const IMeshBackend3D& mesh) override;
     std::optional<f32> read_exposure(IViewBackend3D& view) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
+    std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32 side) override;
+    bool capture_reflection(IReflectionCaptureBackend3D& capture, Scene3D& scene, Vec3f position,
+                            const ReflectionCaptureOptions3D& options, IViewBackend3D* lighting,
+                            RenderDebugStats3D& stats) override;
+    bool global_illumination_lit(IViewBackend3D& view) const override;
+    bool read_reflection_capture(IReflectionCaptureBackend3D& capture, std::vector<f32>& rgb, Vec2i& size) override;
+    bool read_mesh(const IMeshBackend3D& mesh, u32 vertex_count, MeshData3D& out) override;
+    bool read_texture(const Texture& texture, std::vector<u8>& texels, Vec2i& size) override;
+    std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i size,
+                                                                                std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<ISurfaceShaderBackend3D>
     create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) override;
@@ -562,7 +605,10 @@ public:
                                                       std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
+    bool renders_part(const IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D* lit_by) const override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
+    bool render_lit_by(IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D& lit_by,
+                       RenderDebugStats3D& stats) override;
     bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) override;
     std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
                                                      RenderDebugStats3D&) override;
@@ -810,6 +856,14 @@ private:
     void push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot = 0, bool record_history = true);
     // Lights3D::sky_lights_scene: the sky drawn into a small panorama and filtered, when it has moved enough.
     void sky_environment(FrameCtx& ctx);
+    // The reflection array the light variants read at binding 6 (uEnvSpecular): layer 0 the environment's specular
+    // copied, the layers after it the probes' chosen this render, each filtered when its capture changed; their records
+    // in ctx (push_frame_uniforms). Nothing without an environment or probes.
+    void prepare_reflections(FrameCtx& ctx);
+    // Screen-space reflections: the trace (after the pre-pass, its compute with the others), and the copy of the
+    // frame's lit picture the next frame's trace reads (after the temporal resolve).
+    bool ssr_trace(FrameCtx& ctx);
+    void ssr_keep_picture(FrameCtx& ctx);
     // G5, global illumination (gpu_gi3d.cpp). make_gi: the GI scene's pipelines, with the renderer (where the device
     // cannot, absent and RendererCapabilities3D::global_illumination false). gi_scene: the view's GI scene for `scene`,
     // built (compute passes into `commands`) when it has none or what it is made of changed; true when the view has one
@@ -830,8 +884,9 @@ private:
     // G5c: the probes' light on what the pre-pass drew, at half the view's size (gi_resolve.comp), after it and its
     // compute (`projection`: the one it drew with; `jittered`: temporal anti-aliasing's, which each texel's keeping
     // from the render before evens out); true when it was read.
-    bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
-                    bool jittered, RenderDebugStats3D& stats);
+    // `source`: another view whose probes light this one's pixels (a capture borrowing them; null: its own).
+    bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuView3D* source, const Scene3D& scene,
+                    const Mat4f& projection, bool jittered, RenderDebugStats3D& stats);
     // GlobalIllumination3D::area_lights: their light on what the pre-pass drew (gi_area.comp), after gi_resolve; true
     // when it was (the main pass then reads it in the coverage's place).
     bool gi_area(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
@@ -971,7 +1026,9 @@ private:
     void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum,
                        SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     static Pass pass_of(const Material3D& material);
-    // A material's texture as a binding: its own, or a white one without.
+    // A material's texture as a binding: its own, or a white one without, or for the picture the render draws into (a
+    // mirror's own reflection in its view: `_drawn_picture`), which a draw may not read while it is drawn.
+    SDL_GPUTexture* _drawn_picture = nullptr;
     SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v,
                                                  std::optional<TextureSampler3D> sampler = {});
     void bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material);
@@ -1198,10 +1255,33 @@ private:
     bool shadow_unchanged(FrameCtx& ctx);
     void shadow_drawn(FrameCtx& ctx, bool complete);
     bool _chain_ready = false; // the occlusion built the linear depth chain this render: the blurs read it
-    SDL_GPUSampler* _point_sampler = nullptr;           // texel by texel, for compute
-    SDL_GPUSampler* _compare_sampler = nullptr;         // the shadow map's
-    SDL_GPUSampler* _environment_sampler = nullptr;     // wraps round, clamps at the poles, mipmapped
-    SDL_GPUComputePipeline* _filter_pipeline = nullptr; // env_filter.comp
+    SDL_GPUSampler* _point_sampler = nullptr;             // texel by texel, for compute
+    SDL_GPUSampler* _compare_sampler = nullptr;           // the shadow map's
+    SDL_GPUSampler* _environment_sampler = nullptr;       // wraps round, clamps at the poles, mipmapped
+    SDL_GPUComputePipeline* _filter_pipeline = nullptr;   // env_filter.comp
+    SDL_GPUComputePipeline* _panorama_pipeline = nullptr; // probe_panorama.comp
+    SDL_GPUComputePipeline* _ssr_pipeline = nullptr;      // ssr_trace.comp
+    // While a capture renders with a view's global illumination borrowed (capture_reflection): that view, whose probes
+    // light it, untouched (no GI scene or probes of the capture's own).
+    const GpuView3D* _gi_borrowed = nullptr;
+    // While a render lit by another view (render_lit_by) whose GI has no light yet: the scene's GI is not drawn (none
+    // of the view's own is made either).
+    bool _gi_off = false;
+    SDL_GPUComputePipeline* _ssr_pyramid_pipeline = nullptr; // ssr_pyramid.comp
+    std::shared_ptr<GpuBuffer> _ssr_dummy;                   // bound where a light variant reads no reflections
+    // The reflection array (prepare_reflections): equirectangular layers the environment's specular size (or 256 x
+    // 128 without one), a level a roughness; layer 0 the environment's, then one a probe. What each holds.
+    GpuTexture _reflections;
+    u32 _reflection_levels = 0;
+    const GpuEnvironment3D* _reflection_environment = nullptr;
+    u64 _reflection_environment_generation = 0;
+    struct ReflectionLayer {
+        std::weak_ptr<IReflectionCaptureBackend3D> capture;
+        u64 generation = 0; // the capture's, when filtered here (0: nothing)
+        u64 used = 0;       // the render it was last read by
+    };
+    std::array<ReflectionLayer, max_reflection_probes3d> _reflection_layers{};
+    u64 _reflection_renders = 0;
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;
     u32 _shadow_layers = 0;
@@ -1510,7 +1590,8 @@ private:
     u64 _instance_generation = 0, _local_instance_generation = 0, _joints_generation = 0, _offsets_generation = 0;
     std::vector<u32> _retained_visible;
     std::shared_ptr<GpuBuffer> _retained_indices;
-    GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material) const;
+    GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material,
+                                DrawClip3D clip = DrawClip3D::camera) const;
     void retain_instances(DrawRef& ref, FrameCtx& ctx);
     void retain_scene_instances(FrameCtx& ctx);
     void cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stats);

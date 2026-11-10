@@ -17,6 +17,7 @@
 #include <kin/render3d/environment3d.hpp>
 #include <kin/render3d/mesh3d.hpp>
 #include <kin/render3d/particles3d.hpp>
+#include <kin/render3d/reflection_probes3d.hpp>
 #include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/data_buffer.hpp>
@@ -149,6 +150,11 @@ public:
 // illumination). A material graph's are its compiler's (CompiledMaterialGraph3D::traits); a surface of your own has
 // these defaults (as kin's stock surface: what its material's fields emit, its colour times the vertex colour) unless
 // it is made with others.
+// What the GI scene takes in of a surface material (SurfaceTraits3D::gi): a stand-in drawn from the surface (its
+// colour and emission over a square); the material without the surface (its colour and emission fields, not its maps,
+// as kin's stock material makes them); nothing (it neither shades nor lights the GI: see-through water).
+enum class SurfaceGi3D : u8 { StandIn, Fields, None };
+
 struct SurfaceTraits3D {
     // It makes its own emission: the GI scene takes in the stand-in's, whatever the material's emission fields say.
     // Off, a surface material glows there only where those fields emit (Material3D::emits_light).
@@ -157,6 +163,11 @@ struct SurfaceTraits3D {
     // stock surface does), and its alpha: the GI scene multiplies the stand-in's by the copy's. Off, it doesn't.
     bool vertex_color = true;
     bool vertex_alpha = true;
+    // What the GI scene takes in of it (SurfaceGi3D): a stand-in; its material's fields alone, for a surface whose look
+    // is a picture of the view or changes every frame (kin's planar surfaces: a mirror's, a portal's), which a stand-in
+    // would neither hold nor keep up with (each frame's parameters a new one; its maps may be pictures of the view); or
+    // none, for one the GI should see through (water: else a dark lid over the pool, and the light round it wrong).
+    SurfaceGi3D gi = SurfaceGi3D::StandIn;
 
     friend bool operator==(const SurfaceTraits3D&, const SurfaceTraits3D&) = default;
 };
@@ -313,6 +324,13 @@ struct Material3D {
 
 // One copy of a mesh in a draw_instanced() call. A transform that mirrors
 // (a negative scale) turns its faces inside out: draw it double-sided.
+// How a draw's copies meet the clip plane of the camera that draws them (Camera3D::clip_plane).
+enum class DrawClip3D : u8 {
+    camera,      // cut by it (the default)
+    whole,       // never cut: what is half-way through a portal, at the exit (PlanarViews3D)
+    whole_if_cut // never cut, and drawn only by cameras that have a clip plane: the same, at the entry
+};
+
 struct MeshInstance3D {
     Mat4f transform{};
     Color tint = colors::white;
@@ -460,6 +478,10 @@ struct Lights3D {
     // Spot lights (P3b): at most 16 a frame, chosen as the points are (the cone's bounding sphere reaches the view, the
     // strongest and nearest first). Cleared with the draws.
     std::vector<SpotLightSource3D> spots;
+    // Reflection probes (kin/render3d/reflection_probes3d.hpp): glossy surfaces inside a probe's box reflect its
+    // picture, parallax-corrected, in place of the environment. At most max_reflection_probes3d a render (those that
+    // reach the view, by priority, then the nearest). Cleared with the draws.
+    std::vector<ReflectionProbeSource3D> reflection_probes;
     // Shadows of lights that are not the sun (P3b), all opt-in (a light's `shadow.enabled`; `fill_shadow.enabled`) and
     // off, the picture and the cost are what they were. Of the lights that ask, the most important this many a frame
     // have a map (importance: intensity x reach x the share of the view it covers, with a hysteresis in favour of the
@@ -534,6 +556,20 @@ struct ContactShadows3D {
 // A camera cut should call View3D::reset_history(). Moving meshes are matched
 // from one frame to the next by draw order or MeshInstance3D::id: see
 // docs/rendering_3d.md for how, and what it cannot do.
+// Screen-space reflections (docs/rendering_3d.md, "Screen-space reflections"): each pixel's mirror reflection traced
+// against the depth pre-pass (half size), its colour read from the previous frame's picture. A glossy surface reflects
+// what is on screen where the trace finds it, in place of the reflection probes' or the environment's, fading out
+// toward the screen's edges, where the trace misses, and as it roughens (to `max_roughness`); a mirror's or portal's
+// picture still wins. The stock lit shaders only; off on WebGL2. The pre-pass runs for it.
+struct ScreenSpaceReflections3D {
+    bool enabled = false;
+    f32 max_roughness = 0.8f; // blurred more as surfaces roughen; none past this (the probes' or the environment's)
+    f32 thickness = 0.3f;     // how deep (world units) what the pre-pass sees is taken to be, behind its front
+    f32 max_distance = 40.0f; // how far (world units) a ray goes
+    u32 steps = 48;           // marching steps a ray (8 to 128), then a refinement
+    f32 intensity = 1.0f;
+};
+
 struct TemporalAA3D {
     bool enabled = false;
     f32 blend = 0.9f; // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
@@ -778,6 +814,7 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    ScreenSpaceReflections3D ssr{};
     // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
     // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
     f32 time = 0.0f;
@@ -826,9 +863,11 @@ public:
     // What is drawn over the scene, in front of everything in it, seen by its
     // own camera and lit by this scene's lights: a first-person gun or hands,
     // which then never sink into a wall. Made on first use; its own overlay
-    // is never drawn.
+    // is never drawn. `show_overlay` false leaves it out of the renders until it is true again (a mirror's picture of a
+    // first-person scene: PlanarViews3D), keeping it.
     Scene3D& overlay();
-    const Scene3D* overlay_if_any() const { return _overlay.get(); }
+    const Scene3D* overlay_if_any() const { return show_overlay ? _overlay.get() : nullptr; }
+    bool show_overlay = true;
 
     // `mesh` placed by `transform`. Draws of the same mesh and material one
     // after another are drawn as one (instanced). history_id follows MeshInstance3D:
@@ -884,6 +923,10 @@ public:
     // Many copies of `mesh`, in one draw.
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
                             const Material3D& material = {});
+    // The same, met by the cameras' clip planes as `clip` says (Draw::clip): one draw only with draws that say the
+    // same.
+    Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances, const Material3D& material,
+                            DrawClip3D clip);
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
     // Retain a handle; batch records need not be copied into instances(). The batch's groups
     // are read at render time, including bounds refreshed by update().
@@ -915,9 +958,19 @@ public:
     std::span<const Decal3D> decals() const { return _decals; }
     void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLightSource3D& light) { lights.spots.push_back(light); }
-    // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
+    // Takes the draws, point and spot lights, reflection probes and particles away, the overlay's too (cameras, the
     // sun and the ambient light and the weather stay), keeping their room.
     void clear();
+    // The copies of draws()[draw] drawn with `material` from the next render on, their mesh and placing as they are (a
+    // mirror's surface drawn as a stand-in in another mirror's picture, then as itself). Failed for a draw out of
+    // range.
+    Status3D set_draw_material(std::size_t draw, const Material3D& material);
+    // Copy `copy` (0 to its count) of draws()[draw] drawn again, at `transform`: its mesh, material, tint and pick id,
+    // a skinned copy's pose (the same joint matrices), a batch's copy as a plain one; met by clip planes as `clip` says
+    // (a draw of its own unless the one before says the same) and with `history_id` for its temporal history (0: by
+    // order). What is half-way through a portal, at the exit too (PlanarViews3D). Failed out of range.
+    Status3D draw_again(std::size_t draw, u32 copy, const Mat4f& transform, DrawClip3D clip = DrawClip3D::camera,
+                        u64 history_id = 0);
 
     struct Draw {
         Mesh3D mesh;
@@ -930,6 +983,7 @@ public:
         u32 skin_first = 0;
         u32 group_first = 0, group_count = 0; // into instance_groups(); ungrouped gaps use per-copy culling
         InstanceBatch3D batch{};              // if set, first/count refer to batch.instances(), not instances()
+        DrawClip3D clip = DrawClip3D::camera; // draw_instanced(..., clip)
     };
     using InstanceGroup = InstanceGroup3D;
     // A batch of particles (draw_particles): its look and sprites [first, first + count) of particle_sprites().
@@ -1011,7 +1065,7 @@ private:
     std::span<MeshInstance3D> add_instances_operation(const Mesh3D& mesh, std::size_t count,
                                                       const Material3D& material = {});
     std::span<MeshInstance3D> add_instances(const Mesh3D& mesh, std::size_t count, const Material3D& material,
-                                            bool skinned, u32 skin_first);
+                                            bool skinned, u32 skin_first, DrawClip3D clip = DrawClip3D::camera);
     // One skinned copy whose matrices start at `first_joint` of _joints (already there).
     void add_skinned_copy(const Mesh3D& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material,
                           Color tint, u32 id, u64 history_id = 0);

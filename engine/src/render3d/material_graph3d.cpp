@@ -222,11 +222,13 @@ const std::vector<NodeSpec>& specs() {
                          return make("clamp(" + in[0].expr + ", " + in[1].expr + ", " + in[2].expr + ")", w);
                      }});
         s.push_back({"smoothstep",
-                     "0 to 1 smoothly from edge0 to edge1",
+                     "0 to 1 smoothly from edge0 to edge1 (its edges widened by the pixel's footprint of x: a sharp "
+                     "edge far away filters, not aliases)",
                      {{"edge0", In::Widest, "0"}, {"edge1", In::Widest, "1"}, {"x"}},
                      false,
                      [](Compiler&, const std::vector<Value>& in, Type w, const std::string&, bool) {
-                         return make("smoothstep(" + in[0].expr + ", " + in[1].expr + ", " + in[2].expr + ")", w);
+                         return make("kin_graph_smoothstep(" + in[0].expr + ", " + in[1].expr + ", " + in[2].expr + ")",
+                                     w);
                      }});
         s.push_back({"remap",
                      "x from [in_min, in_max] to [out_min, out_max]",

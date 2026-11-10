@@ -1,0 +1,298 @@
+{
+ "schema": "kin.material-graph/1",
+ "name": "Checkered marble floor",
+ "parameters": [
+  {
+   "name": "tile",
+   "type": "float",
+   "default": 1.0
+  },
+  {
+   "name": "white",
+   "type": "color",
+   "default": [
+    0.9,
+    0.88,
+    0.84,
+    1
+   ]
+  },
+  {
+   "name": "black",
+   "type": "color",
+   "default": [
+    0.025,
+    0.025,
+    0.03,
+    1
+   ]
+  },
+  {
+   "name": "white_vein",
+   "type": "color",
+   "default": [
+    0.45,
+    0.43,
+    0.42,
+    1
+   ]
+  },
+  {
+   "name": "black_vein",
+   "type": "color",
+   "default": [
+    0.4,
+    0.3,
+    0.14,
+    1
+   ]
+  },
+  {
+   "name": "gloss",
+   "type": "float",
+   "default": 0.07
+  }
+ ],
+ "nodes": [
+  {
+   "id": "xz",
+   "type": "multiply",
+   "inputs": {
+    "a": "position.xz",
+    "b": "tile"
+   }
+  },
+  {
+   "id": "cell",
+   "type": "floor",
+   "inputs": {
+    "x": "xz"
+   }
+  },
+  {
+   "id": "cells",
+   "type": "add",
+   "inputs": {
+    "a": "cell.x",
+    "b": "cell.y"
+   }
+  },
+  {
+   "id": "parity",
+   "type": "mod",
+   "inputs": {
+    "a": "cells",
+    "b": 2.0
+   }
+  },
+  {
+   "id": "parity_f",
+   "type": "glsl",
+   "glsl": "mix(t, 0.5, clamp(2.0 * max(fwidth(q.x), fwidth(q.y)) - 0.5, 0.0, 1.0))",
+   "result": "float",
+   "inputs": {
+    "t": "parity",
+    "q": "xz"
+   }
+  },
+  {
+   "id": "in",
+   "type": "fract",
+   "inputs": {
+    "x": "xz"
+   }
+  },
+  {
+   "id": "out",
+   "type": "one_minus",
+   "inputs": {
+    "x": "in"
+   }
+  },
+  {
+   "id": "edge2",
+   "type": "min",
+   "inputs": {
+    "a": "in",
+    "b": "out"
+   }
+  },
+  {
+   "id": "edge",
+   "type": "min",
+   "inputs": {
+    "a": "edge2.x",
+    "b": "edge2.y"
+   }
+  },
+  {
+   "id": "solid",
+   "type": "smoothstep",
+   "inputs": {
+    "edge0": 0.008,
+    "edge1": 0.018,
+    "x": "edge"
+   }
+  },
+  {
+   "id": "p",
+   "type": "multiply",
+   "inputs": {
+    "a": "position",
+    "b": 1.4
+   }
+  },
+  {
+   "id": "n",
+   "type": "fbm",
+   "inputs": {
+    "p": "p",
+    "scale": 1.0,
+    "octaves": 5,
+    "lacunarity": 2.0,
+    "gain": 0.5
+   }
+  },
+  {
+   "id": "nw",
+   "type": "multiply",
+   "inputs": {
+    "a": "n",
+    "b": 2.4
+   }
+  },
+  {
+   "id": "v_along",
+   "type": "dot",
+   "inputs": {
+    "a": "p",
+    "b": [
+     0.7,
+     0.0,
+     0.7
+    ]
+   }
+  },
+  {
+   "id": "v_warp",
+   "type": "add",
+   "inputs": {
+    "a": "v_along",
+    "b": "nw"
+   }
+  },
+  {
+   "id": "v_freq",
+   "type": "multiply",
+   "inputs": {
+    "a": "v_warp",
+    "b": 3.0
+   }
+  },
+  {
+   "id": "v_wave",
+   "type": "sin",
+   "inputs": {
+    "x": "v_freq"
+   }
+  },
+  {
+   "id": "v_abs",
+   "type": "abs",
+   "inputs": {
+    "x": "v_wave"
+   }
+  },
+  {
+   "id": "v_line",
+   "type": "one_minus",
+   "inputs": {
+    "x": "v_abs"
+   }
+  },
+  {
+   "id": "v_v",
+   "type": "power",
+   "inputs": {
+    "a": "v_line",
+    "b": 8.0
+   }
+  },
+  {
+   "id": "vein_t",
+   "type": "multiply",
+   "inputs": {
+    "a": "v_v",
+    "b": 0.75
+   }
+  },
+  {
+   "id": "vein_f",
+   "type": "glsl",
+   "glsl": "mix(v, 0.15, clamp(fwidth(f) * 0.6 - 0.3, 0.0, 1.0))",
+   "result": "float",
+   "inputs": {
+    "v": "vein_t",
+    "f": "v_freq"
+   }
+  },
+  {
+   "id": "light",
+   "type": "mix",
+   "inputs": {
+    "a": "white.rgb",
+    "b": "white_vein.rgb",
+    "t": "vein_f"
+   }
+  },
+  {
+   "id": "dark",
+   "type": "mix",
+   "inputs": {
+    "a": "black.rgb",
+    "b": "black_vein.rgb",
+    "t": "vein_f"
+   }
+  },
+  {
+   "id": "marble",
+   "type": "mix",
+   "inputs": {
+    "a": "light",
+    "b": "dark",
+    "t": "parity_f"
+   }
+  },
+  {
+   "id": "grout",
+   "type": "multiply",
+   "inputs": {
+    "a": "marble",
+    "b": 0.2
+   }
+  },
+  {
+   "id": "colour",
+   "type": "mix",
+   "inputs": {
+    "a": "grout",
+    "b": "marble",
+    "t": "solid"
+   }
+  },
+  {
+   "id": "rough",
+   "type": "mix",
+   "inputs": {
+    "a": 0.7,
+    "b": "gloss",
+    "t": "solid"
+   }
+  }
+ ],
+ "outputs": {
+  "base_color": "colour",
+  "roughness": "rough",
+  "metallic": 0.0
+ }
+}

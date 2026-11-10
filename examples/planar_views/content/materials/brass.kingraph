@@ -1,0 +1,135 @@
+{
+ "schema": "kin.material-graph/1",
+ "name": "Brushed brass",
+ "parameters": [
+  {
+   "name": "brass",
+   "type": "color",
+   "default": [
+    1.0,
+    0.72,
+    0.3,
+    1
+   ]
+  },
+  {
+   "name": "patina",
+   "type": "color",
+   "default": [
+    0.22,
+    0.48,
+    0.4,
+    1
+   ]
+  },
+  {
+   "name": "patina_amount",
+   "type": "float",
+   "default": 0.7
+  }
+ ],
+ "nodes": [
+  {
+   "id": "streak_p",
+   "type": "multiply",
+   "inputs": {
+    "a": "position",
+    "b": [
+     4.0,
+     140.0,
+     4.0
+    ]
+   }
+  },
+  {
+   "id": "streak",
+   "type": "noise_value",
+   "inputs": {
+    "p": "streak_p",
+    "scale": 1.0
+   }
+  },
+  {
+   "id": "streak_r",
+   "type": "multiply",
+   "inputs": {
+    "a": "streak",
+    "b": 0.16
+   }
+  },
+  {
+   "id": "metal_rough",
+   "type": "add",
+   "inputs": {
+    "a": "streak_r",
+    "b": 0.14
+   }
+  },
+  {
+   "id": "pp",
+   "type": "multiply",
+   "inputs": {
+    "a": "position",
+    "b": 2.2
+   }
+  },
+  {
+   "id": "blotch",
+   "type": "fbm",
+   "inputs": {
+    "p": "pp",
+    "scale": 1.0,
+    "octaves": 5,
+    "lacunarity": 2.0,
+    "gain": 0.5
+   }
+  },
+  {
+   "id": "green0",
+   "type": "smoothstep",
+   "inputs": {
+    "edge0": 0.56,
+    "edge1": 0.7,
+    "x": "blotch"
+   }
+  },
+  {
+   "id": "green",
+   "type": "multiply",
+   "inputs": {
+    "a": "green0",
+    "b": "patina_amount"
+   }
+  },
+  {
+   "id": "colour",
+   "type": "mix",
+   "inputs": {
+    "a": "brass.rgb",
+    "b": "patina.rgb",
+    "t": "green"
+   }
+  },
+  {
+   "id": "metal",
+   "type": "one_minus",
+   "inputs": {
+    "x": "green"
+   }
+  },
+  {
+   "id": "rough",
+   "type": "mix",
+   "inputs": {
+    "a": "metal_rough",
+    "b": 0.85,
+    "t": "green"
+   }
+  }
+ ],
+ "outputs": {
+  "base_color": "colour",
+  "metallic": "metal",
+  "roughness": "rough"
+ }
+}

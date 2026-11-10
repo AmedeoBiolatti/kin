@@ -5,6 +5,7 @@
 #include <kin/ecs/scene3d.hpp>
 #include <kin/physics3d/assets3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/scene/planar_views3d.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>
 #include <kin/scene/scene_entity3d.hpp>
 
@@ -221,6 +222,10 @@ struct SceneSession3DOptions {
     std::function<void(SceneSession3DContext&)> initialize;
     // Optional per-frame game drawing/settings after the stock scene collection.
     std::function<void(SceneSession3DContext&, Scene3D&)> compose;
+    // kin's planar surfaces (create_planar_surfaces / compile_planar_surfaces), for the scene's Mirror3D and Portal3D
+    // entities: render() draws them and renders their pictures (PlanarViews3D) after compose. Without them, mirrors are
+    // kin's own metal and portals their stand-in colour.
+    PlanarSurfaces3D planar_surfaces;
     // Optional ECS audio (kin/ecs/audio.hpp), both or neither: each step() then runs update_audio_listeners,
     // update_audio_emitters and consume_audio_one_shots after the Audio phase's systems, so emitters and one-shots
     // sound from their WorldTransform3D and the listener follows the AudioListener entity or else the active
@@ -340,8 +345,10 @@ public:
     Status3D collect_actions(InputActionContext&) const;
     Status3D write_report(JsonWriter&) const;
     // Clears internal draws, propagates transforms, applies authored settings,
-    // clocks/weather, collects meshes/lights/ropes and calls compose. Recreates
-    // the view only if its options changed; render also submits the frame.
+    // clocks/weather, collects meshes/lights/ropes, sets Scene3D::time to the seconds stepped (material graphs'
+    // `time`) and calls compose. Recreates
+    // the view only if its options changed; render also submits the frame, after the scene's mirrors' and portals'
+    // pictures (PlanarViews3D: a game that renders scene() itself runs one for them).
     // alpha is the host's fixed-step accumulator / fixed_dt, in [0,1].
     // Interpolates draw/camera/bone/rope placement; gameplay transforms remain authoritative.
     Status3D collect(f32 alpha = 1);
@@ -365,6 +372,8 @@ public:
     const SceneInstance* instance() const;
     Scene3D* scene();
     const View3D* view() const; // null without an active scene, or headless
+    // The options view() was made with (the scene's environment's: exposure, bloom, background); null as view().
+    const ViewOptions3D* view_options() const;
     const std::vector<std::string>& diagnostics() const;
 
 private:

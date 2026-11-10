@@ -1,0 +1,15 @@
+{
+ "schema": "kin.materials3d/1",
+ "material": {
+  "graph": "materials/brass.kingraph"
+ },
+ "variants": {
+  "clean": {
+   "material": {
+    "params": {
+     "patina_amount": 0.15
+    }
+   }
+  }
+ }
+}

@@ -5,7 +5,7 @@
 const int MAX_LIGHTS = 16;
 // The frame's, pushed once a pass.
 layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
-    vec4 sun_direction; // xyz: toward the sun, length 1
+    vec4 sun_direction; // xyz: toward the sun, length 1; w: its disc's angular radius (radians)
     vec4 sun_color;     // linear
     vec4 ambient;       // linear: from above
     vec4 ground_ambient; // linear: from below (the same as ambient: even all round)
@@ -31,5 +31,16 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
                         // first slice's near depth, w: slices per unit of the log of depth
     vec4 grid_size;     // x, y: tiles across and down, z: slices, w: cells (where the lists start)
     vec4 time;          // x: Scene3D::time (seconds), for materials that move;
-                        // y: 1 without Scene3D::specular_multiscatter
+                        // y: 1 without Scene3D::specular_multiscatter; z: the surface channel drawn in place of
+                        // the light (RenderDebugOptions3D::surface_channel: 0 none, a bake's)
+    vec4 probes;        // x: the reflection probes this pass reads (Lights3D::reflection_probes), y: their last level
+    // Six a probe (kin_probe_reflection): the boxes' world-to-local rows (xyz) with their centre (w); the influence
+    // box's half extents and blend; the parallax box's half extents (0: none) and the intensity; where it was
+    // captured and its layer of uEnvSpecular (negative: no diffuse light from it).
+    vec4 probe[16 * 6];
+    vec4 ssr;           // screen-space reflections (Scene3D::ssr): x: 1 when this pass reads them, yz: their grid's
+                        // size (half the view's), w: the roughness past which there are none
+    vec4 ssr_pyramid;   // the previous frame's picture in their buffer (ssr_pyramid.comp): x: levels, y: the previous
+                        // projection's [1][1], z: level 0's first word
+    mat4 ssr_previous;  // world to the previous frame's clip space (unjittered)
 } frame;

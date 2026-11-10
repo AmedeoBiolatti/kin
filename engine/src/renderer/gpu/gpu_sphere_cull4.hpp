@@ -82,7 +82,7 @@ public:
 private:
 #if KIN_NATIVE_SPHERES4
     struct Plane { __m128 x, y, z, w; };
-    std::array<Plane, 6> _planes;
+    std::array<Plane, 7> _planes;
     __m128 _x, _y, _z, _radius;
     u32 _count;
     bool _bounded;

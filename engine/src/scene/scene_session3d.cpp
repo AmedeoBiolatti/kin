@@ -9,6 +9,7 @@
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
@@ -454,6 +455,10 @@ struct SceneSession3D::Data {
         Scene3D scene;
         View3D view;
         ViewOptions3D options;
+        std::unique_ptr<PlanarViews3D> planar;      // made for the first Mirror3D or Portal3D
+        std::unique_ptr<ReflectionProbes3D> probes; // made for the first ReflectionProbe3D
+        std::unique_ptr<PortalTravel3D> travel;     // made for the first PortalTraveller3D
+        f64 clock = 0;                              // seconds stepped: Scene3D::time (a material graph's `time`)
         std::vector<std::filesystem::path> dependencies;
         std::map<std::filesystem::path, SourceStamp> watches;
         std::map<u64, Spawned> spawned;
@@ -713,6 +718,12 @@ struct SceneSession3D::Data {
                 for (const auto& source : collider.asset_binding->source_files)
                     watch(state, source);
         });
+        inspect_components<Mirror3D>(state.world.raw(), [&](flecs::entity, const Mirror3D& mirror) {
+            if (!mirror.normal_asset.id.empty())
+                watch(state, mirror.normal_asset.id);
+            if (!mirror.bound_normal.empty())
+                watch(state, mirror.bound_normal);
+        });
         inspect_components<ParticleEmitter3D>(state.world.raw(), [&](flecs::entity, const ParticleEmitter3D& emitter) {
             if (!emitter.texture_asset.id.empty())
                 watch(state, emitter.texture_asset.id);
@@ -905,6 +916,7 @@ struct SceneSession3D::Data {
             append(errors, frame.diagnostics());
             return false;
         }
+        state.scene.time = f32(state.clock); // (compose may set its own)
         if (state.script_background)
             view_options.background = *state.script_background;
         if (options.compose) {
@@ -2454,6 +2466,7 @@ bool SceneSession3D::step_operation(f32 dt) {
     }
     try {
         auto& state = *d.current;
+        state.clock += dt;
         if (state.script) {
             BoolScope callback(state.script_callback);
             if (!state.script->call_update(d.script_context(dt))) {
@@ -2508,8 +2521,21 @@ bool SceneSession3D::step_operation(f32 dt) {
             default:
                 break;
             }
-            if (driver.after_phase(phase, dt))
+            if (driver.after_phase(phase, dt)) {
+                // After the physics: what crossed a portal's opening goes out of its exit (PortalTraveller3D).
+                if (phase == SystemPhase::Physics &&
+                    (state.travel || state.world.raw().count<PortalTraveller3D>() > 0)) {
+                    if (!state.travel)
+                        state.travel = std::make_unique<PortalTravel3D>();
+                    if (const auto travelled = state.travel->step(state.world, state.bodies.get()); !travelled) {
+                        append(d.errors, travelled.diagnostics);
+                        for (const auto& message : travelled.diagnostics)
+                            error += (error.empty() ? "" : "\n") + message;
+                        return false;
+                    }
+                }
                 return true;
+            }
             append(d.errors, driver.diagnostics());
             for (const auto& message : driver.diagnostics()) {
                 if (!error.empty())
@@ -2619,6 +2645,28 @@ bool SceneSession3D::render_operation(f32 alpha) {
         return configuration_error("no renderer");
     if (!collect_operation(alpha))
         return false;
+    auto& state = *_data->current;
+    // The reflection probes first: the mirrors' and portals' pictures reflect them too.
+    if (state.probes || state.world.raw().count<ReflectionProbe3D>() > 0) {
+        if (!state.probes)
+            state.probes = std::make_unique<ReflectionProbes3D>(_data->renderer, _data->assets.root());
+        const auto probes = state.probes->update(state.world, state.scene, &state.view);
+        if (!probes) {
+            _data->errors = probes.diagnostics;
+            return false;
+        }
+    }
+    if (state.planar || state.world.raw().count<Mirror3D>() > 0 || state.world.raw().count<Portal3D>() > 0) {
+        if (!state.planar)
+            state.planar = std::make_unique<PlanarViews3D>(_data->renderer, _data->options.planar_surfaces);
+        // (Its pictures lit by the view's GI, as it stands: the view is rendered after them.)
+        const auto planar = state.planar->render(state.world, state.scene, _data->options.viewport, state.options,
+                                                 state.view ? &state.view : nullptr);
+        if (!planar) {
+            _data->errors = planar.diagnostics;
+            return false;
+        }
+    }
     if (_data->renderer.render(_data->current->view, _data->current->scene))
         return true;
     _data->errors = _data->renderer.diagnostics();
@@ -2724,6 +2772,9 @@ Scene3D* SceneSession3D::scene() {
 }
 const View3D* SceneSession3D::view() const {
     return active() && _data->current->view ? &_data->current->view : nullptr;
+}
+const ViewOptions3D* SceneSession3D::view_options() const {
+    return active() && _data->current->view ? &_data->current->options : nullptr;
 }
 const std::vector<std::string>& SceneSession3D::diagnostics() const {
     return _data->errors;

@@ -14,6 +14,7 @@ layout(location = 3) in vec4 aColor;
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 } draw;
 
 layout(location = 0) out vec3 vNormal;
@@ -28,6 +29,7 @@ void main() {
     const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * normalize(mat3(skin) * aNormal);
     vUV = aUV;
     vAlpha = instance.color.a * aColor.a;
