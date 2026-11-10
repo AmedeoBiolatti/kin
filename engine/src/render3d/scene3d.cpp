@@ -457,7 +457,7 @@ std::span<MeshInstance3D> Scene3D::add_instances_operation(const Mesh3D& mesh, s
 }
 
 std::span<MeshInstance3D> Scene3D::add_instances(const Mesh3D& mesh, std::size_t count, const Material3D& material,
-                                                 bool skinned, u32 skin_first) {
+                                                 bool skinned, u32 skin_first, DrawClip3D clip) {
     if (!_errors.empty())
         return {};
     if (count == 0)
@@ -472,12 +472,14 @@ std::span<MeshInstance3D> Scene3D::add_instances(const Mesh3D& mesh, std::size_t
     // Straight after a draw of the same mesh and material: one draw (skinned copies only with skinned ones: the pose of
     // each is its own, and a plain copy of the mesh has none).
     if (!_draws.empty() && !_draws.back().batch && _draws.back().mesh == mesh && _draws.back().material == material &&
-        _draws.back().first + _draws.back().count == first && _draws.back().skinned == skinned) {
+        _draws.back().first + _draws.back().count == first && _draws.back().skinned == skinned &&
+        _draws.back().clip == clip) {
         _draws.back().count += static_cast<u32>(count);
     } else {
         Draw draw{mesh, material, first, static_cast<u32>(count)};
         draw.skinned = skinned;
         draw.skin_first = skin_first;
+        draw.clip = clip;
         _draws.push_back(std::move(draw));
     }
     return {_instances.data() + first, count};
@@ -637,6 +639,49 @@ Status3D Scene3D::draw(const Mesh3D& mesh, const Mat4f& transform, const Materia
     return status3d(accepted, _errors);
 }
 
+Status3D Scene3D::draw_again(std::size_t draw, u32 copy, const Mat4f& transform, DrawClip3D clip, u64 history_id) {
+    if (draw >= _draws.size() || copy >= _draws[draw].count) {
+        Diagnostics3D errors;
+        errors.push_back("draw_again: copy " + std::to_string(copy) + " of draw " + std::to_string(draw) + " of " +
+                         std::to_string(_draws.size()));
+        return status3d(false, std::move(errors));
+    }
+    if (!_errors.empty())
+        return status3d(false, _errors);
+    // (Copies: adding moves the draws' and instances' storage.)
+    const Draw source = _draws[draw];
+    const MeshInstance3D original =
+        source.batch ? source.batch.instances()[source.first + copy] : _instances[source.first + copy];
+    const MeshInstance3D again{transform, original.tint, original.id, history_id};
+    if (source.skinned) {
+        // The same pose: its first joint matrix, for a copy of its own.
+        const u32 first_joint = _skin_offsets[source.skin_first + copy];
+        const u32 first_copy = static_cast<u32>(_skin_offsets.size());
+        _skin_offsets.push_back(first_joint);
+        const auto room = add_instances(source.mesh, 1, source.material, true, first_copy, clip);
+        if (room.size() == 1)
+            room[0] = again;
+    } else {
+        const auto room = add_instances(source.mesh, 1, source.material, false, 0, clip);
+        if (room.size() == 1)
+            room[0] = again;
+    }
+    return status3d(_errors.empty(), _errors);
+}
+
+Status3D Scene3D::set_draw_material(std::size_t draw, const Material3D& material) {
+    if (draw >= _draws.size()) {
+        Diagnostics3D errors;
+        errors.push_back("set_draw_material: draw " + std::to_string(draw) + " of " + std::to_string(_draws.size()));
+        return status3d(false, std::move(errors));
+    }
+    if (!(_draws[draw].material == material)) {
+        _draws[draw].material = material;
+        touch_draws();
+    }
+    return status3d(true, Diagnostics3D{});
+}
+
 bool Scene3D::draw_operation(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material, Color tint, u32 id,
                              u64 history_id) {
     if (!_errors.empty())
@@ -666,6 +711,18 @@ bool Scene3D::draw_instanced_operation(const Mesh3D& mesh, std::span<const MeshI
         return false;
     std::copy(instances.begin(), instances.end(), room.begin());
     return _errors.empty();
+}
+
+Status3D Scene3D::draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                 const Material3D& material, DrawClip3D clip) {
+    if (!_errors.empty())
+        return status3d(false, _errors);
+    if (!instances.empty()) {
+        const std::span<MeshInstance3D> room = add_instances(mesh, instances.size(), material, false, 0, clip);
+        if (room.size() == instances.size())
+            std::copy(instances.begin(), instances.end(), room.begin());
+    }
+    return status3d(_errors.empty(), _errors);
 }
 
 Status3D Scene3D::draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material) {
@@ -822,6 +879,7 @@ void Scene3D::clear() {
     _decals.clear();
     lights.points.clear();
     lights.spots.clear();
+    lights.reflection_probes.clear();
     if (_overlay) {
         _overlay->clear();
     }

@@ -32,6 +32,7 @@ layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer Previous {
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
     uvec4 first;          // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
     mat4 current;         // without the jitter, this frame's camera
     mat4 prior;           // and the last frame's
 }
@@ -44,6 +45,7 @@ layout(location = 8) out vec3 vOldInCurrent;
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 }
 draw;
 #endif
@@ -93,6 +95,13 @@ void main() {
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
+    if (draw.first.w == 1u) {
+        // A bake (RenderDebugOptions3D::unwrap): over the UV square, shaded where it is; the surface's own UVs ride in
+        // the colour, 16 bits each over 0 to 1 (the material's uv_scale and uv_offset span them: write_scene_snapshot).
+        gl_Position = vec4(aUV.x * 2.0 - 1.0, 1.0 - aUV.y * 2.0, 0.5, 1.0);
+        gl_ClipDistance[0] = 1.0;
+    }
 #ifdef KIN_SKIN
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * normalize(mat3(skin) * aNormal);
 #else
@@ -100,6 +109,11 @@ void main() {
 #endif
     vColor = instance.color * vec4(decode(aColor.rgb), aColor.a);
     vUV = aUV;
+    if (draw.first.w == 1u) {
+        const vec4 bytes = floor(aColor * 255.0 + 0.5);
+        vUV = vec2(bytes.x + bytes.y * 256.0, bytes.z + bytes.w * 256.0) / 65535.0;
+        vColor = instance.color;
+    }
     vId = floatBitsToUint(instance.normal0.w);
     vObject = instance.model[3].xyz;
 #ifdef KIN_VELOCITY

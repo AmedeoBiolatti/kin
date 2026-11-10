@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <kin/core/json.hpp>
 #include <kin/renderer/resource_graph.hpp>
 #include <limits>
 #include <queue>
@@ -405,5 +406,98 @@ bool execute_resource_graph(const CompiledResourceGraph& plan, std::span<const s
             return false;
     }
     return true;
+}
+
+namespace {
+std::string_view resource_kind_name(GraphResourceKind kind) {
+    switch (kind) {
+    case GraphResourceKind::Token:
+        return "token";
+    case GraphResourceKind::ColorTarget:
+        return "color_target";
+    case GraphResourceKind::StorageTexture:
+        return "storage_texture";
+    case GraphResourceKind::Buffer:
+        return "buffer";
+    case GraphResourceKind::RenderAttachment:
+        return "render_attachment";
+    }
+    return "token";
+}
+} // namespace
+
+void write_resource_graph_json(JsonWriter& json, const CompiledResourceGraph& plan, std::span<const f64> pass_ms) {
+    const ResourceGraphDesc& graph = plan.source;
+    const auto name_of = [&](GraphResource id) -> std::string_view {
+        return id < graph.resources.size() ? std::string_view(graph.resources[id].name) : std::string_view();
+    };
+    const auto names = [&](std::string_view key, const std::vector<GraphResource>& ids) {
+        json.key(key).begin_array();
+        for (const GraphResource id : ids)
+            json.value(name_of(id));
+        json.end_array();
+    };
+    std::vector<i64> position(graph.passes.size(), -1);
+    for (u32 i = 0; i < plan.order.size(); ++i)
+        if (plan.order[i] < position.size())
+            position[plan.order[i]] = i;
+
+    json.begin_object();
+    json.field("schema", "kin.render-graph/1");
+    json.key("resources").begin_array();
+    for (const GraphResourceDesc& resource : graph.resources) {
+        json.begin_object();
+        json.field("name", std::string_view(resource.name));
+        json.field("kind", resource_kind_name(resource.kind));
+        json.field("imported", resource.imported);
+        json.field("exported", resource.exported);
+        json.field("persistent", resource.persistent);
+        if (resource.size.x > 0 || resource.size.y > 0) {
+            json.key("size").begin_array().value(resource.size.x).value(resource.size.y).end_array();
+        }
+        json.end_object();
+    }
+    json.end_array();
+    json.key("passes").begin_array();
+    for (u32 i = 0; i < graph.passes.size(); ++i) {
+        const GraphPassDesc& pass = graph.passes[i];
+        // Attachments as what they are to the pass: a version written (and the one it loads, read), or a depth read.
+        std::vector<GraphResource> reads = pass.reads, writes = pass.writes;
+        for (const GraphAttachment& attachment : pass.attachments) {
+            if (attachment.access == GraphAttachmentAccess::ReadOnlyDepth) {
+                reads.push_back(attachment.resource);
+                continue;
+            }
+            writes.push_back(attachment.resource);
+            if (attachment.load == GraphAttachmentLoad::Load && attachment.previous != graph_no_slot)
+                reads.push_back(attachment.previous);
+        }
+        json.begin_object();
+        json.field("name", std::string_view(pass.name));
+        names("reads", reads);
+        names("writes", writes);
+        json.key("after").begin_array();
+        for (const std::string& after : pass.after)
+            json.value(std::string_view(after));
+        json.end_array();
+        json.field("enabled", pass.enabled);
+        json.field("side_effect", pass.side_effect);
+        json.field("order", position[i]);
+        if (i < pass_ms.size())
+            json.field("ms", pass_ms[i]);
+        json.end_object();
+    }
+    json.end_array();
+    json.key("order").begin_array();
+    for (const u32 pass : plan.order)
+        if (pass < graph.passes.size())
+            json.value(std::string_view(graph.passes[pass].name));
+    json.end_array();
+    json.field("culled", plan.culled_passes);
+    json.key("diagnostics").begin_array();
+    for (const std::string& line : plan.diagnostics)
+        json.value(std::string_view(line));
+    json.end_array();
+    json.end_object();
 }
 } // namespace kin

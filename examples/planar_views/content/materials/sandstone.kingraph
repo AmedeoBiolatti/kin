@@ -1,0 +1,122 @@
+{
+ "schema": "kin.material-graph/1",
+ "name": "Sandstone",
+ "parameters": [
+  {
+   "name": "light",
+   "type": "color",
+   "default": [
+    0.8,
+    0.67,
+    0.51,
+    1
+   ]
+  },
+  {
+   "name": "dark",
+   "type": "color",
+   "default": [
+    0.7,
+    0.56,
+    0.41,
+    1
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "id": "wobble",
+   "type": "fbm",
+   "inputs": {
+    "p": "position",
+    "scale": 0.5,
+    "octaves": 4,
+    "lacunarity": 2.0,
+    "gain": 0.5
+   }
+  },
+  {
+   "id": "ww",
+   "type": "multiply",
+   "inputs": {
+    "a": "wobble",
+    "b": 1.6
+   }
+  },
+  {
+   "id": "h",
+   "type": "multiply",
+   "inputs": {
+    "a": "position.y",
+    "b": 3.2
+   }
+  },
+  {
+   "id": "hw",
+   "type": "add",
+   "inputs": {
+    "a": "h",
+    "b": "ww"
+   }
+  },
+  {
+   "id": "strata",
+   "type": "sin",
+   "inputs": {
+    "x": "hw"
+   }
+  },
+  {
+   "id": "t",
+   "type": "remap",
+   "inputs": {
+    "x": "strata",
+    "in_min": -1.0,
+    "in_max": 1.0,
+    "out_min": 0.0,
+    "out_max": 1.0
+   }
+  },
+  {
+   "id": "band",
+   "type": "mix",
+   "inputs": {
+    "a": "light.rgb",
+    "b": "dark.rgb",
+    "t": "t"
+   }
+  },
+  {
+   "id": "grain",
+   "type": "noise_value",
+   "inputs": {
+    "p": "position",
+    "scale": 38.0
+   }
+  },
+  {
+   "id": "g",
+   "type": "remap",
+   "inputs": {
+    "x": "grain",
+    "in_min": 0.0,
+    "in_max": 1.0,
+    "out_min": 0.88,
+    "out_max": 1.06
+   }
+  },
+  {
+   "id": "colour",
+   "type": "multiply",
+   "inputs": {
+    "a": "band",
+    "b": "g"
+   }
+  }
+ ],
+ "outputs": {
+  "base_color": "colour",
+  "roughness": 0.92,
+  "metallic": 0.0
+ }
+}

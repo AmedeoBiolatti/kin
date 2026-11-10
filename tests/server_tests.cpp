@@ -757,6 +757,7 @@ void test_press_completes_a_ui2_click_and_frame_timing() {
         R"({"id":12,"method":"frame.timing","params":{"since":0}})" "\n"
         R"({"id":9,"method":"frame.timing","params":{"reset":true}})" "\n"
         R"({"id":10,"method":"frame.timing"})" "\n"
+        R"({"id":13,"method":"render.graph"})" "\n"
         R"({"id":11,"method":"server.shutdown"})" "\n");
     const int code = kin::run_scene_server({
         .window = {.title = "click", .width = 64, .height = 64},
@@ -783,6 +784,9 @@ void test_press_completes_a_ui2_click_and_frame_timing() {
     assert(timing->find("mean")->find("total_ms")->as_number() >= 0.0);
     assert(timing->find("max")->find("update_ms")->as_number() >= timing->find("mean")->find("update_ms")->as_number());
     assert(!timing->contains("history")); // not asked for
+    // No 3D renderer here (none asked for): no frame graph to show.
+    const kin::JsonValue* graph = response_result(text, 13);
+    assert(graph != nullptr && !graph->bool_at("available", true) && !graph->contains("graph"));
     const kin::JsonValue* after_reset = response_result(text, 10);
     assert(after_reset != nullptr && after_reset->int_at("frames") == 0);
     // The frames after the first, each.

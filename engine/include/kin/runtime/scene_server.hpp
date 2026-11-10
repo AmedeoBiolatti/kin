@@ -84,6 +84,9 @@ public:
     Window& window() { return _window; }
     Renderer2D& renderer() { return _renderer; }
     SceneManager& scenes() { return _scenes; }
+    Renderer3D* renderer3d() { return _renderer3d; } // null without 3D
+    // The app's, as it is now (made with the first scene context, after an inspector's context may be).
+    void set_renderer3d(Renderer3D* renderer3d) { _renderer3d = renderer3d; }
     const WindowedAppConfig& window_config() const { return _window_config; }
     RngKey rng() const { return _rng; }
     f32 fixed_dt() const { return _fixed_dt; }

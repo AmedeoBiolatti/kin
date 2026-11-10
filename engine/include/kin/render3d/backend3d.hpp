@@ -129,6 +129,10 @@ struct ViewOptions3D {
     // What is under each pixel kept too (Renderer3D::pick): one more pass
     // over the scene's opaque meshes.
     bool pick = false;
+    // Without `hdr`: the light kept as x / (1 + x) (Reinhard's, each channel) in the picture, so that what is past
+    // white (a sun glint, a lamp) survives an 8-bit picture, for a reader that takes it back (x / (1 - x)): kin's
+    // planar views' pictures (a mirror's, a portal's), which the view seeing them tonemaps (and blooms) as its own.
+    bool compress = false;
 };
 
 // Single-sample data attachments. Depth is reverse Z (0 background/far, 1 near),
@@ -271,6 +275,10 @@ public:
     // Forgets the temporal anti-aliasing's history, so the next frame starts
     // afresh (a camera cut, a scene change).
     virtual void reset_history() {}
+    // The part of the picture renders fill, from its top-left corner (View3D::set_render_size): the whole unless the
+    // backend renders parts and was asked to.
+    virtual Vec2i render_size() const { return size(); }
+    virtual bool set_render_size(Vec2i) { return false; }
 };
 
 // Backend-owned frame preparation. Source lifetime/edits and frame boundaries
@@ -309,6 +317,24 @@ public:
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).
     virtual std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
+    // Reflection probes' pictures (render3d/reflection_probes3d.hpp): none where unsupported.
+    virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32) { return {}; }
+    // `lighting`: ReflectionCaptureOptions3D::global_illumination's view (null: none).
+    virtual bool capture_reflection(IReflectionCaptureBackend3D&, Scene3D&, Vec3f, const ReflectionCaptureOptions3D&,
+                                    IViewBackend3D* /*lighting*/, RenderDebugStats3D&) {
+        return false;
+    }
+    // Whether a view's global illumination has light (its probes traced at least once): what a capture borrows.
+    virtual bool global_illumination_lit(IViewBackend3D&) const { return false; }
+    // A capture's panorama read back (linear RGB floats, rows top to bottom), and one made from such a picture (2:1).
+    virtual bool read_reflection_capture(IReflectionCaptureBackend3D&, std::vector<f32>&, Vec2i&) { return false; }
+    // Read-backs for tools (write_scene_snapshot): a mesh's level 0 as it was made (vertices, indices, skin), and a
+    // render attachment's texels (RGBA16F: four halves each). They wait for the GPU.
+    virtual bool read_mesh(const IMeshBackend3D&, u32 /*vertex_count*/, MeshData3D&) { return false; }
+    virtual bool read_texture(const Texture&, std::vector<u8>&, Vec2i&) { return false; }
+    virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i, std::span<const f32>) {
+        return {};
+    }
     // Null when the SPIR-V can't be made into a fragment shader.
     virtual std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) = 0;
     // A surface shader from its variants' SPIR-V (SurfaceVariant3D order); null where surface shaders aren't
@@ -326,9 +352,20 @@ public:
     }
     virtual std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) = 0;
     virtual bool resize_view(IViewBackend3D& view, Vec2i size) = 0;
+    // Whether a render of `scene` into `view` can fill only part of it (IViewBackend3D::set_render_size); `lit_by`: a
+    // render lit by that view's global illumination (render_lit_by).
+    virtual bool renders_part(const IViewBackend3D&, const Scene3D&, const IViewBackend3D* /*lit_by*/) const {
+        return false;
+    }
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
     virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;
+    // The same, its global illumination `lit_by`'s (its probes as they stand) instead of the view's own; none while
+    // that has no light (Renderer3D::render(view, scene, lit_by)).
+    virtual bool render_lit_by(IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D& /*lit_by*/,
+                               RenderDebugStats3D& stats) {
+        return render(view, scene, stats);
+    }
     virtual bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) { return false; }
     virtual std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
                                                              RenderDebugStats3D&) {

@@ -322,6 +322,14 @@ View3D Renderer3D::create_view_operation(Vec2i size, const ViewOptions3D& option
     return View3D{std::make_shared<FallbackView>(std::move(target), options)};
 }
 
+bool Renderer3D::can_render_part(const View3D& view, const Scene3D& scene) const {
+    return _backend && view.backend() && _backend->renders_part(*view.backend(), scene, nullptr);
+}
+bool Renderer3D::can_render_part(const View3D& view, const Scene3D& scene, const View3D& lit_by) const {
+    return _backend && view.backend() && lit_by.backend() &&
+           _backend->renders_part(*view.backend(), scene, lit_by.backend());
+}
+
 Status3D Renderer3D::resize(View3D& view, Vec2i size) {
     auto value = resize_operation(view, size);
     return status3d(std::move(value), _errors);
@@ -463,7 +471,11 @@ bool Renderer3D::warm_up_operation(View3D& view, const Scene3D& scene) {
 }
 
 Status3D Renderer3D::render(View3D& view, const Scene3D& scene) {
-    auto value = render_operation(view, scene);
+    auto value = render_operation(view, scene, nullptr);
+    return status3d(std::move(value), _errors);
+}
+Status3D Renderer3D::render(View3D& view, const Scene3D& scene, const View3D& lit_by) {
+    auto value = render_operation(view, scene, &lit_by);
     return status3d(std::move(value), _errors);
 }
 
@@ -690,7 +702,7 @@ Status3D Renderer3D::render_output(const RenderTarget& target, const Texture& so
     return ok ? status3d(true, _errors) : fail("incompatible output inputs/target or GPU recording failed");
 }
 
-bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
+bool Renderer3D::render_operation(View3D& view, const Scene3D& scene, const View3D* lit_by) {
     _errors.clear();
     _stats = {};
     if (!view.valid()) {
@@ -717,7 +729,9 @@ bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
         _renderer->pop_render_target();
         drawn = true;
     } else if (_backend) {
-        drawn = _backend->render(*view.backend(), scene, _stats);
+        drawn = lit_by && lit_by->backend()
+                    ? _backend->render_lit_by(*view.backend(), scene, *lit_by->backend(), _stats)
+                    : _backend->render(*view.backend(), scene, _stats);
     }
     _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
     if (!drawn)

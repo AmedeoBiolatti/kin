@@ -60,6 +60,13 @@ public:
         return s.y > 0 ? static_cast<f32>(s.x) / static_cast<f32>(s.y) : 1.0f;
     }
     IViewBackend3D* backend() const { return _backend.get(); }
+    // Renders fill only `size` pixels of the picture, from its top-left corner (at most size(); none or {}: the
+    // whole), where Renderer3D::can_render_part says they can: a picture whose size changes from frame to frame (a
+    // mirror's: where it shows) drawn at its own size into a view kept larger, without the view resized (all its
+    // targets made again). False where the backend cannot. Whoever draws texture() reads the picture from its UV
+    // (0, 0) to render_size() / size(). A resize renders the whole again.
+    bool set_render_size(Vec2i size) { return _backend && _backend->set_render_size(size); }
+    Vec2i render_size() const { return _backend ? _backend->render_size() : Vec2i{}; }
     // Drops the history Scene3D::taa blends in, so that the next frame does
     // not show the one before: call it when the camera cuts to somewhere
     // else, or the scene is replaced. (A resize does it by itself.)
@@ -153,6 +160,26 @@ public:
     // One from a Radiance .hdr file, read through the content folder or pack.
     // A failed result explains why it could not be read.
     Result3D<Environment3D> load_environment(const std::filesystem::path& path);
+    // A reflection probe's picture (render3d/reflection_probes3d.hpp), `side` pixels a face of its six (16 to 1024),
+    // empty until captured; empty where 3D or compute isn't available.
+    Result3D<ReflectionCapture3D> create_reflection_capture(u32 side = 128);
+    // Renders `scene` all round from `position` into `capture` (six views, as render() draws them: before the 2D drawn
+    // after, its sky, lights, fog and GI too, without temporal anti-aliasing or the overlay; `scene.camera` is put back
+    // after). The renders that use it then filter it, once a capture. Cost: six renders at the capture's side.
+    Status3D capture_reflection(ReflectionCapture3D& capture, Scene3D& scene, Vec3f position,
+                                const ReflectionCaptureOptions3D& options = {});
+    // A capture baked: its panorama written to `file` (a Radiance .hdr picture, 2:1, linear: what load_environment and
+    // load_reflection_capture read), and one loaded from such a picture through the content folder or pack (a baked
+    // probe, or any panorama: a room painted or rendered elsewhere). A loaded capture can be captured again.
+    Status3D save_reflection_capture(const ReflectionCapture3D& capture, const std::filesystem::path& file);
+    // For tools (write_scene_snapshot, kin/render3d/snapshot3d.hpp): a mesh's level 0 read back from the GPU as it was
+    // made (vertices, indices, skin), and an RGBA16F render attachment's texels as floats (four a texel, rows from the
+    // top). Each waits for the GPU (what is recorded so far is submitted first).
+    Result3D<MeshData3D> read_mesh(const Mesh3D& mesh);
+    Result3D<std::vector<f32>> read_linear_texture(const Texture& texture);
+    // Whether `view`'s global illumination has light yet (what capture_reflection's global_illumination borrows).
+    bool global_illumination_lit(const View3D& view) const;
+    Result3D<ReflectionCapture3D> load_reflection_capture(const std::filesystem::path& path);
     // A fragment shader for materials (Material3D::shader), from SPIR-V
     // compiled against kin_material.inc.glsl (docs/rendering_3d.md, Custom
     // shaders). Empty where 3D isn't available or the shader is refused.
@@ -188,9 +215,21 @@ public:
                                                       std::span<const DataBuffer> buffers = {});
     // Gives `view` a new size (its texture changes); false when it can't.
     Status3D resize(View3D& view, Vec2i size);
+    // Whether a render of `scene` into `view` can fill only part of it (View3D::set_render_size): the GPU backend's,
+    // for a view that is not HDR and a scene without temporal anti-aliasing, global illumination, the fog's sun shafts,
+    // occlusion culling, contact shadows or an overlay; and a view without picking. Otherwise renders fill the whole.
+    bool can_render_part(const View3D& view, const Scene3D& scene) const;
+    // The same for a render lit by `lit_by` (render(view, scene, lit_by)), which may have global illumination.
+    bool can_render_part(const View3D& view, const Scene3D& scene, const View3D& lit_by) const;
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     Status3D render(View3D& view, const Scene3D& scene);
+    // The same, lit by `lit_by`'s global illumination (its probes as they stand, read and not moved: what the scene's
+    // GI gave that view's last render) instead of a GI of `view`'s own, which would take renders to settle and cost
+    // its own probes: a mirror's or a portal's picture, lit as the view that shows it is (PlanarViews3D). While
+    // `lit_by` has no light yet (Renderer3D::global_illumination_lit), without GI. Without the scene's GI, as
+    // render(view, scene).
+    Status3D render(View3D& view, const Scene3D& scene, const View3D& lit_by);
     // Clears and writes caller-owned depth/normals, without a stock view or any
     // lighting, shadows, particles, postprocessing or temporal history. Opaque
     // and masked world meshes use stock culling, skinning, retained batches and
@@ -273,6 +312,7 @@ private:
     Mesh3D upload_validated_mesh(const MeshData3D& data, const MeshOptions3D& options);
     Mesh3D create_mesh_operation(const MeshData3D& data, const MeshOptions3D& options);
     Mesh3D create_mesh_operation(const MeshData3D& data);
+    bool render_operation(View3D& view, const Scene3D& scene, const View3D* lit_by);
     View3D create_view_operation(Vec2i size, const ViewOptions3D& options = {});
     Model3D load_model_operation(const std::filesystem::path& path, const MeshOptions3D& options);
     Model3D load_model_operation(const std::filesystem::path& path);
@@ -285,7 +325,6 @@ private:
     SurfaceShader3D compile_surface_shader_operation(const std::filesystem::path& source);
     SurfaceShader3D compile_surface_text_operation(const std::string& surface, const std::string& label);
     bool resize_operation(View3D& view, Vec2i size);
-    bool render_operation(View3D& view, const Scene3D& scene);
     bool warm_up_operation(View3D& view, const Scene3D& scene);
     PickResult3D pick_operation(View3D& view, Vec2i pixel);
     bool read_cluster_picks_operation(View3D& view, std::vector<ClusterPick3D>& out);

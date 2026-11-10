@@ -3,7 +3,10 @@
 #include <kin/runtime/scene_server.hpp>
 #include <kin/render3d/camera3d.hpp> // view.frame's camera3d (its fields only: in 2D builds too)
 #ifdef KIN_EXPERIMENTAL_3D
+#include <kin/render3d/debug_stats3d.hpp>
+#include <kin/render3d/frame_graph3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/resource_graph.hpp>
 #endif
 
 #include "automation_internal.hpp"
@@ -847,6 +850,36 @@ ServerResponse handle_server_status(ServerContext& ctx) {
     return ok_result(out.str());
 }
 
+// The stock 3D frame's graph as the renderer compiles it, with the last render's CPU recording time per pass: for a
+// tool that shows how the frame is made. `available`: false where there is no 3D renderer.
+ServerResponse handle_render_graph(ServerContext& ctx) {
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+#ifdef KIN_EXPERIMENTAL_3D
+    Renderer3D* renderer3d = ctx.renderer3d();
+    if (renderer3d && renderer3d->available()) {
+        ResourceGraphCompiler compiler;
+        const CompiledResourceGraph& plan = compiler.compile(stock_frame_graph3d(), ~u64{0});
+        const RenderDebugStats3D& stats = renderer3d->debug_stats();
+        const bool rendered = stats.graph_passes > 0; // the last render ran the stock frame
+        json.field("available", true);
+        json.field("rendered", rendered);
+        json.field("record_ms", stats.graph_record_ms);
+        json.field("compile_ms", stats.graph_compile_ms);
+        json.key("graph");
+        write_resource_graph_json(json, plan, rendered ? std::span<const f64>(stats.graph_pass_ms) : std::span<const f64>());
+        json.end_object();
+        return ok_result(out.str());
+    }
+#else
+    (void)ctx;
+#endif
+    json.field("available", false);
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) {
     const std::deque<ServerContext::FrameTiming>& timings = ctx.frame_timings();
     const auto total = [](const ServerContext::FrameTiming& t) { return t.update_ms + t.render_ms + t.present_ms; };
@@ -1556,6 +1589,9 @@ static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const Gam
     }
     if (method == "frame.timing") {
         return handle_frame_timing(ctx, params);
+    }
+    if (method == "render.graph") {
+        return handle_render_graph(ctx);
     }
     if (method == "ping") {
         return ok_result("{\"pong\":true}");

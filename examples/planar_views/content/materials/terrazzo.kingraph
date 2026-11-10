@@ -1,0 +1,103 @@
+{
+ "schema": "kin.material-graph/1",
+ "name": "Terrazzo",
+ "parameters": [
+  {
+   "name": "ground",
+   "type": "color",
+   "default": [
+    0.66,
+    0.63,
+    0.58,
+    1
+   ]
+  },
+  {
+   "name": "chip_a",
+   "type": "color",
+   "default": [
+    0.55,
+    0.24,
+    0.14,
+    1
+   ]
+  },
+  {
+   "name": "chip_b",
+   "type": "color",
+   "default": [
+    0.16,
+    0.22,
+    0.28,
+    1
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "id": "cells",
+   "type": "noise_cellular",
+   "inputs": {
+    "p": "position",
+    "scale": 13.0
+   }
+  },
+  {
+   "id": "chip",
+   "type": "smoothstep",
+   "inputs": {
+    "edge0": 0.3,
+    "edge1": 0.22,
+    "x": "cells"
+   }
+  },
+  {
+   "id": "pick",
+   "type": "noise_value",
+   "inputs": {
+    "p": "position",
+    "scale": 4.0
+   }
+  },
+  {
+   "id": "which",
+   "type": "step",
+   "inputs": {
+    "edge": 0.5,
+    "x": "pick"
+   }
+  },
+  {
+   "id": "chips",
+   "type": "mix",
+   "inputs": {
+    "a": "chip_a.rgb",
+    "b": "chip_b.rgb",
+    "t": "which"
+   }
+  },
+  {
+   "id": "colour",
+   "type": "mix",
+   "inputs": {
+    "a": "ground.rgb",
+    "b": "chips",
+    "t": "chip"
+   }
+  },
+  {
+   "id": "rough",
+   "type": "mix",
+   "inputs": {
+    "a": 0.45,
+    "b": 0.25,
+    "t": "chip"
+   }
+  }
+ ],
+ "outputs": {
+  "base_color": "colour",
+  "roughness": "rough",
+  "metallic": 0.0
+ }
+}

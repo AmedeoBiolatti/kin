@@ -1,0 +1,1952 @@
+{
+ "schema": "kin.scene/1",
+ "name": "Atrium",
+ "script": "scripts/atrium.lua",
+ "entities": [
+  {
+   "id": "camera",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      5,
+      15
+     ],
+     "rotation": [
+      -0.15,
+      0,
+      0,
+      0.9887
+     ]
+    },
+    "SceneCamera3D": {
+     "fov": 55,
+     "far": 0
+    }
+   }
+  },
+  {
+   "id": "environment",
+   "components": {
+    "SceneEnvironment3D": {
+     "sky_enabled": true,
+     "sky_lights_scene": true,
+     "sky_turbidity": 2.5,
+     "hdr": true,
+     "exposure": 0.95,
+     "bloom": 0.12,
+     "bloom_threshold": 1.2,
+     "samples": 4,
+     "ao_enabled": true,
+     "ao_radius": 0.8,
+     "shadow_min": [
+      -14,
+      -1,
+      -13
+     ],
+     "shadow_max": [
+      14,
+      7,
+      13
+     ],
+     "shadow_resolution": 2048,
+     "fog_enabled": true,
+     "fog_density": 0.0025,
+     "fog_color_from_sky": true,
+     "anisotropy": 8,
+     "ssr_enabled": true, "gi_enabled": true, "gi_min": [-13, -1, -12], "gi_max": [13, 8, 12], "gi_probes_per_render": 512, "gi_side": 176, "gi_height": 64
+    }
+   }
+  },
+  {
+   "id": "time",
+   "components": {
+    "TimeOfDay3D": {
+     "hours": 16.2,
+     "day_of_year": 200,
+     "latitude": 42,
+     "speed": 0
+    }
+   }
+  },
+  {
+   "id": "probe_atrium",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      5,
+      -4
+     ]
+    },
+    "ReflectionProbe3D": {
+     "extent": [
+      11.5,
+      3.5,
+      10.5
+     ],
+     "box_offset": [
+      0,
+      -2,
+      4.5
+     ],
+     "blend": 1.0,
+     "parallax_extent": [
+      11.5,
+      3,
+      10.5
+     ],
+     "resolution": 128
+    }
+   }
+  },
+  {
+   "id": "floor",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      -0.1,
+      0
+     ],
+     "scale": [
+      24,
+      0.2,
+      22
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/floor.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "wall_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      3,
+      -10.3
+     ],
+     "scale": [
+      24,
+      6,
+      0.6
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/sandstone.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "wall_west",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.8,
+      3,
+      0
+     ],
+     "scale": [
+      0.6,
+      6,
+      22
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/sandstone.kinmaterials"
+    }
+   }
+  },
+  {
+   "id": "wall_west_solid_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.8,
+      3,
+      -5
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      6
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_west_solid_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.8,
+      3,
+      7
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      4
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_west_solid_lintel",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.8,
+      4.6,
+      2
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      1.4,
+      1
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_east",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.8,
+      3,
+      0
+     ],
+     "scale": [
+      0.6,
+      6,
+      22
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/sandstone.kinmaterials"
+    }
+   }
+  },
+  {
+   "id": "wall_east_solid_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.8,
+      3,
+      -5
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      6
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_east_solid_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.8,
+      3,
+      7
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      3,
+      4
+     ]
+    }
+   }
+  },
+  {
+   "id": "wall_east_solid_lintel",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.8,
+      4.6,
+      2
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      0.3,
+      1.4,
+      1
+     ]
+    }
+   }
+  },
+  {
+   "id": "bound_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      3,
+      11.3
+     ]
+    },
+    "Collider3D": {
+     "kind": "box",
+     "half_extents": [
+      12,
+      3,
+      0.3
+     ]
+    }
+   }
+  },
+  {
+   "id": "band_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      0.25,
+      -9.9
+     ],
+     "scale": [
+      23,
+      0.5,
+      0.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "band_west_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.4,
+      0.25,
+      -4.5
+     ],
+     "scale": [
+      0.25,
+      0.5,
+      11.0
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "band_west_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.4,
+      0.25,
+      6.5
+     ],
+     "scale": [
+      0.25,
+      0.5,
+      7.0
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "band_east_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.4,
+      0.25,
+      -4.5
+     ],
+     "scale": [
+      0.25,
+      0.5,
+      11.0
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "band_east_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.4,
+      0.25,
+      6.5
+     ],
+     "scale": [
+      0.25,
+      0.5,
+      7.0
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "cornice_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      6.1,
+      -9.9
+     ],
+     "scale": [
+      24,
+      0.25,
+      1.0
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column0_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -8,
+      0.2,
+      -8.4
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column0",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -8,
+      0.4,
+      -8.4
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column0_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -8,
+      5.15,
+      -8.4
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column1_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -4.5,
+      0.2,
+      -8.4
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column1",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -4.5,
+      0.4,
+      -8.4
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column1_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -4.5,
+      5.15,
+      -8.4
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column2_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      4.5,
+      0.2,
+      -8.4
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column2",
+   "components": {
+    "Transform3D": {
+     "position": [
+      4.5,
+      0.4,
+      -8.4
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column2_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      4.5,
+      5.15,
+      -8.4
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column3_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      8,
+      0.2,
+      -8.4
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column3",
+   "components": {
+    "Transform3D": {
+     "position": [
+      8,
+      0.4,
+      -8.4
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column3_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      8,
+      5.15,
+      -8.4
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column4_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -9.6,
+      0.2,
+      -2.5
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column4",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -9.6,
+      0.4,
+      -2.5
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column4_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -9.6,
+      5.15,
+      -2.5
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column5_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -9.6,
+      0.2,
+      6.5
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column5",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -9.6,
+      0.4,
+      6.5
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column5_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -9.6,
+      5.15,
+      6.5
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column6_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      9.6,
+      0.2,
+      -2.5
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column6",
+   "components": {
+    "Transform3D": {
+     "position": [
+      9.6,
+      0.4,
+      -2.5
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column6_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      9.6,
+      5.15,
+      -2.5
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column7_base",
+   "components": {
+    "Transform3D": {
+     "position": [
+      9.6,
+      0.2,
+      6.5
+     ],
+     "scale": [
+      1.3,
+      0.4,
+      1.3
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "column7",
+   "components": {
+    "Transform3D": {
+     "position": [
+      9.6,
+      0.4,
+      6.5
+     ],
+     "scale": [
+      0.8,
+      4.6,
+      0.8
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/column.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box",
+     "offset": [
+      0,
+      0.5,
+      0
+     ]
+    }
+   }
+  },
+  {
+   "id": "column7_capital",
+   "components": {
+    "Transform3D": {
+     "position": [
+      9.6,
+      5.15,
+      6.5
+     ],
+     "scale": [
+      1.25,
+      0.3,
+      1.25
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "mirror_frame",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      2.9,
+      -9.92
+     ],
+     "scale": [
+      4.9,
+      3.5,
+      0.16
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/brass.kinmaterials",
+     "variant": "clean"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "mirror",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      2.9,
+      -9.83
+     ]
+    },
+    "Mirror3D": {
+     "size": [
+      4.4,
+      3.0
+     ]
+    }
+   }
+  },
+  {
+   "id": "rim_north",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      0.22,
+      -0.7
+     ],
+     "scale": [
+      8.9,
+      0.44,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "rim_south",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      0.22,
+      4.7
+     ],
+     "scale": [
+      8.9,
+      0.44,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "rim_west",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -4.25,
+      0.22,
+      2.0
+     ],
+     "scale": [
+      0.4,
+      0.44,
+      5.0
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "rim_east",
+   "components": {
+    "Transform3D": {
+     "position": [
+      4.25,
+      0.22,
+      2.0
+     ],
+     "scale": [
+      0.4,
+      0.44,
+      5.0
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "water",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      0.34,
+      2.0
+     ],
+     "rotation": [
+      -0.7071068,
+      0,
+      0,
+      0.7071068
+     ]
+    },
+    "Mirror3D": {
+     "size": [
+      8.1,
+      5.0
+     ],
+     "color": [
+      6,
+      22,
+      28,
+      255
+     ],
+     "metallic": 0,
+     "roughness": 0.05,
+     "normal": "textures/ripples.png",
+     "normal_scale": 0.45,
+     "uv_scale": [
+      2.0,
+      1.25
+     ],
+     "flow": [
+      0.025,
+      0.015
+     ],
+     "distortion": 0.18,
+     "refraction": 1.0,
+     "refraction_distortion": 0.08,
+     "murk": [
+      18,
+      58,
+      66,
+      255
+     ],
+     "murk_depth": 0.5
+    }
+   }
+  },
+  {
+   "id": "ring_plinth",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      0.55,
+      1.0
+     ],
+     "scale": [
+      0.7,
+      1.1,
+      0.7
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials",
+     "variant": "dark"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "ring",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      2.6,
+      1.0
+     ],
+     "scale": [
+      1.7,
+      1.7,
+      1.7
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/torus.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/ring.kinmaterials"
+    }
+   }
+  },
+  {
+   "id": "plinth_west",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -6.5,
+      0.6,
+      5.5
+     ],
+     "scale": [
+      1.1,
+      1.2,
+      1.1
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "statue_west",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -6.5,
+      1.75,
+      5.5
+     ],
+     "scale": [
+      1.1,
+      1.1,
+      1.1
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/sphere.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/marble.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "sphere",
+     "radius": 0.5
+    }
+   }
+  },
+  {
+   "id": "plinth_east",
+   "components": {
+    "Transform3D": {
+     "position": [
+      6.5,
+      0.6,
+      5.5
+     ],
+     "scale": [
+      1.1,
+      1.2,
+      1.1
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "statue_east",
+   "components": {
+    "Transform3D": {
+     "position": [
+      6.5,
+      1.75,
+      5.5
+     ],
+     "scale": [
+      1.1,
+      1.1,
+      1.1
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/sphere.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/chrome.kinmaterials"
+    },
+    "ReflectionProbe3D": {
+     "extent": [
+      0.6,
+      0.6,
+      0.6
+     ],
+     "blend": 0,
+     "parallax": false,
+     "every_frame": true,
+     "faces_per_frame": 2,
+     "hide_self": true,
+     "resolution": 64,
+     "priority": 1
+    },
+    "Collider3D": {
+     "kind": "sphere",
+     "radius": 0.5
+    }
+   }
+  },
+  {
+   "id": "plinth_back",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -6.2,
+      0.55,
+      -5.5
+     ],
+     "scale": [
+      1.2,
+      1.1,
+      1.2
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/terrazzo.kinmaterials"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   }
+  },
+  {
+   "id": "statue_back",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -6.2,
+      2.0,
+      -5.5
+     ],
+     "scale": [
+      1.4,
+      1.4,
+      1.4
+     ],
+     "rotation": [
+      0.2,
+      0.3,
+      0.1,
+      0.9274
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/torus.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/iridescent.kinmaterials"
+    }
+   }
+  },
+  {
+   "id": "west_portal",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -11.45,
+      1.6,
+      2.0
+     ],
+     "rotation": [
+      0,
+      0.7071068,
+      0,
+      0.7071068
+     ]
+    },
+    "Portal3D": {
+     "size": [
+      2.0,
+      3.2
+     ],
+     "exit": "east_portal",
+     "depth": 3,
+     "stand_in": [
+      20,
+      60,
+      58,
+      255
+     ]
+    }
+   }
+  },
+  {
+   "id": "west_portal_left",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -1.2,
+      0.1,
+      -0.2
+     ],
+     "scale": [
+      0.4,
+      3.6,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/portal_trim.kinmaterials",
+     "variant": "teal"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   },
+   "parent": "west_portal"
+  },
+  {
+   "id": "west_portal_right",
+   "components": {
+    "Transform3D": {
+     "position": [
+      1.2,
+      0.1,
+      -0.2
+     ],
+     "scale": [
+      0.4,
+      3.6,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/portal_trim.kinmaterials",
+     "variant": "teal"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   },
+   "parent": "west_portal"
+  },
+  {
+   "id": "west_portal_top",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      1.95,
+      -0.2
+     ],
+     "scale": [
+      2.8,
+      0.4,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/portal_trim.kinmaterials",
+     "variant": "teal"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   },
+   "parent": "west_portal"
+  },
+  {
+   "id": "west_portal_light",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      0.6,
+      1.2
+     ]
+    },
+    "PointLight3D": {
+     "color": [
+      0.3,
+      2.2,
+      2.0
+     ],
+     "radius": 7,
+     "size": 0.3
+    }
+   },
+   "parent": "west_portal"
+  },
+  {
+   "id": "east_portal",
+   "components": {
+    "Transform3D": {
+     "position": [
+      11.45,
+      1.6,
+      2.0
+     ],
+     "rotation": [
+      0,
+      -0.7071068,
+      0,
+      0.7071068
+     ]
+    },
+    "Portal3D": {
+     "size": [
+      2.0,
+      3.2
+     ],
+     "exit": "west_portal",
+     "depth": 3,
+     "stand_in": [
+      60,
+      22,
+      46,
+      255
+     ]
+    }
+   }
+  },
+  {
+   "id": "east_portal_left",
+   "components": {
+    "Transform3D": {
+     "position": [
+      -1.2,
+      0.1,
+      -0.2
+     ],
+     "scale": [
+      0.4,
+      3.6,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/portal_trim.kinmaterials",
+     "variant": "rose"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   },
+   "parent": "east_portal"
+  },
+  {
+   "id": "east_portal_right",
+   "components": {
+    "Transform3D": {
+     "position": [
+      1.2,
+      0.1,
+      -0.2
+     ],
+     "scale": [
+      0.4,
+      3.6,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/portal_trim.kinmaterials",
+     "variant": "rose"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   },
+   "parent": "east_portal"
+  },
+  {
+   "id": "east_portal_top",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      1.95,
+      -0.2
+     ],
+     "scale": [
+      2.8,
+      0.4,
+      0.4
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/box.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/portal_trim.kinmaterials",
+     "variant": "rose"
+    },
+    "Collider3D": {
+     "kind": "box"
+    }
+   },
+   "parent": "east_portal"
+  },
+  {
+   "id": "east_portal_light",
+   "components": {
+    "Transform3D": {
+     "position": [
+      0,
+      0.6,
+      1.2
+     ]
+    },
+    "PointLight3D": {
+     "color": [
+      0.3,
+      2.2,
+      2.0
+     ],
+     "radius": 7,
+     "size": 0.3
+    }
+   },
+   "parent": "east_portal"
+  },
+  {
+   "id": "orb",
+   "components": {
+    "Transform3D": {
+     "position": [
+      6,
+      1.0,
+      2.7
+     ],
+     "scale": [
+      0.35,
+      0.35,
+      0.35
+     ]
+    },
+    "ModelRenderer3D": {
+     "asset": "models/sphere.glb"
+    },
+    "ModelMaterials3D": {
+     "asset": "materials/orb.kinmaterials"
+    },
+    "PointLight3D": {
+     "color": [
+      2.4,
+      1.2,
+      0.4
+     ],
+     "radius": 5,
+     "size": 0.18
+    }
+   }
+  },
+  {
+   "id": "survivor",
+   "components": {
+    "Transform3D": {
+     "position": [
+      6.0,
+      0.05,
+      7.5
+     ],
+     "rotation": [
+      0,
+      1,
+      0,
+      0
+     ]
+    },
+    "SkinnedMeshRenderer": {
+     "asset": "models/kenney-survivor/survivor.glb"
+    },
+    "Animator3D": {
+     "clip": "Idle",
+     "speed": 1,
+     "loop": true,
+     "playing": true,
+     "fade_seconds": 0.15,
+     "remove_root_motion": true
+    },
+    "AnimatorAsset3D": {
+     "asset": "animations/survivor.kinanimator"
+    },
+    "CharacterController3D": {
+     "radius": 0.24,
+     "height": 1.8,
+     "crouch_height": 1.0,
+     "walk_speed": 2.5,
+     "sprint_speed": 5.0,
+     "jump_speed": 4.5,
+     "max_step_height": 0.3,
+     "coyote_seconds": 0.1,
+     "jump_buffer_seconds": 0.1,
+     "apply_facing": true
+    },
+    "CharacterAnimationLink3D": {},
+    "PortalTraveller3D": {
+     "height": 1.0
+    }
+   }
+  }
+ ]
+}
