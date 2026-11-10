@@ -7,6 +7,34 @@ releases may change APIs.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-10
+
+A release for 3D, for apps and for whole 2D games. The experimental 3D renderer gains physically based materials
+with node-based material graphs (and an importer for Unreal, Unity and Godot materials), global illumination with
+area lights, mirrors, portals, water, reflection probes and screen-space reflections, volumetric fog lit by local
+lights, the sun and the moon, auto exposure, decals and morph targets, with Jolt physics, characters and ragdolls
+(see [3D rendering](rendering_3d.md)). 2D games get skeletal animation, normal-mapped sprites, light shadows, physics
+characters and one-way platforms, parallax, scenes and saves as data, tweens and timers, and browser builds. ui2 runs
+whole applications, on desktops and Android phones: touch, keyboards, accessibility, charts and composition. Lua
+scripting gains typed API definitions, debugging and scenario tests, and Python scripting arrives (experimental).
+Development builds are faster and build what is asked for. The larger showcase games moved to the
+[kin gallery](https://github.com/AmedeoBiolatti/kin-gallery).
+
+### Upgrading from 0.2.6
+
+- Development presets (`dev`, `dev-3d`, ...) build tools, samples and tests only when asked
+  (`KIN_BUILD_ON_DEMAND`) into `out/build/<preset>/`: request targets with `cmake --build --preset dev --target ...`.
+- Experimental 3D is off by default: use the `dev-3d`/`3d` presets or `-DKIN_EXPERIMENTAL_3D=ON`. Its public types
+  carry 3D suffixes (`Mesh3D`, `Model3D`, `ViewOptions3D`, `RenderStats3D`, ...) and fallible operations return
+  `Result3D<T>`; see the [3D API guide](3d_api_migration.md).
+- `LuaScriptOptions::instruction_limit` is `LuaScriptOptions::limits.instruction_limit`.
+- ui2: editor widgets are declared in `kin/ui2/editor.hpp` and game screen widgets in `kin/ui2/hud.hpp` (both still
+  included by `widgets.hpp`); keys go only to the focused widget; `NumberInput` commits on Enter or on leaving;
+  `SvgOptions::oversample` defaults to the renderer's content scale.
+- Summit, Blockfield, the planar-views atrium and the material gallery are in the
+  [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery); the 3D starters' content is in
+  `examples/camp_walk/content` (was `examples/summit/content`).
+
 - The larger showcase games moved to the [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery), which builds them
   against kin as a subproject: Summit (with its browser export and checks), Blockfield, the planar-views atrium
   (`planar_atrium`, now `atrium`) and the material gallery. kin keeps the small samples, Signal Siege, Signal Breach and
@@ -3019,7 +3047,8 @@ First public release.
 - Demos (`games/`), the Signal Siege and Run Observatory examples, `kin_bench`,
   and the engine test suite.
 
-[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.3...v0.2.4

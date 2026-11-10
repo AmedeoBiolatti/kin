@@ -15,7 +15,7 @@ reading it. It starts small, stays honest about its scope, and grows alongside t
 | ![The mirror atrium: a checkered marble floor, marble columns, a gold torus, a mirror, two glowing portals and a pool](docs/images/atrium.jpg) | ![Run Observatory: a training dashboard with a 10,000-row run list, loss chart and event stream](docs/images/run_observatory.png) |
 | <sub>**[Atrium](https://github.com/AmedeoBiolatti/kin-gallery)** — mirrors, portals, water, reflection probes and material graphs (marble, brass, terrazzo)</sub> | <sub>**Run Observatory** — a data app on ui2: virtualized tables, charts, live updates</sub> |
 
-> **Status — v0.2.6, with v0.3.0 in preparation.** Windows and Linux are supported; Android and the browser
+> **Status — v0.3.0.** Windows and Linux are supported; Android and the browser
 > (WebGL2) are experimental, and so is 3D (`KIN_EXPERIMENTAL_3D`). APIs are young and may change between
 > minor versions; the [changelog](docs/changelog.md) records every change.
 
@@ -256,7 +256,7 @@ set(CMAKE_CXX_STANDARD 23)
 include(FetchContent)
 FetchContent_Declare(kin
     GIT_REPOSITORY https://github.com/AmedeoBiolatti/kin.git
-    GIT_TAG v0.2.6
+    GIT_TAG v0.3.0
 )
 FetchContent_MakeAvailable(kin)
 
