@@ -1,8 +1,12 @@
+#include "hdr_encode3d.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <kin/assets/content.hpp>
@@ -76,6 +80,212 @@ Environment3D Renderer3D::load_environment_operation(const std::filesystem::path
     else
         _errors.clear();
     return environment;
+}
+
+// A Radiance .hdr picture (RGBE, 2:1 panoramas: what kin_hdr_load reads): the header, a "-Y h +X w" size, then each
+// scanline in the new run-length coding (its four components apart, each in runs of one value and literals: a flat
+// scanline whose first texel began 2, 2 would read as a coded one).
+std::string encode_hdr3d(Vec2i size, std::span<const f32> rgb) {
+    const auto w = static_cast<std::size_t>(size.x), h = static_cast<std::size_t>(size.y);
+    std::string out =
+        "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y " + std::to_string(h) + " +X " + std::to_string(w) + "\n";
+    std::vector<u8> texel(w * 4);
+    for (std::size_t y = 0; y < h; ++y) {
+        for (std::size_t x = 0; x < w; ++x) {
+            const f32* c = &rgb[(y * w + x) * 3];
+            const f32 r = std::isfinite(c[0]) ? std::max(c[0], 0.0f) : 0.0f;
+            const f32 g = std::isfinite(c[1]) ? std::max(c[1], 0.0f) : 0.0f;
+            const f32 b = std::isfinite(c[2]) ? std::max(c[2], 0.0f) : 0.0f;
+            const f32 m = std::max({r, g, b});
+            u8* t = &texel[x * 4];
+            if (m < 1e-32f) {
+                t[0] = t[1] = t[2] = t[3] = 0;
+            } else {
+                int e = 0;
+                const f32 scale = std::frexp(m, &e) * 256.0f / m;
+                t[0] = static_cast<u8>(std::min(r * scale, 255.0f));
+                t[1] = static_cast<u8>(std::min(g * scale, 255.0f));
+                t[2] = static_cast<u8>(std::min(b * scale, 255.0f));
+                t[3] = static_cast<u8>(e + 128);
+            }
+        }
+        if (w < 8 || w >= 32768) { // (the coding's limits: flat)
+            out.append(reinterpret_cast<const char*>(texel.data()), texel.size());
+            continue;
+        }
+        out += static_cast<char>(2);
+        out += static_cast<char>(2);
+        out += static_cast<char>(w >> 8);
+        out += static_cast<char>(w & 0xFF);
+        // Runs of one value (4 to 127 alike: a count above 128, then the value), and literals between them (up to 128).
+        for (std::size_t c = 0; c < 4; ++c) {
+            const auto at = [&](std::size_t x) { return texel[x * 4 + c]; };
+            const auto run = [&](std::size_t x) {
+                std::size_t n = 1;
+                while (x + n < w && n < 127 && at(x + n) == at(x))
+                    ++n;
+                return n;
+            };
+            for (std::size_t x = 0; x < w;) {
+                if (const std::size_t n = run(x); n >= 4) {
+                    out += static_cast<char>(128 + n);
+                    out += static_cast<char>(at(x));
+                    x += n;
+                    continue;
+                }
+                std::size_t n = 0;
+                while (x + n < w && n < 128 && run(x + n) < 4)
+                    ++n;
+                out += static_cast<char>(n);
+                for (std::size_t k = 0; k < n; ++k)
+                    out += static_cast<char>(at(x + k));
+                x += n;
+            }
+        }
+    }
+    return out;
+}
+
+Status3D Renderer3D::save_reflection_capture(const ReflectionCapture3D& capture, const std::filesystem::path& file) {
+    _errors.clear();
+    const auto fail = [&](const std::string& why) {
+        fail3d(_errors, "Renderer3D::save_reflection_capture(" + file.string() + ")", why);
+        return status3d(false, _errors);
+    };
+    if (!capture || !_backend)
+        return fail("an empty capture");
+    if (capture.backend()->generation() == 0)
+        return fail("not captured yet");
+    std::vector<f32> rgb;
+    Vec2i size{};
+    if (!_backend->read_reflection_capture(*capture.backend(), rgb, size) || size.x <= 0 || size.y <= 0 ||
+        rgb.size() != static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 3)
+        return fail("its picture could not be read back");
+    std::error_code error;
+    if (file.has_parent_path())
+        std::filesystem::create_directories(file.parent_path(), error);
+    std::ofstream out(file, std::ios::binary);
+    const std::string bytes = encode_hdr3d(size, rgb);
+    if (!out || !out.write(bytes.data(), static_cast<std::streamsize>(bytes.size())))
+        return fail("cannot write it");
+    return status3d(true, _errors);
+}
+
+Result3D<MeshData3D> Renderer3D::read_mesh(const Mesh3D& mesh) {
+    _errors.clear();
+    MeshData3D data;
+    if (!mesh || !_backend || !_backend->read_mesh(*mesh.backend(), mesh.vertex_count(), data)) {
+        fail3d(_errors, "Renderer3D::read_mesh", "the mesh could not be read back");
+        return {std::nullopt, _errors};
+    }
+    return {std::move(data), {}};
+}
+
+Result3D<std::vector<f32>> Renderer3D::read_linear_texture(const Texture& texture) {
+    _errors.clear();
+    std::vector<u8> texels;
+    Vec2i size{};
+    if (!texture || texture.format() != TextureFormat::Rgba16Float || !_backend ||
+        !_backend->read_texture(texture, texels, size) ||
+        texels.size() < std::size_t(size.x) * std::size_t(size.y) * 8) {
+        fail3d(_errors, "Renderer3D::read_linear_texture", "not an RGBA16F attachment, or it could not be read back");
+        return {std::nullopt, _errors};
+    }
+    std::vector<f32> out(std::size_t(size.x) * std::size_t(size.y) * 4);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const u16 h = u16(texels[i * 2] | (texels[i * 2 + 1] << 8));
+        const u32 sign = (h & 0x8000u) << 16, exponent = (h >> 10) & 0x1fu, mantissa = h & 0x3ffu;
+        u32 bits;
+        if (exponent == 0)
+            bits = mantissa == 0 ? sign : [&] { // subnormal: normalised
+                u32 e = 127 - 15 + 1, m = mantissa;
+                while (!(m & 0x400u)) {
+                    m <<= 1;
+                    --e;
+                }
+                return sign | (e << 23) | ((m & 0x3ffu) << 13);
+            }();
+        else if (exponent == 31)
+            bits = sign | 0x7f800000u | (mantissa << 13);
+        else
+            bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+        std::memcpy(&out[i], &bits, sizeof bits);
+    }
+    return {std::move(out), {}};
+}
+
+bool Renderer3D::global_illumination_lit(const View3D& view) const {
+    return _backend && view.valid() && _backend->global_illumination_lit(*view.backend());
+}
+
+Result3D<ReflectionCapture3D> Renderer3D::load_reflection_capture(const std::filesystem::path& path) {
+    _errors.clear();
+    const auto fail = [&](const std::string& why) {
+        fail3d(_errors, "Renderer3D::load_reflection_capture(" + path.string() + ")", why);
+        return result3d(ReflectionCapture3D{}, _errors);
+    };
+    if (!_backend)
+        return fail("3D is not available");
+    const std::optional<std::string> bytes = read_content_file(path);
+    if (!bytes)
+        return fail("cannot read it");
+    int w = 0, h = 0;
+    float* pixels =
+        kin_hdr_load(reinterpret_cast<const unsigned char*>(bytes->data()), static_cast<int>(bytes->size()), &w, &h);
+    if (!pixels)
+        return fail("not a Radiance .hdr picture");
+    std::shared_ptr<IReflectionCaptureBackend3D> backend;
+    if (w >= 16 && w == 2 * h)
+        backend = _backend->create_reflection_capture_from(
+            {w, h}, {pixels, static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3});
+    kin_hdr_free(pixels);
+    if (!(w >= 16 && w == 2 * h))
+        return fail("a panorama must be 2:1 and at least 16 wide");
+    if (!backend)
+        return fail("not supported here (needs the GPU renderer and compute)");
+    return result3d(ReflectionCapture3D{std::move(backend)}, _errors);
+}
+
+Result3D<ReflectionCapture3D> Renderer3D::create_reflection_capture(u32 side) {
+    _errors.clear();
+    const auto fail = [&](const std::string& why) {
+        fail3d(_errors, "Renderer3D::create_reflection_capture", why);
+        return result3d(ReflectionCapture3D{}, _errors);
+    };
+    if (!_backend)
+        return fail("3D is not available");
+    if (side < 16 || side > 1024)
+        return fail("a side of " + std::to_string(side) + " (16 to 1024)");
+    auto backend = _backend->create_reflection_capture(side);
+    if (!backend)
+        return fail("not supported here (needs the GPU renderer and compute)");
+    return result3d(ReflectionCapture3D{std::move(backend)}, _errors);
+}
+
+Status3D Renderer3D::capture_reflection(ReflectionCapture3D& capture, Scene3D& scene, Vec3f position,
+                                        const ReflectionCaptureOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* why) {
+        fail3d(_errors, "Renderer3D::capture_reflection", why);
+        return status3d(false, _errors);
+    };
+    if (!capture || !_backend)
+        return fail("an empty capture");
+    if (!scene.diagnostics().empty()) {
+        _errors = scene.diagnostics();
+        return status3d(false, _errors);
+    }
+    if (!(std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z)) ||
+        !(options.z_near > 0.0f) || !(options.z_far >= 0.0f) ||
+        (options.z_far > 0.0f && options.z_far <= options.z_near))
+        return fail("a position, or near and far, that is not finite and in order");
+    IViewBackend3D* lighting = options.global_illumination && options.global_illumination->valid()
+                                   ? options.global_illumination->backend()
+                                   : nullptr;
+    if (!_backend->capture_reflection(*capture.backend(), scene, position, options, lighting, _stats))
+        return fail("the device refused it");
+    return status3d(true, _errors);
 }
 
 Result3D<MaterialShader3D> Renderer3D::create_material_shader(std::span<const u8> spirv) {

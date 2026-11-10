@@ -6,6 +6,7 @@
 #include <cmath>
 #include <initializer_list>
 #include <kin/ecs/system.hpp>
+#include <kin/scene/planar_views3d.hpp>
 #include <limits>
 #include <sol/sol.hpp>
 #include <stdexcept>
@@ -266,7 +267,7 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         const auto options = checked<sol::table>(options_argument, "options");
 
         command_buffer(*api);
-        fields(options, {"move", "forward", "jump", "crouch", "sprint"});
+        fields(options, {"move", "forward", "jump", "crouch", "sprint", "facing"});
         CharacterInput3D input;
         if (sol::object move = options["move"]; move != sol::nil) {
             const auto value = checked<sol::table>(move, "move");
@@ -279,6 +280,9 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         input.jump = option(options, "jump", false);
         input.crouch = option(options, "crouch", false);
         input.sprint = option(options, "sprint", false);
+        std::optional<Quatf> facing;
+        if (sol::object value = options["facing"]; value != sol::nil)
+            facing = rotation(checked<sol::table>(value, "facing"));
         script_component_access("CharacterController3D", true);
         auto entity = resolve(*api, handle);
         if (!native_character(*api, entity))
@@ -287,6 +291,8 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         if (!controller)
             return false;
         controller->input = input;
+        if (facing)
+            controller->facing = *facing;
         return true;
     };
     scene["character_state"] = [api](sol::this_state state, SceneEntity3D handle) -> sol::object {
@@ -629,6 +635,24 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
                                   vector(lua, hit->physics.point), "normal", vector(lua, hit->physics.normal));
         if (hit->entity)
             result["entity"] = SceneEntity3D(hit->entity);
+        return sol::make_object(state, result);
+    };
+    // A step through the scene's portals (Portal3D; portal_step): nil when it goes through none, else where it ends
+    // (the rest of the step out of the exit), the turn for its facing and velocity, and the portals.
+    scene["portal_step"] = [api](sol::this_state state, sol::object from_argument,
+                                 sol::object to_argument) -> sol::object {
+        if (!api->active() || !api->world)
+            throw std::runtime_error("3D portals require an active scene");
+        const auto step = portal_step(*api->world, vector(checked<sol::table>(from_argument, "from")),
+                                      vector(checked<sol::table>(to_argument, "to")));
+        if (!step)
+            return sol::nil;
+        sol::state_view lua{state};
+        auto result = lua.create_table_with(
+            "position", vector(lua, step->position), "turn",
+            lua.create_table_with("x", step->turn.x, "y", step->turn.y, "z", step->turn.z, "w", step->turn.w));
+        result["portal"] = api->handle(step->portal);
+        result["exit"] = api->handle(step->exit);
         return sol::make_object(state, result);
     };
     scene["teleport"] = [api](SceneEntity3D handle, sol::object position_argument, sol::object rotation_argument) {

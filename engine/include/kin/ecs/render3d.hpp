@@ -163,9 +163,103 @@ struct ParticleEmitter3D {
     std::string bound_texture; // runtime-only; empty refs clear only authored bindings
 };
 
+// Mirrors and portals on entities (docs/rendering_3d.md, Mirrors and portals; PlanarViews3D in
+// kin/scene/planar_views3d.hpp renders them, SceneSession3D on its own). Each is a surface in the entity's XY plane,
+// centred on it, its front its +Z, `size` wide (its X) and high (its Y) times the entity's scale; PlanarViews3D draws
+// it (pick answers the entity) and renders the picture it shows into a view of its own when it is on screen: of where
+// it shows only, with the main view's samples and its pixels' density times `resolution` (1: as sharp as the view).
+//
+// A mirror, still water, a polished floor: its reflection is its picture, weighed as kin's material weighs a
+// reflection (its colour, metallic and roughness: water reflects little head on and much at a glance, a silver mirror
+// all of it). `normal_asset` (a normal map, linear: water's ripples) repeats `uv_scale` times across it and moves by
+// `flow` a second; `distortion` (world units) is how far its ripples move where the picture is read.
+struct Mirror3D {
+    bool enabled = true;
+    Vec2f size{2.0f, 2.0f};
+    Color color = Color::rgb(235, 235, 240);
+    f32 metallic = 1.0f;
+    f32 roughness = 0.045f;
+    ComponentAssetRef normal_asset;
+    f32 normal_scale = 1.0f;
+    Vec2f uv_scale{1.0f, 1.0f};
+    Vec2f flow{0.0f, 0.0f};
+    f32 distortion = 0.0f;
+    f32 strength = 1.0f;   // how much of the reflection its picture is
+    f32 resolution = 1.0f; // its picture's pixels' density, a share of the view's
+    // Water you see into (refraction_view): `refraction` of what is below shows through (0: none, a mirror), bent by
+    // the ripples by `refraction_distortion`, fading into `murk` as it deepens (half of it gone about `murk_depth`
+    // down).
+    f32 refraction = 0.0f;
+    f32 refraction_distortion = 0.1f;
+    Color murk = Color::rgb(28, 64, 70);
+    f32 murk_depth = 1.5f;
+    Texture normal; // runtime: normal_asset's (resolve_render3d_assets), or one from C++
+    std::string bound_normal;
+};
+
+// A portal: the entity `exit` (another portal, or any entity: its placing is the exit's) is what it opens onto, in at
+// this one's front and out of the exit's front (portal_view). `depth`: how many levels of it seen through itself are
+// drawn (two portals facing each other show their corridor that deep); the deepest, and the portal in other planar
+// views' pictures, is `stand_in`, unlit. Things go through it by portal_step (kin/scene/planar_views3d.hpp; Lua
+// scene3d.portal_step).
+// Goes through portals (PortalTravel3D, kin/scene/planar_views3d.hpp): when the point `height` above the entity's
+// origin (a character's waist: the openings may start above its feet) crosses an enabled portal's opening from its
+// front, the entity is put at the exit (its character or dynamic body carried by the physics, its velocity turned with
+// it: WorldPhysicsState3D::carry; else its Transform3D moved and turned). SceneSession3D runs it after each physics
+// step.
+struct PortalTraveller3D {
+    bool enabled = true;
+    f32 height = 1.0f;
+};
+
+struct Portal3D {
+    // What the surface does to its picture (kin's planar_window surface): nothing; ripples spreading from where things
+    // go through, as on water; a vortex turning round its middle, spun faster by what goes through; a glitching
+    // signal, its picture torn and split in colour, worst where things go through; a liquid membrane, wobbling, a
+    // soap film's colours at a glance, rippled by what goes through. Each with a glow at its rim.
+    enum class Effect : u8 { None, Ripples, Vortex, Glitch, Membrane };
+    bool enabled = true;
+    Vec2f size{1.8f, 2.8f};
+    ComponentEntityRef exit{};
+    u32 depth = 1;
+    f32 resolution = 1.0f;
+    Color stand_in = Color::rgb(24, 40, 52);
+    Effect effect = Effect::None;
+    f32 effect_strength = 1.0f;
+};
+
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the
 // rest pose without one). Not MeshRenderer3D: a mesh renderer's entities are instances of one mesh and merge into one
 // draw, and a character is a model of several parts with a skeleton and a pose of its own.
+// A reflection probe (kin/render3d/reflection_probes3d.hpp): the scene seen all round from the entity's place, which
+// the glossy surfaces inside its box reflect, parallax-corrected, in place of the environment. Its boxes are round the
+// entity (plus `box_offset`), turned and scaled as it is. Captured when it first shows, when it moves, when `recapture`
+// changes, every `interval` seconds (0: not on a clock) or every frame (`every_frame`: a shiny thing's own probe, with
+// `hide_self`, the entity's own copies left out of its picture; `faces_per_frame` of its six faces a frame, in turn,
+// the picture updated (and filtered) when all six are new: 2 costs a third of 6, the reflection three frames late).
+// With `baked` (a Radiance .hdr panorama in the content: ReflectionProbes3D::bake writes them) it is loaded from there
+// instead, and captured only when `recapture` changes. SceneSession3D captures and places them (ReflectionProbes3D,
+// kin/scene/reflection_probes3d.hpp).
+struct ReflectionProbe3D {
+    bool enabled = true;
+    Vec3f extent{5.0f, 5.0f, 5.0f};
+    Vec3f box_offset{};
+    f32 blend = 0.5f;
+    bool parallax = true;
+    Vec3f parallax_extent{};
+    f32 intensity = 1.0f;
+    bool diffuse = true;
+    i32 priority = 0;
+    u32 resolution = 128;
+    f32 interval = 0.0f;
+    bool every_frame = false;
+    u32 faces_per_frame = 6; // 1 to 6 (every_frame)
+    bool hide_self = false;
+    f32 z_near = 0.05f;
+    u32 recapture = 0;
+    ComponentAssetRef baked;
+};
+
 struct SkinnedMeshRenderer3D {
     // Its parts, skeleton and clips. Shared: the entity keeps it alive (the animator points into it).
     std::shared_ptr<const Model3D> model;

@@ -222,11 +222,13 @@ const std::vector<NodeSpec>& specs() {
                          return make("clamp(" + in[0].expr + ", " + in[1].expr + ", " + in[2].expr + ")", w);
                      }});
         s.push_back({"smoothstep",
-                     "0 to 1 smoothly from edge0 to edge1",
+                     "0 to 1 smoothly from edge0 to edge1 (its edges widened by the pixel's footprint of x: a sharp "
+                     "edge far away filters, not aliases)",
                      {{"edge0", In::Widest, "0"}, {"edge1", In::Widest, "1"}, {"x"}},
                      false,
                      [](Compiler&, const std::vector<Value>& in, Type w, const std::string&, bool) {
-                         return make("smoothstep(" + in[0].expr + ", " + in[1].expr + ", " + in[2].expr + ")", w);
+                         return make("kin_graph_smoothstep(" + in[0].expr + ", " + in[1].expr + ", " + in[2].expr + ")",
+                                     w);
                      }});
         s.push_back({"remap",
                      "x from [in_min, in_max] to [out_min, out_max]",
@@ -413,6 +415,8 @@ constexpr BuiltIn built_ins[] = {
     {"camera_distance", "length(frame.eye.xyz - vWorld)", Type::Float},
     {"object_position", "kin_object_position()",
      Type::Vec3}, // the copy's origin (a flat varying; at a vertex, its own)
+    {"local_position", "kin_local_position()",
+     Type::Vec3}, // the point in the copy's own space (a varying; at a vertex, through its model matrix)
 };
 struct Field {
     const char* name;
@@ -670,6 +674,8 @@ private:
             return make("length(kin_vs.eye.xyz - kin_v_world)", Type::Float);
         if (name == "object_position")
             return make("kin_object_position()", Type::Vec3);
+        if (name == "local_position")
+            return make("kin_local_position()", Type::Vec3);
         return std::nullopt;
     }
     // A built-in input's value in the cut-out passes (kin_surface_alpha's arguments and the cut-out block), or none.

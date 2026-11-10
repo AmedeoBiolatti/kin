@@ -468,6 +468,11 @@ public:
     // Place a bound rigid body in world space without sweeping; clear velocity
     // and start its presentation segment at the destination (also kinematic).
     Status3D teleport(flecs::entity entity, Vec3f position, Quatf rotation);
+    // Through a portal (PortalTravel3D, kin/scene/planar_views3d.hpp): the entity's character or dynamic body at once
+    // at `position` (its feet, or its body's origin, in the world), turned by `turn` with everything that has a way:
+    // its rotation, a character's facing, its velocities (it goes on as fast, the way the portal sends it). No
+    // interpolation from where it was. Failed for an entity with neither.
+    Status3D carry(flecs::entity entity, Vec3f position, Quatf turn);
 
     // Draws the world's debug lines (the shapes, constraints, contacts) into `scene` as a wireframe, if
     // config().debug.enabled. Add your own with debug() first (rays, sweeps) and they are drawn too.

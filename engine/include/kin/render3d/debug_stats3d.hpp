@@ -159,6 +159,12 @@ struct RenderDebugStats3D : RenderStats3D {
         0; // submitted to the local and moon maps this render (a clustered copy's: its cut's, from the light)
     bool lights_variant = false;
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
+    // Reflection probes (Lights3D::reflection_probes): those this render read, the captures it filtered into its
+    // array (once a capture), and the captures capture_reflection made (its own stats).
+    u32 reflection_probes = 0, reflection_filters = 0, reflection_captures = 0;
+    u32 reflection_gi_captures = 0; // of those, lit by a view's global illumination (borrowed)
+    // Screen-space reflections (Scene3D::ssr): 1 when this render traced them (and its main pass read them).
+    u32 ssr_traces = 0;
     // Sky, fog and the sky's image-based light (P3a): the sky pass ran; meshes were drawn with the fog's shader
     // variants (or custom kin_output); with Lights3D::sky_lights_scene the environment was made again this
     // render (the sky moved past Sky3D::light_threshold and light_interval renders had passed), how many times so far,

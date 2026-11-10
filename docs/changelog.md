@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Material graphs: a `local_position` built-in input, the point in the copy's own space (posed when skinned), from the
+  mesh's vertex shader (at a vertex, through the inverse model matrix). A pattern on it moves and turns with the copy,
+  where `position`'s stays in the world (noise on a rolling ball slid over it).
 - Render graphs for tools: `write_resource_graph_json` writes a compiled graph (`kin.render-graph/1`: resources,
   passes with their reads and writes by name, the run's order, culled passes, times); the stock 3D frame's recipe is
   public as `stock_frame_graph3d()`, `RenderDebugStats3D::graph_pass_ms` times each of its passes, and the game server's
@@ -51,6 +54,136 @@ releases may change APIs.
   `out/build/<preset>/`. `KIN_BUILD_ON_DEMAND` defaults off for other builds;
   focused testing and output conventions are documented in [testing](testing.md)
   and [the agent workflow](../AGENTS.md).
+- Mirrors and portals (3D, native renderers). `Camera3D::clip_plane` cuts a view at a plane (clipped in the vertex
+  shaders, so depth, ambient occlusion, fog and TAA are unchanged; copies behind it are culled on the CPU).
+  `mirror_view` and `portal_view` give the camera of a mirror's or a portal's view and the projector its surface reads
+  the view's picture through; `portal_point`/`portal_rotation` move anything else through a pair of portals.
+  `engine/shaders/planar_reflection.surface.glsl` (the picture replaces the environment's reflection, weighed by the
+  surface's Fresnel and roughness, with normal-map ripples) and `planar_window.surface.glsl` (a portal) are surface
+  shaders a game builds with `kin_compile_surface_shader`; `KinSurface::reflection` lets any surface supply its own
+  reflection. A material reading the texture of the view being drawn reads white there. `examples/planar_views`:
+  a mirror, rippled water and two portals facing each other. Portal gameplay helpers: `PortalPose3D::size`,
+  `portal_crossing` (did a step go through, and how far), `ray_through_portal`, `portal_chain` (portals seen through
+  portals, to a depth), `portal_surface_transform` (a box for the surface, so a camera can step into it), and
+  `planar_on_screen` (skip the views no one sees, size them by screen share). The vertex shaders' draw block grew by
+  a `vec4` (compiled surface vertex variants keep working, without clipping, until rebuilt).
+- Mirrors and portals on entities: `Mirror3D` and `Portal3D` components (authored in scenes and prefabs; a portal's
+  `exit` an entity reference), rendered by `PlanarViews3D` (`kin/scene/planar_views3d.hpp`) and by
+  `SceneSession3D::render` given `SceneSession3DOptions::planar_surfaces` (`kin_planar_surfaces` in CMake builds them;
+  `create_planar_surfaces` / `compile_planar_surfaces` make them). `portal_step` (and Lua `scene3d.portal_step`) moves
+  a step through a world's portals. `Scene3D::set_draw_material` and `Scene3D::show_overlay` (the overlay left out of
+  a render) support them.
+- Portals: things half-way through show on both sides (`portal_straddle`; `PlanarViews3D` draws such copies' images at
+  the exit itself), instead of vanishing or showing as a crescent while crossing, and neither half is cut by the
+  pictures' clip planes, so no rim shows where they meet (`DrawClip3D`, `Scene3D::draw_instanced(..., clip)`). Planar pictures cover only where
+  their surface shows (`Camera3D::window`, `crop_planar_view`, `planar_picture`), as sharp as the view and with its
+  samples (`resolution` 1 by default).
+- Reflection probes: `Renderer3D::create_reflection_capture` / `capture_reflection` (the scene all round from a
+  point, six renders into a panorama) and `Lights3D::reflection_probes` (`ReflectionProbeSource3D`: influence box,
+  blend, parallax box, intensity, priority), read by the stock lit shaders, material graphs and surfaces in place of
+  the environment, parallax-corrected (`reflection_probe_weight`, `reflection_probe_direction`). As entities: the
+  `ReflectionProbe3D` component, captured and placed by `ReflectionProbes3D` (`kin/scene/reflection_probes3d.hpp`) and
+  `SceneSession3D` (once, on an interval, or every frame; `hide_self`). Curved mirrors: a live probe at a shiny thing's
+  centre, the thing left out by `Camera3D::hidden_id`. The light variants' binding 6 is now a 2D array (layer 0 the
+  environment's specular); custom material shaders keep the 2D environment.
+- Screen-space reflections (`Scene3D::ssr`; authored `ssr_*` in `SceneEnvironment3D`): each pixel's reflection hit
+  traced through the depth pre-pass at half size; the lit shaders follow their own (normal-mapped) reflection that far
+  into the previous frame's picture, kept as a blur pyramid, read as wide as the reflection's lobe (glossy surfaces get
+  blurred reflections, up to `max_roughness`); in place of the probes' or the environment's where it finds something;
+  fades by the screen's edges, curvature and steep normal maps, and leaves a thing's own probe alone. The light variants' last storage buffer (older compiled surfaces simply do not read it).
+- Reflection probes light what is inside their boxes too (`ReflectionProbeSource3D::diffuse`, the component's
+  `diffuse`, on by default): the probe's irradiance, a level more in its layer, in place of the environment's or the
+  hemisphere's ambient light (global illumination's probes still win where they reach).
+- Reflection probes baked to disk: `Renderer3D::save_reflection_capture` (a Radiance .hdr panorama) and
+  `load_reflection_capture` (any 2:1 panorama, through the content), the component's `baked` (loaded instead of
+  captured) and `ReflectionProbes3D::bake` (captures and writes every probe, setting `baked`).
+- Water you see into: `refraction_view` and `planar_refraction_params` (what is below a planar surface, bent by its
+  ripples, weighed by what its Fresnel does not reflect), and `Mirror3D::refraction`, `refraction_distortion`, `murk`,
+  `murk_depth` (the picture fogged by a height fog under the surface: deeper is murkier).
+- Reflection probes lit by global illumination: `ReflectionCaptureOptions3D::global_illumination` lends a capture a
+  view's GI (its probes, read, not moved; `Renderer3D::global_illumination_lit`), and sessions' probes borrow their
+  view's, captured once more when it has settled (`ReflectionProbes3D::gi_settle`).
+- Characters and instance batches go through portals whole: `Scene3D::draw_again` (a copy drawn again elsewhere, a
+  skinned one in its pose, a batch's as a plain one) and PlanarViews3D drawing every kind of copy half-way through;
+  `portal_straddle` takes things up to the opening's diagonal (a character's T-pose bounds). The atrium has a walking
+  survivor (Kenney, CC0) and `--camera 5`.
+- Physics through portals: `PortalTraveller3D` marks an entity that physics carries through a portal, after each
+  physics step of a `SceneSession3D` (`PortalTravel3D` for a game's own loop), by
+  `WorldPhysicsState3D::carry` (a character's feet, velocity, facing, command and state turned; a body's velocities).
+  Lua's `scene3d.character_input` takes a `facing`. `planar_atrium` plays a physics character (WASD, mouse camera,
+  jump, run) through the portals, and `--autoplay SECONDS` plays it by a bot through the real input and reports falls,
+  escapes, stuck spots, missed portals, frame and GPU times and memory (exit 2 on a gameplay failure, or on memory
+  still growing over the second half of a run of 4 minutes or more).
+- A view can render a part of itself (`View3D::set_render_size`, `render_size`; `Renderer3D::can_render_part`): renders
+  fill only that many pixels from its top-left, where the GPU backend can (no HDR, picking, temporal AA, GI, fog
+  shafts, occlusion culling, contact shadows or overlay). Planar views (mirrors, water, portals) use it: each picture
+  is drawn at its own size into a view that only grows, so a moving eye no longer resizes views (with all their
+  targets) about 13 times a second; after the first seconds, none. It is pixel for pixel the picture of a view of that
+  size. `planar_view_params` / `planar_refraction_params` take the part's `share`, and the planar surfaces keep their
+  reads in it; water's own colour no longer comes from its refraction picture.
+- A portal seen in a mirror (or in water) shows what is beyond it: PlanarViews3D renders it a picture from the mirror's
+  camera through the portal and draws it on the portal in the mirror's picture (it showed its stand-in colour).
+- The sun's highlight is the size of its disc (the specular lobe's alpha at least its angular radius), and a point or
+  spot light's the size it spans (`size` over its distance): a chrome or rippled surface's highlights no longer
+  flicker as the eye or the light moves.
+- Screen-space reflections trace a texel a pixel (a half-size grid stepped every reflected edge in twos, plainly so in
+  a large window), a ray crossing a surface between two steps counts (once its point is checked on the surface), and
+  the reflections' pyramid stays half size. About 0.1 to 0.2 ms more at 1280 x 720.
+- `ViewOptions3D::compress`: a view that is not HDR keeps its light as x / (1 + x), so that what is past white survives
+  an 8-bit picture; planar views' pictures use it and their surfaces take it back (`planar_view_params` /
+  `planar_refraction_params` `compressed`): a sun glint seen in a mirror or through a portal is as bright as seen
+  directly (it was cut to white, then tonemapped grey).
+- planar_atrium: the brass ring's patina and brushing turn with it (its own graph, the pattern from the ring's rest
+  position: it was in world space, so the ring turned through it); both portal lights are the trims' teal (walking
+  through, the light went from teal to magenta).
+- planar_atrium opens on a loading screen (the step under way, a progress bar, the controls) that fades out over the
+  scene's first frames, and its material graphs are cooked at build time (`kin_cook_material_graphs`; `*.kingraph.spv`
+  is git-ignored): it starts in about a second, from about 18 (eight graphs compiled with glslc as it started).
+- `Portal3D::effect` (none, ripples, vortex, glitch, membrane) and `effect_strength`: the planar window surface
+  distorts and lights its picture, answering what goes through the portal (where it went through and when, on both
+  surfaces of the pair). planar_atrium: P cycles them.
+- planar_atrium shows the camera's and the survivor's places at the bottom (centimetres, yaw and pitch; F3 hides it).
+- Checking a scene against Cycles: `write_scene_snapshot` (`kin/render3d/snapshot3d.hpp`) writes a rendered scene
+  (camera, lights, the sky as a panorama, posed meshes, materials baked per copy into texture pages by kin's own
+  shaders, graphs included) and `tools/cycles/compare.py` renders it with Blender's Cycles and compares.
+  `planar_atrium --at X Y Z YAW PITCH --survivor X Y Z YAW --cycles-snapshot DIR` writes one from a given view. New
+  for it: `RenderDebugOptions3D::unwrap` and `surface_channel` (a surface's channel drawn over its UV square),
+  `Renderer3D::read_mesh` and `read_linear_texture`, `SceneSession3D::view_options`; Radiance .hdr files are written
+  with run-length runs (a flat picture is a fraction of the size).
+- Pictures lit by another view's global illumination: `Renderer3D::render(view, scene, lit_by)` (and
+  `can_render_part(view, scene, lit_by)`: such a render may fill part of its view, the GI's light resolved over it).
+  PlanarViews3D renders mirrors' and portals' pictures with the view's GI (`render`'s `lit_by`; SceneSession3D passes
+  its view), and `SurfaceTraits3D::gi` (`SurfaceGi3D`: `Fields` for mirrors and portals, `None` for water) keeps the GI
+  from baking a stand-in of a surface whose look changes every frame, and from taking water as a dark lid (blotches of
+  the pool's dark light that shifted with the view along its rim). The atrium turns GI on: against Cycles (tools/cycles), the west wall's shade
+  and the sun's bounce were missing (mean difference 33 levels in that view, 14 now); about 1.1 to 1.4 ms more GPU.
+- Reflection probes can capture some faces at a time: `ReflectionCaptureOptions3D::faces` and `publish`,
+  `ReflectionProbe3D::faces_per_frame` for live probes (their picture updated when all six faces are new). The atrium's
+  chrome ball renders 2 a frame and its GI updates 512 probes a render: about 1.25 ms of the GPU less (5.1 to 3.8 ms,
+  median of three alternating autoplay runs each), the GI settling a little slower at the start.
+- The material graph's `smoothstep` node is filtered by the pixel's footprint (distant tile seams and terrazzo chips
+  no longer break into crawling dots, plainly so through a portal); the atrium's floor fades its checker and veins to
+  their mean far away too.
+- Where every GI probe round a point is hidden from it (under a ball on a plinth, a crease), it is no longer pitch
+  black: it takes its own surface's GI light from round it, where the probes see it (texels on two rings, by their
+  depth on its plane), and only failing that gives seven tenths of the probes' share to the ambient light.
+- The atrium's GI is one window over the whole room (`gi_side` 176, `gi_height` 64 at 0.15 m): it no longer moves with
+  the camera, so a walk, or a portal that carries the camera across the room, does not start its probes over (seconds
+  of changing light, horizontal bands on the walls while they filled in); about 0.3 ms more GPU.
+- The GI's light on the view takes a texel only from this fragment's own surface by its depth plane (a rim's side next
+  to its top is not its surface, though as deep).
+- Screen-space reflections on rough surfaces fade in over their lobe's width where neighbouring rays hit and miss (a
+  brushed frame's reflection of a figure was a sharp cut-out).
+- Probe and environment reflections are read at least at the roughness of how fast the normal turns across the pixel:
+  curved shiny things (the atrium's iridescent ring) no longer alias what they reflect into shimmering stripes.
+- Portal effects fade out as the camera reaches the opening; water seen in another planar view is its murk, a little
+  see-through, not a dark lid. The atrium's room probe is captured above its brass ring (it filled a quarter of the
+  probe's picture).
+- 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
+  allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
+  fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).
+- `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
+  authored scenes (they stood still).
 - Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
   with a private six-file cache. It stays off by default because cold/private-header
   rebuilds cost more; see [measurements](build_times.md#private-widget-implementation-pch).
@@ -787,6 +920,11 @@ releases may change APIs.
 
 ### Fixed
 
+- Keep `world.snapshot`'s raw world valid JSON when an entity's name holds a
+  dot (kin names the second entity called `gem` `gem.<id>`): flecs wrote its
+  children's parent paths with the dot escaped (`gem\.<id>`), which no JSON
+  reader takes. That backslash is now escaped too, so the path reads back as
+  flecs wrote it.
 - Every instance of a prefab draws. Where instances inherit the prefab's renderer (rects, sprites, text,
   particles, textured renderers), only the first instance in each table was drawn, and the others read past the
   shared value.

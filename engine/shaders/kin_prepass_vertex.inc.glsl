@@ -11,6 +11,7 @@ layout(location = 3) in vec4 aColor;
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 } draw;
 
 // The same position as the pre-pass's and the main pass's, to the bit (the main pass starts from the pre-pass's depth).
@@ -31,6 +32,7 @@ void main() {
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal;
     vUV = aUV;
     vAlpha = instance.color.a * aColor.a;

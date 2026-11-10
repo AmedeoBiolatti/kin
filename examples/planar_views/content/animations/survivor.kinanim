@@ -1,0 +1,6 @@
+statemachine locomotion
+  initial ground
+  state ground Idle
+  state air Fall
+  transition ground -> air when bool:airborne == true mode replace
+  transition air -> ground when bool:airborne == false mode replace

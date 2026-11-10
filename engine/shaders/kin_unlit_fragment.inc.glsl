@@ -25,7 +25,9 @@ void main() {
     alpha = 1.0;
 #endif
     vec3 c = color.rgb * (vec3(1.0) + vec3(material.params.x));
-    if (frame.flags.x > 0.5) {
+    if (frame.flags.x > 1.5) // (ViewOptions3D::compress)
+        c = c / (1.0 + max(c, vec3(0.0)));
+    if (frame.flags.x > 0.5 && frame.flags.x < 2.5) {
         c = encode(c);
     }
     FragColor = vec4(c * alpha, alpha);

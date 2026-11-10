@@ -21,6 +21,7 @@ layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer Casters {
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance; y: where its list starts, plus one (0: no list)
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 } draw;
 
 uint instance_index() {
@@ -43,6 +44,7 @@ void main() {
                                   instance.model);
 #endif
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
 #ifdef KIN_SHADOW_MASK
     vWorld = world.xyz;
     vUV = aUV;

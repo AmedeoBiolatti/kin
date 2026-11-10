@@ -148,7 +148,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `scene.stack` | none | All scenes with index, name, flags, and `has_world`. |
 | `scene.current` | none | Top scene name plus its `write_report` state. |
 | `scene.actions` | none | Available input actions and bindings. |
-| `world.snapshot` | `{scene?, animations?}` | Flecs world JSON plus animation snapshots unless `animations:false`. ECS scenes only; without `scene`, the topmost scene with a world (under overlays such as transitions). |
+| `world.snapshot` | `{scene?, animations?}` | Flecs world JSON (its paths escape a `.` inside a name: `gem\.12`) plus animation snapshots unless `animations:false`. ECS scenes only; without `scene`, the topmost scene with a world (under overlays such as transitions). |
 | `world.query` | `{scene?, selector?, limit?}` | Filter by ID/authored ID/name/enabled and all/none registered component names; matching count, truncation and entities with decimal string IDs/64-bit fields. |
 | `animation.diagnostics` | none | Unresolved-reference diagnostics from the scene's animation library. |
 | `ui.snapshot` | `{scene?}` | Semantic ui2 tree from `Scene::ui_context()`: IDs, labels, roles, values, bounds and interaction flags. |
