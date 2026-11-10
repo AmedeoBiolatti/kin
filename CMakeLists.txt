@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(kin VERSION 0.2.6 LANGUAGES C CXX)
+project(kin VERSION 0.3.0 LANGUAGES C CXX)
 
 # On Windows, the Python on PATH (the one `python -m pip install` installs
 # Pillow into) before the newest one in the registry.
