@@ -219,6 +219,19 @@ def add_object(o, index, materials, folder, meshes):
     data = np.fromfile(os.path.join(folder, o["mesh"]), dtype=np.float32).reshape(-1, 13)
     name = f"kin_{index}"
     key = o["mesh"]
+    # A placing with shear (a rotation inside a scale that is not uniform: a model's node in a stretched entity) is
+    # not an object's location, rotation and scale, which is all Blender keeps: its own copy, placed in its vertices.
+    m = np.array(o["transform"], dtype=np.float64).reshape(4, 4).T
+    axes = m[:3, :3]
+    lengths = np.linalg.norm(axes, axis=0)
+    cosines = (axes.T @ axes) / np.outer(lengths, lengths)
+    sheared = np.abs(cosines - np.eye(3)).max() > 1e-4
+    if sheared:
+        data = data.copy()
+        data[:, 0:3] = data[:, 0:3] @ axes.T + m[:3, 3]
+        n = data[:, 3:6] @ np.linalg.inv(axes)  # (the normals by the inverse transpose)
+        data[:, 3:6] = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+        key = None
     if key in meshes and not o["baked"]:
         mesh = meshes[key].copy()
     else:
@@ -241,7 +254,8 @@ def add_object(o, index, materials, folder, meshes):
         mesh.update()
         mesh.validate(clean_customdata=False)
         mesh.normals_split_custom_set([tuple(v) for v in data[:, 3:6]])
-        meshes.setdefault(key, mesh)
+        if key is not None:
+            meshes.setdefault(key, mesh)
     mesh.materials.clear()
     if o["baked"]:
         pages = sorted(set(int(p) for p in data[::3, 12]))
@@ -254,7 +268,7 @@ def add_object(o, index, materials, folder, meshes):
         mesh.materials.append(materials.get(o, None))
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
-    obj.matrix_world = KIN_TO_BLENDER @ kin_matrix(o["transform"])
+    obj.matrix_world = KIN_TO_BLENDER if sheared else KIN_TO_BLENDER @ kin_matrix(o["transform"])
     if o["unlit"]:
         obj.visible_diffuse = False
     # (Water casts no shadow: a sun's or a lamp's light reaches what is under it, as kin lights a pool's floor; a path
