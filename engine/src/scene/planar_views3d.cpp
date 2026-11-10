@@ -158,6 +158,30 @@ struct PlanarViews3D::Data {
         u64 frame = 0;
     };
     std::unordered_map<EcsId, Entry> entries;
+    // Where things went through each portal lately (Portal3D::effect answers them): the point on its surface (its own
+    // x, y, metres from its middle), when (Scene3D::time) and how strongly (their size); the four latest.
+    struct Disturbance {
+        Vec2f at{};
+        f32 born = -1e9f;
+        f32 strength = 0.0f;
+    };
+    struct Disturbances {
+        std::array<Disturbance, 4> latest{};
+        std::size_t next = 0;
+        u64 frame = 0;
+    };
+    std::unordered_map<EcsId, Disturbances> disturbances;
+    // A thing at `at` on portal `id`'s surface: a new disturbance, unless one began within 0.3 s and 0.35 m of it (a
+    // thing going through slowly leaves a trail of them, a quick one one).
+    void disturb(EcsId id, Vec2f at, f32 strength, f32 now) {
+        Disturbances& d = disturbances[id];
+        d.frame = frame;
+        for (const Disturbance& old : d.latest)
+            if (now - old.born < 0.3f && std::hypot(old.at.x - at.x, old.at.y - at.y) < 0.35f)
+                return;
+        d.latest[d.next] = {at, now, strength};
+        d.next = (d.next + 1) % d.latest.size();
+    }
     u64 frame = 0;
     u32 rendered = 0, skipped = 0;
     explicit Data(Renderer3D& r, PlanarSurfaces3D s) : renderer(r), surfaces(std::move(s)) {}
@@ -315,6 +339,8 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         std::vector<View3D*> views;
         u32 shown = 0;
         Vec2i frame{}; // its pictures' frame (Portal3D::resolution)
+        Portal3D::Effect effect = Portal3D::Effect::None;
+        f32 effect_strength = 1.0f;
     };
     std::vector<Mirror> mirrors;
     std::vector<Portal> portals;
@@ -330,6 +356,34 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         return scene.draws().empty() ? 0 : scene.draws().size() - 1;
     };
 
+    // A portal's effect in its surface's parameters (kin_planar_window reads them): the effect and its strength, the
+    // opening's size; its middle and its x and y axes (where a fragment is on it); its latest disturbances (x, y on it,
+    // when, how strongly).
+    const auto effect_params = [&](Material3D& level, const Portal& p) {
+        auto& q = level.shader_params;
+        q[44] = f32(u32(p.effect));
+        q[45] = std::max(p.effect_strength, 0.0f);
+        q[46] = p.pose.size.x;
+        q[47] = p.pose.size.y;
+        const Vec3f x = p.pose.rotation.rotate({1, 0, 0}), y = p.pose.rotation.rotate({0, 1, 0});
+        for (int i = 0; i < 3; ++i) {
+            q[20 + i] = (&p.pose.position.x)[i];
+            q[24 + i] = (&x.x)[i];
+            q[28 + i] = (&y.x)[i];
+        }
+        if (const auto found = d.disturbances.find(p.id); found != d.disturbances.end())
+            for (std::size_t k = 0; k < found->second.latest.size(); ++k) {
+                const Data::Disturbance& t = found->second.latest[k];
+                q[48 + 4 * k] = t.at.x;
+                q[49 + 4 * k] = t.at.y;
+                q[50 + 4 * k] = t.born;
+                q[51 + 4 * k] = t.strength;
+            }
+        else
+            for (std::size_t k = 0; k < 4; ++k)
+                q[50 + 4 * k] = -1e9f;
+    };
+
     // What is half-way through a portal, drawn at the exit too (portal_straddle): every copy of the scene's draws whose
     // bounds straddle an enabled portal's opening, plain, skinned (a character walking through: its pose as it is) or a
     // batch's, with the copy's id, so pick names it (Scene3D::draw_again). Neither half is cut by the pictures' clip
@@ -339,11 +393,25 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     // batch's groups far from every opening are passed over whole.
     {
         std::vector<std::pair<PortalPose3D, PortalPose3D>> pairs;
+        std::vector<EcsId> ids; // each pair's entry
         world.each([&](flecs::entity entity, const Portal3D& c) {
             if (c.enabled)
-                if (auto poses = portal_poses(EcsEntity{entity}))
+                if (auto poses = portal_poses(EcsEntity{entity})) {
                     pairs.push_back(*poses);
+                    ids.push_back(entity.id());
+                }
         });
+        // The portal whose surface is `pose` (an exit is the entry of another pair, where it is one).
+        const auto portal_at = [&](const PortalPose3D& pose) -> std::optional<EcsId> {
+            for (std::size_t i = 0; i < pairs.size(); ++i)
+                if (length(pairs[i].first.position - pose.position) < 1e-3f)
+                    return ids[i];
+            return std::nullopt;
+        };
+        const auto on_surface = [](const PortalPose3D& pose, Vec3f p) {
+            const Vec3f local = pose.rotation.conjugate().rotate(p - pose.position);
+            return Vec2f{local.x, local.y};
+        };
         // Whether a sphere comes near any opening (inside its slab, within its size and the radius round it).
         const auto near_any = [&](Vec3f centre, f32 radius) {
             for (const auto& [entry, exit] : pairs) {
@@ -364,8 +432,8 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         };
         std::vector<Image> images;
         const auto& draws = scene.draws();
-        for (std::size_t d = 0; !pairs.empty() && d < draws.size(); ++d) {
-            const Scene3D::Draw& draw = draws[d];
+        for (std::size_t di = 0; !pairs.empty() && di < draws.size(); ++di) {
+            const Scene3D::Draw& draw = draws[di];
             const std::span<const MeshInstance3D> copies = draw.batch
                                                                ? draw.batch.instances().subspan(draw.first, draw.count)
                                                                : scene.instances().subspan(draw.first, draw.count);
@@ -377,15 +445,27 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                     std::max({length(Vec3f{m.m[0], m.m[1], m.m[2]}), length(Vec3f{m.m[4], m.m[5], m.m[6]}),
                               length(Vec3f{m.m[8], m.m[9], m.m[10]})});
                 const Vec3f centre = m.apply(b.center());
-                for (const auto& [entry, exit] : pairs)
-                    if (const auto through = portal_straddle(entry, exit, centre, b.radius() * stretch)) {
-                        images.push_back({d, i, *through * m, DrawClip3D::whole,
-                                          copy.history_id ? copy.history_id ^ 0x9e3779b97f4a7c15ull : 0});
-                        if (draw.clip == DrawClip3D::camera &&
-                            (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask))
-                            images.push_back({d, i, m, DrawClip3D::whole_if_cut,
-                                              copy.history_id ? copy.history_id ^ 0x632be59bd9b4e019ull : 0});
+                for (std::size_t k = 0; k < pairs.size(); ++k) {
+                    const auto& [entry, exit] = pairs[k];
+                    const auto through = portal_straddle(entry, exit, centre, b.radius() * stretch);
+                    if (!through)
+                        continue;
+                    // Where it goes through, on both surfaces (the exit's where it comes out): once its middle is
+                    // near (a character's bounds, arms out, reach far round it).
+                    if (std::abs(entry.rotation.conjugate().rotate(centre - entry.position).z) < 0.5f) {
+                        const f32 strength = std::clamp(b.radius() * stretch, 0.1f, 1.0f);
+                        d.disturb(ids[k], on_surface(entry, centre), strength, scene.time);
+                        if (const auto other = portal_at(exit))
+                            d.disturb(*other, on_surface(exit, portal_point(entry, exit, centre)), strength,
+                                      scene.time);
                     }
+                    images.push_back({di, i, *through * m, DrawClip3D::whole,
+                                      copy.history_id ? copy.history_id ^ 0x9e3779b97f4a7c15ull : 0});
+                    if (draw.clip == DrawClip3D::camera &&
+                        (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask))
+                        images.push_back({di, i, m, DrawClip3D::whole_if_cut,
+                                          copy.history_id ? copy.history_id ^ 0x632be59bd9b4e019ull : 0});
+                }
             };
             const auto groups = draw.batch ? draw.batch.groups() : std::span<const InstanceGroup3D>{};
             if (!groups.empty()) {
@@ -472,6 +552,8 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         if (!poses)
             return;
         Portal p{entity.id(), poses->first, poses->second, 0, {}, {}, {}, {}, 0};
+        p.effect = c.effect;
+        p.effect_strength = c.effect_strength;
         d.keep(p.id);
         p.stand_in = {.color = c.stand_in, .unlit = true, .double_sided = true, .casts_shadow = false};
         tag(p.stand_in, index++);
@@ -512,6 +594,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
             level.surface = d.surfaces.window;
             level.emissive_texture = p.views[k]->texture();
             planar_view_params(level.shader_params, p.chain[k].projector, 0.0f, 1.0f, Data::part_of(*p.views[k]), true);
+            effect_params(level, p);
             p.levels.push_back(std::move(level));
         }
         // A box behind the opening, so that a camera a little way into it still sees through.
@@ -552,6 +635,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 shown.surface = d.surfaces.window;
                 shown.emissive_texture = view->texture();
                 planar_view_params(shown.shader_params, level.projector, 0.0f, 1.0f, Data::part_of(*view), true);
+                effect_params(shown, p);
                 m.through.push_back({i, view, level.camera, std::move(shown)});
             }
         }
@@ -609,6 +693,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     for (const Portal& p : portals)
         (void)scene.set_draw_material(p.draw, p.shown ? p.levels[0] : p.stand_in);
     std::erase_if(d.entries, [&](const auto& e) { return e.second.frame != d.frame; });
+    std::erase_if(d.disturbances, [&](const auto& e) { return d.frame - e.second.frame > 600; });
     return status3d(errors.empty(), std::move(errors));
 }
 

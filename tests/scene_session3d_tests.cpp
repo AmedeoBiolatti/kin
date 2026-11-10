@@ -1106,7 +1106,8 @@ void gpu_planar(Renderer2D& renderer) {
       {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
       {"id":"entry","components":{"Transform3D":{},"Portal3D":{"size":[2,2],"exit":"exit","stand_in":[255,0,0,255],
         "resolution":1}}},
-      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[2,2],"exit":"entry"}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[2,2],"exit":"entry",
+        "effect":"vortex","effect_strength":0.5}}},
       {"id":"box","components":{"Transform3D":{"position":[20,0,4]},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
     // What the eye sees through it: from 6 m behind the exit, turned half round (looking +Z), no portals.
     write(scratch.path / "direct.kinscene", R"({"schema":"kin.scene/1","entities":[
@@ -1159,6 +1160,10 @@ void gpu_planar(Renderer2D& renderer) {
     const auto seen = centre(session);
     for (int i = 0; i < 3; ++i)
         check(std::abs(seen[size_t(i)] - expected[size_t(i)]) <= 12, "the portal does not show what is beyond it");
+    // The exit's effect as authored (not seen from here: the entry shows the picture as ever).
+    const auto* exit_portal = session.entity("exit").get<Portal3D>();
+    check(exit_portal && exit_portal->effect == Portal3D::Effect::Vortex && exit_portal->effect_strength == 0.5f,
+          "a portal's effect did not load");
     // Going through it: in at the entry's front, out of the exit's, the rest of the step after.
     const auto step = portal_step(*session.world(), {0.5f, 0, 1}, {0.5f, 0, -1});
     check(step && step->portal.id() == session.entity("entry").id() && step->exit.id() == session.entity("exit").id(),
