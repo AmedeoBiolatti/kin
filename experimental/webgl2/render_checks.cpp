@@ -1,7 +1,9 @@
 #include "render_checks.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <kin/renderer/graph_resources.hpp>
 #include <stdexcept>
 #include <string>
@@ -326,8 +328,11 @@ void check_webgl_materials(Renderer2D& r, Renderer3D& r3d) {
         return read();
     };
     const auto near = [&](std::array<int, 4> value, std::array<int, 4> expected, const char* message) {
-        for (u32 i = 0; i < 4; ++i)
+        for (u32 i = 0; i < 4; ++i) {
+            if (std::abs(value[i] - expected[i]) > 3)
+                std::cerr << message << ": channel " << i << " got " << value[i] << " expected " << expected[i] << '\n';
             require(std::abs(value[i] - expected[i]) <= 3, message);
+        }
     };
     scene.lights.ambient = {1, 1, 1};
     near(submit({.occlusion = tex({128, 0, 0, 255})}), {188, 188, 188, 255},
@@ -337,6 +342,58 @@ void check_webgl_materials(Renderer2D& r, Renderer3D& r3d) {
     scene.lights.ambient = {0, 0, 0};
     near(submit({.color = colors::black, .emissive = 1, .emissive_texture = tex({128, 0, 0, 255})}), {128, 0, 0, 255},
          "Emissive maps must decode sRGB and emit independently of base color");
+
+    // F3: independent factors/strength must survive blue base, vertex and instance colours, with a white fallback
+    // for a missing map. The browser's LDR output clips HDR radiance after emission has been evaluated.
+    auto blue_data = quad();
+    for (auto& vertex : blue_data.vertices)
+        vertex.color = Color::rgb(0, 0, 255);
+    const auto blue_mesh = r3d.create_mesh(blue_data).value_or({});
+    require(bool(blue_mesh), "Emission reference mesh allocation failed");
+    Material3D authored{.color = Color::rgb(0, 0, 255)};
+    for (const f32 strength : {1.f, 2.f, 5.f}) {
+        authored.set_emission({.1f, .2f, .04f}, strength);
+        scene.clear();
+        require(bool(scene.draw(blue_mesh, {}, authored, Color::rgb(0, 0, 255))), "RGB emission submission failed");
+        const auto expected = to_srgb(LinearRgb{.1f * strength, .2f * strength, .04f * strength}.with_alpha());
+        near(read(), {expected.r, expected.g, expected.b, 255}, "Authored RGB emission must ignore base/vertex/tint");
+    }
+    authored.set_emission({.5f, .25f, .1f}, 2);
+    authored.emissive_texture = tex({128, 64, 255, 255});
+    scene.clear();
+    require(bool(scene.draw(blue_mesh, {}, authored, Color::rgb(0, 0, 255))), "Textured RGB emission failed");
+    const auto emitted =
+        to_srgb(LinearRgb{srgb_to_linear(128.f / 255), .5f * srgb_to_linear(64.f / 255), .2f}.with_alpha());
+    near(read(), {emitted.r, emitted.g, emitted.b, 255}, "RGB emission must multiply the decoded map and strength");
+
+    // F1: a sheared/mirrored copy whose origin is outside the view still has visible tips. Compare direct, grouped
+    // and retained submissions against culling disabled; the reference must contain actual foreground pixels.
+    for (const bool mirrored : {false, true})
+        for (u32 mode = 0; mode < 3; ++mode) {
+            const auto transform = Mat4f::translation({6.5f, 0, 0}) * Mat4f::scaling({mirrored ? -8.f : 8.f, 1, .5f}) *
+                                   Mat4f::rotation_z(45);
+            const std::array<MeshInstance3D, 1> copies{{{transform}}};
+            const auto batch = InstanceBatch3D::create(mesh, {copies[0]}, {{0, 1}}).value_or({});
+            require(bool(batch), "Affine retained batch allocation failed");
+            scene.clear();
+            const Material3D red{.color = Color::rgb(255, 0, 0), .unlit = true, .double_sided = true};
+            require(bool(mode == 0   ? scene.draw(mesh, transform, red)
+                         : mode == 1 ? scene.draw_instanced_group(mesh, copies, instance_bounds(mesh, copies), red)
+                                     : scene.draw_instanced(batch, red)),
+                    "Affine submission failed");
+            scene.cull = false;
+            read();
+            const auto expected = pixels;
+            u32 foreground = 0;
+            for (size_t i = 0; i < expected.size(); i += 4)
+                foreground += expected[i] > 200 && expected[i + 1] < 3;
+            require(foreground > 0, "Affine reference must contain visible tips");
+            scene.cull = true;
+            read();
+            require(pixels == expected, "Affine culling must preserve sheared/mirrored visible geometry");
+        }
+    std::cout << "web fidelity: RGB emission and six affine culling comparisons passed\n";
+
     scene.lights.sun.direction = {0, 0, 1};
     scene.lights.sun.color = {0.2f, 0.2f, 0.2f};
     Material3D material{.color = Color::rgb(100, 100, 100), .metallic = 1};
@@ -428,6 +485,86 @@ void check_webgl_materials(Renderer2D& r, Renderer3D& r3d) {
     near(sample(filtered), {128, 128, 0, 255}, "Mipmapped textures must keep linear magnification");
     r.set_scale_mode(pattern, ScaleMode::Nearest);
     near(sample(filtered), {0, 255, 0, 255}, "Returning to nearest must invalidate the material sampler");
+
+    // F6: exercise all six min/mip choices, both magnification choices and all U/V wrap pairs. Mips are present,
+    // but constant-UV samples magnify a single texel; a second tile distinguishes mirror from clamp.
+    r.set_scale_mode(pattern, ScaleMode::Mipmapped);
+    const auto second_tile = constant_uv({1.25f, 1.25f}), third_tile = constant_uv({2.25f, 2.25f});
+    u32 sampler_cases = 0;
+    for (const auto min : {TextureFilter3D::Nearest, TextureFilter3D::Linear})
+        for (const auto mip : {MipFilter3D::None, MipFilter3D::Nearest, MipFilter3D::Linear})
+            for (const auto mag : {TextureFilter3D::Nearest, TextureFilter3D::Linear})
+                for (const auto u : {Wrap3D::Clamp, Wrap3D::Repeat, Wrap3D::Mirror})
+                    for (const auto v : {Wrap3D::Clamp, Wrap3D::Repeat, Wrap3D::Mirror}) {
+                        Material3D m{.unlit = true, .texture = pattern};
+                        m.texture_samplers[0] = TextureSampler3D{u, v, min, mag, mip};
+                        for (const bool third : {false, true}) {
+                            scene.clear();
+                            require(bool(scene.draw(third ? third_tile : second_tile, {}, m)),
+                                    "Explicit sampler matrix submission failed");
+                            const bool right = u == Wrap3D::Clamp || (u == Wrap3D::Mirror && !third);
+                            const bool bottom = v == Wrap3D::Clamp || (v == Wrap3D::Mirror && !third);
+                            const std::array<std::array<int, 4>, 4> colors{
+                                {{{255, 0, 0, 255}}, {{0, 255, 0, 255}}, {{0, 0, 255, 255}}, {{255, 255, 255, 255}}}};
+                            near(read(), colors[u32(bottom) * 2 + u32(right)], "Explicit per-map wrap/filter mismatch");
+                        }
+                        ++sampler_cases;
+                    }
+    // One image, two maps with opposite samplers. Under ambient light the clamped AO reads green's R=0, while
+    // repeating emission reads red. Binding the image or the last map's sampler globally would change this pixel.
+    Material3D independent{.occlusion = pattern, .emissive_texture = pattern};
+    independent.set_emission({.25f, .25f, .25f});
+    independent.texture_samplers[3] = TextureSampler3D{Wrap3D::Clamp, Wrap3D::Clamp};
+    independent.texture_samplers[4] = TextureSampler3D{Wrap3D::Repeat, Wrap3D::Clamp};
+    scene.lights.ambient = {1, 1, 1};
+    scene.lights.sun.color = {};
+    scene.clear();
+    require(bool(scene.draw(wrapped, {}, independent)), "Shared-image independent-map submission failed");
+    const auto red_emission = to_srgb(LinearRgb{.25f, 0, 0}.with_alpha());
+    near(read(), {red_emission.r, 0, 0, 255}, "Shared image must preserve independent AO/emission samplers");
+    scene.lights.ambient = {};
+
+    // Actual minification must retain mips even with nearest magnification. A repeated high-frequency pattern
+    // averages to yellow in its mips; explicit no-mip sampling keeps the red texel at this pixel's phase.
+    std::vector<u8> fine_pixels(64 * 64 * 4);
+    for (u32 y = 0; y < 64; ++y)
+        for (u32 x = 0; x < 64; ++x) {
+            const u32 at = (y * 64 + x) * 4;
+            fine_pixels[at] = x % 2 ? 0 : 255;
+            fine_pixels[at + 1] = x % 2 ? 255 : 0;
+            fine_pixels[at + 3] = 255;
+        }
+    const auto fine = r.create_texture_from_rgba(fine_pixels.data(), {64, 64});
+    require(bool(fine), "Minification image allocation failed");
+    r.set_scale_mode(fine, ScaleMode::Mipmapped);
+    auto repeated_data = quad();
+    for (auto& vertex : repeated_data.vertices)
+        vertex.uv = {vertex.uv.x * 64.f + .5f / 64, vertex.uv.y * 64.f + .5f / 64};
+    const auto repeated_mesh = r3d.create_mesh(repeated_data).value_or({});
+    require(bool(repeated_mesh), "Minification mesh allocation failed");
+    scene.anisotropy = 16;
+    scene.texture_lod_bias = -2;
+    for (const auto min : {TextureFilter3D::Nearest, TextureFilter3D::Linear})
+        for (const auto mip : {MipFilter3D::None, MipFilter3D::Nearest, MipFilter3D::Linear})
+            for (const auto mag : {TextureFilter3D::Nearest, TextureFilter3D::Linear}) {
+                Material3D m{.unlit = true, .texture = fine};
+                m.texture_samplers[0] = TextureSampler3D{Wrap3D::Repeat, Wrap3D::Repeat, min, mag, mip};
+                scene.clear();
+                require(bool(scene.draw(repeated_mesh, {}, m)), "Minification submission failed");
+                near(read(),
+                     mip == MipFilter3D::None ? std::array<int, 4>{255, 0, 0, 255}
+                                              : std::array<int, 4>{128, 128, 0, 255},
+                     "Minification must preserve explicit mip/no-mip intent independently of magnification");
+            }
+    // Render targets have no mip storage. An explicit mip sampler must resolve to a usable base-level sampler.
+    Material3D missing_mips{.unlit = true, .texture = surface.texture()};
+    missing_mips.texture_samplers[0] = TextureSampler3D{Wrap3D::Clamp, Wrap3D::Clamp};
+    submit(missing_mips);
+    near(read(32, 36), {0, 0, 255, 255}, "Missing mip storage must resolve explicitly to base-level sampling");
+    scene.anisotropy = 1;
+    scene.texture_lod_bias = 0;
+    std::cout << "web fidelity: " << sampler_cases
+              << " sampler combinations, independent maps and minification passed\n";
 
     // Three copies share one skinned draw but retain independent palette offsets.
     auto data = quad();

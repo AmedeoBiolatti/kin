@@ -45,7 +45,7 @@ bool is_flat_soup(const MeshData3D& data) {
         }
         flat += all ? 1 : 0;
     }
-    return counted > 0 && flat * 100 >= counted * 99;
+    return counted > 0 && flat == counted; // every nondegenerate triangle must permit normal reconstruction
 }
 
 // Position-only welding is valid only when selecting another corner cannot change appearance. Attribute-bearing
@@ -261,7 +261,7 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
 
 // The bake of a chain (mesh_levels_bake_key, save_mesh_levels). Raise it whenever build_mesh_levels would make another
 // chain from the same mesh and options (the key then changes, so no old bake is read), or the bytes change.
-constexpr u32 levels_bake_version = 2;
+constexpr u32 levels_bake_version = 3;
 
 u64 mesh_levels_bake_key(const MeshData3D& data, const MeshOptions3D& options) {
     BakeKey key{"kin.mesh_levels", levels_bake_version};

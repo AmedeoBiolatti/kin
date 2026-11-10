@@ -131,8 +131,8 @@ struct MeshOptions3D {
     // Scene3D::lod then chooses, for each copy, a cut through the hierarchy, so that the part of one huge mesh near
     // the camera stays fine while the far part is coarse. `levels` is ignored for such a mesh. Built at load, over the
     // mesh welded (by position, UV and colour where it is flat-shaded: its normals are then made in the shader from
-    // the screen-space derivatives of the position, so a normal map has no effect on it). A bound on the number of
-    // triangles in a cluster (at most 128).
+    // the screen-space derivatives of the position; normal maps use a UV-derived frame where usable). A bound on the
+    // number of triangles in a cluster (at most 128).
     bool clusters = false;
     u32 cluster_triangles = 128;
     bool operator==(const MeshOptions3D&) const = default;

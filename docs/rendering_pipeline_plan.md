@@ -1,6 +1,6 @@
 # Rendering pipeline and 3D quality plan
 
-Status: implementation underway, 28 October 2026. Sections below describe the intended delivery; completed work and validation are recorded in [rendering progress](rendering_progress.md).
+Status: implementation underway; F1–F6 status reconciled on 10 November 2026. Sections below retain the delivery requirements; the E1 status table distinguishes implemented fixes from outstanding acceptance evidence. Completed work and validation are recorded in [rendering progress](rendering_progress.md).
 
 Kin should provide a fast default renderer whose materials, passes and output can be customized without forking the backend. The next work should establish correct visibility and composition, reduce repeated CPU work, account for GPU resources, and make imported art predictable. A compiled render graph should then support both the stock pipeline and developer pipelines, including ASCII rendering, alternative shadows and experiments with finite light propagation.
 
@@ -8,7 +8,7 @@ The intended result is a coherent default configuration with explicit overrides.
 
 ## Scope and current baseline
 
-The baseline for this plan is main at `6245258`. The existing [3D plan](3d_plan.md) remains the historical design and measurement log; [3D rendering](rendering_3d.md) documents current APIs. Features described below as deliverables are proposals, not available APIs.
+The baseline for this plan is main at `6245258`. The existing [3D plan](3d_plan.md) remains the historical design and measurement log; [3D rendering](rendering_3d.md) documents current APIs. Deliverables without an implementation status remain proposals; use the current guide and progress log to establish availability.
 
 The concurrent `exp/realtime-lighting` work was inspected at `77b76c8`, with additional edits in progress. Recheck that branch before implementing overlapping changes. Its committed work already includes clustered local lights, anisotropic filtering, texture mip bias, specular anti-aliasing, TAA improvements, SDF and probe GI, fog sunlight through shadows, pre-pass depth reuse, asynchronous image readback and a dedicated GI sun map. Finer occupancy within GI voxels is in progress. Quality work here must incorporate those results rather than implement them again. Benchmark identities must include the commit, local patch, shaders and content used.
 
@@ -215,7 +215,24 @@ Start view, afternoon, Normal quality; kin `exp/realtime-lighting` at `c0fa9a0`,
 
 ## E1 Rendering correctness fixes
 
-Reconfirm each issue against the implementation being changed. Keep these fixtures independent of the future graph so the fixes can land early.
+All six fixes have implementations and recorded native regression coverage. The requirements and acceptance criteria below remain the completion contract; the combined E1 acceptance gate stays open pending the evidence listed in [E1 acceptance follow-up](#e1-acceptance-follow-up).
+
+The following mapping comes from current source/tests and the [Stage 1 progress record](rendering_progress.md#stage-1-correctness-and-material-fidelity). Its hardware/software Vulkan passes and browser smoke are historical results, not new runs from this documentation review. The [validation guide](rendering_validation.md#automated-checks) defines how to qualify a changed implementation. A general browser smoke pass does not establish each focused F1–F6 acceptance case.
+
+| Fix | Implemented behaviour | Existing regression evidence |
+| --- | --- | --- |
+| F1 Bounds | Shared conservative `stretch_bound()` for shear/mirrors, posed bounds, visibility and LOD, including browser use. Unusable active skin bounds make the whole pose unbounded. | [CPU affine tests](../tests/render3d_cpu_tests.cpp) check transformed corners, 64,000 directions and unbounded poses; [bounds image tests](../tests/render3d_bounds_tests.cpp) compare culling on/off with groups, retained copies, skinning, shadows, picking and CPU/GPU cluster cuts. The [browser fixture](../experimental/webgl2/render_checks.cpp) adds six direct/grouped/retained shear/mirror comparisons. |
+| F2 Transparency | Native mesh copies and sprites share camera-depth composition; only consecutive compatible packed records batch. `sort=false` source depth uses admitted sprites only. Browser meshes sort per copy; browser particles are unsupported. | [Fidelity tests](../tests/render3d_fidelity_tests.cpp) compare batched/separate mesh copies, sprites on both sides of glass and additive light behind alpha in gamma/linear working spaces. `particle_capacity_composition` also checks a capped source against its survivor-only reference. |
+| F3 Emission | Independent linear RGB factor and strength, explicit legacy mode, material-file/import/shader support and GI invalidation rules. | [Fidelity tests](../tests/render3d_fidelity_tests.cpp) cover imported factors, blue base/vertex/tint independence, HDR strength, legacy appearance, GI colour, strength reuse, texture updates, zero-factor membership and material-file round trips; [material assets](../tests/material_assets3d_tests.cpp) cover sharing, variants and reload. The [browser fixture](../experimental/webgl2/render_checks.cpp) checks independent/textured RGB and strength before its LDR output clipping. |
+| F4 Flat LOD | Uniform-attribute shortcut plus seam-aware remapping/attribute simplification; level zero retained and flat normal-map frame repaired. Minority authored normals prevent whole-mesh flat reconstruction; indexed cluster welding skips unused vertices. | [Mesh-cluster suite](../tests/mesh_cluster_tests.cpp) checks indexed/unindexed UV and colour/alpha seams, mixed normals, unused vertices and versioned bakes, and reports fixture build time/extra storage; [fidelity tests](../tests/render3d_fidelity_tests.cpp) compare flat/smooth normal-map output. |
+| F5 Capacity | Reserve a complete finest-cut upper bound per submitted draw for the camera and, for casters, sun views; otherwise draw complete level-zero meshes in dependent passes. CPU counters require no GPU readback. | [Fidelity tests](../tests/render3d_fidelity_tests.cpp) check zero/tiny/exact-fit budgets on CPU/GPU paths, including `cluster_shadow_reservations` with mixed casters/noncasters and one/four sun maps; [renderer tests](../tests/render3d_tests.cpp), `test_gpu_cut_overflow_clamps`, check cascades, two views, recovery and no render-time waits with debug readback off, alongside occlusion-pressure coverage. |
+| F6 Samplers | Independent per-map wrap/min/mag/mip descriptors with shared images, material-file inheritance/clearing and native/browser binding paths. | [Fidelity tests](../tests/render3d_fidelity_tests.cpp) cover 108 imported filter/wrap combinations and same-image sampler differences; [model asset tests](../tests/model_assets3d_tests.cpp) check image sharing with independent filters. The [browser fixture](../experimental/webgl2/render_checks.cpp) checks 108 sampler combinations, actual minification, independent AO/emission samplers on one image, no-mip/nearest intent under quality settings and missing-mip fallback. Stage 1 also records cutout-shadow/picking coverage. |
+
+Reconfirm an issue against the implementation before changing it. Reuse these fixtures independently of graph work, and attach before/after regression evidence when repairing a newly reproduced failure.
+
+The [10 November F2/F5 follow-up](rendering_progress.md#f2f5-capacity-follow-up--2026-11-10) records two newly reproduced capacity cases, their fixes and focused hardware/software Vulkan synchronization-validation passes. Broader F2/F5 acceptance and performance work remains in the follow-up list below.
+
+The [F1/F3/F4/F6 follow-up](rendering_progress.md#f1f3f4f6-correctness-and-browser-follow-up--2026-11-10) records additional bound/LOD fixes, native validation, focused browser fidelity checks and small LOD fixture measurements.
 
 ### F1 Conservative bounds under general affine transforms
 
@@ -223,7 +240,7 @@ Starting points: `sphere_of` in [gpu_renderer3d.cpp](../engine/src/renderer/gpu/
 
 The largest matrix-column length does not conservatively bound a sphere under shear. A scaled parent and rotated child can produce shear without an explicit shear component. Establish one documented affine stretch bound and use equivalent maths wherever it affects visibility, spatial groups, LOD error, shadow reach and temporal matching distances.
 
-For linear transform A, a candidate is to form G = transpose(A) * A and bound stretch by `sqrt(max_i(sum_j(abs(G[i,j]))))`, with conservative floating-point rounding. The row sum bounds the largest eigenvalue of G; its square root bounds stretch and reduces to the maximum axis scale for orthogonal columns. Compare its cost and tightness with a Frobenius bound and transformed boxes. Use a tighter or specialized path only when its conservativeness is established; an unconverged power iteration is not an upper-bound proof.
+The implemented [stretch bound](../engine/src/render3d/skeleton.cpp) forms G = transpose(A) * A and bounds stretch by `sqrt(max_i(sum_j(abs(G[i,j]))))`, using double intermediates and outward float rounding. The row sum bounds the largest eigenvalue of G; its square root bounds stretch and reduces to the maximum axis scale for orthogonal columns before rounding. A comparison with a Frobenius bound or transformed boxes is a cost/tightness experiment. Use a tighter or specialized path only when its conservativeness is established; an unconverged power iteration is not an upper-bound proof.
 
 Preserve negative scales and singular transforms where supported. Define failure or conservative visibility behaviour for nonfinite transforms. Custom deformation must provide conservative bounds or opt out of affected culling; ordinary rest bounds cannot prove visibility for arbitrary vertex code.
 
@@ -241,6 +258,8 @@ Starting points: `cull_and_upload`, `order_draws`, `order_particle_batches` and 
 Define a common transparent submission representation carrying view/layer, geometry or sprite reference, material, stable identity and camera-space sort depth. Sort visible transparent copies across compatible mesh and particle submissions, then form consecutive draw runs. Batching must preserve the selected composition order. Do not derive a batch's global order from its first submitted instance or mean depth.
 
 Use deterministic ties. Keep overlays in their own defined space. Specify where additive effects belong relative to alpha layers: additive layers commute with each other, but their placement relative to an alpha foreground changes the result. Preserve explicit artistic layer ordering as a documented override.
+
+The current default sorts transparent copies and sprites together, including additive effects behind alpha foregrounds. Explicit particle `sort=false` keeps that source in one run at its mean depth and opts into approximate ordering. Browser particles remain unavailable; browser mesh composition is the supported subset. See [particle drawing](rendering_3d.md#particles-and-weather) for current controls and ordering diagnostics.
 
 Object-depth sorting remains approximate for intersecting geometry. Document that limit and evaluate weighted blended OIT as an optional path for dense effects after the sorted path is correct. Do not substitute approximate OIT for all alpha materials or change the meaning of existing authored materials silently.
 
@@ -288,7 +307,9 @@ Acceptance:
 
 Starting points: `Lod3D::max_cluster_triangles`, GPU cluster scan/args/gather shaders and CPU cluster fallback.
 
-Replace partial cluster truncation with a complete representation per affected object. First implement a safe fallback that does not require synchronous GPU readback. A candidate is to emit a full-mesh fallback indirect draw for an object whose chosen cut does not fit, and suppress that object's partial gathered draw. Use compatible geometry choices across its dependent depth, colour, motion, pick and shadow passes. A reserved complete coarse cut is a later optimization.
+Partial cluster truncation has been replaced by conservative admission before CPU/GPU cut selection. Each submitted draw reserves the upper bound of its complete finest cut for its copies, the camera and, for casters, sun views. Noncasters reserve camera capacity only. A draw that cannot fit uses its complete level-zero meshes across depth, colour, motion, pick and shadow passes. `cluster_budget_fallbacks` and `cluster_budget_reserved_triangles` are CPU diagnostics available without GPU readback. See the current [cluster contract](rendering_3d.md#clusters).
+
+This safety policy can fall back even when the actual coarser cut would fit, and fallback geometry can exceed the intended detail/performance target. A possible optimization is GPU admission based on actual per-object cut counts, with full-mesh fallback indirect draws and suppression of every rejected object's partial gathered draw across dependent passes. A reserved complete coarse cut is another option. Neither is required to repair the original missing-geometry bug; measure the current fallback cost before choosing either.
 
 Account for all views and shadow passes sharing the allocation. Ensure arithmetic and prefix sums cannot wrap at supported limits. Grow within the configured budget, select coarser complete cuts, or use the safe fallback; failed resource creation must return a clear operation failure rather than present missing geometry as success.
 
@@ -315,6 +336,19 @@ Acceptance:
 - Two maps sharing an image but using different samplers do not overwrite each other or duplicate decoded images unnecessarily.
 - Check base-repeat/occlusion-clamp, mixed nearest/mipmapped filtering, mask shadows, picking and GI voxelization.
 - Native/browser capability differences resolve explicitly. Existing files using material-wide wrap settings convert predictably.
+
+### E1 acceptance follow-up
+
+Reuse or link existing results where they satisfy a criterion; add focused cases only for uncovered behaviour. Record the reviewed commit, backend, effective capabilities and any skips. Retain the E1 gate that each regression must demonstrably fail before its fix; the status mapping above alone does not establish that history for every case.
+
+1. **F1:** Extend the current direct/grouped/retained browser comparisons to the remaining streamed-submission evidence mapping. The skin-bound helper now returns an unbounded result for unusable active joints, and GI clips unbounded boxes to its requested area before integer grid conversion; this does not make an invalid pose renderable. Record false-positive visibility and CPU/GPU cost separately from correctness. Custom deformation bounds/fallbacks belong to E4/E5.
+2. **F2:** Map masked depth, soft intersections, premultiplied/zero-alpha additive output, TAA coverage and picking to existing regressions. Record sort time, draw-run count and GPU cost on Grove/mixed effects. Resolve the artistic-layer override requirement against the supported API. Keep intersecting-geometry sorting and `sort=false` documented as approximations; weighted blended OIT is an optional later feature, not an E1 blocker.
+3. **F3:** Native/browser RGB fidelity and material-file round trips now have focused evidence. Complete the direct/cooked, custom-material, scene-editing and Lua workflow mapping, and attach the Cornell panel reference result with renderer/content identities. Existing native/GI pixels do not by themselves establish every serialization or editing path. Verify migration and ambiguous-field diagnostics through those paths.
+4. **F4:** Procedural indexed/unindexed seams, mixed authored normals, unused vertices, and fixture build time/extra vertex/index payload are covered. Attach missing-normal imported visual transition comparisons and remaining normal-map/handedness evidence. Keep returned LOD payload separate from GPU residency, and geometric limits separate from appearance error; explicit tangent-stream support belongs to E4.
+5. **F5:** Measure pathological full-mesh fallback cost and confirm the allocation-failure, arithmetic-limit and shared-view/pass ownership policies against the current implementation. Preserve existing zero/tiny/exact-fit, cascade, two-view and no-readback coverage. Optimize actual-cut admission only if these measurements justify it; complete silhouettes/casters and ordinary fallback counters remain mandatory.
+6. **F6:** The browser filter/wrap matrix, independent maps, missing-mip fallback and nearest/no-mip intent under quality settings now pass focused checks. Map native mask shadows, picking and GI voxelization to exact cases; browser picking/GI are unsupported and cannot be claimed as parity passes. Preserve predictable conversion of legacy material-wide settings.
+
+Continue the remaining workflow/pass evidence mapping needed to close E1. For performance work, start with F5 fallback measurements and F2 composition costs under E0's comparison protocol. The dated follow-ups distinguish new results from historical evidence; broader platform acceptance remains in E8.
 
 ## E2 Remove repeated CPU scans
 
@@ -610,7 +644,8 @@ Run native tests under the real selected backend and require GPU execution for r
 
 ### Final acceptance checklist
 
-- [ ] F1 through F6 have independent regression coverage and complete native/browser policies.
+- [x] F1 through F6 have implementations and recorded native regression coverage; see the E1 status table.
+- [ ] F1 through F6 meet every acceptance criterion with complete native/browser policies and linked evidence; see [E1 acceptance follow-up](#e1-acceptance-follow-up).
 - [ ] Static and sparse-edit workloads show the intended reduction in scans and updates without hiding raw writes.
 - [ ] Stock and custom pipelines share resources/operations and stable frames reuse compiled plans.
 - [ ] ASCII, custom shadows/deformation and a bounded slow-light example use public interfaces.

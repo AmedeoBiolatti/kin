@@ -143,6 +143,26 @@ void test_affine_bounds() {
     std::cout << "affine bounds: sheared hierarchy, retained groups and 64,000 directional stretch checks\n";
 }
 
+// An incomplete pose must not appear bounded just because another active joint has a usable matrix.
+void test_unbounded_skin_pose() {
+    const std::array<SkinBound3D, 2> bounds{{{{0, 0, 0}, 1}, {{0, 0, 0}, 4}}};
+    std::array<Mat4f, 2> matrices{};
+    Vec3f centre;
+    f32 radius;
+    for (const f32 bad : {std::numeric_limits<f32>::quiet_NaN(), std::numeric_limits<f32>::infinity(), 1e38f}) {
+        matrices[1] = Mat4f::scaling({bad, bad, bad});
+        assert(skin_sphere(bounds, matrices, centre, radius));
+        assert(std::isinf(radius) && std::isfinite(centre.x) && std::isfinite(centre.y) && std::isfinite(centre.z));
+    }
+    assert(skin_sphere(bounds, std::span{matrices}.first(1), centre, radius) && std::isinf(radius));
+    const std::array<SkinBound3D, 1> unused{{{{}, -1}}};
+    assert(!skin_sphere(unused, {}, centre, radius));
+    const std::vector<SkinBound3D> oversized(max_skin_joints + 1, {{}, 1});
+    const std::vector<Mat4f> oversized_pose(oversized.size());
+    assert(skin_sphere(oversized, oversized_pose, centre, radius) && std::isinf(radius));
+    std::cout << "skin bounds: invalid, overflowing and missing active joints remain unbounded\n";
+}
+
 // Every group's bounds against measuring the group's copies again.
 void check_groups(const InstanceBatch3D& batch) {
     for (const InstanceGroup3D& g : batch.groups()) {
@@ -703,6 +723,7 @@ void test_sun_times_at_the_poles() {
 } // namespace
 
 int main() {
+    test_unbounded_skin_pose();
     test_scene_instance_exposure();
     test_affine_bounds();
     test_bounds_follow_edits();

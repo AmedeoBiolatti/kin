@@ -66,7 +66,7 @@ bool is_flat(const MeshData3D& data) {
         }
         flat += all ? 1 : 0;
     }
-    return counted > 0 && flat * 100 >= counted * 99;
+    return counted > 0 && flat == counted; // a minority of authored smooth normals still affects appearance
 }
 
 // Clusters built in a thread's own pools, appended to the mesh's in order.
@@ -293,7 +293,8 @@ MeshClusterBuild3D build_mesh_clusters(const MeshData3D& data, const MeshOptions
         }
         mesh.vertices.resize(unique);
         for (std::size_t i = 0; i < source_vertices; ++i) {
-            mesh.vertices[remap[i]] = data.vertices[i];
+            if (remap[i] != ~u32{0}) // indexed meshes may carry vertices no triangle references
+                mesh.vertices[remap[i]] = data.vertices[i];
         }
         if (mesh.flat) {
             for (MeshVertex3D& v : mesh.vertices) {
@@ -556,7 +557,7 @@ MeshClusterBuild3D build_mesh_clusters(const MeshData3D& data, const MeshOptions
 
 // The bake of a build (mesh_clusters_bake_key, save_mesh_clusters). Raise it whenever build_mesh_clusters would make
 // another hierarchy from the same mesh and options (the key then changes, so no old bake is read), or the bytes change.
-constexpr u32 clusters_bake_version = 1;
+constexpr u32 clusters_bake_version = 2;
 static_assert(sizeof(MeshCluster3D) == 84 && sizeof(MeshClusterGroup3D) == 36,
               "a field added to MeshCluster3D or MeshClusterGroup3D must be saved and restored (and "
               "clusters_bake_version raised)");

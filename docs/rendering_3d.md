@@ -1510,7 +1510,8 @@ normal to the axis, a ring on the ground). A texture, an atlas of columns by row
 `Premultiplied` (a texture that holds colour times alpha: alpha 0 with colour adds, inside one sprite). `sort` (default true): sprites and alpha/additive mesh copies compose together by camera-space centre depth, with
 stable ties. Only consecutive copies of one compatible source and contiguous packed slots share a draw. This preserves
 cross-batch interleaving and dims additive light behind alpha foregrounds. `sort=false` explicitly keeps that particle
-source in one run at its mean depth. Centre sorting is approximate for intersecting geometry; it does not split polygons.
+source in one run at the mean depth of its admitted sprites; particles dropped by the frame capacity do not affect that
+depth. Centre sorting is approximate for intersecting geometry; it does not split polygons.
 `debug_stats().transparent_draw_runs`, `transparent_sort_ms` (CPU scheduling, not GPU time) and `composition_order_bytes`
 show the cost. Overlay meshes use their own scene/camera order. Native sprites are supported; browser particle support
 remains unavailable.
@@ -3150,7 +3151,9 @@ clusters of at most 128 triangles (`kin/render3d/mesh_clusters3d.hpp`; `levels` 
 rounds of grouping about 4 neighbouring clusters, simplifying the group to half with its outer border locked, and splitting the
 result, up to one cluster (open meshes stop at a few roots). The mesh is welded to share its vertices (by every attribute; a
 flat-shaded one, as a model with no normals, by position, UV and colour, and its normals are then made in the shader from the screen-space
-derivatives of the position: a normal map has no effect on it). `Mesh3D::cluster_count()`, `cluster_levels()`, `cluster_roots()`,
+derivatives of the position; a normal map uses the UV-derived frame where the UVs are nondegenerate). Every nondegenerate
+triangle must qualify for flat reconstruction; a minority of authored smooth normals keeps the attribute-aware path.
+`Mesh3D::cluster_count()`, `cluster_levels()`, `cluster_roots()`,
 `leaf_triangles()`, `cluster_triangles()` read it back. The kiln (5.15 M triangles) takes 5 s at load and 1.5 GB for the process, less than
 with no hierarchy, since the welded vertices replace the unindexed ones on the GPU. The mesh keeps on the CPU only the
 hierarchy (`MeshClusters3D`, what the cut reads): the welded vertices are uploaded and let go (`MeshClusterBuild3D`).
@@ -3174,7 +3177,8 @@ against 0.4 to 0.9 for the CPU cut). The picture is the CPU cut's, byte for byte
 anti-aliasing, picking). It costs video memory: the table of clusters (80 bytes each) and every level's indices (the kiln: 62 MB more than the leaves
 alone, 7 MB of table), and the gathered indices (`scene.lod.max_cluster_triangles`, default 4 million triangles, 12 bytes each, shared by all
 passes and copies). Before selecting clusters, each submitted draw reserves the upper bound of its finest complete
-cut for all camera/sun views. If it cannot fit, that draw uses its complete level-zero mesh across colour, depth, motion,
+cut for the camera and, for sun casters, all sun views. Noncasters reserve camera capacity only. If it cannot fit, that
+draw uses its complete level-zero mesh across colour, depth, motion,
 picking and shadows. This first conservative policy can use more geometry than the requested detail budget, even when
 an actual coarser cut would have fit. It preserves coverage without synchronous GPU readback; `cluster_budget_fallbacks`
 counts submitted fallback copies and `cluster_budget_reserved_triangles` reports the reservation. Both CPU and GPU cuts
