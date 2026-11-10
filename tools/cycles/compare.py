@@ -2,7 +2,7 @@
 
     python3 tools/cycles/compare.py <snapshot dir> [--samples 256] [--denoise] [--blender path] [--reuse]
 
-The snapshot comes from a kin program that writes one (planar_atrium --cycles-snapshot DIR, with --at and --survivor
+The snapshot comes from a kin program that writes one (the kin gallery's atrium --cycles-snapshot DIR, with --at and --survivor
 to place the camera and the character): DIR/scene.json, its meshes and baked pages, and kin.png, kin's own picture.
 This renders the scene with Blender's Cycles (tools/cycles/render_snapshot.py; --reuse keeps a render already there)
 and writes DIR/cycles/: cycles.png (through the view's exposure and tonemap), compare.png (kin | Cycles | the

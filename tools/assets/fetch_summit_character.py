@@ -23,7 +23,7 @@ def main():
   with urllib.request.urlopen(URL,timeout=30) as r:data=r.read(8*1024*1024+1)
  if len(data)>8*1024*1024 or hashlib.sha256(data).hexdigest()!=SHA:raise SystemExit('Survivor archive checksum/size changed')
  a.scratch.mkdir(parents=True,exist_ok=True)
- out=REPO/'examples/summit/content/kenney-character';out.mkdir(parents=True,exist_ok=True)
+ out=REPO/'examples/camp_walk/content/kenney-character';out.mkdir(parents=True,exist_ok=True)
  with tempfile.TemporaryDirectory(dir=a.scratch) as directory:
   root=Path(directory)
   with zipfile.ZipFile(io.BytesIO(data)) as archive:

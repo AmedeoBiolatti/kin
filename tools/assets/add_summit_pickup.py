@@ -65,7 +65,7 @@ def add_pickup(path):
     path.write_bytes(output)
 
 if __name__=='__main__':
-    path=REPO/'examples/summit/content/kenney-character/survivor.glb'
+    path=REPO/'examples/camp_walk/content/kenney-character/survivor.glb'
     add_pickup(path)
     manifest_path=path.with_name('manifest.json')
     if manifest_path.exists():

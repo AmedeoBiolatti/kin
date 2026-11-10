@@ -53,86 +53,24 @@ if(KIN_EXPERIMENTAL_3D)
     target_link_libraries(sponza_walk PRIVATE kin_example_workloads)
     kin_game(sponza_walk TITLE "Sponza Walk" NO_CONTENT)
 
-    # Summit: a one-player Peak-like on the 3D renderer and physics (docs/3d_plan.md, P4). The simulation is a library with no
-    # window or renderer (summit/level, game, input_mapper, camera, script); the executable is its view.
-    add_library(kin_summit_sim STATIC summit/level.cpp summit/game.cpp summit/script.cpp summit/input_map.cpp summit/camera.cpp
-        summit/rock.cpp summit/climber.cpp summit/settings.cpp summit/environment.cpp summit/hud.cpp summit/audio.cpp summit/expedition.cpp summit/props.cpp)
-    target_include_directories(kin_summit_sim PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(kin_summit_sim PUBLIC kin::engine)
-    kin_enable_release_optimizations(kin_summit_sim)
-    add_executable(summit summit/main.cpp summit/view.cpp summit/hud_draw.cpp summit/external_assets.cpp summit/benchmark.cpp)
-    target_link_libraries(summit PRIVATE kin_summit_sim kin_example_workloads)
-    kin_game(summit TITLE "Summit" CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/summit/content")
+    # The 3D starting points: camp_walk, projectile_range and lua_range share one set of CC0 content (camp scenes,
+    # Kenney's survival kit and survivor), which the engine's 3D tests also read.
+    set(_camp_content "${CMAKE_CURRENT_SOURCE_DIR}/camp_walk/content")
     add_executable(camp_walk camp_walk/main.cpp)
     target_link_libraries(camp_walk PRIVATE kin::engine)
-    kin_game(camp_walk TITLE "Camp walk" CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/summit/content")
+    kin_game(camp_walk TITLE "Camp walk" CONTENT "${_camp_content}")
     add_executable(projectile_range projectile_range/main.cpp)
     target_link_libraries(projectile_range PRIVATE kin::engine)
-    kin_game(projectile_range TITLE "Projectile range" CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/summit/content")
+    kin_game(projectile_range TITLE "Projectile range" CONTENT "${_camp_content}")
     add_executable(lua_range lua_range/main.cpp)
     target_link_libraries(lua_range PRIVATE kin::engine)
-    kin_game(lua_range TITLE "Lua range" CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/summit/content")
+    kin_game(lua_range TITLE "Lua range" CONTENT "${_camp_content}")
     if(BUILD_TESTING)
         add_test(NAME lua-range-smoke COMMAND lua_range --headless --frames=240 --seed=7 --mute)
-    endif()
-    if(BUILD_TESTING)
-        add_executable(kin_summit_asset_tests summit/asset_tests.cpp)
-        target_link_libraries(kin_summit_asset_tests PRIVATE kin_summit_sim)
-        target_compile_definitions(kin_summit_asset_tests PRIVATE SUMMIT_ASSET_CONTENT="${CMAKE_CURRENT_SOURCE_DIR}/summit/content")
-        add_test(NAME kin-summit-assets COMMAND kin_summit_asset_tests)
-        add_executable(kin_summit_tests summit/summit_tests.cpp)
-        target_link_libraries(kin_summit_tests PRIVATE kin_summit_sim)
-        add_test(NAME kin-summit COMMAND kin_summit_tests)
-        add_executable(kin_summit_expedition_tests summit/expedition_tests.cpp)
-        target_link_libraries(kin_summit_expedition_tests PRIVATE kin_summit_sim)
-        add_test(NAME kin-summit-expedition COMMAND kin_summit_expedition_tests)
-        set_tests_properties(kin-summit-expedition PROPERTIES TIMEOUT 120)
-        add_test(NAME summit-script-expedition COMMAND summit --script expedition --seed 1)
-        add_test(NAME summit-script-shelter COMMAND summit --script shelter --seed 1)
-        set_tests_properties(summit-script-expedition summit-script-shelter PROPERTIES TIMEOUT 120)
-        add_test(NAME summit-expedition-shots
-            COMMAND summit --headless --script shelter --seed 1 --width 320 --height 180 --samples 1 --max-steps 12000
-                    "--screenshot=${CMAKE_CURRENT_BINARY_DIR}/summit_shots/expedition" --skip-if-unavailable)
-        set_tests_properties(summit-expedition-shots PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu" SKIP_RETURN_CODE 77 TIMEOUT 120
-            PASS_REGULAR_EXPRESSION "summit_shots/expedition_complete.png")
-        # Summit's presentation on the CPU (P4b): HUD model and layout, menu, sound cues and curves, environment, settings, and
-        # that none of it changes the simulation.
-        add_executable(kin_summit_presentation_tests summit/presentation_tests.cpp)
-        target_link_libraries(kin_summit_presentation_tests PRIVATE kin_summit_sim)
-        add_test(NAME kin-summit-presentation COMMAND kin_summit_presentation_tests)
-        set_tests_properties(kin-summit-presentation PROPERTIES TIMEOUT 300)
-        # The scripted runs: a CPU run with no window (the route bot to the summit, the same with a fall), and the same with
-        # pictures at key moments, small, which skips (77) without a 3D device and fails without one when
-        # KIN_REQUIRE_GPU_TESTS is set (lavapipe is enough). Unit/presentation replay
-        # tests compare hashes within this build; no machine-specific golden is portable.
-        add_test(NAME summit-script-climb
-            COMMAND summit --script climb --seed 1 --timing)
-        add_test(NAME summit-script-fall COMMAND summit --script fall --seed 1)
-        add_test(NAME summit-script-shots
-            COMMAND summit --headless --script climb --seed 1 --width 320 --height 180 --samples 1
-                    "--screenshot=${CMAKE_CURRENT_BINARY_DIR}/summit_shots/climb" --skip-if-unavailable)
-        set_tests_properties(summit-script-shots PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu" SKIP_RETURN_CODE 77 TIMEOUT 300
-            PASS_REGULAR_EXPRESSION "summit_shots/climb_summit.png")
-        # The same with the HUD hidden and the sound muted (the flags a picture or a CI run uses).
-        add_test(NAME summit-script-shots-nohud
-            COMMAND summit --headless --script climb --seed 1 --width 320 --height 180 --samples 1 --no-hud --mute
-                    "--screenshot=${CMAKE_CURRENT_BINARY_DIR}/summit_shots/nohud" --skip-if-unavailable)
-        set_tests_properties(summit-script-shots-nohud PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu" SKIP_RETURN_CODE 77 TIMEOUT 300
-            PASS_REGULAR_EXPRESSION "summit_shots/nohud_summit.png")
-        set_tests_properties(summit-script-climb summit-script-fall PROPERTIES TIMEOUT 120)
     endif()
 endif()
 
 if(KIN_EXPERIMENTAL_3D)
-    add_library(kin_blockfield_world STATIC blockfield/world.cpp)
-    target_include_directories(kin_blockfield_world PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/blockfield")
-    target_link_libraries(kin_blockfield_world PUBLIC kin::engine)
-    kin_enable_release_optimizations(kin_blockfield_world)
-    add_executable(blockfield blockfield/main.cpp)
-    target_link_libraries(blockfield PRIVATE kin_blockfield_world)
-    kin_game(blockfield TITLE "Blockfield" NO_CONTENT)
-    add_executable(blockfield_render_compare blockfield/render_compare.cpp)
-    target_link_libraries(blockfield_render_compare PRIVATE kin_blockfield_world)
     add_executable(industrial_yard industrial_yard/main.cpp)
     target_link_libraries(industrial_yard PRIVATE kin::engine)
     # planar_views: mirrors, still water and portals; kin's planar surfaces compiled at build time (kin_planar_surfaces).
@@ -140,32 +78,10 @@ if(KIN_EXPERIMENTAL_3D)
         add_executable(planar_views planar_views/main.cpp)
         target_link_libraries(planar_views PRIVATE kin::engine)
         kin_planar_surfaces(planar_views)
-        # planar_atrium: the same as an authored scene (Mirror3D, Portal3D, material graphs, Lua) in a SceneSession3D.
-        add_executable(planar_atrium planar_views/atrium.cpp)
-        target_link_libraries(planar_atrium PRIVATE kin::engine)
-        target_compile_definitions(planar_atrium PRIVATE
-            ATRIUM_CONTENT="${CMAKE_CURRENT_SOURCE_DIR}/planar_views/content")
-        kin_planar_surfaces(planar_atrium)
-        # Its material graphs cooked beside them (<graph>.spv, git-ignored), as kin_game cooks a game's: without, each
-        # is compiled with glslc when the atrium starts (about 2 s each).
-        kin_cook_material_graphs(atrium_graphs CONTENT planar_views/content)
-        if(atrium_graphs)
-            add_custom_target(planar_atrium_graphs DEPENDS ${atrium_graphs})
-            add_dependencies(planar_atrium planar_atrium_graphs)
-        endif()
     endif()
-    # material_gallery: imported materials (kin_import_material --graphs) on pedestals; content not in the repository.
-    add_executable(material_gallery material_gallery/main.cpp)
-    target_link_libraries(material_gallery PRIVATE kin::engine)
     # bunker_exit: auto exposure, decals and morph targets in one small scene (every picture made in code).
     add_executable(bunker_exit bunker_exit/main.cpp)
     target_link_libraries(bunker_exit PRIVATE kin::engine)
-    if(BUILD_TESTING)
-        add_executable(kin_blockfield_tests blockfield/tests.cpp)
-        target_link_libraries(kin_blockfield_tests PRIVATE kin_blockfield_world)
-        add_test(NAME kin-blockfield COMMAND kin_blockfield_tests)
-        set_tests_properties(kin-blockfield PROPERTIES TIMEOUT 60)
-    endif()
 endif()
 
 if(BUILD_TESTING)
@@ -195,17 +111,10 @@ if(BUILD_TESTING)
         # depends on an external reference cache. The full Sponza benchmark
         # still uses the separately downloaded asset. Required GPU runs fail
         # when the device is unavailable; optional runs may skip.
-        foreach(_example IN ITEMS sponza_walk summit)
-            if(_example STREQUAL "sponza_walk")
-                set(_smoke_mode sponza)
-            else()
-                set(_smoke_mode summit)
-            endif()
-            add_test(NAME ${_example}-required-gpu-policy
-                COMMAND ${CMAKE_COMMAND} "-DPROGRAM=$<TARGET_FILE:${_example}>" "-DMODE=${_smoke_mode}"
-                        -P "${PROJECT_SOURCE_DIR}/tests/required_gpu_smoke.cmake")
-            set_tests_properties(${_example}-required-gpu-policy PROPERTIES TIMEOUT 90)
-        endforeach()
+        add_test(NAME sponza_walk-required-gpu-policy
+            COMMAND ${CMAKE_COMMAND} "-DPROGRAM=$<TARGET_FILE:sponza_walk>" -DMODE=sponza
+                    -P "${PROJECT_SOURCE_DIR}/tests/required_gpu_smoke.cmake")
+        set_tests_properties(sponza_walk-required-gpu-policy PROPERTIES TIMEOUT 90)
         set(_sponza_no_reference "${CMAKE_CURRENT_BINARY_DIR}/sponza_smoke_no_reference")
         file(WRITE "${_sponza_no_reference}" "Smoke tests must use their explicit vendored model.\n")
         add_test(NAME sponza-walk-smoke

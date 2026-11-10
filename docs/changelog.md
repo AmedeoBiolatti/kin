@@ -7,6 +7,15 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- The larger showcase games moved to the [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery), which builds them
+  against kin as a subproject: Summit (with its browser export and checks), Blockfield, the planar-views atrium
+  (`planar_atrium`, now `atrium`) and the material gallery. kin keeps the small samples, Signal Siege, Signal Breach and
+  the renderer viewers. The 3D starting points' CC0 content moved from `examples/summit/content` to
+  `examples/camp_walk/content`; the `summit-webgl2` preset, `KIN_BUILD_WEB_SUMMIT`, `tests/webgl2_benchmark.mjs`,
+  `tools/analyze_webgl_pacing.py` and the smoke check's `summit` and `simulation` modes went with Summit. The
+  `requests/` folder (game requests, all done) is removed.
+- Fixed: `kin_compile_surface_shader` (and so `kin_planar_surfaces`) compiled nothing for a game that adds kin as a
+  subproject: its surface variants were variables of kin's own directory scope.
 - Material graphs: a `local_position` built-in input, the point in the copy's own space (posed when skinned), from the
   mesh's vertex shader (at a vertex, through the inverse model matrix). A pattern on it moves and turns with the copy,
   where `position`'s stays in the world (noise on a rolling ball slid over it).

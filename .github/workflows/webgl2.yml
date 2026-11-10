@@ -8,13 +8,9 @@ on:
       - 'engine/**'
       - 'cmake/**'
       - 'games/hex_demo/**'
-      - 'examples/summit/**'
-      - 'examples/content/lang/fonts/**'
       - 'experimental/webgl2/**'
       - 'web/**'
       - 'tests/webgl2_smoke.mjs'
-      - 'tests/webgl2_benchmark.mjs'
-      - 'tools/analyze_webgl_pacing.py'
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
       - '.github/workflows/webgl2.yml'
@@ -44,9 +40,6 @@ jobs:
           - preset: webgl2-3d
             target: webgl2_3d_fixture
             mode: 3d
-          - preset: summit-webgl2
-            target: summit_web
-            mode: summit
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -63,28 +56,7 @@ jobs:
           cmake --build build/${{ matrix.preset }} --target ${{ matrix.target }}_package --parallel 4
       - name: Check WebGL2 rendering and game input in an iframe
         shell: bash
-        run: |
-          if [ "${{ matrix.mode }}" = summit ]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y xvfb xdotool
-            xvfb-run -a node tests/webgl2_smoke.mjs --headed --mode summit --root build/summit-webgl2/web/summit_web --output out/webgl2-smoke
-            xvfb-run -a node tests/webgl2_smoke.mjs --headed --deny-storage --mode summit --root build/summit-webgl2/web/summit_web --output out/webgl2-storage-denied
-          else
-            node tests/webgl2_smoke.mjs --mode ${{ matrix.mode }} --root build/${{ matrix.preset }}/web/${{ matrix.target }} --output out/webgl2-smoke
-          fi
-      - name: Check Summit simulation and expedition in Wasm
-        if: matrix.mode == 'summit'
-        shell: bash
-        run: |
-          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
-          cmake --build build/summit-webgl2 --target summit_web_simulation_package --parallel 4
-          node tests/webgl2_smoke.mjs --mode simulation --root build/summit-webgl2/web/summit_web_simulation --output out/webgl2-simulation
-      - name: Check Summit benchmark export
-        if: matrix.mode == 'summit'
-        run: |
-          python3 -m py_compile examples/summit/compare_web_native.py tools/analyze_webgl_pacing.py
-          xvfb-run -a node tests/webgl2_benchmark.mjs --software --steps 360 --root build/summit-webgl2/web/summit_web --output out/webgl2-benchmark
-          node tests/webgl2_benchmark.mjs --headless --software --steps 360 --root build/summit-webgl2/web/summit_web --output out/webgl2-benchmark-offscreen
+        run: node tests/webgl2_smoke.mjs --mode ${{ matrix.mode }} --root build/${{ matrix.preset }}/web/${{ matrix.target }} --output out/webgl2-smoke
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -93,7 +65,3 @@ jobs:
             build/${{ matrix.preset }}/packages/${{ matrix.target }}-webgl2.zip
             build/${{ matrix.preset }}/bin/${{ matrix.target }}.html.symbols
             out/webgl2-smoke/
-            out/webgl2-storage-denied/
-            out/webgl2-simulation/
-            out/webgl2-benchmark/
-            out/webgl2-benchmark-offscreen/

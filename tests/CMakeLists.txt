@@ -462,7 +462,7 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set_tests_properties(kin-scene-queries3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_camp_input_tests kin-camp-input SOURCES camp_input_tests.cpp)
     kin_add_test(kin_camp_gameplay3d_tests kin-camp-gameplay3d SOURCES camp_gameplay3d_tests.cpp
-        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     set_tests_properties(kin-camp-gameplay3d PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME kin-camp-push COMMAND kin_camp_gameplay3d_tests push)
     set_tests_properties(kin-camp-push PROPERTIES SKIP_RETURN_CODE 77)
@@ -475,21 +475,21 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set_tests_properties(kin-scene-pipeline3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_prefab_pool3d_tests kin-prefab-pool3d SOURCES prefab_pool3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
-                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     set_tests_properties(kin-prefab-pool3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_runtime_scene3d_tests kin-runtime-scene3d SOURCES runtime_scene3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
-                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     set_tests_properties(kin-runtime-scene3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_particle_assets3d_tests kin-particle-assets3d SOURCES particle_assets3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
-                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     kin_add_test(kin_particle_shadow_tests kin-particle-shadows3d SOURCES particle_shadow_cast3d_tests.cpp)
     set_tests_properties(kin-particle-shadows3d PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
     add_test(NAME kin-particle-assets3d-cpu COMMAND kin_particle_assets3d_tests cpu)
     set_tests_properties(kin-particle-assets3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_physics3d_asset_tests kin-physics3d-assets SOURCES physics3d_asset_tests.cpp
-        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     # Material graphs (material_graph3d.hpp): the compiler, on the CPU (with glslc: every node type compiled).
     kin_add_test(kin_material_graph3d_tests kin-material-graph3d SOURCES material_graph3d_tests.cpp)
     kin_cook_material_graph(_cooked_graph SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tinted.kingraph")
@@ -516,7 +516,7 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     target_include_directories(kin_material_import3d_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/render3d)
     kin_add_test(kin_material_assets3d_tests kin-material-assets3d SOURCES material_assets3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
-                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     if(KIN_GLSLC)
         kin_compile_glsl(_kin_material_shader OUTPUT_DIR "${_kin_test_shader_dir}" SOURCES shaders/custom_flat.frag.glsl)
         add_custom_target(kin_material_test_shader DEPENDS ${_kin_material_shader})
@@ -526,11 +526,11 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set_tests_properties(kin-material-assets3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_scene_session3d_tests kin-scene-session3d SOURCES scene_session3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
-                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     set_tests_properties(kin-scene-session3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_scene3d_asset_tests kin-scene3d-assets SOURCES scene3d_asset_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
-                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/camp_walk/content")
     set_tests_properties(kin-scene3d-assets PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_model_assets3d_tests kin-model-assets3d SOURCES model_assets3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
