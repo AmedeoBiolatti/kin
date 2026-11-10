@@ -579,7 +579,8 @@ jobs:
 
   # The ruleset requires a check named "Linux GPU (lavapipe)". The Release GPU
   # jobs above split that work, so this job takes the name and passes when all
-  # four of them pass. (The Debug job is not part of it, as before.)
+  # four of them pass. (The Debug job is not part of it, as before.) Called from
+  # the release workflow, the job names carry a "tests / " prefix.
   gpu-required:
     name: Linux GPU (lavapipe)
     needs: [select-run, gpu]
@@ -598,7 +599,7 @@ jobs:
             exit 0
           fi
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --paginate \
-            --jq '.jobs[] | select(.name | test("^Linux GPU \\(lavapipe, (Release|render3d [0-9] of 3)\\)$")) | "\(.name): \(.conclusion)"' | tee jobs.txt
+            --jq '.jobs[] | select(.name | test("(^|/ )Linux GPU \\(lavapipe, (Release|render3d [0-9] of 3)\\)$")) | "\(.name): \(.conclusion)"' | tee jobs.txt
           test "$(wc -l < jobs.txt)" -eq 4
           ! grep -v ': success$' jobs.txt
 
