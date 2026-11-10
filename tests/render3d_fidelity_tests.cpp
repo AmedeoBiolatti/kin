@@ -13,6 +13,7 @@
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <stdexcept>
+#include <string_view>
 
 namespace {
 using namespace kin;
@@ -27,6 +28,12 @@ void cpu() {
     assert(m.texture->sampler == (TextureSampler3D{Wrap3D::Mirror, Wrap3D::Clamp, TextureFilter3D::Linear,
                                                    TextureFilter3D::Nearest, MipFilter3D::Nearest}));
     assert(!m.normal->reset_sampler && m.occlusion->reset_sampler && !m.occlusion->sampler);
+    const auto restored = parse_materials3d_asset(write_materials3d_asset(*parsed));
+    assert(restored);
+    const auto& roundtrip = restored->base.material;
+    assert(roundtrip.emission_mode == m.emission_mode && roundtrip.emission_color == m.emission_color &&
+           roundtrip.emissive == m.emissive && roundtrip.texture->sampler == m.texture->sampler &&
+           !roundtrip.normal->reset_sampler && roundtrip.occlusion->reset_sampler && !roundtrip.occlusion->sampler);
     const auto legacy = parse_materials3d_asset(R"({"schema":"kin.materials3d/1","material":{"emissive":2}})");
     assert(legacy && legacy->base.material.emission_mode == EmissionMode3D::BaseRelative);
     for (const auto* bad : {R"({"emission_color":[1,0]})", R"({"emission_color":[-1,0,0]})",
@@ -63,6 +70,82 @@ std::vector<u8> shoot(Renderer2D& renderer, Renderer3D& r3d, View3D& view, const
     renderer.present();
     return pixels;
 }
+// Admission can truncate a source before composition. A sort=false source's approximate depth must describe only
+// its surviving sprites: an invisible dropped sprite must not pull its foreground survivor behind the glass.
+void particle_capacity_composition(Renderer2D& renderer) {
+    Renderer3D r3d{renderer};
+    assert(r3d.capabilities().particles);
+    auto view = r3d.create_view({160, 120}, {.samples = 1, .background = colors::black}).value_or({});
+    const auto glass = r3d.create_mesh(meshes::box({4, 4, .01f})).value_or({});
+    assert(view && glass);
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({0, 0, 5}, {});
+    scene.cull = false;
+    assert(scene.draw(glass, {}, {.color = Color::rgba(0, 255, 0, 128), .unlit = true, .blend = Blend3D::Alpha}));
+    // The renderer admits at most 2^20 sprites. Degenerate, transparent fillers occupy all but one slot without
+    // contributing pixels or per-sprite composition commands; the second source has one survivor and one drop.
+    constexpr u32 capacity = 1u << 20;
+    const std::vector<ParticleSprite3D> filler(capacity - 1, ParticleSprite3D{{}, 0, 0, {}, 0});
+    assert(scene.draw_particles({.sort = false}, filler));
+    const std::array<ParticleSprite3D, 2> source{{{{0, 0, 1}, 2, 0, {1, 0, 0}, 1}, {{0, 0, -20}, 2, 0, {0, 0, 1}, 1}}};
+    assert(scene.draw_particles({.softness = 0, .sort = false}, {source.data(), 1}));
+    const auto expected = shoot(renderer, r3d, view, scene);
+    assert(r3d.debug_stats().particles_drawn == capacity && r3d.debug_stats().particles_dropped == 0);
+    scene.clear();
+    assert(scene.draw(glass, {}, {.color = Color::rgba(0, 255, 0, 128), .unlit = true, .blend = Blend3D::Alpha}));
+    assert(scene.draw_particles({.sort = false}, filler));
+    assert(scene.draw_particles({.softness = 0, .sort = false}, source));
+    const auto actual = shoot(renderer, r3d, view, scene);
+    const auto& stats = r3d.debug_stats();
+    assert(stats.particles_drawn == capacity && stats.particles_dropped == 1 && stats.device_waits == 0);
+    const u32 centre = (60 * 160 + 80) * 4;
+    assert(expected[centre] > 250 && expected[centre + 1] < 3);
+    if (actual != expected)
+        throw std::runtime_error("dropped particle changed its source's composition depth");
+    std::cout << "composition: particle-cap survivor stays in front of glass with sort=false\n";
+}
+
+// Active sun maps do not consume gathered-index capacity for a noncaster. A camera-only cut must fit alongside a
+// caster at the exact shared boundary, for both CPU and GPU selection, with no synchronous diagnostic readback.
+void cluster_shadow_reservations(Renderer2D& renderer) {
+    Renderer3D r3d{renderer};
+    const auto mesh = r3d.create_mesh(meshes::sphere(1, 32, 16), {.clusters = true}).value_or({});
+    auto view = r3d.create_view({160, 120}, {.samples = 1, .background = colors::black}).value_or({});
+    assert(mesh && mesh.cluster_count() > 1 && view);
+    for (const bool gpu : {false, true})
+        for (const u32 cascades : {1u, 4u})
+            for (const bool caster_first : {false, true}) {
+                Scene3D scene;
+                scene.camera = Camera3D::look_at({0, 0, 7}, {});
+                scene.lights.shadow_area = {{-4, -4, -4}, {4, 4, 4}};
+                scene.lights.shadow_resolution = 64;
+                scene.lights.shadow_cascades = cascades;
+                scene.debug.gpu_culling = gpu;
+                for (const bool casts : {caster_first, !caster_first})
+                    assert(scene.draw(mesh, Mat4f::translation({casts ? -1.2f : 1.2f, 0, 0}),
+                                      {.unlit = true, .casts_shadow = casts}));
+                const auto expected = shoot(renderer, r3d, view, scene);
+                scene.lod.enabled = true;
+                scene.debug.force_level = 0;
+                const u32 room = mesh.leaf_triangles() * (2 + cascades);
+                for (const u32 budget : {0u, room - 1, room}) {
+                    scene.lod.max_cluster_triangles = budget;
+                    const auto actual = shoot(renderer, r3d, view, scene);
+                    assert(actual == expected);
+                    const auto& stats = r3d.debug_stats();
+                    assert(stats.device_waits == 0 && stats.cluster_overflow == 0 && stats.shadow_casters > 0);
+                    if (budget == room && stats.cluster_budget_fallbacks != 0)
+                        throw std::runtime_error("noncaster reserved unused sun views and forced a full-mesh fallback");
+                    assert(stats.cluster_budget_fallbacks == (budget == 0 ? 2u : budget == room ? 0u : 1u));
+                    if (budget == room) {
+                        assert(stats.cluster_budget_reserved_triangles == room && stats.cluster_copies == 2);
+                        assert(stats.cluster_gpu == (gpu && r3d.capabilities().gpu_driven_clusters));
+                    }
+                }
+            }
+    std::cout << "cluster budget: camera-only noncasters fit exact shared capacity with one/four sun maps\n";
+}
+
 void stock_graph_parity(Renderer2D& renderer) {
     Renderer3D r3d{renderer};
     auto compiled = r3d.create_view({160, 120}, {.samples = 1, .hdr = true, .pick = true}).value_or({});
@@ -389,7 +472,12 @@ void check_gpu(Renderer2D& renderer) {
 #endif
 }
 } // namespace
-int main() {
+int main(int argc, char** argv) {
+    const std::string_view selected = argc == 2 ? argv[1] : "";
+    if (argc > 2 || (!selected.empty() && selected != "--particle-capacity" && selected != "--cluster-reservations")) {
+        std::cerr << "usage: kin_render3d_fidelity_tests [--particle-capacity|--cluster-reservations]\n";
+        return 2;
+    }
     cpu();
     bool ready = false;
     const char* require = std::getenv("KIN_REQUIRE_GPU_TESTS");
@@ -401,8 +489,14 @@ int main() {
             throw std::runtime_error("SDL_GPU unavailable");
         Renderer2D renderer{std::move(backend)};
         ready = true;
-        check_gpu(renderer);
-        stock_graph_parity(renderer);
+        if (selected.empty() || selected == "--particle-capacity")
+            particle_capacity_composition(renderer);
+        if (selected.empty() || selected == "--cluster-reservations")
+            cluster_shadow_reservations(renderer);
+        if (selected.empty()) {
+            check_gpu(renderer);
+            stock_graph_parity(renderer);
+        }
         return 0;
     } catch (const std::exception& e) {
         const bool fail = ready || (require && require[0] && require[0] != '0');

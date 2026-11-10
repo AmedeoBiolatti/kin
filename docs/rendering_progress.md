@@ -2,6 +2,36 @@
 
 Work proceeds on `exp/rendering-foundations`, from committed lighting work `77b76c8`. See the [pipeline plan](rendering_pipeline_plan.md) for scope and acceptance gates, and the [build and validation guide](rendering_validation.md) for current commands and CI coverage. Earlier sections below preserve dated implementation and measurement checkpoints.
 
+## F1/F3/F4/F6 correctness and browser follow-up — 2026-11-10
+
+- F1: `skin_sphere` no longer drops unusable active joints and reports a finite bound for the remainder. Missing/nonfinite matrices, unrepresentable bounds or too many active bounds produce a zero centre/infinite radius; no active joints still returns false. GI clips unbounded boxes to its requested area before integer grid conversion. This preserves conservative bounds without promising valid rendering of malformed poses. The new CPU regression failed before the fix. Browser pixel checks compare direct, grouped and retained shear/mirror submissions against culling disabled, with a nonblank reference.
+- F3: native material-file round trips now check independent RGB/strength alongside sampler inheritance/clearing. Browser pixel checks cover RGB independent of blue base, vertex and instance colours, decoded emissive textures and strength through the LDR output's clipping. Existing native/GI tests continue to pass; no additional emission implementation was needed for these cases.
+- F4: both LOD and cluster builders previously treated 99-percent-flat meshes as entirely flat, discarding minority authored normals. Every nondegenerate triangle must now qualify before normal reconstruction is selected. A second regression reproduced a crash when indexed flat-cluster welding wrote an unused vertex through the remapper's sentinel index; unused entries are now skipped. Both failures were reproduced before their fixes. Levels/cluster bake versions are now 3/2. Indexed/unindexed UV and colour/alpha seam checks, unchanged level zero, mixed normals and unused vertices pass; hard normal seams may legitimately prevent another LOD level.
+- F6: browser pixel checks cover 108 min/mag/mip/wrap combinations across two repeated tiles, actual minification for every min/mip/mag combination, opposite AO/emission samplers on one image, nearest/no-mip intent with quality overrides and base-level fallback for missing mip storage. Existing descriptors/bindings passed; no sampler implementation change was needed.
+
+The small flat-LOD fixture reports the following single-run diagnostics, not a controlled speed comparison or GPU residency measurement. Each builds four levels over the same 1,024-triangle surface; indexed and unindexed seam cases retain equivalent appearance attributes. Extra payload excludes base geometry and allocator overhead.
+
+| Fixture | Build (ms) | Extra vertices | Extra vertex bytes | Extra index bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Unindexed, UV/colour seams | 1.219 | 319 | 11,484 | 10,752 |
+| Indexed, UV/colour seams | 1.152 | 0 | 0 | 10,752 |
+| Unindexed, uniform attributes | 0.735 | 305 | 10,980 | 10,752 |
+
+Validation: `kin-render3d-cpu` and `kin-mesh-clusters` pass. Bounds, fidelity and surface-stage suites pass on RTX 4080 Laptop Vulkan and lavapipe with the Khronos layer loaded and synchronization/shader-access validation enabled: six passes, no skips or validation errors. The Emscripten 6.0.13 `webgl2-3d` bundle passes the Chromium/SwiftShader fixture, including the new pixel cases, GL error checks, input, resize and fullscreen. Native `build/` was reused; `build/webgl2-3d/` is the separate browser configuration required by its existing preset. Formatting and document links are checked. Evidence, source identities, before-fix logs, JUnit and browser output are local under `out/runs/f1-f3-f4-f6-20261110/`.
+
+This closes the newly reproduced bound/LOD failures and adds focused supported-browser evidence. Full hardware/browser performance calibration, remaining imported visual transitions, scene-editing/Lua/cooked workflow mapping, the identified reference captures and the E8 platform matrix remain separate acceptance work. Browser picking, GI and native custom material shaders are unsupported; the browser's emission output is LDR.
+
+## F2/F5 capacity follow-up — 2026-11-10
+
+Two focused regressions failed against the original renderer at `cbb0043` and pass after the fixes in this working tree:
+
+- F2: truncating a particle source at the frame cap left dropped sprites in its `sort=false` mean-depth sum. A surviving foreground sprite could consequently compose behind glass. The mean now uses admitted sprites only. `particle_capacity_composition` compares the capped scene byte-for-byte with its survivor-only reference at the 2^20-sprite boundary; transparent degenerate fillers keep this a bounded image test.
+- F5: noncasters reserved gathered-index capacity for sun views that neither CPU nor GPU selection could emit. Admission now reserves those views only for casters. `cluster_shadow_reservations` checks a caster/noncaster pair with one/four sun maps, both submission orders, CPU/GPU selection and zero/below-exact/exact budgets. Exact capacity admits both cuts; lower budgets retain the full-mesh reference image. Debug readback is off and the render-time device-wait counter stays zero. Admission remains conservative for whole submitted draws; actual-cut GPU admission is a separate optimization.
+
+Both cases extend the existing [fidelity suite](../tests/render3d_fidelity_tests.cpp); its optional `--particle-capacity` and `--cluster-reservations` arguments isolate the reproductions. The complete `kin-render3d-fidelity` and `kin-render3d-surface-stages` suites pass on RTX 4080 Laptop Vulkan and lavapipe with Khronos layer 1.4.341.0, synchronization validation and shader-access analysis enabled: four passes, no skips or validation errors, with loader evidence of layer insertion for every test. The layer was downloaded/extracted locally because it was absent from the system; the first attempted validation runs passed functionally but were rejected as validation evidence. Source formatting and whitespace checks pass.
+
+Local evidence is under `out/runs/f2-f5-20261110/`: before-fix failure logs/identities, final JUnit/verbose logs, validation-layer identity and summary. Release/GCC 15, experimental 3D and image I/O; scene runtime, physics, scripting, audio and TTF disabled. The compatible existing `build/` directory was reconfigured and the two affected targets built explicitly. This is focused native coverage. Browser policies, remaining F2/F5 acceptance mapping, Grove/mixed-effects timings and pathological fallback costs remain open. The GPU was occupied by a game and Blender, so no controlled frame-time or speedup claim is made.
+
 ## CI and documentation completion — 2026-10-29
 
 Integrated main's UI/editor update (`9ac0dde`) into the rendering branch before platform validation. CI now includes

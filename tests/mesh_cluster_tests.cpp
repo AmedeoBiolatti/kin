@@ -666,6 +666,16 @@ void test_flat_weld() {
     assert(build_mesh_clusters(meshes::box({1.0f, 2.0f, 3.0f}), options).flat);
 }
 
+void test_flat_unused_vertices() {
+    auto data = meshes::box({1, 2, 3});
+    const auto reference = build_mesh_clusters(data, {});
+    data.vertices.push_back({.position = {100, 200, 300}}); // unreferenced by any triangle
+    std::cerr << "flat clusters: checking an indexed mesh with an unused vertex\n";
+    const auto actual = build_mesh_clusters(data, {});
+    assert(actual.flat && actual.vertices.size() == reference.vertices.size() &&
+           actual.leaf_indices() == reference.leaf_indices());
+}
+
 // What a mesh keeps (MeshClusters3D) holds no vertex: the welded ones are only in the build, which the renderer uploads
 // and lets go; the hierarchy moved out of a build is whole, and cuts as the build does.
 template <typename T>
@@ -807,23 +817,75 @@ void test_flat_lod_seams() {
             for (const auto v : {vertex(0, 0), vertex(1, 0), vertex(0, 1), vertex(1, 0), vertex(1, 1), vertex(0, 1)})
                 soup.vertices.push_back(v);
         }
-    const auto chain = build_mesh_levels(soup, {.levels = 4});
-    assert(chain.count() > 1 && chain.levels[0].indices.empty() && chain.levels[0].triangles == soup.triangle_count());
-    const auto vertex = [&](u32 index) -> const MeshVertex3D& {
-        return index < soup.vertices.size() ? soup.vertices[index] : chain.extra_vertices[index - soup.vertices.size()];
-    };
-    for (std::size_t level = 1; level < chain.count(); ++level)
-        for (std::size_t i = 0; i < chain.levels[level].indices.size(); i += 3) {
-            const auto& a = vertex(chain.levels[level].indices[i]);
-            const auto& b = vertex(chain.levels[level].indices[i + 1]);
-            const auto& c = vertex(chain.levels[level].indices[i + 2]);
-            assert(a.color == b.color && a.color == c.color);
-            const bool right = a.color.g != 0;
-            for (const auto* v : {&a, &b, &c}) {
-                assert(v->uv.x == v->position.x + (right ? 4 : 0));
-                assert(right ? v->position.x >= 0 : v->position.x <= 0);
+    const auto verify = [&](const MeshData3D& data, bool seams) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto chain = build_mesh_levels(data, {.levels = 4});
+        const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        assert(chain.count() > 1 && chain.levels[0].indices.empty() &&
+               chain.levels[0].triangles == data.triangle_count());
+        const auto vertex = [&](u32 index) -> const MeshVertex3D& {
+            return index < data.vertices.size() ? data.vertices[index]
+                                                : chain.extra_vertices[index - data.vertices.size()];
+        };
+        size_t index_bytes = 0;
+        for (std::size_t level = 1; level < chain.count(); ++level) {
+            index_bytes += chain.levels[level].indices.size() * sizeof(u32);
+            for (std::size_t i = 0; i < chain.levels[level].indices.size(); i += 3) {
+                const auto& a = vertex(chain.levels[level].indices[i]);
+                const auto& b = vertex(chain.levels[level].indices[i + 1]);
+                const auto& c = vertex(chain.levels[level].indices[i + 2]);
+                assert(a.color == b.color && a.color == c.color);
+                const bool right = a.color.g != 0;
+                for (const auto* v : {&a, &b, &c}) {
+                    if (seams) {
+                        assert(v->uv.x == v->position.x + (right ? 4 : 0));
+                        assert(right ? v->position.x >= 0 : v->position.x <= 0);
+                    } else {
+                        assert(v->uv == Vec2f{} && v->color == colors::white);
+                    }
+                }
             }
         }
+        std::cout << "flat LOD fixture: indexed=" << !data.indices.empty() << " seams=" << seams << " build_ms=" << ms
+                  << " levels=" << chain.count() << " extra_vertices=" << chain.extra_vertices.size()
+                  << " extra_vertex_bytes=" << chain.extra_vertices.size() * sizeof(MeshVertex3D)
+                  << " extra_index_bytes=" << index_bytes << '\n';
+    };
+    verify(soup, true);
+    MeshData3D indexed;
+    std::map<std::array<f32, 9>, u32> vertices;
+    for (const auto& v : soup.vertices) {
+        const std::array<f32, 9> key{v.position.x,   v.position.y,   v.position.z,   v.uv.x,        v.uv.y,
+                                     f32(v.color.r), f32(v.color.g), f32(v.color.b), f32(v.color.a)};
+        const auto [at, added] = vertices.try_emplace(key, u32(indexed.vertices.size()));
+        if (added)
+            indexed.vertices.push_back(v);
+        indexed.indices.push_back(at->second);
+    }
+    verify(indexed, true);
+    auto uniform = soup;
+    for (auto& v : uniform.vertices) {
+        v.uv = {};
+        v.color = colors::white;
+    }
+    verify(uniform, false);
+}
+
+// A mostly flat soup still has authored normals on its exceptional triangle. Neither LOD welding nor cluster
+// welding may classify the whole mesh as flat and replace those normals with reconstructed face normals.
+void test_mixed_flat_normals() {
+    auto mixed = icosphere(3, true);
+    for (u32 i = 0; i < 3; ++i)
+        mixed.vertices[i].normal = normalize(Vec3f{1, 2, 3});
+    const auto chain = build_mesh_levels(mixed, {.levels = 3});
+    const auto clusters = build_mesh_clusters(mixed, {});
+    std::cerr << "mixed normal detection: LOD flat=" << !chain.extra_vertices.empty()
+              << " clusters flat=" << clusters.flat << '\n';
+    // Hard normal seams may stop simplification. Preserving them takes precedence over making another level.
+    assert(chain.levels[0].triangles == mixed.triangle_count() && chain.extra_vertices.empty() && !clusters.flat);
+    assert(std::any_of(clusters.vertices.begin(), clusters.vertices.end(),
+                       [&](const MeshVertex3D& v) { return v.normal == mixed.vertices[0].normal; }));
+    std::cout << "mixed flat normals: exceptional authored normals use the attribute-aware paths\n";
 }
 
 // A key changes with what the build reads, and only with that.
@@ -990,6 +1052,8 @@ void test_bake_hash() {
 } // namespace
 
 int main() {
+    test_flat_unused_vertices();
+    test_mixed_flat_normals();
     std::cout << "meshes\n";
     test_meshes();
     std::cout << "tiny\n";

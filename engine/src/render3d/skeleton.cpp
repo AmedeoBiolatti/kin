@@ -223,7 +223,12 @@ f32 stretch_bound(const Mat4f& m) {
 }
 
 bool skin_sphere(std::span<const SkinBound3D> bounds, std::span<const Mat4f> matrices, Vec3f& center, f32& radius) {
-    const std::size_t n = std::min(bounds.size(), matrices.size());
+    const auto unbounded = [&] {
+        center = {};
+        radius = std::numeric_limits<f32>::infinity();
+        return true;
+    };
+    const std::size_t n = bounds.size();
     Vec3f lo{std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max(), std::numeric_limits<f32>::max()};
     Vec3f hi{-lo.x, -lo.y, -lo.z};
     struct Ball {
@@ -233,13 +238,15 @@ bool skin_sphere(std::span<const SkinBound3D> bounds, std::span<const Mat4f> mat
     // The moved balls, small enough on the stack for a skeleton of any size (at most max_skin_joints).
     Ball balls[max_skin_joints];
     std::size_t used = 0;
-    for (std::size_t j = 0; j < n && used < max_skin_joints; ++j) {
+    for (std::size_t j = 0; j < n; ++j) {
         if (bounds[j].radius < 0.0f) {
             continue;
         }
+        if (j >= matrices.size() || used == max_skin_joints)
+            return unbounded();
         Ball b{matrices[j].apply(bounds[j].center), bounds[j].radius * stretch_bound(matrices[j])};
         if (!std::isfinite(b.c.x) || !std::isfinite(b.c.y) || !std::isfinite(b.c.z) || !std::isfinite(b.r)) {
-            continue; // a broken matrix: its joint is not trusted to bound anything (the others still do)
+            return unbounded(); // omitting one active joint would underbound the whole pose
         }
         lo = {std::min(lo.x, b.c.x - b.r), std::min(lo.y, b.c.y - b.r), std::min(lo.z, b.c.z - b.r)};
         hi = {std::max(hi.x, b.c.x + b.r), std::max(hi.y, b.c.y + b.r), std::max(hi.z, b.c.z + b.r)};
@@ -254,6 +261,8 @@ bool skin_sphere(std::span<const SkinBound3D> bounds, std::span<const Mat4f> mat
         radius = std::max(radius, length(balls[i].c - center) + balls[i].r);
     }
     radius = radius * 1.0001f + 1e-5f;
+    if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) || !std::isfinite(radius))
+        return unbounded();
     return true;
 }
 

@@ -4886,7 +4886,6 @@ u32 GpuRenderer3D::select_particles(FrameCtx& ctx, std::span<const ParticleSourc
         }
         batch.first = static_cast<u32>(_particle_order.size());
         _particle_keys.clear();
-        f64 depth_sum = 0.0;
         const bool stretched = src.look->facing == ParticleFacing3D::Stretched;
         for (u32 j = 0; j < src.count; ++j) {
             const ParticleSprite3D& p = src.sprites[j];
@@ -4900,7 +4899,6 @@ u32 GpuRenderer3D::select_particles(FrameCtx& ctx, std::span<const ParticleSourc
             }
             const f32 key = dot(p.position - eye, forward);
             _particle_keys.push_back({key, j});
-            depth_sum += static_cast<f64>(key);
         }
         if (_particle_keys.empty()) {
             continue;
@@ -4920,8 +4918,10 @@ u32 GpuRenderer3D::select_particles(FrameCtx& ctx, std::span<const ParticleSourc
             // passes of 11 bits, O(n), and the same order every run).
             radix_sort_far_first(_particle_keys, _particle_scratch);
         }
+        f64 depth_sum = 0.0;
         for (const auto& [key, j] : _particle_keys) {
             _particle_order.push_back(j);
+            depth_sum += static_cast<f64>(key); // only admitted sprites contribute to the source's mean depth
         }
         batch.count = static_cast<u32>(_particle_keys.size());
         batch.depth = static_cast<f32>(depth_sum / static_cast<f64>(_particle_keys.size()));
@@ -8109,9 +8109,10 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         stats.preparation_cpu_bytes = ctx.prepared->cpu_bytes();
     };
     bool any_levels = false, any_clusters = false, any_skinned = false;
-    // Reserve the complete finest cut's upper bound before choosing the cluster path. A draw that cannot fit uses
-    // its full level-zero mesh in every dependent pass. This conservative policy needs no GPU readback and cannot
-    // leave a partial silhouette; a later GPU per-object fallback can admit cuts whose actual size is much smaller.
+    // Reserve the complete finest cut's upper bound before choosing the cluster path, including sun views only for
+    // casters. A draw that cannot fit uses its full level-zero mesh in every dependent pass. This conservative policy
+    // needs no GPU readback and cannot leave a partial silhouette; a later GPU per-object fallback can admit cuts
+    // whose actual size is much smaller.
     u64 cluster_room = std::min<u64>(scene.lod.max_cluster_triangles, 100'000'000);
     const u64 cluster_views = ctx.shadows ? 1 + std::max(ctx.cascades, 1u) : 1;
     // The frame's joint matrices: the scene's, then the overlay's.
@@ -8162,7 +8163,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 // A mesh with clusters is cut instead (its copies stay in the one run, seen first, then the sun's).
                 if (lod[s].on && mesh->clusters &&
                     (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask)) {
-                    const u64 per_copy = u64(mesh->clusters->leaf_triangles) * cluster_views;
+                    const u64 per_copy = u64(mesh->clusters->leaf_triangles) * (caster ? cluster_views : 1u);
                     if (per_copy && draw.count <= cluster_room / per_copy) {
                         _refs.back().clustered = true;
                         any_clusters = true;

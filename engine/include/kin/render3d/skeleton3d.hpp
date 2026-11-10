@@ -115,6 +115,8 @@ std::vector<SkinBound3D> compute_skin_bounds(const MeshData3D& mesh, u32 joints)
 // The sphere, in the mesh's space, that holds every vertex of the mesh posed by `matrices` (one a joint, as
 // compute_joint_matrices makes them). A joint matrix that squashes or stretches (non-uniform scale) is allowed for: its
 // largest stretch is used. False when no joint is used (nothing to bound). Never smaller than the vertices.
+// Missing/nonfinite active-joint matrices, unrepresentable bounds or too many active bounds make the pose unbounded:
+// true with a zero centre and infinite radius. This is an opt-out from finite-bound culling, not a valid pose.
 bool skin_sphere(std::span<const SkinBound3D> bounds, std::span<const Mat4f> matrices, Vec3f& center, f32& radius);
 
 // Conservative stretch of a matrix's linear part, including shear and mirrors (no eigenvalue solve). Rounded

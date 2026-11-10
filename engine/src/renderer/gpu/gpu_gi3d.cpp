@@ -1051,6 +1051,11 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                                   std::abs(t.m[2]) * half.x + std::abs(t.m[6]) * half.y + std::abs(t.m[10]) * half.z};
                 c.box = {at - reach, at + reach};
             }
+            // Unbounded poses/transforms must invalidate the requested area, never reach the integer block/grid
+            // conversions below as infinities or NaNs. Their geometry still has to satisfy the rendering contract.
+            if (!std::isfinite(c.box.min.x) || !std::isfinite(c.box.min.y) || !std::isfinite(c.box.min.z) ||
+                !std::isfinite(c.box.max.x) || !std::isfinite(c.box.max.y) || !std::isfinite(c.box.max.z))
+                c.box = gi.area;
             if (!overlaps(c.box, gi.area)) {
                 continue;
             }
