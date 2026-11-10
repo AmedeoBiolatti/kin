@@ -2943,6 +2943,8 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
         put(params.right[f], eye.right(), 0.0f);
         put(params.up[f], eye.up(), 0.0f);
         put(params.forward[f], eye.forward(), 0.0f);
+        if (!((options.faces >> f) & 1u))
+            continue; // (kept as last captured)
         scene.camera = eye;
         ok = render(*view, scene, stats) && view->_scene;
         if (!ok)
@@ -2968,6 +2970,10 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
         ++stats.reflection_gi_captures;
     if (!ok)
         return false;
+    if (!options.publish) {
+        ++stats.reflection_captures;
+        return true; // (the faces kept for a later capture to publish)
+    }
     // The faces into the panorama, then its mips (the filter reads them as an environment's).
     SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
     const SDL_GPUStorageTextureReadWriteBinding output{.texture = capture->source.handle()};

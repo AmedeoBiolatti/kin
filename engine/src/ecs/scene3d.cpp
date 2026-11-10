@@ -178,6 +178,10 @@ void register_render3d_components(EcsWorld& world) {
             .description("Captured again this often (0: only when it first shows, moves or is asked to).")
             .field("every_frame", &ReflectionProbe3D::every_frame)
             .description("Captured every frame (six renders a frame: a shiny thing's own, small probe).")
+            .field("faces_per_frame", &ReflectionProbe3D::faces_per_frame)
+            .range(1.0, 6.0)
+            .description(
+                "With every_frame: faces rendered a frame, in turn (2: a third of the cost, three frames late).")
             .field("hide_self", &ReflectionProbe3D::hide_self)
             .description("The entity's own copies left out of its picture (a shiny sphere's probe at its centre).")
             .field("z_near", &ReflectionProbe3D::z_near)

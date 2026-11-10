@@ -864,24 +864,33 @@ KinSurface kin_stock_surface() {
 // ambient light or environment. Not the surface's own light (kin_emissive).
 #ifdef KIN_GI
 // The probes' light here, as gi_resolve.comp read it on what the pre-pass drew, from the four texels round this pixel
-// (at half its size), filtered: on what the pre-pass drew, those within `near` of this fragment's `depth` along the
-// view (all four, most often), or where none is (a thin thing between texels) the one nearest in depth; on what it did
-// not draw (glass, in front of what it shows) all of them with light. Weighed, not picked, so that a texel coming or
+// (at half its size), filtered: on what the pre-pass drew, those whose depth along the view is this fragment's surface's
+// there (its `depth` carried to the texel's middle by its screen-space slope `depth_slope`, within half a pixel's slope
+// and a little: a surface meeting it at an edge at another angle, a rim's side beside its top, is not its own even at
+// the same depth; all four, most often), or where none is (a thin thing between texels) the one nearest to that; on
+// what it did not draw (glass, in front of what it shows) all of them with light. Weighed, not picked, so that a texel coming or
 // going as the view's jitter moves does not make the light jump. For the way `n` (this surface's normal, its normal
 // map's) for the diffuse (`probed`) and `r` for the reflections (`traced`). False where the probes have no light for it
 // (the sky's stands).
 // With area lights (frame.gi.y), `area`: their irradiance over pi facing the surface (else 0).
-bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced, out float coverage,
-                     out vec3 area) {
+bool kin_gi_resolved(vec3 n, vec3 r, float depth, vec2 depth_slope, out vec3 probed, out vec3 traced,
+                     out float coverage, out vec3 area) {
     const ivec2 size = textureSize(uGiLight, 0);
     const vec2 uv = gl_FragCoord.xy * 0.5 / vec2(size);
     // x, y, z, w: the texels at (0, 1), (1, 1), (1, 0) and (0, 0) from the footprint's first.
     const vec4 depths = textureGather(uGiLight, uv, 3);
     const bool drawn = material.maps.z > 0.5;
+    // This surface's depth at each texel's middle (a texel two pixels: its middle between them), and how far off it may
+    // be (which of its pixels the texel stands for: half a pixel's slope either way).
+    const ivec2 first = ivec2(floor(uv * vec2(size) - 0.5));
+    const vec2 to0 = vec2(first) * 2.0 + 1.0 - gl_FragCoord.xy;
+    const vec4 expected = depth + depth_slope.x * (to0.x + vec4(0.0, 2.0, 2.0, 0.0)) +
+                          depth_slope.y * (to0.y + vec4(2.0, 2.0, 0.0, 0.0));
+    const float near = 0.005 * depth + 0.75 * (abs(depth_slope.x) + abs(depth_slope.y)) + 0.02;
     vec4 light, slope, shares;
     coverage = 0.0;
     area = vec3(0.0);
-    if (all(greaterThan(depths, vec4(0.0))) && (!drawn || all(lessThanEqual(abs(depths - depth), vec4(near))))) {
+    if (all(greaterThan(depths, vec4(0.0))) && (!drawn || all(lessThanEqual(abs(depths - expected), vec4(near))))) {
         light = textureLod(uGiLight, uv, 0.0);
         slope = textureLod(uGiSlope, uv, 0.0);
         shares = textureLod(uGiCoverage, uv, 0.0);
@@ -900,7 +909,7 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
             if (depths[i] == 0.0) {
                 continue; // no surface
             }
-            const float off = abs(abs(depths[i]) - depth);
+            const float off = abs(abs(depths[i]) - expected[i]);
             if (off < nearest) {
                 nearest = off;
                 nearest_one = i;
@@ -1304,10 +1313,10 @@ vec3 kin_lit_surface(KinSurface surface) {
     if (frame.gi.x > 0.5) {
         const vec3 r = normalize(mix(reflect(-v, n), n, s.alpha));
         const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
-        const float near = 0.02 * depth + 4.0 * fwidth(depth);
+        const vec2 depth_slope = vec2(dFdx(depth), dFdy(depth));
         vec3 probed, traced;
         float coverage;
-        if (kin_gi_resolved(n, r, depth, near, probed, traced, coverage, area_light)) {
+        if (kin_gi_resolved(n, r, depth, depth_slope, probed, traced, coverage, area_light)) {
             around = mix(around, probed, coverage);
             behind = mix(behind, probed, coverage); // (the probes' for the front: none from the sky through a roof)
             const vec3 open = frame.environment.w > 0.5

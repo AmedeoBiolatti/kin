@@ -1002,9 +1002,10 @@ the plan's G5b results.
   in the surface's SPIR-V is in its `SurfaceTraits3D` (`SurfaceShader3D::traits`), which a material graph's compiler
   fills in: `emission`, the surface makes its own (a graph with an emission output), so the stand-in's emission is
   light in the GI even with the material's emission fields off (else only a material whose fields emit,
-  `emits_light`, glows there); `gi_stand_in` false, no stand-in at all: the GI takes the material's own colour and
-  emission fields (no maps), for a surface whose look is a picture of the view or changes every frame (kin's planar
-  surfaces: a stand-in a frame would be made, kept and dropped each frame); `vertex_color` and `vertex_alpha`, its
+  `emits_light`, glows there); `gi` (`SurfaceGi3D`): `StandIn` (the default), `Fields` (no stand-in: the material's
+  own colour and emission fields, no maps, for a surface whose look is a picture of the view or changes every frame:
+  kin's mirrors and portals; a stand-in would be made, kept and dropped each frame) or `None` (left out: water, which
+  the GI should see through rather than take as a dark lid over the pool); `vertex_color` and `vertex_alpha`, its
   colour and alpha read the vertex colour (the
   stand-in is drawn with a white one, and the voxels take the copy's vertex colour and tint only where they do; a
   surface shader of your own has the stock surface's defaults: no emission of its own, both read; make it with
@@ -2713,6 +2714,8 @@ scene.lights.reflection_probes.push_back({.position = {0, 1.5f, 0}, // where it 
   settles over frames, so a capture has its own none: `global_illumination` (a `View3D*`) lends it that view's, its
   probes as they stand (read, not moved; round that view's camera, so a probe within their reach is lit as the view
   sees the scene lit; not its area lights). `global_illumination_lit(view)` says whether that view's GI has light yet.
+  `faces` (a mask, +X -X +Y -Y +Z -Z in bits 0 to 5) renders only some, the others kept as last captured, and
+  `publish = false` keeps them without making the probe's picture (and its filtering) new until a capture publishes.
   It costs six renders at the capture's side; `debug_stats().reflection_captures` counts them
   (`reflection_gi_captures` those lit by a view's GI). The renders that use a capture filter it into a layer of the
   renderer's reflection array once a capture (`reflection_filters`).
@@ -2759,7 +2762,9 @@ A `ReflectionProbe3D` component (`kin/ecs/render3d.hpp`; scene files, Lua's comp
 captured from its place, its boxes round it (plus `box_offset`), turned and scaled as it is. `SceneSession3D` captures
 and places them (`ReflectionProbes3D`, `kin/scene/reflection_probes3d.hpp`, for a game that renders `scene()` itself),
 before the mirrors' and portals' pictures, which reflect them too. A probe is captured when it first shows, when it
-moves, when `recapture` changes, every `interval` seconds (of `Scene3D::time`) or `every_frame`; `hide_self` leaves the
+moves, when `recapture` changes, every `interval` seconds (of `Scene3D::time`) or `every_frame` (`faces_per_frame` of
+its six faces a frame, in turn, its picture updated when all six are new: 2 costs a third, the reflection three frames
+late; the atrium's chrome ball does it, 0.6 ms of the GPU less); `hide_self` leaves the
 entity's own copies out of its picture (a shiny statue's own probe). With global illumination on, the session's view
 lends its GI to the captures, and a probe captured before that GI settled (`ReflectionProbes3D::gi_settle` updates of
 light, 60) is captured once more when it has. With `baked` (a picture in the content) it is loaded

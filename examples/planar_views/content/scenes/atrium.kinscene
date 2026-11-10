@@ -54,7 +54,7 @@
      "fog_density": 0.0025,
      "fog_color_from_sky": true,
      "anisotropy": 8,
-     "ssr_enabled": true, "gi_enabled": true, "gi_min": [-13, -1, -12], "gi_max": [13, 8, 12]
+     "ssr_enabled": true, "gi_enabled": true, "gi_min": [-13, -1, -12], "gi_max": [13, 8, 12], "gi_probes_per_render": 512
     }
    }
   },
@@ -1526,6 +1526,7 @@
      "blend": 0,
      "parallax": false,
      "every_frame": true,
+     "faces_per_frame": 2,
      "hide_self": true,
      "resolution": 64,
      "priority": 1

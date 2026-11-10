@@ -534,23 +534,23 @@ constexpr u64 gi_proxy_idle = 600;
 
 } // namespace
 
-// The maps the GI scene reads of a material: none of a surface without a stand-in (SurfaceTraits3D::gi_stand_in: its
-// maps may hold pictures of the view, as kin's planar surfaces' do), its colour and emission fields alone.
+// The maps the GI scene reads of a material: none of a surface whose GI is its fields (SurfaceGi3D::Fields: its maps
+// may hold pictures of the view, as kin's planar surfaces' do), its colour and emission fields alone.
 namespace {
 const Texture& gi_base_map(const Material3D& m) {
     static const Texture none{};
-    return m.surface.backend() && !m.surface.traits().gi_stand_in ? none : m.texture;
+    return m.surface.backend() && m.surface.traits().gi != SurfaceGi3D::StandIn ? none : m.texture;
 }
 const Texture& gi_emissive_map(const Material3D& m) {
     static const Texture none{};
-    return m.surface.backend() && !m.surface.traits().gi_stand_in ? none : m.emissive_texture;
+    return m.surface.backend() && m.surface.traits().gi != SurfaceGi3D::StandIn ? none : m.emissive_texture;
 }
 } // namespace
 
 bool GpuRenderer3D::gi_proxied(const Material3D& m) {
     // As the GI scene takes draws in (gi_scene): lit, opaque or cut out. A custom shader stands in for a surface.
     return !m.shader.backend() && dynamic_cast<const GpuSurfaceShader3D*>(m.surface.backend().get()) &&
-           m.surface.traits().gi_stand_in && !m.unlit && !m.wireframe &&
+           m.surface.traits().gi == SurfaceGi3D::StandIn && !m.unlit && !m.wireframe &&
            (m.blend == Blend3D::Opaque || m.blend == Blend3D::Mask);
 }
 
@@ -973,7 +973,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     for (const Scene3D::Draw& draw : scene.draws()) {
         const Material3D& m = draw.material;
         if (draw.count == 0 || m.unlit || m.wireframe || (m.blend != Blend3D::Opaque && m.blend != Blend3D::Mask) ||
-            (draw.skinned && !gi.skinned)) {
+            (draw.skinned && !gi.skinned) || (m.surface.backend() && m.surface.traits().gi == SurfaceGi3D::None)) {
             continue;
         }
         const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());

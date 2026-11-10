@@ -150,6 +150,11 @@ public:
 // illumination). A material graph's are its compiler's (CompiledMaterialGraph3D::traits); a surface of your own has
 // these defaults (as kin's stock surface: what its material's fields emit, its colour times the vertex colour) unless
 // it is made with others.
+// What the GI scene takes in of a surface material (SurfaceTraits3D::gi): a stand-in drawn from the surface (its
+// colour and emission over a square); the material without the surface (its colour and emission fields, not its maps,
+// as kin's stock material makes them); nothing (it neither shades nor lights the GI: see-through water).
+enum class SurfaceGi3D : u8 { StandIn, Fields, None };
+
 struct SurfaceTraits3D {
     // It makes its own emission: the GI scene takes in the stand-in's, whatever the material's emission fields say.
     // Off, a surface material glows there only where those fields emit (Material3D::emits_light).
@@ -158,11 +163,11 @@ struct SurfaceTraits3D {
     // stock surface does), and its alpha: the GI scene multiplies the stand-in's by the copy's. Off, it doesn't.
     bool vertex_color = true;
     bool vertex_alpha = true;
-    // The GI scene takes in a stand-in drawn from the surface (its colour and emission over a square). Off, it takes
-    // the material without the surface (its fields and maps, as kin's stock material draws them): for a surface whose
-    // look is a picture of the view or changes every frame (kin's planar surfaces: a mirror's, water's, a portal's),
-    // which a stand-in would neither hold nor keep up with (each frame's parameters a new one).
-    bool gi_stand_in = true;
+    // What the GI scene takes in of it (SurfaceGi3D): a stand-in; its material's fields alone, for a surface whose look
+    // is a picture of the view or changes every frame (kin's planar surfaces: a mirror's, a portal's), which a stand-in
+    // would neither hold nor keep up with (each frame's parameters a new one; its maps may be pictures of the view); or
+    // none, for one the GI should see through (water: else a dark lid over the pool, and the light round it wrong).
+    SurfaceGi3D gi = SurfaceGi3D::StandIn;
 
     friend bool operator==(const SurfaceTraits3D&, const SurfaceTraits3D&) = default;
 };

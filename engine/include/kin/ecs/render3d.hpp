@@ -231,9 +231,11 @@ struct Portal3D {
 // the glossy surfaces inside its box reflect, parallax-corrected, in place of the environment. Its boxes are round the
 // entity (plus `box_offset`), turned and scaled as it is. Captured when it first shows, when it moves, when `recapture`
 // changes, every `interval` seconds (0: not on a clock) or every frame (`every_frame`: a shiny thing's own probe, with
-// `hide_self`, the entity's own copies left out of its picture). With `baked` (a Radiance .hdr panorama in the content:
-// ReflectionProbes3D::bake writes them) it is loaded from there instead, and captured only when `recapture` changes.
-// SceneSession3D captures and places them (ReflectionProbes3D, kin/scene/reflection_probes3d.hpp).
+// `hide_self`, the entity's own copies left out of its picture; `faces_per_frame` of its six faces a frame, in turn,
+// the picture updated (and filtered) when all six are new: 2 costs a third of 6, the reflection three frames late).
+// With `baked` (a Radiance .hdr panorama in the content: ReflectionProbes3D::bake writes them) it is loaded from there
+// instead, and captured only when `recapture` changes. SceneSession3D captures and places them (ReflectionProbes3D,
+// kin/scene/reflection_probes3d.hpp).
 struct ReflectionProbe3D {
     bool enabled = true;
     Vec3f extent{5.0f, 5.0f, 5.0f};
@@ -247,6 +249,7 @@ struct ReflectionProbe3D {
     u32 resolution = 128;
     f32 interval = 0.0f;
     bool every_frame = false;
+    u32 faces_per_frame = 6; // 1 to 6 (every_frame)
     bool hide_self = false;
     f32 z_near = 0.05f;
     u32 recapture = 0;
