@@ -86,6 +86,16 @@
    }
   },
   {
+   "id": "parity_f",
+   "type": "glsl",
+   "glsl": "mix(t, 0.5, clamp(2.0 * max(fwidth(q.x), fwidth(q.y)) - 0.5, 0.0, 1.0))",
+   "result": "float",
+   "inputs": {
+    "t": "parity",
+    "q": "xz"
+   }
+  },
+  {
    "id": "in",
    "type": "fract",
    "inputs": {
@@ -217,12 +227,22 @@
    }
   },
   {
+   "id": "vein_f",
+   "type": "glsl",
+   "glsl": "mix(v, 0.15, clamp(fwidth(f) * 0.6 - 0.3, 0.0, 1.0))",
+   "result": "float",
+   "inputs": {
+    "v": "vein_t",
+    "f": "v_freq"
+   }
+  },
+  {
    "id": "light",
    "type": "mix",
    "inputs": {
     "a": "white.rgb",
     "b": "white_vein.rgb",
-    "t": "vein_t"
+    "t": "vein_f"
    }
   },
   {
@@ -231,7 +251,7 @@
    "inputs": {
     "a": "black.rgb",
     "b": "black_vein.rgb",
-    "t": "vein_t"
+    "t": "vein_f"
    }
   },
   {
@@ -240,7 +260,7 @@
    "inputs": {
     "a": "light",
     "b": "dark",
-    "t": "parity"
+    "t": "parity_f"
    }
   },
   {

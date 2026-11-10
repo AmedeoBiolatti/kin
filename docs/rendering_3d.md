@@ -1767,7 +1767,11 @@ shadowed, fogged and GI-lit as kin's own materials are.
   world normal, with a `strength`), `tangent_to_world`, `triplanar`, `texture_equirect` (an equirectangular map's texel
   in a `direction`: the environment's layout, seamless where u wraps); `noise_value`, `noise_gradient`,
   `noise_cellular`, `fbm`, `checker` (deterministic: hash-based, the same picture on every GPU); `fresnel`,
-  `uv_panner` (with time), `uv_rotate`; and `glsl`, an expression of its own over named inputs.
+  `uv_panner` (with time), `uv_rotate`; and `glsl`, an expression of its own over named inputs. `smoothstep` widens
+  its edges by the pixel's footprint of `x` (half its `fwidth` each way; none in a vertex's offset): a sharp procedural
+  edge (a tile's seam, a terrazzo chip) far away filters to its share of the pixel instead of breaking into dots that
+  crawl as the eye moves, and up close it is smoothstep. Other high-frequency patterns (a checker's parity, `sin`
+  veins) can fade toward their mean the same way in a `glsl` node (the atrium's floor: `fwidth`).
 - **Errors** name their node: an unknown type or input, a missing input, a cycle, a bad swizzle, a reference to
   nothing, too many parameters, two textures in a slot, nodes chained more than 1024 deep (a node's inputs, theirs,
   and so on: the compiler follows them on a stack of its own, 256 MB reserved, as a 1 MB main thread's, Windows',

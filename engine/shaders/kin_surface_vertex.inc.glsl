@@ -116,6 +116,7 @@ vec3 kin_graph_saturate(vec3 x) {
 vec4 kin_graph_saturate(vec4 x) {
     return clamp(x, 0.0, 1.0);
 }
+#define KIN_GRAPH_NO_DERIVATIVES // (a vertex's: the smoothstep node unfiltered)
 #include "kin_graph_noise.inc.glsl"
 
 // An equirectangular map's texel in direction `d` (kin_graph_equirect_uv's layout): its top level (no derivatives here).

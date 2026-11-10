@@ -2,6 +2,34 @@
 #define KIN_GRAPH_NOISE_INC
 // Material graphs' procedural nodes (kin_graph.inc.glsl, kin_cutout.inc.glsl): pure functions, no resources.
 
+// --- Filtered edges ---
+
+// The smoothstep node: its edges widened, each way, by half the pixel's footprint of x (its fwidth): a sharp
+// procedural edge (a tile's seam, a terrazzo chip) seen far away filters to its share of the pixel instead of breaking
+// into dots that crawl as the eye moves; up close (a footprint well under the edges' gap) it is smoothstep. Edges may
+// run either way (edge0 above edge1: one minus). Where there are no derivatives (a vertex's offset:
+// KIN_GRAPH_NO_DERIVATIVES) it is smoothstep.
+#ifdef KIN_GRAPH_NO_DERIVATIVES
+#define KIN_GRAPH_SMOOTHSTEP(T, E)                                                                                     \
+    T kin_graph_smoothstep(E e0, E e1, T x) {                                                                          \
+        return smoothstep(T(e0), T(e1), x);                                                                            \
+    }
+#else
+#define KIN_GRAPH_SMOOTHSTEP(T, E)                                                                                     \
+    T kin_graph_smoothstep(E e0, E e1, T x) {                                                                          \
+        const T w = 0.5 * fwidth(x) * sign(T(e1) - T(e0));                                                            \
+        return smoothstep(T(e0) - w, T(e1) + w, x);                                                                    \
+    }
+#endif
+KIN_GRAPH_SMOOTHSTEP(float, float)
+KIN_GRAPH_SMOOTHSTEP(vec2, vec2)
+KIN_GRAPH_SMOOTHSTEP(vec3, vec3)
+KIN_GRAPH_SMOOTHSTEP(vec4, vec4)
+KIN_GRAPH_SMOOTHSTEP(vec2, float)
+KIN_GRAPH_SMOOTHSTEP(vec3, float)
+KIN_GRAPH_SMOOTHSTEP(vec4, float)
+#undef KIN_GRAPH_SMOOTHSTEP
+
 // --- Directions ---
 
 // Where an equirectangular picture shows direction `d` (the environment's layout, environment_uv's without its turn:

@@ -158,6 +158,11 @@ releases may change APIs.
   `ReflectionProbe3D::faces_per_frame` for live probes (their picture updated when all six faces are new). The atrium's
   chrome ball renders 2 a frame and its GI updates 512 probes a render: about 1.25 ms of the GPU less (5.1 to 3.8 ms,
   median of three alternating autoplay runs each), the GI settling a little slower at the start.
+- The material graph's `smoothstep` node is filtered by the pixel's footprint (distant tile seams and terrazzo chips
+  no longer break into crawling dots, plainly so through a portal); the atrium's floor fades its checker and veins to
+  their mean far away too.
+- Where every GI probe round a point is hidden from it (under a ball on a plinth, a crease), the probes give up two
+  fifths of their share to the ambient light instead of leaving it pitch black.
 - The GI's light on the view takes a texel only from this fragment's own surface by its depth plane (a rim's side next
   to its top is not its surface, though as deep).
 - Screen-space reflections on rough surfaces fade in over their lobe's width where neighbouring rays hit and miss (a
