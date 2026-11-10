@@ -68,7 +68,10 @@ public:
     // background; one sample, no bloom, no picking, and not HDR: linear light clamped at white, which an HDR view
     // tonemaps once with the rest of its picture). Views are kept from one call to the next,
     // one a mirror and one a portal's level, made again when the size changes, and dropped with their entities.
-    Status3D render(EcsWorld& world, Scene3D& scene, Vec2i view_size, const ViewOptions3D& like = {});
+    // `lit_by`: the view the scene is then rendered into, whose global illumination lights the pictures too (as it
+    // stands: Renderer3D::render(view, scene, lit_by)); without it, a scene with GI has its pictures make their own.
+    Status3D render(EcsWorld& world, Scene3D& scene, Vec2i view_size, const ViewOptions3D& like = {},
+                    const View3D* lit_by = nullptr);
     // The last render's planar views, and what it skipped (surfaces not on screen, or behind the camera).
     u32 views_rendered() const;
     u32 views_skipped() const;

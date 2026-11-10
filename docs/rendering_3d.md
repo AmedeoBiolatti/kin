@@ -1002,7 +1002,10 @@ the plan's G5b results.
   in the surface's SPIR-V is in its `SurfaceTraits3D` (`SurfaceShader3D::traits`), which a material graph's compiler
   fills in: `emission`, the surface makes its own (a graph with an emission output), so the stand-in's emission is
   light in the GI even with the material's emission fields off (else only a material whose fields emit,
-  `emits_light`, glows there); `vertex_color` and `vertex_alpha`, its colour and alpha read the vertex colour (the
+  `emits_light`, glows there); `gi_stand_in` false, no stand-in at all: the GI takes the material's own colour and
+  emission fields (no maps), for a surface whose look is a picture of the view or changes every frame (kin's planar
+  surfaces: a stand-in a frame would be made, kept and dropped each frame); `vertex_color` and `vertex_alpha`, its
+  colour and alpha read the vertex colour (the
   stand-in is drawn with a white one, and the voxels take the copy's vertex colour and tint only where they do; a
   surface shader of your own has the stock surface's defaults: no emission of its own, both read; make it with
   others as `SurfaceShader3D{shader.backend(), traits}`). Its limits: a surface that depends on where it is or which
@@ -2827,16 +2830,22 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   glitching signal tears and splits in colour, worst where things go through; a liquid membrane wobbles, shows a soap
   film's colours at a slant and ripples slowly. Each glows at its rim. Things going through are those half-way through
   its opening (as `portal_straddle` finds them) within half a metre of it: the four latest, on both surfaces of the
-  pair, in the window surface's parameters (`planar_window.surface.glsl`, `kin_planar_window`). `planar_atrium`: P
-  cycles them.
+  pair, in the window surface's parameters (`planar_window.surface.glsl`, `kin_planar_window`). The effect fades out as
+  the camera that sees the surface comes within a metre and a half of its plane (gone by a quarter of a metre): a
+  follow camera at the opening sees the room beyond as it is, not a whole screen of effect. `planar_atrium`: P cycles
+  them (`--effect N` starts with one).
 - **What renders.** A mirror's picture when it is on screen, of where it shows (two pixels round it, in steps of 64;
   where the renderer can render part of a view, each picture at its own size into a view that only grows, to the
   largest picture it has shown, so that a moving eye does not resize views, all their targets made again, every few
   frames; otherwise the view is the picture's size); a portal's levels while the level before sees it, each of
   where it shows within the level before, deepest first; a portal seen in a mirror, a picture of what is beyond it as the
   mirror's camera sees through it (one level), drawn on the portal in the mirror's picture; each with the other planar
-  surfaces as stand-ins (a mirror as kin's own metal) and without the scene's overlay
-  (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). Views are kept from frame to frame and
+  surfaces as stand-ins (a mirror as kin's own metal, water as its murk, a little see-through) and without the scene's
+  overlay
+  (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). A scene with global illumination
+  lights them by the view's (`PlanarViews3D::render`'s `lit_by`; `SceneSession3D` passes its view): what is seen
+  through a portal or in a mirror is lit as it is seen directly, and no picture builds a GI of its own. Views are kept
+  from frame to frame and
   dropped with their entities. `PlanarViews3D::views_rendered()` and `views_skipped()` count them. Whatever is
   half-way through a portal is drawn at its exit too (`portal_straddle`, `Scene3D::draw_again`): every copy of the
   scene's draws whose bounds straddle an opening, plain, skinned (a character walking through: its pose as it is) or an
@@ -2897,6 +2906,11 @@ scene.lights.reflection_probes.push_back({.position = {0, 1.5f, 0}, // where it 
   illumination), material graphs and surface shaders; custom material shaders keep the environment. A mirror's or a
   portal's picture still wins where it shows (`KinSurface::reflection`), and with global illumination the probes' light
   replaces the GI's specular where their boxes reach.
+- **Curved and bumpy surfaces.** A probe's (and the environment's) reflection is read from the level of the
+  surface's roughness, or of the roughness as wide as its pixel's reflection turns where its normal turns faster (a
+  ring's, a ball's curve, a bumpy normal map: twice the normal's change across the pixel, as GGX's alpha): a smooth
+  curved thing does not alias what it reflects into stripes that shimmer as it or the eye moves (the atrium's
+  iridescent ring did). A flat mirror's normal does not turn: its reflection stays sharp.
 - **Diffuse light.** A probe lights what is inside its box too (`diffuse`, on by default): each surface by what the
   probe saw all round, facing its way (its picture's irradiance, a level more in its layer, as an environment's), in
   place of the environment's or the hemisphere's ambient light. Global illumination's probes still win where they have
@@ -2966,7 +2980,10 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
   or decoded where the view's output is sRGB) in the same buffer. The main pass's stock lit shaders take the hit
   distance its pixel traced, if it traced its own surface (by its depth: glass and the overlay, not in the pre-pass,
   get none), follow the fragment's own reflection (its normal map's) that far, and read the previous picture there at the pyramid level as wide as the reflection's lobe is at that distance: a rough surface reflects a
-  blurred picture. With temporal anti-aliasing each pixel starts its march at a different point (averaged over
+  blurred picture. Where a rough surface's lobe spans neighbours whose rays hit and miss (the edge of what it
+  reflects), its share fades in over the lobe's width on the screen (twelve more texels on two rings, their hits
+  counted): a brushed brass frame shows a soft smear of a figure in front of it, as a path tracer does, not a
+  sharp-edged cut-out where its own ray stops hitting. With temporal anti-aliasing each pixel starts its march at a different point (averaged over
   frames); without, all start alike (no noise, some banding).
 - **Where they fade.** Toward the screen's edges, toward the end of the rays, for rays that come back toward the camera
   (what they meet is behind it), as the surface roughens to `max_roughness`, where the surface's own shape turns fast
@@ -3000,11 +3017,20 @@ next `render`.
 A view can render a part of itself: `view.set_render_size(size)` makes renders fill only `size` pixels, from its
 top-left corner (at most its size; `{}`, or a resize, the whole), where `Renderer3D::can_render_part(view, scene)`
 says they can: the GPU backend's, for a view that is not HDR and has no `pick`, and a scene without temporal
-anti-aliasing, global illumination, the fog's sun shafts, occlusion culling, contact shadows or an overlay. A picture
+anti-aliasing, global illumination (but one borrowed, below), the fog's sun shafts, occlusion culling, contact shadows
+or an overlay. A picture
 whose size changes from frame to frame (a mirror's: where it shows) is then drawn at its own size into a view kept as
 large as the largest, without resizing the view (making all its targets again) every few frames; it is the picture a
 view of that size would show. Whoever draws `view.texture()` reads the picture from UV (0, 0) to
 `render_size() / size()` (the planar surfaces do: `planar_view_params`' `share`).
+
+`renderer.render(view, scene, lit_by)` renders a scene with global illumination lit by another view's (`lit_by`'s
+probes as they stand, read and not moved: what its last render left), not a GI of `view`'s own, which would take
+renders to settle and cost its own probes and voxels: a second picture of the same place lit as the first is (a
+mirror's or a portal's, which `PlanarViews3D` renders this way). While `lit_by` has no light yet
+(`global_illumination_lit`) the render has none at all, rather than starting one of its own; it may render part of
+itself (`can_render_part(view, scene, lit_by)`), the GI's light resolved over the part. Without the scene's GI it is
+`render(view, scene)`.
 
 `compress` (for a view that is not `hdr`) keeps the light as x / (1 + x) in the picture, each channel, so that what is
 past white (a sun glint, a lamp) survives an 8-bit picture for a reader that takes it back, x / (1 - x): kin's planar

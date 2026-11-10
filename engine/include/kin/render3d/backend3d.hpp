@@ -352,11 +352,20 @@ public:
     }
     virtual std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) = 0;
     virtual bool resize_view(IViewBackend3D& view, Vec2i size) = 0;
-    // Whether a render of `scene` into `view` can fill only part of it (IViewBackend3D::set_render_size).
-    virtual bool renders_part(const IViewBackend3D&, const Scene3D&) const { return false; }
+    // Whether a render of `scene` into `view` can fill only part of it (IViewBackend3D::set_render_size); `lit_by`: a
+    // render lit by that view's global illumination (render_lit_by).
+    virtual bool renders_part(const IViewBackend3D&, const Scene3D&, const IViewBackend3D* /*lit_by*/) const {
+        return false;
+    }
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
     virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;
+    // The same, its global illumination `lit_by`'s (its probes as they stand) instead of the view's own; none while
+    // that has no light (Renderer3D::render(view, scene, lit_by)).
+    virtual bool render_lit_by(IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D& /*lit_by*/,
+                               RenderDebugStats3D& stats) {
+        return render(view, scene, stats);
+    }
     virtual bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) { return false; }
     virtual std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
                                                              RenderDebugStats3D&) {

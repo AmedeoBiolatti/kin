@@ -54,7 +54,7 @@
      "fog_density": 0.0025,
      "fog_color_from_sky": true,
      "anisotropy": 8,
-     "ssr_enabled": true
+     "ssr_enabled": true, "gi_enabled": true, "gi_min": [-13, -1, -12], "gi_max": [13, 8, 12]
     }
    }
   },
@@ -75,8 +75,8 @@
     "Transform3D": {
      "position": [
       0,
-      2,
-      0
+      5,
+      -4
      ]
     },
     "ReflectionProbe3D": {
@@ -87,8 +87,8 @@
      ],
      "box_offset": [
       0,
-      1,
-      0.5
+      -2,
+      4.5
      ],
      "blend": 1.0,
      "parallax_extent": [
