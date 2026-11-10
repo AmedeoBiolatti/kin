@@ -920,6 +920,11 @@ releases may change APIs.
 
 ### Fixed
 
+- Keep `world.snapshot`'s raw world valid JSON when an entity's name holds a
+  dot (kin names the second entity called `gem` `gem.<id>`): flecs wrote its
+  children's parent paths with the dot escaped (`gem\.<id>`), which no JSON
+  reader takes. That backslash is now escaped too, so the path reads back as
+  flecs wrote it.
 - Every instance of a prefab draws. Where instances inherit the prefab's renderer (rects, sprites, text,
   particles, textured renderers), only the first instance in each table was drawn, and the others read past the
   shared value.
