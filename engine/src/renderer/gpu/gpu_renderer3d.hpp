@@ -528,8 +528,10 @@ public:
                                                       std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
-    bool renders_part(const IViewBackend3D& view, const Scene3D& scene) const override;
+    bool renders_part(const IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D* lit_by) const override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
+    bool render_lit_by(IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D& lit_by,
+                       RenderDebugStats3D& stats) override;
     bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) override;
     std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
                                                      RenderDebugStats3D&) override;
@@ -1128,6 +1130,9 @@ private:
     // While a capture renders with a view's global illumination borrowed (capture_reflection): that view, whose probes
     // light it, untouched (no GI scene or probes of the capture's own).
     const GpuView3D* _gi_borrowed = nullptr;
+    // While a render lit by another view (render_lit_by) whose GI has no light yet: the scene's GI is not drawn (none
+    // of the view's own is made either).
+    bool _gi_off = false;
     SDL_GPUComputePipeline* _ssr_pyramid_pipeline = nullptr; // ssr_pyramid.comp
     std::shared_ptr<GpuBuffer> _ssr_dummy;                   // bound where a light variant reads no reflections
     // The reflection array (prepare_reflections): equirectangular layers the environment's specular size (or 256 x

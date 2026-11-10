@@ -2649,7 +2649,9 @@ bool SceneSession3D::render_operation(f32 alpha) {
     if (state.planar || state.world.raw().count<Mirror3D>() > 0 || state.world.raw().count<Portal3D>() > 0) {
         if (!state.planar)
             state.planar = std::make_unique<PlanarViews3D>(_data->renderer, _data->options.planar_surfaces);
-        const auto planar = state.planar->render(state.world, state.scene, _data->options.viewport, state.options);
+        // (Its pictures lit by the view's GI, as it stands: the view is rendered after them.)
+        const auto planar = state.planar->render(state.world, state.scene, _data->options.viewport, state.options,
+                                                 state.view ? &state.view : nullptr);
         if (!planar) {
             _data->errors = planar.diagnostics;
             return false;

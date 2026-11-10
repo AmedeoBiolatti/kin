@@ -3088,13 +3088,28 @@ bool GpuRenderer3D::resize_view(IViewBackend3D& base, Vec2i size) {
 // occlusion, the light grid, the main pass with its sky and fog, the screen-space reflections. The others read and
 // write whole targets (the temporal resolve's history, the HDR output and bloom, GI's screen probes, the fog's sun
 // shafts, the occlusion pyramid, picking, the contact shadows, the overlay's velocity).
-bool GpuRenderer3D::renders_part(const IViewBackend3D& base, const Scene3D& scene) const {
+bool GpuRenderer3D::renders_part(const IViewBackend3D& base, const Scene3D& scene, const IViewBackend3D* lit_by) const {
     const auto* view = dynamic_cast<const GpuView3D*>(&base);
     if (!view || view->_hdr || view->_options.pick)
         return false;
     const Scene3D* overlay = scene.overlay_if_any();
-    return !scene.taa.enabled && !scene.global_illumination.enabled && !(scene.fog.enabled && scene.fog.sun_shadows) &&
-           !scene.lod.occlusion.enabled && !scene.contact_shadows.enabled && !(overlay && !overlay->draws().empty());
+    // (A GI of its own builds windows round the view's whole picture; one borrowed is resolved over the part.)
+    const bool gi = scene.global_illumination.enabled && (!lit_by || lit_by == &base);
+    return !scene.taa.enabled && !gi && !(scene.fog.enabled && scene.fog.sun_shadows) && !scene.lod.occlusion.enabled &&
+           !scene.contact_shadows.enabled && !(overlay && !overlay->draws().empty());
+}
+
+bool GpuRenderer3D::render_lit_by(IViewBackend3D& base, const Scene3D& scene, const IViewBackend3D& lit_by,
+                                  RenderDebugStats3D& stats) {
+    const auto* source = dynamic_cast<const GpuView3D*>(&lit_by);
+    const bool gi = scene.global_illumination.enabled && source != &base;
+    const bool borrow = gi && source && source->_gi.lit && source->_gi.irradiance;
+    _gi_borrowed = borrow ? source : nullptr;
+    _gi_off = gi && !borrow;
+    const bool ok = render(base, scene, stats);
+    _gi_borrowed = nullptr;
+    _gi_off = false;
+    return ok;
 }
 
 u32 GpuRenderer3D::ensure_shadow_map(u32 resolution, u32 layers) {
@@ -5914,7 +5929,7 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     ctx.soft_particles = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
     // Global illumination's probes are read on what the pre-pass drew (gi_resolve).
     const bool gi_wanted =
-        scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
+        scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available && !_gi_off;
     // The fog's sunlit share (Fog3D::sun_shadows) is walked on what the pre-pass drew.
     const Fog3D& asked_fog = scene.fog;
     ctx.fog_sun_wanted = _fog_sun_pipeline && _fog_available && asked_fog.enabled && asked_fog.sun_shadows &&

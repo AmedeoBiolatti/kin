@@ -212,9 +212,17 @@ public:
     // for a view that is not HDR and a scene without temporal anti-aliasing, global illumination, the fog's sun shafts,
     // occlusion culling, contact shadows or an overlay; and a view without picking. Otherwise renders fill the whole.
     bool can_render_part(const View3D& view, const Scene3D& scene) const;
+    // The same for a render lit by `lit_by` (render(view, scene, lit_by)), which may have global illumination.
+    bool can_render_part(const View3D& view, const Scene3D& scene, const View3D& lit_by) const;
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     Status3D render(View3D& view, const Scene3D& scene);
+    // The same, lit by `lit_by`'s global illumination (its probes as they stand, read and not moved: what the scene's
+    // GI gave that view's last render) instead of a GI of `view`'s own, which would take renders to settle and cost
+    // its own probes: a mirror's or a portal's picture, lit as the view that shows it is (PlanarViews3D). While
+    // `lit_by` has no light yet (Renderer3D::global_illumination_lit), without GI. Without the scene's GI, as
+    // render(view, scene).
+    Status3D render(View3D& view, const Scene3D& scene, const View3D& lit_by);
     // Clears and writes caller-owned depth/normals, without a stock view or any
     // lighting, shadows, particles, postprocessing or temporal history. Opaque
     // and masked world meshes use stock culling, skinning, retained batches and
@@ -292,6 +300,7 @@ private:
     Mesh3D upload_validated_mesh(const MeshData3D& data, const MeshOptions3D& options);
     Mesh3D create_mesh_operation(const MeshData3D& data, const MeshOptions3D& options);
     Mesh3D create_mesh_operation(const MeshData3D& data);
+    bool render_operation(View3D& view, const Scene3D& scene, const View3D* lit_by);
     View3D create_view_operation(Vec2i size, const ViewOptions3D& options = {});
     Model3D load_model_operation(const std::filesystem::path& path, const MeshOptions3D& options);
     Model3D load_model_operation(const std::filesystem::path& path);
@@ -304,7 +313,6 @@ private:
     SurfaceShader3D compile_surface_shader_operation(const std::filesystem::path& source);
     SurfaceShader3D compile_surface_text_operation(const std::string& surface, const std::string& label);
     bool resize_operation(View3D& view, Vec2i size);
-    bool render_operation(View3D& view, const Scene3D& scene);
     bool warm_up_operation(View3D& view, const Scene3D& scene);
     PickResult3D pick_operation(View3D& view, Vec2i pixel);
     bool read_cluster_picks_operation(View3D& view, std::vector<ClusterPick3D>& out);

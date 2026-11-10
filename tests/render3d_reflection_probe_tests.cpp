@@ -418,6 +418,38 @@ void test_gi_capture(Renderer2D& r, Renderer3D& r3d) {
     r.present();
     assert(r3d.global_illumination_lit(view));
     std::cout << "probes: captures lit by a view's global illumination\n";
+
+    // A second view rendered lit by the first's GI (Renderer3D::render(view, scene, lit_by): a mirror's or a portal's
+    // picture): its walls green from the first's probes, none of its own made; it may render part of itself (GI
+    // borrowed, not built round its whole picture); lit by a view without light yet, no GI at all (not one of its own).
+    View3D other = r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    View3D unlit_view = r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    assert(other && unlit_view);
+    assert(!r3d.can_render_part(other, scene) && r3d.can_render_part(other, scene, view));
+    const auto wall_green = [&](View3D& into, const View3D* lit_by, Vec2i part) {
+        into.set_render_size(part);
+        r.clear(colors::black);
+        assert(lit_by ? r3d.render(into, scene, *lit_by) : r3d.render(into, scene));
+        r.draw_texture(into.texture(), rect);
+        std::vector<u8> pixels;
+        Vec2i size;
+        assert(r.read_rgba(rect, pixels, size) && size == extent);
+        r.present();
+        // (A wall at the left of the picture, in the part rendered: its top-left quarter.)
+        double green = 0;
+        for (int y = 10; y < 20; ++y)
+            for (int x = 10; x < 20; ++x)
+                green += pixels[(std::size_t(y) * std::size_t(extent.x) + std::size_t(x)) * 4 + 1];
+        return green / 100.0;
+    };
+    const double borrowed = wall_green(other, &view, {}), in_part = wall_green(other, &view, {80, 60});
+    assert(!r3d.global_illumination_lit(other)); // (none of its own)
+    const double without_light = wall_green(other, &unlit_view, {});
+    assert(!r3d.global_illumination_lit(other) && !r3d.global_illumination_lit(unlit_view));
+    std::cerr << "probes: a view lit by another's GI: wall green " << borrowed << " (in part " << in_part
+              << "), lit by one without light " << without_light << "\n";
+    assert(borrowed > 8.0 && borrowed > 3.0 * (without_light + 1.0) && std::abs(in_part - borrowed) < 0.25 * borrowed);
+    std::cout << "probes: views lit by another view's global illumination, in part too\n";
 }
 
 } // namespace

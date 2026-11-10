@@ -158,6 +158,11 @@ struct SurfaceTraits3D {
     // stock surface does), and its alpha: the GI scene multiplies the stand-in's by the copy's. Off, it doesn't.
     bool vertex_color = true;
     bool vertex_alpha = true;
+    // The GI scene takes in a stand-in drawn from the surface (its colour and emission over a square). Off, it takes
+    // the material without the surface (its fields and maps, as kin's stock material draws them): for a surface whose
+    // look is a picture of the view or changes every frame (kin's planar surfaces: a mirror's, water's, a portal's),
+    // which a stand-in would neither hold nor keep up with (each frame's parameters a new one).
+    bool gi_stand_in = true;
 
     friend bool operator==(const SurfaceTraits3D&, const SurfaceTraits3D&) = default;
 };

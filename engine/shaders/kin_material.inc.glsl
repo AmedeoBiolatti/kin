@@ -175,6 +175,17 @@ vec2 environment_uv(vec3 d) {
     return vec2(0.5 + atan(d.z, d.x) / (2.0 * PI), 0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI);
 }
 
+// How far a pixel's reflection turns across it by the surface's own turning (its normal `n`'s derivatives, twice:
+// a reflection turns twice as far as the normal), as the roughness whose lobe is about that wide (GGX's alpha about
+// the angle): a curved shiny thing (a ring, a ball) or a bumpy normal map reflects a piece of the picture as wide as
+// its pixel sees, read from that roughness's level when it is above the surface's own, which would alias what it
+// reflects (a floor's veins into stripes that shimmer as it or the eye moves). A flat mirror's is 0: what its pixels
+// see is its picture, sharp. Computed where every pixel of the quad runs (derivatives).
+float kin_reflection_footprint(vec3 n) {
+    const float turn = 2.0 * max(length(dFdx(n)), length(dFdy(n)));
+    return sqrt(min(turn, 1.0));
+}
+
 #ifdef KIN_LIGHT_GRID
 // The reflection probes' light at `p` along `r` (unit), at the level `lod`: every probe whose influence box holds `p`, in
 // the renderer's order (by priority, then the smaller), each taking its weight of what the ones before left; .a the
@@ -311,7 +322,7 @@ vec4 kin_ssr_reflection(float depth, vec3 p, vec3 r, float roughness) {
     const vec2 f = at - vec2(base);
     const float alpha = roughness * roughness;
     vec3 colour = vec3(0.0);
-    float shown = 0.0, weights = 0.0;
+    float shown = 0.0, weights = 0.0, hit_distance = 0.0;
     for (int k = 0; k < 4; ++k) {
         const ivec2 o = ivec2(k & 1, k >> 1);
         const ivec2 q = clamp(base + o, ivec2(0), grid - 1);
@@ -339,6 +350,51 @@ vec4 kin_ssr_reflection(float depth, vec3 p, vec3 r, float roughness) {
         const float level = clamp(log2(max(width, 1.0)), 0.0, frame.ssr_pyramid.x - 1.0);
         colour += kin_ssr_picture(uv, level) * s;
         shown += s;
+        hit_distance += distance * s;
+    }
+    // A rough surface's lobe spreads over its neighbours' rays: where some hit and some miss (the edge of what it
+    // reflects), its reflection fades in over the lobe's width, as a path tracer's does, rather than at the one texel
+    // where its own ray stops hitting. Twelve more texels on two rings as wide as the lobe is on the screen here (the
+    // hits' own distance, else a metre's), their hits and misses counted (their colour: this texel's look-up, or the
+    // ring's hits' mean distance's).
+    const float lobe = 1.5 * alpha * (shown > 1e-4 ? hit_distance / shown : 1.0);
+    const float radius = min(lobe * frame.ssr_pyramid.y / max(depth, 1e-3) * 0.5 * float(grid.y), 16.0);
+    if (radius >= 1.5) {
+        const float own = weights > 1e-4 ? shown / weights : 0.0;
+        float ring_shown = 0.0, ring_weights = 0.0, ring_distance = 0.0;
+        for (int k = 0; k < 12; ++k) {
+            const float turn = float(k) * 1.0471976 + (k >= 6 ? 0.5235988 : 0.0);
+            const vec2 offset = vec2(cos(turn), sin(turn)) * (k >= 6 ? radius : 0.5 * radius);
+            const ivec2 q = clamp(ivec2(floor(at + offset + 0.5)), ivec2(0), grid - 1);
+            const uint i = uint(q.y * grid.x + q.x) * 3u;
+            const float traced = uintBitsToFloat(kin_ssr[i + 2u]);
+            // (Its own surface: along a slope, as far off in depth as the ring is wide allows.)
+            if (abs(traced - depth) > (0.02 + 0.004 * radius) * depth + 0.05)
+                continue;
+            const float share = unpackHalf2x16(kin_ssr[i + 1u]).x;
+            ring_weights += 1.0;
+            ring_shown += share;
+            ring_distance += share * uintBitsToFloat(kin_ssr[i]);
+        }
+        if (shown <= 1e-4 && ring_shown > 1e-4) {
+            const vec4 clip = frame.ssr_previous * vec4(p + r * (ring_distance / ring_shown), 1.0);
+            if (clip.w > 1e-4) {
+                const vec2 ndc = clip.xy / clip.w;
+                const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+                const float width = 1.5 * alpha * (ring_distance / ring_shown) * frame.ssr_pyramid.y / clip.w * 0.5 *
+                                    float(kin_ssr_prior_grid().y);
+                colour = kin_ssr_picture(uv, clamp(log2(max(width, 1.0)), 0.0, frame.ssr_pyramid.x - 1.0));
+                shown = 1.0;
+                const vec2 edge = min(uv, 1.0 - uv);
+                ring_shown *= smoothstep(0.0, 0.08, min(edge.x, edge.y));
+            }
+        }
+        if (shown > 1e-4) {
+            // (The four's share as four taps, and the ring's.)
+            const float share = (own * 4.0 + ring_shown) / (4.0 + ring_weights);
+            return vec4(colour / shown, share);
+        }
+        return vec4(0.0);
     }
     if (weights <= 1e-4 || shown <= 1e-4)
         return vec4(0.0);
@@ -1205,15 +1261,20 @@ vec3 kin_lit_surface(KinSurface surface) {
     // A clear coat's reflection (`coat_above`) by its own roughness.
     vec3 around, above, behind = vec3(0.0), coat_above = vec3(0.0);
     if (frame.environment.w > 0.5) {
+        // (Its level at least the pixel's footprint: kin_reflection_footprint.)
+        const float footprint = kin_reflection_footprint(n);
         around = textureLod(uEnvIrradiance, environment_uv(n), 0.0).rgb * frame.environment.x;
         if (backlit || wrap > 0.5) {
             behind = textureLod(uEnvIrradiance, environment_uv(-n), 0.0).rgb * frame.environment.x;
         }
         if (coat > 0.0) {
-            coat_above = kin_env_specular(environment_uv(reflect(-v, n)), coat_roughness * frame.environment.y).rgb *
+            coat_above = kin_env_specular(environment_uv(reflect(-v, n)),
+                                          max(coat_roughness, footprint) * frame.environment.y)
+                             .rgb *
                          frame.environment.x;
         }
-        above = kin_env_specular(environment_uv(reflect(-v, n)), roughness * frame.environment.y).rgb * frame.environment.x;
+        above = kin_env_specular(environment_uv(reflect(-v, n)), max(roughness, footprint) * frame.environment.y).rgb *
+                frame.environment.x;
     } else {
         const vec3 reflected = normalize(mix(reflect(-v, n), n, s.alpha));
         around = mix(frame.ground_ambient.rgb, frame.ambient.rgb, n.y * 0.5 + 0.5);
@@ -1266,11 +1327,13 @@ vec3 kin_lit_surface(KinSurface surface) {
     float own_probe = 0.0; // the share a thing's own probe took (the screen-space reflections leave it)
     if (frame.probes.x > 0.5) {
         const vec3 r = reflect(-v, n);
-        const vec4 probed = kin_probe_reflection(vWorld, r, roughness * frame.probes.y, own_probe);
+        const float footprint = kin_reflection_footprint(n);
+        const vec4 probed = kin_probe_reflection(vWorld, r, max(roughness, footprint) * frame.probes.y, own_probe);
         above = probed.rgb + above * (1.0 - probed.a);
         if (coat > 0.0) {
             float coat_own;
-            const vec4 coat_probed = kin_probe_reflection(vWorld, r, coat_roughness * frame.probes.y, coat_own);
+            const vec4 coat_probed =
+                kin_probe_reflection(vWorld, r, max(coat_roughness, footprint) * frame.probes.y, coat_own);
             coat_above = coat_probed.rgb + coat_above * (1.0 - coat_probed.a);
         }
     }

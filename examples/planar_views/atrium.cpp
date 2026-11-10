@@ -5,7 +5,7 @@
 //
 //   planar_atrium [--camera N] [--shot picture.png] [--frames N] [--content folder] [--bake-probes]
 //                 [--autoplay SECONDS [--autoplay-report report.json]] [--at X Y Z YAW PITCH]
-//                 [--survivor X Y Z [YAW]] [--cycles-snapshot folder]
+//                 [--survivor X Y Z [YAW]] [--cycles-snapshot folder] [--effect N]
 //
 // --camera: 6 (the default) plays: the survivor (an animated character, a physics capsule) is yours, seen from behind
 // (WASD or the arrows walk, the mouse turns the camera, Space jumps, Shift runs, F3 hides the camera's and the
@@ -26,7 +26,7 @@
 // it there; --survivor the survivor (centimetres; YAW: the way it faces, degrees round +Y from +Z). --cycles-snapshot
 // renders headless as --shot does (the picture: kin.png in the folder unless --shot names one) and writes the scene
 // as it was rendered into the folder (write_scene_snapshot) for tools/cycles/compare.py to render it with Blender's
-// Cycles and compare. Esc: quit.
+// Cycles and compare. --effect starts the portals with that effect (0 off to 4 membrane, as P cycles). Esc: quit.
 #include "planar_surfaces.hpp"
 
 #include <algorithm>
@@ -73,6 +73,7 @@ struct Options {
     std::optional<std::array<f32, 5>> at;       // --at: x, y, z (cm), yaw, pitch (degrees)
     std::optional<std::array<f32, 4>> survivor; // --survivor: x, y, z (cm), yaw (degrees)
     std::filesystem::path snapshot;             // --cycles-snapshot
+    u32 effect = 0;                             // --effect
 };
 
 // The memory the process holds (resident), in MiB (Linux; 0 elsewhere).
@@ -296,6 +297,11 @@ public:
         _models.clear();
         if (_o.autoplay > 0)
             _bot = std::make_unique<AtriumBot>();
+        if (_o.effect > 0) {
+            _effect = _o.effect - 1;
+            next_effect();
+            _effect_shown = 0.0f;
+        }
     }
 
     // Small at the bottom: where the camera is (centimetres) and the way it looks (yaw: degrees round +Y from +Z,
@@ -662,6 +668,8 @@ int main(int argc, char** argv) {
                 o.survivor = place;
             } else if (a == "--cycles-snapshot")
                 o.snapshot = value();
+            else if (a == "--effect")
+                o.effect = u32(std::clamp(std::stoi(value()), 0, 4));
             else
                 runtime.push_back(argv[i]);
         }

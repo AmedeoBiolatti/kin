@@ -78,7 +78,9 @@ Result3D<PlanarSurfaces3D> create_planar_surfaces(Renderer3D& renderer,
             errors.insert(errors.end(), made.diagnostics.begin(), made.diagnostics.end());
             continue;
         }
-        (std::string_view(stem) == "planar_reflection" ? out.reflection : out.window) = *made;
+        // (Their look is a picture of the view, new each frame: the GI takes their material's own fields.)
+        (std::string_view(stem) == "planar_reflection" ? out.reflection : out.window) =
+            SurfaceShader3D{made->backend(), {.gi_stand_in = false}};
     }
     return result3d(out, std::move(errors));
 }
@@ -94,7 +96,8 @@ Result3D<PlanarSurfaces3D> compile_planar_surfaces(Renderer3D& renderer) {
             errors.insert(errors.end(), made.diagnostics.begin(), made.diagnostics.end());
             continue;
         }
-        (std::string_view(stem) == "planar_reflection" ? out.reflection : out.window) = *made;
+        (std::string_view(stem) == "planar_reflection" ? out.reflection : out.window) =
+            SurfaceShader3D{made->backend(), {.gi_stand_in = false}};
     }
     return result3d(out, std::move(errors));
 #else
@@ -184,6 +187,7 @@ struct PlanarViews3D::Data {
     }
     u64 frame = 0;
     u32 rendered = 0, skipped = 0;
+    const View3D* lit_by = nullptr; // this render's (PlanarViews3D::render)
     explicit Data(Renderer3D& r, PlanarSurfaces3D s) : renderer(r), surfaces(std::move(s)) {}
 
     // Keeps an entity's views for another frame (it is still there, if off screen).
@@ -222,7 +226,7 @@ struct PlanarViews3D::Data {
         Room& room = e.room[k];
         const Vec2i have = v.texture().size();
         Vec2i want = size;
-        if (renderer.can_render_part(v, scene)) {
+        if (this->lit_by ? renderer.can_render_part(v, scene, *this->lit_by) : renderer.can_render_part(v, scene)) {
             const auto roomy = [](int peak, int at) { return at > 2 * peak + 128; };
             room.peak = {std::max(room.peak.x, size.x), std::max(room.peak.y, size.y)};
             if (!(roomy(room.peak.x, have.x) || roomy(room.peak.y, have.y)))
@@ -279,8 +283,10 @@ void PlanarViews3D::clear() {
     _data->entries.clear();
 }
 
-Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size, const ViewOptions3D& like) {
+Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size, const ViewOptions3D& like,
+                               const View3D* lit_by) {
     Data& d = *_data;
+    d.lit_by = lit_by && lit_by->valid() ? lit_by : nullptr;
     d.rendered = d.skipped = 0;
     ++d.frame;
     Diagnostics3D errors;
@@ -358,11 +364,15 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
 
     // A portal's effect in its surface's parameters (kin_planar_window reads them): the effect and its strength, the
     // opening's size; its middle and its x and y axes (where a fragment is on it); its latest disturbances (x, y on it,
-    // when, how strongly).
-    const auto effect_params = [&](Material3D& level, const Portal& p) {
+    // when, how strongly). The strength fades out as the camera that sees it (`viewer`) comes within a metre and a half
+    // of the opening's plane, gone by a quarter of a metre: a camera at the opening (a follow camera as its character
+    // walks through) sees the room beyond as it is, the whole screen otherwise one effect.
+    const auto effect_params = [&](Material3D& level, const Portal& p, Vec3f viewer) {
         auto& q = level.shader_params;
+        const f32 off = std::abs(dot(viewer - p.pose.position, p.pose.rotation.rotate({0, 0, 1})));
+        const f32 fade = std::clamp((off - 0.25f) / 1.25f, 0.0f, 1.0f);
         q[44] = f32(u32(p.effect));
-        q[45] = std::max(p.effect_strength, 0.0f);
+        q[45] = std::max(p.effect_strength, 0.0f) * fade * fade * (3.0f - 2.0f * fade);
         q[46] = p.pose.size.x;
         q[47] = p.pose.size.y;
         const Vec3f x = p.pose.rotation.rotate({1, 0, 0}), y = p.pose.rotation.rotate({0, 1, 0});
@@ -507,6 +517,14 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         }
         tag(base, index++);
         m.stand_in = m.real = base;
+        // Water seen in another planar view (a portal's picture, a mirror's) has no picture of what is below it of its
+        // own: its stand-in is its murk, as deep water mostly shows, a little see-through where it refracts (the floor
+        // under shallow water, faintly), in place of a dark lid.
+        if (c.refraction > 0.0f && c.metallic < 1.0f) {
+            m.stand_in.color = c.murk;
+            m.stand_in.color.a = u8(std::lround(255.0f * (1.0f - 0.3f * std::clamp(c.refraction, 0.0f, 1.0f))));
+            m.stand_in.blend = Blend3D::Alpha;
+        }
         const auto bounds = planar_on_screen(eye, aspect, at->position, at->rotation, m.size);
         if (bounds && d.surfaces.reflection) {
             // Only where the mirror shows (its ripples read a little round it: the margin), as sharp as the view.
@@ -594,7 +612,8 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
             level.surface = d.surfaces.window;
             level.emissive_texture = p.views[k]->texture();
             planar_view_params(level.shader_params, p.chain[k].projector, 0.0f, 1.0f, Data::part_of(*p.views[k]), true);
-            effect_params(level, p);
+            // (Level k is seen from the level before's camera; the first from the eye.)
+            effect_params(level, p, k == 0 ? eye.position : p.chain[k - 1].camera.position);
             p.levels.push_back(std::move(level));
         }
         // A box behind the opening, so that a camera a little way into it still sees through.
@@ -635,7 +654,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 shown.surface = d.surfaces.window;
                 shown.emissive_texture = view->texture();
                 planar_view_params(shown.shader_params, level.projector, 0.0f, 1.0f, Data::part_of(*view), true);
-                effect_params(shown, p);
+                effect_params(shown, p, m.frame_camera.position);
                 m.through.push_back({i, view, level.camera, std::move(shown)});
             }
         }
@@ -645,7 +664,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     scene.show_overlay = false;
     const auto picture = [&](View3D& view, const Camera3D& camera) {
         scene.camera = camera;
-        if (!d.renderer.render(view, scene)) {
+        if (!(d.lit_by ? d.renderer.render(view, scene, *d.lit_by) : d.renderer.render(view, scene))) {
             const auto& why = d.renderer.diagnostics();
             errors.insert(errors.end(), why.begin(), why.end());
             if (why.empty())

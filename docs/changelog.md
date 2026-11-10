@@ -103,6 +103,19 @@ releases may change APIs.
   for it: `RenderDebugOptions3D::unwrap` and `surface_channel` (a surface's channel drawn over its UV square),
   `Renderer3D::read_mesh` and `read_linear_texture`, `SceneSession3D::view_options`; Radiance .hdr files are written
   with run-length runs (a flat picture is a fraction of the size).
+- Pictures lit by another view's global illumination: `Renderer3D::render(view, scene, lit_by)` (and
+  `can_render_part(view, scene, lit_by)`: such a render may fill part of its view, the GI's light resolved over it).
+  PlanarViews3D renders mirrors' and portals' pictures with the view's GI (`render`'s `lit_by`; SceneSession3D passes
+  its view), and `SurfaceTraits3D::gi_stand_in` (off for the planar surfaces) keeps the GI from baking a stand-in of a
+  surface whose look changes every frame. The atrium turns GI on: against Cycles (tools/cycles), the west wall's shade
+  and the sun's bounce were missing (mean difference 33 levels in that view, 14 now); about 1.1 to 1.4 ms more GPU.
+- Screen-space reflections on rough surfaces fade in over their lobe's width where neighbouring rays hit and miss (a
+  brushed frame's reflection of a figure was a sharp cut-out).
+- Probe and environment reflections are read at least at the roughness of how fast the normal turns across the pixel:
+  curved shiny things (the atrium's iridescent ring) no longer alias what they reflect into shimmering stripes.
+- Portal effects fade out as the camera reaches the opening; water seen in another planar view is its murk, a little
+  see-through, not a dark lid. The atrium's room probe is captured above its brass ring (it filled a quarter of the
+  probe's picture).
 - 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
   allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
   fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).
