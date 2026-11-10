@@ -167,6 +167,21 @@ void test_parallax(Renderer2D& r, Renderer3D& r3d) {
     assert(!r3d.load_reflection_capture(std::filesystem::temp_directory_path() / "kin-probe-missing.hdr"));
     std::filesystem::remove(file);
     std::cout << "probes: baked to disk\n";
+
+    // Some faces at a time (ReflectionCaptureOptions3D::faces, publish: a live probe's faces in turn): kept without
+    // publishing, the probe's picture stays what it was (its generation, which its filtering follows); published, it
+    // changes.
+    ReflectionCapture3D turns = r3d.create_reflection_capture(32).value_or({});
+    assert(turns);
+    Scene3D again;
+    room(again);
+    assert(r3d.capture_reflection(turns, again, {0, 1, 0}));
+    assert(turns.backend()->generation() == 1);
+    assert(r3d.capture_reflection(turns, again, {0, 1, 0}, {.faces = 0b000011, .publish = false}));
+    assert(turns.backend()->generation() == 1 && r3d.debug_stats().reflection_captures == 1);
+    assert(r3d.capture_reflection(turns, again, {0, 1, 0}, {.faces = 0b111100}));
+    assert(turns.backend()->generation() == 2);
+    std::cout << "probes: faces in turn, published when asked\n";
 }
 
 // Camera3D::hidden_id: the copies with that pick id are not drawn by the camera (a shiny thing in its own probe's

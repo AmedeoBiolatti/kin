@@ -150,9 +150,16 @@ releases may change APIs.
 - Pictures lit by another view's global illumination: `Renderer3D::render(view, scene, lit_by)` (and
   `can_render_part(view, scene, lit_by)`: such a render may fill part of its view, the GI's light resolved over it).
   PlanarViews3D renders mirrors' and portals' pictures with the view's GI (`render`'s `lit_by`; SceneSession3D passes
-  its view), and `SurfaceTraits3D::gi_stand_in` (off for the planar surfaces) keeps the GI from baking a stand-in of a
-  surface whose look changes every frame. The atrium turns GI on: against Cycles (tools/cycles), the west wall's shade
+  its view), and `SurfaceTraits3D::gi` (`SurfaceGi3D`: `Fields` for mirrors and portals, `None` for water) keeps the GI
+  from baking a stand-in of a surface whose look changes every frame, and from taking water as a dark lid (blotches of
+  the pool's dark light that shifted with the view along its rim). The atrium turns GI on: against Cycles (tools/cycles), the west wall's shade
   and the sun's bounce were missing (mean difference 33 levels in that view, 14 now); about 1.1 to 1.4 ms more GPU.
+- Reflection probes can capture some faces at a time: `ReflectionCaptureOptions3D::faces` and `publish`,
+  `ReflectionProbe3D::faces_per_frame` for live probes (their picture updated when all six faces are new). The atrium's
+  chrome ball renders 2 a frame and its GI updates 512 probes a render: about 1.25 ms of the GPU less (5.1 to 3.8 ms,
+  median of three alternating autoplay runs each), the GI settling a little slower at the start.
+- The GI's light on the view takes a texel only from this fragment's own surface by its depth plane (a rim's side next
+  to its top is not its surface, though as deep).
 - Screen-space reflections on rough surfaces fade in over their lobe's width where neighbouring rays hit and miss (a
   brushed frame's reflection of a figure was a sharp cut-out).
 - Probe and environment reflections are read at least at the roughness of how fast the normal turns across the pixel:

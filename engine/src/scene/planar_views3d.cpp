@@ -80,7 +80,7 @@ Result3D<PlanarSurfaces3D> create_planar_surfaces(Renderer3D& renderer,
         }
         // (Their look is a picture of the view, new each frame: the GI takes their material's own fields.)
         (std::string_view(stem) == "planar_reflection" ? out.reflection : out.window) =
-            SurfaceShader3D{made->backend(), {.gi_stand_in = false}};
+            SurfaceShader3D{made->backend(), {.gi = SurfaceGi3D::Fields}};
     }
     return result3d(out, std::move(errors));
 }
@@ -97,7 +97,7 @@ Result3D<PlanarSurfaces3D> compile_planar_surfaces(Renderer3D& renderer) {
             continue;
         }
         (std::string_view(stem) == "planar_reflection" ? out.reflection : out.window) =
-            SurfaceShader3D{made->backend(), {.gi_stand_in = false}};
+            SurfaceShader3D{made->backend(), {.gi = SurfaceGi3D::Fields}};
     }
     return result3d(out, std::move(errors));
 #else
@@ -535,6 +535,9 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 m.frame_camera = m.seen.camera;
                 crop_planar_view(m.seen, picture.window, f32(picture.size.x) / f32(picture.size.y), true);
                 m.real.surface = d.surfaces.reflection;
+                // (Water the GI sees through: the light comes down into the pool, not off a dark lid.)
+                if (c.refraction > 0.0f && c.metallic < 1.0f)
+                    m.real.surface = SurfaceShader3D{d.surfaces.reflection.backend(), {.gi = SurfaceGi3D::None}};
                 m.real.emissive_texture = m.view->texture();
                 planar_view_params(m.real.shader_params, m.seen.projector, c.distortion,
                                    std::clamp(c.strength, 0.0f, 1.0f), Data::part_of(*m.view), true);

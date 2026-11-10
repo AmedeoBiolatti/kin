@@ -208,9 +208,11 @@ Result3D<SnapshotStats3D> write_scene_snapshot(Renderer3D& renderer, const Scene
             c.material = draw.material;
             if (draw.skinned)
                 c.joints = &scene.joint_matrices()[scene.skin_offsets()[draw.skin_first + i]];
-            if (options.window.valid() && draw.material.surface == options.window)
+            // (By the shader: a copy's traits may differ, water's from a mirror's.)
+            const auto* surface = draw.material.surface.backend().get();
+            if (options.window.valid() && surface == options.window.backend().get())
                 c.kind = Kind::Holdout;
-            else if (options.reflection.valid() && draw.material.surface == options.reflection) {
+            else if (options.reflection.valid() && surface == options.reflection.backend().get()) {
                 // The surface's own pictures (its reflection's, what is under water) are what the truth traces.
                 if (draw.material.shader_params[36] > 0.0f) {
                     c.kind = Kind::Water;

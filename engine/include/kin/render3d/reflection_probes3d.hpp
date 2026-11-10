@@ -55,6 +55,11 @@ struct ReflectionCaptureOptions3D {
     // that view's camera, so a probe inside their reach is lit as the view sees the scene lit). Without one, or where
     // that view's GI has no light yet, the capture has none (it is a view's own, and takes renders to settle).
     const View3D* global_illumination = nullptr;
+    // The faces rendered (bits 0 to 5: +X, -X, +Y, -Y, +Z, -Z), the others kept as last captured: a live probe can
+    // render a few a frame, in turn (ReflectionProbe3D::faces_per_frame). With `publish` false the faces are only kept,
+    // and the probe's picture (and its filtering) stays the last published one until a capture publishes them.
+    u32 faces = 0x3F;
+    bool publish = true;
 };
 
 // A probe placed in the scene (Lights3D::reflection_probes). Its boxes share a centre and a rotation:

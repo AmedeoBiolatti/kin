@@ -23,6 +23,7 @@ struct ReflectionProbes3D::Data {
         u64 seen = 0;           // the update it was last in
         std::string baked;      // the picture it was loaded from (ReflectionProbe3D::baked), if any
         bool unsettled = false; // captured before the lighting view's GI had settled (captured again once it has)
+        u32 next_face = 0;      // a live probe's next face to render (ReflectionProbe3D::faces_per_frame)
     };
     std::unordered_map<u64, Probe> probes;
     u64 updates = 0;
@@ -55,6 +56,8 @@ Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene, const View3
         u64 id;
         u32 hidden;
         f32 z_near;
+        u32 faces = 0x3F;
+        bool publish = true;
     };
     std::vector<Due> due;
     world.each([&](flecs::entity entity, const ReflectionProbe3D& c) {
@@ -108,8 +111,22 @@ Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene, const View3
         const bool clock = c.interval > 0.0f && scene.time - p.captured_at >= c.interval;
         const bool live =
             p.baked.empty() && (!p.captured || moved || clock || c.every_frame || (p.unsettled && settled));
-        if (live || c.recapture != p.recapture)
-            due.push_back({entity.id(), c.hide_self ? static_cast<u32>(entity.id()) : 0u, std::max(c.z_near, 1e-4f)});
+        if (live || c.recapture != p.recapture) {
+            Due job{entity.id(), c.hide_self ? static_cast<u32>(entity.id()) : 0u, std::max(c.z_near, 1e-4f)};
+            // A live probe that has a whole picture already, nothing else asking for one: some faces, in turn, its
+            // picture published when the round ends.
+            const u32 per = std::clamp(c.faces_per_frame, 1u, 6u);
+            if (c.every_frame && per < 6 && p.captured && !moved && !clock && c.recapture == p.recapture &&
+                !(p.unsettled && settled)) {
+                job.faces = 0;
+                for (u32 k = 0; k < per; ++k)
+                    job.faces |= 1u << ((p.next_face + k) % 6);
+                p.next_face = (p.next_face + per) % 6;
+                job.publish = p.next_face < per; // (the round wrapped: every face rendered since the last)
+            } else
+                p.next_face = 0;
+            due.push_back(job);
+        }
         p.position = position;
         p.rotation = rotation;
         p.recapture = c.recapture;
@@ -133,9 +150,12 @@ Status3D ReflectionProbes3D::update(EcsWorld& world, Scene3D& scene, const View3
     // The captures, of the scene with every probe placed (so each sees the others, as last captured).
     for (const Due& c : due) {
         Data::Probe& p = d.probes[c.id];
-        if (!d.renderer.capture_reflection(
-                p.capture, scene, p.position,
-                {.z_near = c.z_near, .hidden_id = c.hidden, .global_illumination = gi ? lighting : nullptr})) {
+        if (!d.renderer.capture_reflection(p.capture, scene, p.position,
+                                           {.z_near = c.z_near,
+                                            .hidden_id = c.hidden,
+                                            .global_illumination = gi ? lighting : nullptr,
+                                            .faces = c.faces,
+                                            .publish = c.publish})) {
             const auto& why = d.renderer.diagnostics();
             errors.insert(errors.end(), why.begin(), why.end());
             continue;
