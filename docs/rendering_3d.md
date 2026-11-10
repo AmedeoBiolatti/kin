@@ -5034,6 +5034,32 @@ to F1/capture/profiling sinks. Tools can explicitly add implementation rows with
 renderer resources. Benchmarks and reference tools consume `debug_stats()` so
 supported CSV/report counters remain available; retired experiment columns have been removed.
 
+## Checking a scene against Cycles
+
+`write_scene_snapshot(renderer, scene, size, folder, options)` (`kin/render3d/snapshot3d.hpp`; tools and tests, not
+games) writes a scene as it was rendered for Blender's Cycles to render the same, and `tools/cycles/compare.py` renders
+it and compares kin's picture with it. The folder holds `scene.json` (the camera, the view's exposure and tonemap, the
+sun, fill, ambient, point and spot lights, and each mesh copy's placing and material), `meshes/*.bin` (object-space
+triangles; skinned copies posed), `sky.hdr` (the sky's light as a panorama, without the sun's disc: the sun is a lamp)
+and `pages/`: a material with maps or a surface (a material graph) is baked, copy by copy, into pages of its base
+colour, alpha, world normal, occlusion/roughness/metallic and emission. Each triangle gets its own cell, sized by its
+area in the world (`texels_per_unit`), and is drawn there by the renderer itself
+(`RenderDebugOptions3D::unwrap` and `surface_channel`), so that a graph is evaluated by kin's own shader at that point
+of the world. `SnapshotOptions3D::reflection` and `window` (the planar surfaces) make mirrors real mirrors, water a real
+refracting surface, and portals holes the comparison leaves out. Fog, particles and the overlay are not written; kin's
+bloom is not in the truth.
+
+`planar_atrium` writes one from where its bottom line (F3) says the camera is:
+
+```sh
+KIN_RENDER_BACKEND=gpu planar_atrium --at X Y Z YAW PITCH [--survivor X Y Z YAW] --cycles-snapshot out/runs/cycles/view
+python3 tools/cycles/compare.py out/runs/cycles/view --samples 512 --denoise
+```
+
+`compare.py` writes `cycles/compare.png` (kin, Cycles, the difference times four) and `cycles/report.json`, and prints
+the mean difference, PSNR and SSIM over the compared pixels. Lights are mapped as `tools/reference/blender_truth.py`
+maps them (a point light's power 4π² times its colour; Cycles has no fade at the radius).
+
 ## API names, colour inputs and 2D builds
 
 See [the 3D API migration guide](3d_api_migration.md) for `LinearRgb` light inputs, the suffixed type/header names, the 2D-only preset and the formatting check.

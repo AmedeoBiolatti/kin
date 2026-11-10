@@ -1,5 +1,6 @@
 // Reflection probes (docs/rendering_3d.md, "Reflection probes"): their weights and box projection on the CPU, and on
-// the GPU a capture read by a mirror floor, parallax-corrected.
+// the GPU a capture read by a mirror floor, parallax-corrected. And a scene written out for a path tracer
+// (write_scene_snapshot: its bakes face the right way, its sky's panorama).
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -7,8 +8,10 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <kin/assets/image.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/snapshot3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <tuple>
@@ -419,6 +422,59 @@ void test_gi_capture(Renderer2D& r, Renderer3D& r3d) {
 
 } // namespace
 
+// A textured floor (baked into a page) and a plain box (its constants), under a sky: the files, the floor's normal
+// baked facing up (+Y), its texture's two colours in the base page, its UVs in its mesh file pointing at them.
+void test_snapshot(Renderer2D& r, Renderer3D& r3d) {
+    const Mesh3D plane = r3d.create_mesh(meshes::plane({4, 4})).value_or({});
+    const Mesh3D box = r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    const u8 checks[16] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255};
+    const Texture checker = r.create_texture({2, 2}, TextureFormat::Rgba8, checks);
+    assert(plane && box && checker);
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({0, 3, 5}, {0, 0, 0});
+    scene.sky.enabled = true;
+    scene.lights.sky_lights_scene = true;
+    assert(scene.draw(plane, Mat4f::identity(), Material3D{.texture = checker}).ok());
+    assert(scene.draw(box, Mat4f::translation({0, 0.5f, 0}), Material3D{.color = Color::rgb(40, 90, 200)}).ok());
+    const auto folder = std::filesystem::temp_directory_path() / "kin-snapshot";
+    std::filesystem::remove_all(folder);
+    const auto written = write_scene_snapshot(
+        r3d, scene, extent, folder, {.texels_per_unit = 16, .max_cell = 128, .page_size = 256, .environment_side = 16});
+    assert(written.ok());
+    assert(written->objects == 2 && written->baked == 1 && written->pages == 1 && written->triangles == 14);
+    assert(std::filesystem::exists(folder / "scene.json") && std::filesystem::exists(folder / "sky.hdr"));
+    const Image normal = load_image(folder / "pages" / "page0_normal.png");
+    const Image base = load_image(folder / "pages" / "page0_base.png");
+    assert(normal.valid() && base.valid() && normal.size == (Vec2i{256, 256}));
+    // The floor's mesh file: its corners' UVs (u right, v down over the page) and page; at each, its bakes.
+    std::ifstream in(folder / "meshes" / "00000.bin", std::ios::binary);
+    std::vector<f32> corners;
+    f32 value = 0;
+    while (in.read(reinterpret_cast<char*>(&value), sizeof value))
+        corners.push_back(value);
+    assert(corners.size() == 6 * 13); // (two triangles, unindexed)
+    int red = 0, green = 0;
+    for (std::size_t k = 0; k < 6; ++k) {
+        const f32* v = &corners[k * 13];
+        assert(v[12] == 0.0f); // its page
+        // A little inside the triangle, toward its middle: the texel there.
+        const std::size_t t = k / 3 * 3;
+        const f32 u =
+            0.8f * v[6] + 0.1f * (corners[t * 13 + 6] + corners[(t + 1) * 13 + 6] + corners[(t + 2) * 13 + 6] - v[6]);
+        const f32 w =
+            0.8f * v[7] + 0.1f * (corners[t * 13 + 7] + corners[(t + 1) * 13 + 7] + corners[(t + 2) * 13 + 7] - v[7]);
+        const std::size_t texel = (std::size_t(w * 256) * 256 + std::size_t(u * 256)) * 4;
+        // Facing up: (0, 1, 0) stored as (128, 255, 128).
+        assert(std::abs(int(normal.rgba[texel]) - 128) < 6 && normal.rgba[texel + 1] > 245 &&
+               std::abs(int(normal.rgba[texel + 2]) - 128) < 6);
+        red += base.rgba[texel] > 150 && base.rgba[texel + 1] < 100;
+        green += base.rgba[texel + 1] > 150 && base.rgba[texel] < 100;
+    }
+    assert(red > 0 && green > 0); // (the checker's corners: red at (0, 0) and (1, 1), green at the others)
+    std::filesystem::remove_all(folder);
+    std::cout << "snapshot: bakes face up, the texture in the page, the sky written\n";
+}
+
 int main() {
     test_weight();
     test_direction();
@@ -434,4 +490,5 @@ int main() {
     test_diffuse(r, r3d);
     test_gi_capture(r, r3d);
     test_ssr(r, r3d);
+    test_snapshot(r, r3d);
 }

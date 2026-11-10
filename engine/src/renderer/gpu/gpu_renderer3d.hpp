@@ -593,6 +593,8 @@ public:
                             RenderDebugStats3D& stats) override;
     bool global_illumination_lit(IViewBackend3D& view) const override;
     bool read_reflection_capture(IReflectionCaptureBackend3D& capture, std::vector<f32>& rgb, Vec2i& size) override;
+    bool read_mesh(const IMeshBackend3D& mesh, u32 vertex_count, MeshData3D& out) override;
+    bool read_texture(const Texture& texture, std::vector<u8>& texels, Vec2i& size) override;
     std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i size,
                                                                                 std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;

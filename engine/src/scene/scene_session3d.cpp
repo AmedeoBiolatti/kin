@@ -2771,6 +2771,9 @@ Scene3D* SceneSession3D::scene() {
 const View3D* SceneSession3D::view() const {
     return active() && _data->current->view ? &_data->current->view : nullptr;
 }
+const ViewOptions3D* SceneSession3D::view_options() const {
+    return active() && _data->current->view ? &_data->current->options : nullptr;
+}
 const std::vector<std::string>& SceneSession3D::diagnostics() const {
     return _data->errors;
 }

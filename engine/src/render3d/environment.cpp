@@ -1,9 +1,12 @@
+#include "hdr_encode3d.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <kin/assets/content.hpp>
@@ -79,11 +82,10 @@ Environment3D Renderer3D::load_environment_operation(const std::filesystem::path
     return environment;
 }
 
-namespace {
 // A Radiance .hdr picture (RGBE, 2:1 panoramas: what kin_hdr_load reads): the header, a "-Y h +X w" size, then each
-// scanline in the new run-length coding (its four components apart, each in literal runs of up to 128: a flat scanline
-// whose first texel began 2, 2 would read as a coded one).
-std::string encode_hdr(Vec2i size, std::span<const f32> rgb) {
+// scanline in the new run-length coding (its four components apart, each in runs of one value and literals: a flat
+// scanline whose first texel began 2, 2 would read as a coded one).
+std::string encode_hdr3d(Vec2i size, std::span<const f32> rgb) {
     const auto w = static_cast<std::size_t>(size.x), h = static_cast<std::size_t>(size.y);
     std::string out =
         "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y " + std::to_string(h) + " +X " + std::to_string(w) + "\n";
@@ -115,18 +117,34 @@ std::string encode_hdr(Vec2i size, std::span<const f32> rgb) {
         out += static_cast<char>(2);
         out += static_cast<char>(w >> 8);
         out += static_cast<char>(w & 0xFF);
-        for (std::size_t c = 0; c < 4; ++c)
+        // Runs of one value (4 to 127 alike: a count above 128, then the value), and literals between them (up to 128).
+        for (std::size_t c = 0; c < 4; ++c) {
+            const auto at = [&](std::size_t x) { return texel[x * 4 + c]; };
+            const auto run = [&](std::size_t x) {
+                std::size_t n = 1;
+                while (x + n < w && n < 127 && at(x + n) == at(x))
+                    ++n;
+                return n;
+            };
             for (std::size_t x = 0; x < w;) {
-                const std::size_t n = std::min<std::size_t>(128, w - x);
+                if (const std::size_t n = run(x); n >= 4) {
+                    out += static_cast<char>(128 + n);
+                    out += static_cast<char>(at(x));
+                    x += n;
+                    continue;
+                }
+                std::size_t n = 0;
+                while (x + n < w && n < 128 && run(x + n) < 4)
+                    ++n;
                 out += static_cast<char>(n);
                 for (std::size_t k = 0; k < n; ++k)
-                    out += static_cast<char>(texel[(x + k) * 4 + c]);
+                    out += static_cast<char>(at(x + k));
                 x += n;
             }
+        }
     }
     return out;
 }
-} // namespace
 
 Status3D Renderer3D::save_reflection_capture(const ReflectionCapture3D& capture, const std::filesystem::path& file) {
     _errors.clear();
@@ -147,10 +165,53 @@ Status3D Renderer3D::save_reflection_capture(const ReflectionCapture3D& capture,
     if (file.has_parent_path())
         std::filesystem::create_directories(file.parent_path(), error);
     std::ofstream out(file, std::ios::binary);
-    const std::string bytes = encode_hdr(size, rgb);
+    const std::string bytes = encode_hdr3d(size, rgb);
     if (!out || !out.write(bytes.data(), static_cast<std::streamsize>(bytes.size())))
         return fail("cannot write it");
     return status3d(true, _errors);
+}
+
+Result3D<MeshData3D> Renderer3D::read_mesh(const Mesh3D& mesh) {
+    _errors.clear();
+    MeshData3D data;
+    if (!mesh || !_backend || !_backend->read_mesh(*mesh.backend(), mesh.vertex_count(), data)) {
+        fail3d(_errors, "Renderer3D::read_mesh", "the mesh could not be read back");
+        return {std::nullopt, _errors};
+    }
+    return {std::move(data), {}};
+}
+
+Result3D<std::vector<f32>> Renderer3D::read_linear_texture(const Texture& texture) {
+    _errors.clear();
+    std::vector<u8> texels;
+    Vec2i size{};
+    if (!texture || texture.format() != TextureFormat::Rgba16Float || !_backend ||
+        !_backend->read_texture(texture, texels, size) ||
+        texels.size() < std::size_t(size.x) * std::size_t(size.y) * 8) {
+        fail3d(_errors, "Renderer3D::read_linear_texture", "not an RGBA16F attachment, or it could not be read back");
+        return {std::nullopt, _errors};
+    }
+    std::vector<f32> out(std::size_t(size.x) * std::size_t(size.y) * 4);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const u16 h = u16(texels[i * 2] | (texels[i * 2 + 1] << 8));
+        const u32 sign = (h & 0x8000u) << 16, exponent = (h >> 10) & 0x1fu, mantissa = h & 0x3ffu;
+        u32 bits;
+        if (exponent == 0)
+            bits = mantissa == 0 ? sign : [&] { // subnormal: normalised
+                u32 e = 127 - 15 + 1, m = mantissa;
+                while (!(m & 0x400u)) {
+                    m <<= 1;
+                    --e;
+                }
+                return sign | (e << 23) | ((m & 0x3ffu) << 13);
+            }();
+        else if (exponent == 31)
+            bits = sign | 0x7f800000u | (mantissa << 13);
+        else
+            bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+        std::memcpy(&out[i], &bits, sizeof bits);
+    }
+    return {std::move(out), {}};
 }
 
 bool Renderer3D::global_illumination_lit(const View3D& view) const {
