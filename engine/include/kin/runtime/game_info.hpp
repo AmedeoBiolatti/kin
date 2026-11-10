@@ -27,6 +27,9 @@ struct GameWindowInfo {
     bool borderless = false;
     ColorSpace color_space = ColorSpace::Gamma; // see Renderer2D::set_color_space
     bool hdr = false;
+    // A tool rather than a game: draw only when something changes (see
+    // AppConfig::wait_for_events).
+    bool wait_for_events = false;
 };
 
 // Every member has a default, so a designated initializer can leave any out
@@ -37,14 +40,21 @@ struct GameInfo {
     std::string version{};
     std::string description{};
     std::string author{};
+    // Its icon: a PNG in its content (the window's; kin_game makes the Windows
+    // executable's from <name>.ico beside it).
+    std::string icon{};
     GameWindowInfo window{};
     bool headless_supported = true;
+    // Its Steam app id ("steam_app_id 480"): run_scene_app starts Steam's
+    // services with it (kin/platform/services.hpp); 0: none.
+    u32 steam_app_id = 0;
     std::vector<std::string> tags{};
     std::vector<GameInfoField> fields{};
     std::optional<InputMap> input_map{};
 };
 
-WindowedAppConfig window_config(const GameInfo& info);
+// Its window; with `content` (its content root), its icon too.
+WindowedAppConfig window_config(const GameInfo& info, const std::filesystem::path& content = {});
 
 void set_field(GameInfo& info, std::string_view key, std::string_view value);
 const std::string* field(const GameInfo& info, std::string_view key);

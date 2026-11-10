@@ -1,5 +1,6 @@
 #include <kin/assets/file_watcher.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/theme_file.hpp>
 
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace {
 
@@ -148,6 +150,50 @@ void test_skins_are_drawn_with_a_renderer() {
     } // the theme, and its frames, go before the renderer
 }
 
+// Image skins and font files: read from the content when the theme is built;
+// what can't be read is said, and left as it was.
+void test_image_skins_and_fonts() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_theme_art_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "ui");
+#if KIN_ENABLE_IMAGE_IO
+    assert(kin::ColorLut::neutral(4).save_png(dir / "ui" / "button.png")); // any image: a 16 x 4 one
+#endif
+    kin::ui2::ThemeFile file;
+    std::vector<std::string> errors;
+    assert(kin::ui2::parse_theme_file("[theme]\nfont = fonts/missing.ttf\nfont_size = 18\n"
+                                      "[skin]\nbutton = image ui/button.png 6\npanel = image ui/gone.png 4 0 0 8 8\n",
+                                      file, errors));
+    assert(file.font == "fonts/missing.ttf" && file.font_size == 18.0f);
+    assert(file.skin.size() == 2 && file.skin[0].second.image == "ui/button.png" && file.skin[0].second.margin == 6.0f);
+    assert(file.skin[1].second.source.w == 8.0f);
+    assert(!kin::ui2::parse_theme_file("[skin]\nbutton = image\n", file, errors));
+    errors.clear();
+
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "theme-art", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{window};
+    {
+        kin::ui2::ThemeFile built;
+        assert(kin::ui2::parse_theme_file("[theme]\nfont = fonts/missing.ttf\n[skin]\nbutton = image ui/button.png 6\npanel = image ui/gone.png 4\n",
+                                          built, errors));
+        std::vector<std::string> problems;
+        built.build(renderer, dir, problems);
+#if KIN_ENABLE_IMAGE_IO
+        assert(built.theme.button.surface.normal.use_skin); // the image
+        assert(problems.size() == 2);                         // the font, and the image that is not there
+#else
+        assert(!built.theme.button.surface.normal.use_skin); // a build without image files reads none
+        assert(problems.size() == 3);                          // the font, and both images
+#endif
+    }
+    const std::vector<std::string_view> slots = kin::ui2::theme_skin_slot_names();
+    assert(std::ranges::find(slots, std::string_view("button_hovered")) != slots.end());
+    assert(!kin::ui2::theme_token_names().empty() && !kin::ui2::theme_surface_names().empty());
+    fs::remove_all(dir);
+}
+
 void test_a_theme_reloads_when_edited() {
     const fs::path dir = fs::temp_directory_path() / "kin-theme-file-tests";
     fs::create_directories(dir);
@@ -181,5 +227,6 @@ int main() {
     test_mistakes_are_reported_and_change_nothing();
     test_skins_are_drawn_with_a_renderer();
     test_a_theme_reloads_when_edited();
+    test_image_skins_and_fonts();
     return 0;
 }

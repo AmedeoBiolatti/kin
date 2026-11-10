@@ -1,5 +1,6 @@
 #include <cmath>
 #include <kin/audio/audio.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -22,7 +23,14 @@ SceneFrame3D::SceneFrame3D(EcsWorld& world, WorldRenderState3D& rendering, Scene
 }
 
 bool SceneFrame3D::validate() {
-    _errors = validate_particles3d(_world, _options.particles).diagnostics;
+    const u64 revision = _rendering.particle_configuration_revision();
+    const bool reused = _rendering.mutation_mode() == SceneMutationMode3D::Tracked && revision == _particle_revision;
+    _rendering.note_particle_validation(reused);
+    if (!reused) {
+        _particle_diagnostics = validate_particles3d(_world, _options.particles).diagnostics;
+        _particle_revision = revision;
+    }
+    _errors = _particle_diagnostics;
     return _errors.empty();
 }
 
@@ -51,6 +59,9 @@ bool SceneFrame3D::after_phase_operation(SystemPhase phase, f32 dt) {
         case SystemPhase::Animation:
             if (!validate())
                 return false;
+            // Animators' tracks first (resolve_animators3d bound them): they place entities the models' clips are
+            // then played on.
+            update_animators(_world, dt, true);
             _rendering.animate(dt);
             _rendering.advance_time_of_day(dt);
             _rendering.advance_weather(dt);
@@ -155,7 +166,12 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         scene.ambient_occlusion = {};
         scene.contact_shadows = {};
         scene.taa = {};
+        scene.ssr = {};
+        scene.anisotropy = 1;
+        scene.texture_lod_bias = 0.0f;
+        scene.specular_aa = 0.0f;
         scene.lod = {};
+        scene.global_illumination = {};
         scene.cull = true;
         _rendering.propagate_transforms();
         WorldRenderState3D::Presentation3D presentation;
@@ -177,6 +193,9 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         _rendering.apply_time_of_day(scene);
         const auto fog = scene.fog;
         _rendering.apply_weather(scene, fog);
+        // The entities' morph target weights (MorphWeights3D), onto their own meshes, before they are collected.
+        if (_options.renderer && _options.renderer->available())
+            _rendering.apply_morphs(*_options.renderer);
         _rendering.collect(scene, presentation, poses, ik, alpha);
         if (_options.bodies && _options.renderer && _options.renderer->available())
             _options.bodies->collect_ropes(*_options.renderer, scene, alpha);

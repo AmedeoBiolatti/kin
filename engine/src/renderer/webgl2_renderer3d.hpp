@@ -15,11 +15,14 @@ public:
     RendererCapabilities3D capabilities() const override;
     std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
+    bool update_mesh_vertices(IMeshBackend3D& mesh, std::span<const MeshVertex3D> vertices) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i, std::span<const f32>) override { return {}; }
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8>) override { return {}; }
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
+    // Nothing to make ahead: the programs are made with the renderer, the targets with the view.
+    bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
     Result3D<PickResult3D> pick(IViewBackend3D&, Vec2i) override;
 
 private:

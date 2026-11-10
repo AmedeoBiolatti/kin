@@ -1,23 +1,29 @@
-# cmake -DOUTPUT=<cpp> -DHEADER=<hpp> -DNAME=<function> [-DNAMESPACE=<ns>] -DFILES=<a|b|...> -P kin_embed_generate.cmake
+# cmake -DOUTPUT=<cpp> -DHEADER=<hpp> -DNAME=<function> [-DNAMESPACE=<ns>]
+#       (-DFILES_LIST=<a file of paths, one a line> | -DFILES=<a|b|...>) -P kin_embed_generate.cmake
 # Writes the source that kin_embed_files builds into a target.
 
-string(REPLACE "|" ";" files "${FILES}")
+if(DEFINED FILES_LIST)
+    file(STRINGS "${FILES_LIST}" files)
+else()
+    string(REPLACE "|" ";" files "${FILES}")
+endif()
 
-set(entries)
+# Sorted by name alone, as the lookup's lower_bound needs: "a.py" before
+# "a.pyi" (sorting "name|path" put them the other way round).
+set(sorted_names)
 foreach(file IN LISTS files)
     get_filename_component(name "${file}" NAME)
-    list(APPEND entries "${name}|${file}")
+    list(APPEND sorted_names "${name}")
+    set("path_of_${name}" "${file}")
 endforeach()
-list(SORT entries)
+list(SORT sorted_names)
 
 set(arrays "")
 set(table "")
 set(names "")
 set(index 0)
-foreach(entry IN LISTS entries)
-    string(REPLACE "|" ";" parts "${entry}")
-    list(GET parts 0 name)
-    list(GET parts 1 file)
+foreach(name IN LISTS sorted_names)
+    set(file "${path_of_${name}}")
     file(READ "${file}" hex HEX)
     string(LENGTH "${hex}" hex_length)
     math(EXPR size "${hex_length} / 2")
@@ -88,4 +94,12 @@ set(content
 
 ${open_ns}${body}${close_ns}")
 
+# A shader may rebuild to identical bytes (for example after a comment edit).
+# Preserve the source's timestamp so Ninja/Make can skip C++ compilation.
+if(EXISTS "${OUTPUT}")
+    file(READ "${OUTPUT}" previous)
+    if(previous STREQUAL content)
+        return()
+    endif()
+endif()
 file(WRITE "${OUTPUT}" "${content}")

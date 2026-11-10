@@ -1,0 +1,15 @@
+{
+  "schema": "kin.eval-scene/1",
+  "id": "sponza",
+  "adapter": "reference",
+  "source": "../../../tests/reference/scenes/sponza.json",
+  "asset_root": "~/.cache/kin/reference",
+  "views": [
+    "nave",
+    "roof"
+  ],
+  "reference": {
+    "provider": "reference",
+    "coverage": "existing static glTF/lighting Cycles mapping; review material/light fidelity before tuning"
+  }
+}

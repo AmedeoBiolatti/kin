@@ -2,8 +2,119 @@
 
 The engine animation surface is `kin::anim`: `AnimationRegistry`,
 `AnimationPlayer`, `AnimationStateMachine`, and `AnimationEventDispatch`.
+Frames only (a walk cycle of a sprite sheet) need none of it: a sprite
+catalog's `animation` lines, played by `SpriteAnimator`
+([Sprite animations](rendering.md#sprite-animations)), are what scene files and
+editors use.
 The old ECS sprite/state animation API and frame-based renderer animation API
 have been retired from the engine build.
+
+## Animators: Animations In Scenes
+
+`kin::Animator` (`kin/ecs/animator.hpp`) plays an animation of an animation
+file of the game's content on an entity. Scene files name the file (`asset`, a
+`.kinanim`) and the animation (`animation`); `Assets2D` reads the file, and
+`update_animators(world, dt)` plays it each frame. That call also advances and
+samples every other `AnimationPlayer`, so call it instead of those two.
+- **What tracks set:** an Animator's property tracks can set any field of the
+  world's described native components that holds a number, a pair, a colour, a
+  whole number, a check, text, a 3D vector or a 3D turn
+  (`register_described_properties`: `"Transform2D.pos"`, `"TextRenderer.color"`,
+  `"CameraComponent.zoom"`, `"Transform3D.position"`, `"Transform3D.rotation"`).
+- **Children:** a track's `target` names a child, by its name.
+- **Sprites:** sprite tracks set the entity's `SpriteRenderer` sprite, from its
+  catalog.
+- **Events:** go to the entity's `AnimationEventQueue`.
+- **Playing:** `speed` and `playing` control playback; `time` and `finished`
+  report it. Naming another animation starts it from the beginning.
+- **Prefabs:** an Animator on a prefab's instance gets its own copy, as do the
+  components its tracks set, so instances animate independently.
+
+```cpp
+door.set(kin::Animator{.asset = {"animations/door.kinanim"}, .animation = "open"});
+kin::update_animators(world, dt); // each frame
+```
+
+In a 3D scene, `SceneSession3D` binds them (`resolve_animators3d`, from the
+content folder: at load, for spawned prefabs and for live edits) and
+`SceneFrame3D` plays them in its animation phase, before the models' clips, so
+a door, a platform or a camera rail moves as authored. Their writes are
+announced (`update_animators(world, dt, true)`: each field set marked as set),
+as the 3D drawing watches for changes. A 3D track's keys are `vec3 x y z` (a
+place or a size, eased by its parts) and `quat x y z w` (a turn, made whole as
+read, eased the short way round at a steady speed):
+
+```text
+animation door.open
+  clip 1
+    track Transform3D.rotation target=hinge
+      key 0 quat 0 0 0 1 linear
+      key 1 quat 0 0.7071068 0 0.7071068 easeout
+    track Transform3D.position
+      key 0 vec3 0 0 0 linear
+      key 1 vec3 0 0.1 0 linear
+```
+
+A relative quat track turns from where the entity was, in its own frame.
+
+## Tweens
+
+A tween moves one field from what it is to a value over time: a panel sliding
+in, a card turning over, a coin fading. No animation file is needed
+(`kin/ecs/tween.hpp`).
+
+```cpp
+kin::tween(world, card, {.property = "Transform2D.pos", .to = kin::Vec2f{320, 200},
+                         .seconds = 0.3f, .easing = kin::Easing::BackOut});
+kin::update_tweens(world, dt); // each frame
+```
+
+Where Lua scripts run, their world's script services step the world's tweens
+once per simulation step (`ScriptWorkflows2D`, before the scripts' updates), so
+do not call `update_tweens` as well. Scripts start tweens with `self:tween` and
+`tweens.to` ([Lua 2D workflows](lua_2d_workflows.md#property-tweens)).
+
+- **What it moves:** any described field that tracks can set, named the same
+  way. Numbers, pairs and colours move. Whole numbers, checks and text change
+  at its end.
+- **Where it starts:** from the field's value when it starts, after its
+  `delay`, so tweens one after another follow on. `relative` adds `to` to that
+  value.
+- **Repeats:** `repeats` goes again that many times once done (-1: on and on),
+  and `yoyo` goes back the other way each time.
+- **One tween per field:** a new tween of a field stops the one it replaces.
+  `stop_tween(entity, id)` and `stop_tweens(entity[, property])` stop tweens
+  where they are; `tweening(entity[, property])` says whether any are
+  running.
+- **Ended:** a tween that gets to its end is in its entity's
+  `Tweens::ended` until the next `update_tweens`.
+- **Prefabs:** an instance of a prefab gets its own copy of the component it
+  writes.
+
+Tweens and key frames ease the same ways (`Easing`, `easings()`):
+- `step` and `linear`;
+- `easein`, `easeout` and `easeinout` (quadratic);
+- `sine`, `cubic`, `back` (overshoots a little and comes back), `elastic`
+  (springs) and `bounce`, each `in`, `out` or `inout`: `backout`,
+  `bounceout`, `sineinout`.
+
+For things to do later by time, `kin::Timers` (`kin/core/timers.hpp`) runs
+actions `after(seconds, ...)` or `every(seconds, ...)` as the game calls
+`update(dt)`, and `cancel(id)` stops one. Scripts use tasks instead
+(`self:after`, `self:every`, `task.wait`), which a reload or a stopped script
+cancels.
+
+Sequences are tasks too: await one tween after another, or start several and
+await each for a parallel step:
+
+```lua
+task.run(function()
+    task.await(tweens.to(card, 'Transform2D.pos', {x=320,y=200}, 0.3, 'backout'))
+    local fade = tweens.to(card, 'SpriteRenderer.tint', {r=255,g=255,b=255,a=0}, 0.2)
+    local turn = tweens.to(card, 'Transform2D.rotation', 180, 0.2)
+    task.await(fade); task.await(turn)
+end)
+```
 
 ## Definitions And Players
 
@@ -70,7 +181,7 @@ machine->states["run"] = "hero.run";
 machine->transitions.push_back({
     .from = "idle",
     .to = "run",
-    .conditions = {{.param = "moving", .op = kin::CondOp::BoolEqual, .bool_value = true}},
+    .when = {{.param = "moving", .op = kin::CondOp::IsTrue}},
 });
 
 player.machine = machine;
@@ -80,6 +191,69 @@ player.params.set_bool("moving", true);
 Empty transition `from` means any current state. `ReplaceBase` changes the base
 animation and current state. `PushOverride` pushes an override and leaves the
 current state unchanged.
+- **Order:** transitions are tried in order, and the first whose conditions
+  all hold is taken.
+- **Any-state into itself:** a transition from any state into the state already
+  running, replacing it, is not taken, since it would restart that state every
+  step.
+- **Finished:** `CondOp::Finished` (`finished` in a file) holds once the
+  state's animation has played through. Use it to go back to idle after an
+  attack or a jump.
+
+In a `.kinanim` file:
+
+```text
+statemachine hero
+  initial idle
+  state idle idle
+  state run run
+  state jump jump
+  transition idle -> run when bool:running == true mode replace
+  transition run -> idle when bool:running == false mode replace
+  transition any -> jump when trigger:jump mode replace
+  transition jump -> idle when finished mode replace
+  place idle 0 0
+```
+
+A transition's `blend` (seconds; `... mode replace blend 0.2` in a file) fades
+the state it leaves into the one it enters. The old base goes to
+`AnimationPlayer::fading` and fades out while the new base fades in; numeric
+fields are mixed by their weights, and the new state's sprite shows at once.
+A push with a blend fades its override in over that time.
+
+### Blend spaces
+
+A blend space (`blend_space.hpp`) mixes animations by a float parameter. Each
+animation sits at a position along it, and the two either side of the value
+are mixed by nearness. Their clips are kept in step: each goes through its loop
+in the same share of a turn, so a walk's and a run's steps land together. Only
+the heaviest sends events and sets the sprite. A state plays a blend space by
+its name, as it plays an animation; `set_base` does too.
+
+```text
+blendspace locomotion speed
+  at 0 walk
+  at 1.5 jog
+  at 4 run
+
+statemachine hero
+  initial ground
+  state ground locomotion
+  state jump jump
+  transition any -> jump when trigger:jump mode replace blend 0.15
+  transition jump -> ground when finished mode replace blend 0.25
+```
+
+`AnimationRegistry::add_blend_space`, `blend_space` and `blend_weights` give
+the same from code.
+
+`place` lines say where an editor draws each state (and `any`, the any-state).
+Editors write them; nothing reads them when the machine plays.
+
+An `Animator` runs a machine of its file when it names one (`machine`, in place
+of `animation`). The game sets the parameters on the Animator
+(`animator.params.set_bool("running", true)`, `set_trigger("jump")`; a trigger
+is handed to the machine once). `state` reports the state it is in.
 
 ## Layers And Blending
 
@@ -89,7 +263,7 @@ Layer 0 is the base animation. `push(...)` adds override layers above it:
 kin::push(player, "hero.attack", {.weight = 0.5f, .blend_in = 0.15f});
 ```
 
-Numeric property tracks (`float`, `vec2`, `color`, `int`) blend per property
+Numeric property tracks (`float`, `vec2`, `color`, `int`, `vec3`, `quat`) blend per property
 using normalized positive layer weights. `blend_in` ramps an override's effective
 weight from `0` to its target weight. Sprite tracks, events, strings, and bools
 remain topmost-wins.

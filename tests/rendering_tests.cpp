@@ -1,3 +1,5 @@
+#include <kin/renderer/backend.hpp>
+#include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/material.hpp>
 #include <kin/renderer/render_graph.hpp>
 #include <kin/renderer/render_profile.hpp>
@@ -510,6 +512,16 @@ void test_render_graph_pass_toggles_and_stats() {
     assert(graph.passes().set_enabled("debug", true));
     graph.execute(renderer, queue);
     assert(debug_runs == 1);
+    assert(graph.compiler_stats().compilations == 1 && graph.compiler_stats().cache_hits == 1);
+    graph.passes().find("world")->dependencies = {{"debug"}};
+    bool cycle = false;
+    try {
+        graph.execute(renderer, queue);
+    } catch (const std::runtime_error&) {
+        cycle = true;
+    }
+    assert(cycle && world_runs == 2 && debug_runs == 1);
+
 }
 
 void test_default_render_graph_flushes_pass_masks() {

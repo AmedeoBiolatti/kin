@@ -3,15 +3,51 @@
 Kin tests are CTest-driven C++ executables under `tests/`, built when kin is the
 top-level project (`KIN_BUILD_TESTS`).
 
+Lua modules and scripted ECS components can run directly through `kin_lua test`,
+with isolated fixtures, controlled time/input, reload assertions and JSON/JUnit
+reports. See [Lua development](lua_development.md#lua-unit-and-component-tests)
+and the runnable [example project](../examples/lua_testing/README.md).
+
 ## Quick Start
 
-Configure, build, and run the full test suite:
+For a normal edit, configure once and build/run the affected suite:
+
+```sh
+cmake --preset dev
+cmake --build --preset dev --target kin_scene_tests
+ctest --preset dev -R '^kin-scene$'
+```
+
+The development presets enable `KIN_BUILD_ON_DEMAND`: tests, sample games and
+tools stay available as targets but are excluded from the default build. CTest
+still lists all registered tests; it does not build missing executables. Always
+build the selected targets first and filter CTest to the corresponding tests.
+Some integration tests also require game/tool targets; build those dependencies
+as well. Running unfiltered CTest after a focused build can report missing
+executables.
+
+Documentation-only changes need relevant document checks, not compilation.
+Script and content changes usually need relevant script checks and a bounded
+sample smoke run. For C++ changes, start with affected targets and existing
+subsystem tests. Broaden coverage for shared headers/contracts, build settings,
+cross-module changes, failures or uncertainty. CI covers the full platform matrix.
+Repeat passing checks only after relevant edits or a new concern.
+
+For integration/release work, configure, build, and run the full suite:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure -j 8
 ```
+
+The plain configuration defaults to `KIN_BUILD_ON_DEMAND=OFF`, so existing CI
+and full-build commands retain their behavior. To run all enabled tests in an
+existing development build, reconfigure that same directory with
+`cmake --preset dev -DKIN_BUILD_ON_DEMAND=OFF`, build it, then run
+`ctest --preset dev`. Restore on-demand mode with `cmake --preset dev`.
+Examples and benchmarks remain disabled by the development presets; enable
+them explicitly when their coverage is needed.
 
 Keep CTest parallelism at 8 or below: many tests start SDL, and higher counts
 cause backend startup contention.
@@ -25,6 +61,19 @@ ctest --test-dir build -C Release --output-on-failure --rerun-failed
 ```
 
 Use `-j 1` when diagnosing order or resource issues.
+
+For GPU-required 3D tests, software Vulkan, core/synchronization validation,
+sanitizers and CI coverage, see the [rendering validation guide](rendering_validation.md).
+Dummy-driver test passes do not exercise GPU rendering.
+
+For reusable gameplay scenarios, bounded tick conditions, session replay and
+failure bundles, see [gameplay automation](automation.md). The Workshop's
+`kin-workflow-automation` CTest runs JSON/Lua scenarios, both recording paths,
+replay and failure capture through real game processes.
+
+`kin-workflow-development` additionally tests live Lua/scene reload, invalid edit
+rollback, active leases/jobs, replay, and actual edits through the development
+launcher/import watcher. See [safe development reload](hot_reload.md).
 
 ## Building Tests
 
@@ -40,7 +89,9 @@ are found.
 
 ## Test Layout
 
-Each test source usually builds one executable:
+Extend an existing subsystem suite when adding cases. Create a separate
+executable when it needs different dependencies, process isolation or build
+configuration. A typical existing suite is registered like this:
 
 ```cmake
 add_executable(kin_scene_tests
@@ -97,6 +148,23 @@ std::filesystem::create_directories(dir);
 
 Clean the directory at the start of tests that assert discovery counts or exact file
 sets. For hot-reload tests, advance the file timestamp explicitly after rewriting.
+
+## Test Profiles
+
+`KIN_TEST_PROFILE` chooses which tests CMake registers (and so builds). `all`, the
+default, registers every test. `config` leaves out the tests listed in
+`KIN_CONFIG_INDEPENDENT_TESTS` in `tests/CMakeLists.txt`: units of pure logic (ECS,
+animation, pathfinding, prefabs, ...) and the Python checks of the tools, whose results
+cannot depend on how kin is configured.
+
+CI uses `config` for the builds that exist to check one set of options (the minimal
+shipping build, the software-renderer and compact exports, direct SDL on Windows). They
+build with link-time optimization, where every test executable costs a link of the
+whole engine, and the default builds (`Linux GCC`, `Linux Clang`, `Windows MSVC`, the
+2D-only build) already run the same tests. A test whose outcome can depend on an option
+must not be added to the list: one that reads a `KIN_ENABLE_*` macro, or goes through the
+renderer, image or font support, the platform layer, a shipping feature or a component.
+A new test is registered in every build until someone lists it.
 
 ## Failure Workflow
 
@@ -468,8 +536,15 @@ response is one line: `{"id": <echoed>, "result": {...}}` or
 | `scene.actions` | Available input actions and their bindings. |
 | `world.snapshot {scene?, animations?}` | Flecs world JSON for an ECS scene (see below). |
 | `animation.diagnostics` | Unresolved-reference diagnostics from the scene's animation library. |
-| `ui.snapshot {scene?}` | Unavailable after legacy `kin/ui` removal; use `world.snapshot` or scene reports. |
+| `ui.snapshot {scene?}` | ui2 semantic elements, bounds, state and supported actions from the scene's UI context. |
+| `ui.query {scene?, selector?}` / `ui.action {scene?, selector, action?}` | Scoped semantic queries and unique, deferred actions. |
+| `world.query {scene?, selector?, limit?}` | Filter registered entities/components by authored ID, name and component names. |
+| `server.schema` / `server.capabilities` | Request/result schemas, method effects and current provider/mode availability. |
+| `automation.snapshot {world?}` | Scene reports/UI and optionally registered ECS state for trace checkpoints. |
 | `view.screenshot {path?}` | Render the current scene and save a PNG; returns path + dimensions. |
+| `view.scene {path, content?}` | The top scene shows another scene file (`Scene::view_scene`); for tools' scene views. |
+| `view.edit {entities}` | The scene shown takes changed fields in place (`Scene::view_edit`); a tool's dragged handle, without reading the file again. |
+| `view.frame {path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene through the given camera and write raw RGBA; returns path + dimensions. |
 | `sim.tick {count}` | Advance N fixed-timestep frames; returns the frame counter. |
 | `sim.reset {seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |
 | `input.action {name, mode}` | Queue an action `press` (a tap, released at the start of the next tick), `hold`, or `release` for the next tick. |

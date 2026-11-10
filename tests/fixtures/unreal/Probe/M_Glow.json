@@ -1,0 +1,98 @@
+{
+ "schema": "kin.unreal-material/1",
+ "name": "M_Glow",
+ "path": "/Game/Probe/M_Glow",
+ "class": "Material",
+ "parents": [],
+ "base": "/Game/Probe/M_Glow",
+ "blend_mode": "BLEND_ADDITIVE",
+ "shading_model": "MSM_DEFAULT_LIT",
+ "two_sided": false,
+ "opacity_mask_clip_value": 0.33329999446868896,
+ "parameters": {
+  "scalar": {
+   "Strength": 5.0
+  },
+  "vector": {},
+  "texture": {},
+  "switch": {}
+ },
+ "inputs": {
+  "EmissiveColor": {
+   "class": "MaterialExpressionMultiply",
+   "output": "",
+   "const_a": 0.0,
+   "const_b": 1.0,
+   "inputs": [
+    {
+     "class": "MaterialExpressionConstant3Vector",
+     "output": "",
+     "value": [
+      1.0,
+      0.5,
+      0.0,
+      1.0
+     ]
+    },
+    {
+     "class": "MaterialExpressionScalarParameter",
+     "output": "",
+     "parameter": "Strength",
+     "value": 5.0
+    }
+   ]
+  }
+ },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionMultiply_0": {
+    "class": "MaterialExpressionMultiply",
+    "props": {
+     "const_a": 0.0,
+     "const_b": 1.0
+    },
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionConstant3Vector_0",
+      "output": "RGB",
+      "output_index": 0
+     },
+     "B": {
+      "node": "MaterialExpressionScalarParameter_0",
+      "output": "",
+      "output_index": 0
+     }
+    }
+   },
+   "MaterialExpressionConstant3Vector_0": {
+    "class": "MaterialExpressionConstant3Vector",
+    "props": {
+     "constant": [
+      1.0,
+      0.5,
+      0.0,
+      1.0
+     ]
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionScalarParameter_0": {
+    "class": "MaterialExpressionScalarParameter",
+    "props": {
+     "default_value": 5.0,
+     "parameter_name": "Strength",
+     "sort_priority": 32
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "EmissiveColor": {
+    "node": "MaterialExpressionMultiply_0",
+    "output": ""
+   }
+  }
+ },
+ "functions": {},
+ "textures": {}
+}

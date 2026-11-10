@@ -1,35 +1,21 @@
 #include <kin/scripting/lua_script.hpp>
 
+#include "lua_api_surface.hpp"
 #include "lua_l10n.hpp"
+#include "lua_services.hpp"
 #include "lua_paths.hpp"
+#include "lua_vm.hpp"
 
 #include <kin/assets/file_watcher.hpp>
 #include <kin/platform/log.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
 namespace kin {
 
 namespace {
-
-// The budget of the load or call running on this thread (null: no limit). The
-// count hook takes 1,000 instructions from it at a time and stops the script
-// with an error when it runs out.
-thread_local u64* t_budget = nullptr;
-constexpr int hook_interval = 1000;
-
-void count_hook(lua_State* state, lua_Debug*) {
-    if (!t_budget) {
-        return;
-    }
-    if (*t_budget <= static_cast<u64>(hook_interval)) {
-        *t_budget = 0;
-        luaL_error(state, "instruction limit reached (a loop that never ends?)");
-        return;
-    }
-    *t_budget -= static_cast<u64>(hook_interval);
-}
 
 std::string error_text(const sol::protected_function_result& result) {
     const sol::error error = result;
@@ -38,18 +24,9 @@ std::string error_text(const sol::protected_function_result& result) {
 
 } // namespace
 
-LuaScript::Budget::Budget(const LuaScript& script)
-    : _remaining(script._options.instruction_limit), _previous(t_budget) {
-    t_budget = _remaining > 0 ? &_remaining : nullptr;
-}
-
-LuaScript::Budget::~Budget() {
-    t_budget = _previous;
-}
-
 LuaScript::LuaScript(LuaScriptOptions options)
     : _options(std::move(options)), _dependencies(std::make_shared<std::vector<std::filesystem::path>>()) {
-    _lua = make_state(_dependencies);
+    _vm = make_vm(_dependencies);
 }
 
 LuaScript::~LuaScript() {
@@ -60,10 +37,9 @@ LuaScript::~LuaScript() {
     }
 }
 
-std::unique_ptr<sol::state> LuaScript::make_state(const Dependencies& dependencies) const {
-    auto lua = std::make_unique<sol::state>();
-    scripting_detail::bind_script_errors(*lua);
-    lua->open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string, sol::lib::utf8);
+std::unique_ptr<LuaVm> LuaScript::make_vm(const Dependencies& dependencies) const {
+    auto vm = std::make_unique<LuaVm>(_vm ? _vm->runtime.limits() : _options.limits);
+    sol::state* lua = vm->lua.get();
     // Nothing that reads the world outside the script, or makes up numbers.
     for (const char* name : {"dofile", "loadfile", "load", "require", "collectgarbage"}) {
         (*lua)[name] = sol::lua_nil;
@@ -72,6 +48,7 @@ std::unique_ptr<sol::state> LuaScript::make_state(const Dependencies& dependenci
     (*lua)["math"]["randomseed"] = sol::lua_nil;
     // Translations to read, not the language to change.
     scripting_detail::bind_l10n(*lua, false);
+    scripting_detail::bind_services(*lua);
     (*lua)["print"] = [](sol::this_state state, sol::variadic_args args) {
         sol::state_view view{state};
         const sol::protected_function to_text = view["tostring"];
@@ -126,13 +103,10 @@ std::unique_ptr<sol::state> LuaScript::make_state(const Dependencies& dependenci
         };
     }
 
-    if (_options.instruction_limit > 0) {
-        lua_sethook(lua->lua_state(), count_hook, LUA_MASKCOUNT, hook_interval);
-    }
     if (_options.setup) {
         _options.setup(*lua);
     }
-    return lua;
+    return vm;
 }
 
 bool LuaScript::load_file(const std::filesystem::path& path) {
@@ -141,7 +115,17 @@ bool LuaScript::load_file(const std::filesystem::path& path) {
         fail("could not read " + path.string());
         return false;
     }
-    if (!run(*code, "@" + path.filename().string(), {scripting_detail::normalized_path(path)})) {
+    // Named as breakpoints name it: under module_root, from there
+    // ("scripts/player.lua"); else by its file's name.
+    std::string chunk = path.filename().string();
+    const std::filesystem::path full = scripting_detail::normalized_path(path);
+    if (!_options.module_root.empty()) {
+        const std::filesystem::path relative = full.lexically_relative(scripting_detail::normalized_path(_options.module_root));
+        if (!relative.empty() && *relative.begin() != "..") {
+            chunk = relative.generic_string();
+        }
+    }
+    if (!run(*code, "@" + chunk, {full})) {
         return false;
     }
     _path = path;
@@ -154,29 +138,68 @@ bool LuaScript::load_string(std::string_view code, std::string_view name) {
 }
 
 bool LuaScript::run(std::string_view code, const std::string& chunk_name, std::vector<std::filesystem::path> dependencies) {
-    // A fresh state, replacing the current one only if the script loads and runs.
+    // A fresh state, replacing the current one only if the script loads and
+    // runs (a rejected one closes, with its tasks, when it goes).
     auto fresh_dependencies = std::make_shared<std::vector<std::filesystem::path>>(std::move(dependencies));
-    std::unique_ptr<sol::state> fresh = make_state(fresh_dependencies);
-    sol::load_result chunk = fresh->load(code, chunk_name);
-    if (!chunk.valid()) {
-        const sol::error error = chunk;
-        fail(error.what());
-        return false;
-    }
-    sol::protected_function script = chunk;
+    std::unique_ptr<LuaVm> fresh = make_vm(fresh_dependencies);
     {
-        const Budget budget{*this};
-        const sol::protected_function_result result = script();
+        LuaCall call{fresh->runtime, fresh->state(), "script.load"};
+        sol::load_result chunk = call.compile([&] { return fresh->lua->load(code, chunk_name); });
+        if (!chunk.valid()) {
+            const sol::error error = chunk;
+            fail(error.what());
+            return false;
+        }
+        sol::protected_function script = chunk;
+        const sol::protected_function_result result = call.invoke(script);
         if (!result.valid()) {
             fail(error_text(result));
             return false;
         }
     }
     _dependencies = std::move(fresh_dependencies);
-    _lua = std::move(fresh);
+    _vm.swap(fresh); // the old state closes here
     _loaded = true;
     _error.clear();
     return true;
+}
+
+sol::state& LuaScript::lua() {
+    return *_vm->lua;
+}
+
+LuaRuntime& LuaScript::runtime() {
+    return _vm->runtime;
+}
+
+const LuaRuntime& LuaScript::runtime() const {
+    return _vm->runtime;
+}
+
+bool LuaScript::advance_tasks(f32 dt, const std::function<bool(u64)>& owner_alive) {
+    std::string error;
+    if (!_vm->tasks->advance(dt, error, owner_alive)) {
+        fail("task: " + error);
+        return false;
+    }
+    _vm->collect();
+    return true;
+}
+
+void LuaScript::set_task_owner(u64 owner) {
+    _vm->tasks->set_owner(owner);
+}
+
+void LuaScript::cancel_tasks() {
+    _vm->tasks->cancel_all();
+}
+
+void LuaScript::cancel_tasks(u64 owner) {
+    _vm->tasks->cancel(owner);
+}
+
+LuaApiSurface LuaScript::api_surface() const {
+    return scripting_detail::lua_api_surface(*_vm->lua);
 }
 
 bool LuaScript::has(std::string_view function) const {
@@ -187,7 +210,7 @@ sol::protected_function LuaScript::find(std::string_view function) const {
     if (!_loaded) {
         return {};
     }
-    const sol::object value = (*_lua)[std::string(function)];
+    const sol::object value = _vm->lua->globals().raw_get<sol::object>(std::string(function));
     if (value.get_type() != sol::type::function) {
         return {};
     }
@@ -242,6 +265,18 @@ void LuaScript::rewatch() {
     if (_dependencies->empty()) {
         _watches.push_back(_files->watch(_path, [this](const std::filesystem::path&) { load_file(_path); }));
     }
+}
+
+bool check_lua_syntax(std::string_view code, std::string_view name, std::string& error) {
+    sol::state lua;
+    const sol::load_result loaded = lua.load(code, "=" + std::string(name)); // "=": named as it is, not [string "..."]
+    if (loaded.valid()) {
+        error.clear();
+        return true;
+    }
+    const sol::error why = loaded;
+    error = why.what();
+    return false;
 }
 
 } // namespace kin

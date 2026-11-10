@@ -98,11 +98,15 @@ struct DialogueNode {
     std::string target;
     std::string event_id;
     std::vector<DialogueEffect> effects;
+    std::optional<Vec2f> place; // where an editor draws it ("place": {"x", "y"})
 };
 
 struct DialogueDocument {
     std::string id;
     std::string start_node;
+    // Other nodes a game starts it at (a TalkComponent's start, a script's
+    // dialogue.start(path, node)): starts too, for what it reaches.
+    std::vector<std::string> entries;
     std::vector<DialogueSpeaker> speakers;
     std::vector<DialogueNode> nodes;
 };
@@ -182,6 +186,10 @@ LanguageFile dialogue_language_file(const DialogueDocument& document, std::strin
 class DialoguePlayer {
 public:
     void start(const DialogueDocument& document, std::string_view start_node = {});
+    // Started with these variables (the game's, kept between dialogues).
+    void start(const DialogueDocument& document, std::string_view start_node,
+               const std::unordered_map<std::string, DialogueVariable>& variables);
+    void set_variable(const std::string& name, DialogueVariable value) { _state.variables[name] = std::move(value); }
     void reset();
     void advance();
     bool choose(i32 index);
@@ -215,6 +223,16 @@ struct DialogueLoadResult {
 };
 
 DialogueLoadResult parse_dialogue(std::string_view json);
+// What is wrong with it: ids given twice or empty, a start or a target that
+// is no node, a speaker no speaker is, nodes nothing reaches from the start,
+// a choice node with no choices. Empty when nothing is.
+std::vector<std::string> dialogue_problems(const DialogueDocument& document);
+// The nodes `node` goes on to (its line's next, its choices', a jump's or an event's target).
+std::vector<std::string> dialogue_targets(const DialogueNode& node);
+// A variable's value as text ("true", "3", "gold"), and read back from text
+// (true/false, a number, else text).
+std::string dialogue_variable_text(const DialogueVariable& value);
+DialogueVariable dialogue_variable_from_text(std::string_view text);
 DialogueLoadResult load_dialogue(const std::filesystem::path& path);
 bool save_dialogue(const DialogueDocument& document, const std::filesystem::path& path, std::string* error = nullptr);
 std::string dialogue_to_json(const DialogueDocument& document);

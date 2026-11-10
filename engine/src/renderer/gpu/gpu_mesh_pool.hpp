@@ -36,7 +36,10 @@ struct GpuMeshBufferAllocation {
 // meshes.
 class GpuMeshBufferPool {
 public:
-    explicit GpuMeshBufferPool(SharedDevice device) : _device(std::move(device)) {}
+    // `extra_usage` is added to every page's (the GI scene's compute reads meshes:
+    // SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ).
+    explicit GpuMeshBufferPool(SharedDevice device, SDL_GPUBufferUsageFlags extra_usage = 0)
+        : _device(std::move(device)), _extra_usage(extra_usage) {}
     ~GpuMeshBufferPool();
     GpuMeshBufferAllocation allocate(u32 vertex_bytes, u32 index_bytes);
     void retire(GpuMeshBufferAllocation allocation);
@@ -57,6 +60,7 @@ private:
     GpuMeshBufferSlice allocate_slice(u32 bytes, SDL_GPUBufferUsageFlags usage, u32 capacity);
     void free_slice(const GpuMeshBufferSlice& slice);
     SharedDevice _device;
+    SDL_GPUBufferUsageFlags _extra_usage = 0;
     mutable std::mutex _mutex;
     std::vector<std::shared_ptr<GpuMeshBufferPage>> _pages;
     std::vector<GpuMeshBufferAllocation> _pending;

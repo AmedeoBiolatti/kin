@@ -1,8 +1,8 @@
 #pragma once
 
-#include <kin/renderer/render_queue.hpp>
-
 #include <functional>
+#include <kin/renderer/render_queue.hpp>
+#include <kin/renderer/resource_graph.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,9 +26,7 @@ constexpr std::string_view editor_overlay = "editor_overlay";
 struct RenderPassId {
     std::string value;
 
-    friend bool operator==(const RenderPassId& a, const RenderPassId& b) {
-        return a.value == b.value;
-    }
+    friend bool operator==(const RenderPassId& a, const RenderPassId& b) { return a.value == b.value; }
 };
 
 struct RenderPassStats {
@@ -78,9 +76,12 @@ public:
     void clear();
     void add_default_passes();
     void execute(Renderer2D& renderer, RenderQueue& queue, const RenderView* view = nullptr);
+    const GraphCompilerStats& compiler_stats() const { return _compiler.stats(); }
 
 private:
     RenderPassRegistry _passes;
+    ResourceGraphDesc _definition;
+    ResourceGraphCompiler _compiler;
 };
 
 } // namespace kin

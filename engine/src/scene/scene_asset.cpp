@@ -3,17 +3,17 @@
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
-#include <kin/ecs/render.hpp>
-#if defined(KIN_EXPERIMENTAL_3D)
-#include <kin/ecs/scene3d.hpp>
-#endif
+#include <kin/ecs/text.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <memory>
 #include <ostream>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include "../prefab/prefab_asset_json.hpp"
 
 namespace kin {
@@ -233,50 +233,8 @@ void mark_prefab_metadata(EcsWorld& world,
                                   "PrefabInstanceComponent");
 }
 
-} // namespace
 
-void register_builtin_editor_components(EcsWorld& world) {
-#if defined(KIN_EXPERIMENTAL_3D) && KIN_ENABLE_PHYSICS3D
-    register_render3d_components(world);
-    register_physics3d_components(world);
-#endif
-    if (!world.components().find("Transform2D")) {
-        world.components().native<Transform2D>("Transform2D")
-            .field("pos", &Transform2D::pos)
-            .field("rotation", &Transform2D::rotation)
-            .field("scale", &Transform2D::scale);
-    }
-    if (!world.components().find("RectRenderer")) {
-        world.components().native<RectRenderer>("RectRenderer")
-            .field("offset", &RectRenderer::offset)
-            .field("size", &RectRenderer::size)
-            .field("color", &RectRenderer::color)
-            .field("layer", &RectRenderer::layer)
-            .field("order", &RectRenderer::order)
-            .field("visible", &RectRenderer::visible);
-    }
-    if (!world.components().find("LineRenderer")) {
-        world.components().native<LineRenderer>("LineRenderer")
-            .field("a", &LineRenderer::a)
-            .field("b", &LineRenderer::b)
-            .field("color", &LineRenderer::color)
-            .field("layer", &LineRenderer::layer)
-            .field("order", &LineRenderer::order)
-            .field("visible", &LineRenderer::visible);
-    }
-    if (!world.components().find("Timer")) {
-        world.components().data("Timer")
-            .field_f32("duration", 0.0f)
-            .field_f32("elapsed", 0.0f)
-            .field_bool("repeating", false)
-            .field_bool("finished", false)
-            .field_i32("ticks", 0);
-    }
-    if (!world.components().find("Lifetime")) {
-        world.components().data("Lifetime")
-            .field_f32("remaining", 0.0f);
-    }
-}
+} // namespace
 
 void register_scene_metadata_components(EcsWorld& world) {
     world.component<PrefabInstanceComponent>("PrefabInstanceComponent");
@@ -465,6 +423,10 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
                 return instance;
             }
         }
+        // Its text translated under its own key (scene.<scene>.<entity>), where a language has it.
+        if (const TextRenderer* text = runtime.get<TextRenderer>(); text && text->auto_key.empty()) {
+            runtime.get_mut<TextRenderer>()->auto_key = scene_text_key(scene.name, entity.id);
+        }
     }
 
     std::vector<const ScenePrefabInstanceAsset*> pending;
@@ -637,7 +599,7 @@ SceneSaveResult build_scene_asset(EcsWorld& world, const SceneSaveOptions& optio
         };
         for (auto entity : world.entities().all()) include(entity);
         for (auto entity : world.components().entities()) include(entity);
-        world.raw().each([&](flecs::entity raw) { include(EcsEntity{raw}); });
+        world.each([&](flecs::entity raw) { include(EcsEntity{raw}); });
     }
     std::unordered_map<std::string, const SceneEntityDocument*> documents;
     for (const auto& item : document.entities) if (entities.contains(item.id)) documents.emplace(item.id, &item);

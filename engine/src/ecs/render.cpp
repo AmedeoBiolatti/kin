@@ -1,20 +1,37 @@
 #include <kin/ecs/render.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
+#include "render_internal.hpp"
+
 #include <kin/core/affine.hpp>
 #include <kin/core/jobs.hpp>
 
+#include <kin/ecs/normal_sprite2d.hpp>
 #include <kin/ecs/particles.hpp>
+#include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/skeleton2d.hpp>
+#include <kin/ecs/text.hpp>
+#include <kin/ecs/tilemap.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/render_profile.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace kin {
 namespace {
+
+using render_detail::flip_for;
+using render_detail::key_for;
+using render_detail::mirrored_pivot;
+using render_detail::to_world;
+using render_detail::turned_bounds;
 
 Vec2f add(Vec2f a, Vec2f b) {
     return {a.x + b.x, a.y + b.y};
@@ -36,29 +53,11 @@ bool plain(const WorldTransform& t) {
     return t.rotation == 0.0f && t.scale == Vec2f{1.0f, 1.0f};
 }
 
-// A point in the entity's own space, in the world.
-Vec2f to_world(const WorldTransform& t, Vec2f local) {
-    if (plain(t)) {
-        return add(t.pos, local);
-    }
-    return add(t.pos, Affine2::trs({}, t.rotation, t.scale).apply_vector(local));
-}
-
 Vec2f resolved_size(const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
     if (sprite.size.x > 0.0f && sprite.size.y > 0.0f) {
         return sprite.size;
     }
     return resolved.size;
-}
-
-// The flags, mirrored again on each axis the transform scales negatively.
-Flip flip_for(const WorldTransform& t, bool flip_x, bool flip_y) {
-    return flip_of(flip_x != (t.scale.x < 0.0f), flip_y != (t.scale.y < 0.0f));
-}
-
-// The pivot as a fraction of the mirrored image: the same point of the world.
-Vec2f mirrored_pivot(Vec2f pivot, Flip flip) {
-    return {flips_x(flip) ? 1.0f - pivot.x : pivot.x, flips_y(flip) ? 1.0f - pivot.y : pivot.y};
 }
 
 Vec2f resolved_pivot(const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
@@ -109,41 +108,6 @@ Rectf texture_draw_rect(const WorldTransform& t, const TextureRenderer& texture,
     return {top_left.x, top_left.y, size.x, size.y};
 }
 
-// What a rectangle turned by `rotation` about `pivot` (a fraction of it) may cover.
-Rectf turned_bounds(Rectf rect, f32 rotation, Vec2f pivot) {
-    if (rotation == 0.0f) {
-        return rect;
-    }
-    const Vec2f p{rect.x + rect.w * pivot.x, rect.y + rect.h * pivot.y};
-    const f32 dx = std::max(std::abs(p.x - rect.x), std::abs(rect.x + rect.w - p.x));
-    const f32 dy = std::max(std::abs(p.y - rect.y), std::abs(rect.y + rect.h - p.y));
-    const f32 r = std::sqrt(dx * dx + dy * dy);
-    return {p.x - r, p.y - r, 2 * r, 2 * r};
-}
-
-u64 pass_mask_for_layer(i32 layer) {
-    if (layer >= layer_value(RenderLayer::Debug)) {
-        return render_pass_mask::debug;
-    }
-    if (layer >= layer_value(RenderLayer::UI)) {
-        return render_pass_mask::ui;
-    }
-    if (layer >= layer_value(RenderLayer::Effects)) {
-        return render_pass_mask::effects;
-    }
-    return render_pass_mask::world;
-}
-
-RenderKey key_for(i32 layer, i32 order, bool y_sort, f32 y) {
-    return {
-        .layer = layer,
-        .order = order,
-        .y = y,
-        .use_y = y_sort,
-        .pass_mask = pass_mask_for_layer(layer),
-    };
-}
-
 } // namespace
 
 WorldRenderState::WorldRenderState(flecs::world& world)
@@ -154,14 +118,19 @@ WorldRenderState::WorldRenderState(flecs::world& world)
                               .each([](flecs::entity entity, Transform2D&) {
                                   entity.ensure<WorldTransform>();
                               })),
-      _transforms(world.query_builder<WorldTransform, const Transform2D, const WorldTransform>()
+      _transforms(world.query_builder<WorldTransform, const Transform2D, const WorldTransform, const Parallax*>()
                       .term_at(2).parent().cascade().optional()
+                      .term_at(3).self()
                       .cached()
                       .build()),
       _sprites(world.query_builder<const Transform2D, const WorldTransform, const SpriteRenderer, const ClipGroup*>()
                    .term_at(3).self().up().cached().build()),
       _textures(world.query_builder<const Transform2D, const WorldTransform, const TextureRenderer, const ClipGroup*>()
                     .term_at(3).self().up().cached().build()),
+      _skeletons(world.query_builder<const Transform2D, const WorldTransform, const SkeletonRenderer2D, const ClipGroup*>()
+                     .term_at(3).self().up().cached().build()),
+      _normal_sprites(world.query_builder<const Transform2D, const WorldTransform, const NormalSpriteRenderer2D, const ClipGroup*>()
+                          .term_at(3).self().up().cached().build()),
       _rects(world.query_builder<const Transform2D, const WorldTransform, const RectRenderer, const ClipGroup*>()
                  .term_at(3).self().up().cached().build()),
       _lines(world.query_builder<const Transform2D, const WorldTransform, const LineRenderer, const ClipGroup*>()
@@ -171,7 +140,13 @@ WorldRenderState::WorldRenderState(flecs::world& world)
       _particle_systems(world.query_builder<const ParticleSystemComponent, const ClipGroup*>()
                             .term_at(1).self().up().cached().build()),
       _particle_fields(world.query_builder<const ParticleFieldComponent, const ClipGroup*>()
-                           .term_at(1).self().up().cached().build()) {
+                           .term_at(1).self().up().cached().build()),
+      _tilemaps(world.query_builder<const Transform2D, const WorldTransform, const TilemapComponent, const ClipGroup*>()
+                    .term_at(3).self().up().cached().build()),
+      _texts(world.query_builder<const Transform2D, const WorldTransform, const TextRenderer, const ClipGroup*>()
+                 .term_at(3).self().up().cached().build()),
+      _shader_effects(world.query_builder<const Transform2D, const WorldTransform, const ShaderEffect, const ClipGroup*>()
+                          .term_at(3).self().up().cached().build()) {
 }
 
 RenderQueue& WorldRenderState::group_queue(flecs::entity owner, const SpriteRenderOptions& options) {
@@ -222,14 +197,16 @@ void WorldRenderState::submit_groups(RenderQueue& queue, const SpriteRenderOptio
 namespace {
 
 // fn(it, row, world transform, renderer) for each row of a renderer query.
+// A renderer the rows inherit (from a prefab) is one value for all of them.
 template <typename R, typename Fn>
 void each_row(flecs::query<const Transform2D, const WorldTransform, const R, const ClipGroup*>& query, Fn&& fn) {
     query.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto world = it.field<const WorldTransform>(1);
             const auto renderers = it.field<const R>(2);
+            const bool shared = !it.is_self(2);
             for (const auto i : it) {
-                fn(it, static_cast<std::size_t>(i), world[i], renderers[i]);
+                fn(it, static_cast<std::size_t>(i), world[i], renderers[shared ? 0 : i]);
             }
         }
     });
@@ -241,8 +218,9 @@ void each_particles(flecs::query<const P, const ClipGroup*>& query, Fn&& fn) {
     query.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto particles = it.field<const P>(0);
+            const bool shared = !it.is_self(0); // inherited: one for every row
             for (const auto i : it) {
-                fn(it, static_cast<std::size_t>(i), particles[i]);
+                fn(it, static_cast<std::size_t>(i), particles[shared ? 0 : i]);
             }
         }
     });
@@ -250,10 +228,54 @@ void each_particles(flecs::query<const P, const ClipGroup*>& query, Fn&& fn) {
 
 } // namespace
 
+namespace {
+
+// fn(where) for each place a renderer is drawn: where it is, and, for a
+// Parallax layer's own that repeats, again every `repeat` along each axis over
+// the view (64 times at most along one).
+template <typename Fn>
+void repeated(flecs::entity entity, const WorldTransform& at, const RenderView* view, Fn&& fn) {
+    const Parallax* layer = at.parallax ? entity.get<Parallax>() : nullptr;
+    if (!layer || (layer->repeat.x <= 0.0f && layer->repeat.y <= 0.0f) || !view) {
+        fn(at);
+        return;
+    }
+    const Rectf area = render_view_visible_rect(*view);
+    if (area.w <= 0.0f || area.h <= 0.0f) {
+        fn(at);
+        return;
+    }
+    constexpr i32 most = 32;
+    const auto span = [&](f32 period, f32 from, f32 begin, f32 size) {
+        if (period <= 0.0f) {
+            return std::pair{0, 0};
+        }
+        const i32 first = static_cast<i32>(std::floor((begin - from) / period)) - 1;
+        const i32 last = static_cast<i32>(std::ceil((begin + size - from) / period)) + 1;
+        return std::pair{std::max(first, -most), std::min(last, most)};
+    };
+    const auto [x0, x1] = span(layer->repeat.x, at.pos.x, area.x, area.w);
+    const auto [y0, y1] = span(layer->repeat.y, at.pos.y, area.y, area.h);
+    for (i32 y = y0; y <= y1; ++y) {
+        for (i32 x = x0; x <= x1; ++x) {
+            WorldTransform copy = at;
+            copy.pos = {at.pos.x + static_cast<f32>(x) * layer->repeat.x, at.pos.y + static_cast<f32>(y) * layer->repeat.y};
+            fn(copy);
+        }
+    }
+}
+
+bool animated(const TilemapComponent& tilemap) {
+    return tilemap.tilemap && tilemap.tilemap->map.tileset.animated();
+}
+
+} // namespace
+
 void WorldRenderState::propagate_transforms() {
     // Tables come in hierarchy depth order (cascade), and every entity in a table
     // shares its parent, so each table is one tight loop with no per-entity lookups.
-    _transforms.run([](flecs::iter& it) {
+    const std::optional<Vec2f> view = _parallax_view;
+    _transforms.run([&view](flecs::iter& it) {
         while (it.next()) {
             const auto self = it.field<WorldTransform>(0);
             const auto local = it.field<const Transform2D>(1);
@@ -263,14 +285,24 @@ void WorldRenderState::propagate_transforms() {
             }
             if (plain(parent)) {
                 for (const auto i : it) {
-                    self[i] = {add(parent.pos, local[i].pos), parent.rotation + local[i].rotation, local[i].scale};
+                    self[i] = {add(parent.pos, local[i].pos), parent.rotation + local[i].rotation, local[i].scale, parent.parallax};
                 }
-                continue;
+            } else {
+                const Affine2 linear = Affine2::trs({}, parent.rotation, parent.scale); // once per table
+                for (const auto i : it) {
+                    self[i] = {add(parent.pos, linear.apply_vector(local[i].pos)), parent.rotation + local[i].rotation,
+                               mul(parent.scale, local[i].scale), parent.parallax};
+                }
             }
-            const Affine2 linear = Affine2::trs({}, parent.rotation, parent.scale); // once per table
-            for (const auto i : it) {
-                self[i] = {add(parent.pos, linear.apply_vector(local[i].pos)), parent.rotation + local[i].rotation,
-                           mul(parent.scale, local[i].scale)};
+            if (it.is_set(3)) {
+                // Parallax layers: shifted as the camera looks elsewhere (their children with them).
+                const auto layers = it.field<const Parallax>(3);
+                for (const auto i : it) {
+                    self[i].parallax = true;
+                    if (view) {
+                        self[i].pos = add(self[i].pos, parallax_shift(layers[i], *view));
+                    }
+                }
             }
         }
     });
@@ -285,17 +317,18 @@ void WorldRenderState::collect_all(RenderQueue& queue,
     const auto wanted = [&](flecs::iter& it, std::size_t i) { return !include || include(it.entity(i)); };
     each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
         if (wanted(it, i)) {
-            submit_sprite(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_sprite(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_textures, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TextureRenderer& r) {
         if (wanted(it, i)) {
-            submit_texture(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_texture(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
+    collect_skeletons_and_normal_sprites(queue, options, include);
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
         if (wanted(it, i)) {
-            submit_rect(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
@@ -305,7 +338,23 @@ void WorldRenderState::collect_all(RenderQueue& queue,
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
         if (wanted(it, i)) {
-            submit_shape(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_shape(to(it, i), it.entity(i), at, r, options.view); });
+        }
+    });
+    each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {
+        if (wanted(it, i)) {
+            KIN_DRAW_ENTITY(it.entity(i), "TilemapComponent");
+            submit_tilemap(to(it, i), t, r, options.view);
+        }
+    });
+    each_row(_texts, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TextRenderer& r) {
+        if (wanted(it, i)) {
+            submit_text(to(it, i), it.entity(i), t, r, options.view);
+        }
+    });
+    each_row(_shader_effects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShaderEffect& r) {
+        if (wanted(it, i)) {
+            submit_shader_effect(to(it, i), it.entity(i), t, r, options.view);
         }
     });
     // Everything above was culled as it was submitted; only particles still need it.
@@ -333,26 +382,33 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
     const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     // Clipped renderers are left to collect_dynamic(): their groups are made there.
-    const auto take = [](flecs::iter& it, bool is_static) { return is_static && !it.is_set(3); };
+    // Those a Parallax layer moves too, and maps with animated tiles: drawn each frame.
+    const auto take = [](flecs::iter& it, bool is_static, const WorldTransform& t) { return is_static && !it.is_set(3) && !t.parallax; };
     each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_sprite(queue, it.entity(i), t, r, options.view);
         }
     });
     collect_textures(queue, options, true);
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_rect(queue, it.entity(i), t, r, options.view);
         }
     });
     each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_line(queue, it.entity(i), t, r, options.view);
         }
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_shape(queue, it.entity(i), t, r, options.view);
+        }
+    });
+    each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {
+        if (take(it, r.static_renderable && !animated(r), t)) {
+            KIN_DRAW_ENTITY(it.entity(i), "TilemapComponent");
+            submit_tilemap(queue, t, r, options.view);
         }
     });
     if (options.view) {
@@ -382,7 +438,8 @@ private:
 // submit_texture()'s work, into `out` instead of a queue: safe on a worker.
 bool prepare_texture(const WorldTransform& transform, const TextureRenderer& texture, const ViewCuller& culler,
                      PreparedSprite& out) {
-    if (!texture.visible || !texture.texture) {
+    // A blended one is a command of its own (collect_textures submits it after).
+    if (!texture.visible || !texture.texture || texture.blend != BlendMode::Alpha) {
         return false;
     }
     const Flip flip = flip_for(transform, texture.flip_x, texture.flip_y);
@@ -416,19 +473,28 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
             const auto world = it.field<const WorldTransform>(1);
             const auto textures = it.field<const TextureRenderer>(2);
             const i32 rows = static_cast<i32>(it.count());
+            // Inherited (from a prefab): one renderer for every row, drawn by the loops below.
+            const bool shared = !it.is_self(2);
             if (it.is_set(3)) {
                 // Clipped: all dynamic, each into its group's queue.
                 if (!statics) {
                     for (const auto i : it) {
-                        submit_texture(route(queue, it, i, 3, options), it.entity(i), world[i], textures[i], options.view);
+                        repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
+                            submit_texture(route(queue, it, i, 3, options), it.entity(i), at, textures[shared ? 0 : i],
+                                           options.view);
+                        });
                     }
                 }
                 continue;
             }
-            if (!options.jobs || rows < parallel_min) {
+            if (!options.jobs || rows < parallel_min || world[0].parallax ||
+                shared) { // a table shares its parent (and any Parallax)
                 for (const auto i : it) {
-                    if (textures[i].static_renderable == statics) {
-                        submit_texture(queue, it.entity(i), world[i], textures[i], options.view);
+                    const TextureRenderer& texture = textures[shared ? 0 : i];
+                    if ((texture.static_renderable && !world[i].parallax) == statics) {
+                        repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
+                            submit_texture(queue, it.entity(i), at, texture, options.view);
+                        });
                     }
                 }
                 continue;
@@ -450,7 +516,7 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                 const auto [begin, end] = rows_of(c);
                 for (i32 i = begin; i < end; ++i) {
                     const auto row = static_cast<std::size_t>(i);
-                    if (textures[row].static_renderable == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
+                    if ((textures[row].static_renderable && !world[row].parallax) == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
                         ++count;
                         // Each entity holds its own handle: compare textures, not handle addresses.
                         if ((!last || !(*sprite.texture == *last)) &&
@@ -483,7 +549,7 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                 const auto [begin, end] = rows_of(c);
                 for (i32 i = begin; i < end; ++i) {
                     const auto row = static_cast<std::size_t>(i);
-                    if (textures[row].static_renderable == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
+                    if ((textures[row].static_renderable && !world[row].parallax) == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
 #ifdef KIN_ENABLE_RENDER_PROBE
                         sprite.draw_source = draw_source_for(it.entity(row), "TextureRenderer");
 #endif
@@ -497,8 +563,40 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                     }
                 }
             });
+            for (i32 i = 0; i < rows; ++i) {
+                const auto row = static_cast<std::size_t>(i);
+                if (textures[row].blend != BlendMode::Alpha && (textures[row].static_renderable && !world[row].parallax) == statics) {
+                    submit_texture(queue, it.entity(row), world[row], textures[row], options.view);
+                }
+            }
         }
     });
+}
+
+void WorldRenderState::collect_skeletons_and_normal_sprites(RenderQueue& queue, const SpriteRenderOptions& options,
+                                                            const EcsRenderFilter& include) {
+    const auto to = [&](flecs::iter& it, std::size_t i) -> RenderQueue& { return route(queue, it, i, 3, options); };
+    const auto wanted = [&](flecs::iter& it, std::size_t i) { return !include || include(it.entity(i)); };
+    each_row(_skeletons, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SkeletonRenderer2D& r) {
+        if (wanted(it, i)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) {
+                submit_skeleton2d(to(it, i), it.entity(i), at, r, options.view);
+            });
+        }
+    });
+    if (!_normal_sprites.is_true()) {
+        return;
+    }
+    // The lights, gathered once for every sprite (and kept while they stay the same).
+    _normal_sprite_lighting = gather_normal_sprite_lighting2d(*_world, std::move(_normal_sprite_lighting));
+    each_row(_normal_sprites,
+             [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const NormalSpriteRenderer2D& r) {
+                 if (wanted(it, i)) {
+                     repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) {
+                         submit_normal_sprite2d(to(it, i), it.entity(i), at, r, _normal_sprite_lighting, options.view);
+                     });
+                 }
+             });
 }
 
 void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions options) {
@@ -506,27 +604,41 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     const auto to = [&](flecs::iter& it, std::size_t i) -> RenderQueue& { return route(queue, it, i, 3, options); };
     // Clipped renderers are all dynamic: their groups are made here.
-    const auto take = [](flecs::iter& it, bool is_static) { return !is_static || it.is_set(3); };
+    const auto take = [](flecs::iter& it, bool is_static, const WorldTransform& t) { return !is_static || it.is_set(3) || t.parallax; };
     each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
-        if (take(it, r.static_renderable)) {
-            submit_sprite(to(it, i), it.entity(i), t, r, options.view);
+        if (take(it, r.static_renderable, t)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_sprite(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     collect_textures(queue, options, false);
+    collect_skeletons_and_normal_sprites(queue, options, {});
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
-        if (take(it, r.static_renderable)) {
-            submit_rect(to(it, i), it.entity(i), t, r, options.view);
+        if (take(it, r.static_renderable, t)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_line(to(it, i), it.entity(i), t, r, options.view);
         }
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
-        if (take(it, r.static_renderable)) {
-            submit_shape(to(it, i), it.entity(i), t, r, options.view);
+        if (take(it, r.static_renderable, t)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_shape(to(it, i), it.entity(i), at, r, options.view); });
         }
+    });
+    each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {
+        if (take(it, r.static_renderable && !animated(r), t)) {
+            KIN_DRAW_ENTITY(it.entity(i), "TilemapComponent");
+            submit_tilemap(to(it, i), t, r, options.view);
+        }
+    });
+    // Text is always dynamic: its callback carries the camera it is drawn through.
+    each_row(_texts, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TextRenderer& r) {
+        submit_text(to(it, i), it.entity(i), t, r, options.view);
+    });
+    each_row(_shader_effects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShaderEffect& r) {
+        submit_shader_effect(to(it, i), it.entity(i), t, r, options.view);
     });
     // Everything above was culled as it was submitted; only particles still need it.
     const u64 unculled = queue.submitted();
@@ -644,7 +756,7 @@ bool submit_sprite(RenderQueue& queue,
                                   sprite.order,
                                   sprite.y_sort,
                                   sprite_anchor_pos(transform, sprite, resolved).y + sprite.sort_y_offset);
-    queue.draw_sprite(key, resolved.sprite, dest, sprite.tint, {}, rotation, pivot, flip);
+    queue.draw_sprite(key, resolved.sprite, dest, sprite.tint, blend_ref(sprite.blend), rotation, pivot, flip);
     return true;
 }
 
@@ -678,7 +790,7 @@ bool submit_texture(RenderQueue& queue,
                                   texture.y_sort,
                                   to_world(transform, texture.offset).y + texture.sort_y_offset);
     queue.draw_texture_region(key, texture.texture, texture_source_rect(texture), dest, texture.tint,
-                              transform.rotation, pivot, flip);
+                              transform.rotation, pivot, flip, blend_ref(texture.blend));
     return true;
 }
 
@@ -725,11 +837,12 @@ bool submit_rect(RenderQueue& queue,
                       .rect = bounds,
                       .color = rect.color,
                       .rotation = transform.rotation,
-                      .pivot = pivot});
+                      .pivot = pivot,
+                      .material = blend_material(rect.blend)});
     } else if (rect.outline) {
-        queue.draw_rect(key, bounds, rect.color);
+        queue.draw_rect(key, bounds, rect.color, blend_ref(rect.blend));
     } else {
-        queue.fill_rect(key, bounds, rect.color);
+        queue.fill_rect(key, bounds, rect.color, blend_ref(rect.blend));
     }
     return true;
 }
@@ -799,7 +912,85 @@ bool submit_shape(RenderQueue& queue,
                                   shape.order,
                                   shape.y_sort,
                                   to_world(transform, shape.offset).y + shape.sort_y_offset);
-    queue.draw_shape(key, shape.mesh, place, shape.tint);
+    queue.draw_shape(key, shape.mesh, place, shape.tint, blend_ref(shape.blend));
+    return true;
+}
+
+bool submit_text(RenderQueue& queue,
+                 [[maybe_unused]] flecs::entity entity,
+                 const WorldTransform& transform,
+                 const TextRenderer& text,
+                 const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "TextRenderer");
+    if (!text.visible || !text.face) {
+        return false;
+    }
+    TextLayout laid = layout_text(text); // its text, translated
+    if (laid.lines.empty()) {
+        return false;
+    }
+    const Affine2 place = Affine2::trs(transform.pos, transform.rotation, transform.scale);
+    const Rectf box{laid.at.x - text.outline, laid.at.y - text.outline, laid.size.x + text.outline * 2.0f,
+                    laid.size.y + text.outline * 2.0f};
+    const Rectf bounds = transformed_bounds(place, box);
+    if (view && !render_view_visible(*view, bounds)) {
+        return false;
+    }
+    // Text commands draw in screen space (the camera taken off): the callback
+    // puts it back on, so the text is in the world.
+    std::optional<Camera2D> camera;
+    if (view && view->camera && !view->output_space) {
+        camera = *view->camera;
+    }
+    const RenderKey key = key_for(text.layer, text.order, text.y_sort,
+                                  to_world(transform, text.offset).y + text.sort_y_offset);
+    queue.draw_text(key, text.text, {bounds.x, bounds.y}, bounds, 1.0f, text.color,
+                    [laid = std::move(laid), text, place, camera](Renderer2D& renderer) {
+                        const auto placed = renderer.scoped_transform(camera ? camera->view_transform() * place : place);
+                        draw_text_layout(renderer, text, laid);
+                    });
+    return true;
+}
+
+bool submit_shader_effect(RenderQueue& queue,
+                          [[maybe_unused]] flecs::entity entity,
+                          const WorldTransform& transform,
+                          const ShaderEffect& effect,
+                          const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "ShaderEffect");
+    if (!effect.visible || !effect.shader || effect.size.x <= 0.0f || effect.size.y <= 0.0f) {
+        return false;
+    }
+    const Affine2 place = Affine2::trs(transform.pos, transform.rotation, transform.scale);
+    const Rectf box{effect.offset.x - effect.size.x * 0.5f, effect.offset.y - effect.size.y * 0.5f, effect.size.x, effect.size.y};
+    const Rectf bounds = transformed_bounds(place, box);
+    if (view && !render_view_visible(*view, bounds)) {
+        return false;
+    }
+    // Drawn as text is: the callback puts the camera back on.
+    std::optional<Camera2D> camera;
+    if (view && view->camera && !view->output_space) {
+        camera = *view->camera;
+    }
+    ShaderParams uniforms = effect.uniforms;
+    if (uniforms.layout) {
+        uniforms.set("time", effect.time);
+        uniforms.set("size", std::array{effect.size.x, effect.size.y});
+    }
+    const RenderKey key = key_for(effect.layer, effect.order, effect.y_sort, to_world(transform, effect.offset).y + effect.sort_y_offset);
+    queue.custom(key,
+                 [shader = effect.shader, texture = effect.texture, uniforms = std::move(uniforms), blend = effect.blend, box, place,
+                  camera](Renderer2D& renderer) {
+                     const auto placed = renderer.scoped_transform(camera ? camera->view_transform() * place : place);
+                     const Renderer2D::BlendModeGuard blended = blend != BlendMode::Alpha ? renderer.scoped_blend_mode(blend)
+                                                                                          : Renderer2D::BlendModeGuard{};
+                     if (texture) {
+                         renderer.draw_shader_surface(box, shader, uniforms, texture);
+                     } else {
+                         renderer.draw_shader_surface(box, shader, uniforms);
+                     }
+                 },
+                 "ShaderEffect");
     return true;
 }
 
@@ -816,6 +1007,25 @@ bool submit_particles(RenderQueue& queue, flecs::entity entity) {
     return submitted;
 }
 
+bool submit_tilemap(RenderQueue& queue, const WorldTransform& world, const TilemapComponent& tilemap, const RenderView* view) {
+    if (!tilemap.visible || !tilemap.tilemap) {
+        return false;
+    }
+    const TilemapRenderOptions options{
+        .layer = tilemap.layer,
+        .order = tilemap.order,
+        .sheet = tilemap.tilemap->sheet.valid() ? &tilemap.tilemap->sheet : nullptr,
+        .origin = world.pos,
+        .time = tilemap.clock,
+    };
+    if (view) {
+        tilemap.tilemap->map.submit(queue, *view, options);
+    } else {
+        tilemap.tilemap->map.submit(queue, options);
+    }
+    return true;
+}
+
 bool submit_particles(RenderQueue& queue, const ParticleSystemComponent& particles) {
     return submit_particles(queue,
                             particles.system.particles(),
@@ -824,6 +1034,7 @@ bool submit_particles(RenderQueue& queue, const ParticleSystemComponent& particl
                                 .pixel_grid = particles.system.pixel_grid(),
                                 .sprites = particles.sprites,
                                 .sort = queue.sort() != RenderSortMode::Submission,
+                                .blend = particles.blend,
                             });
 }
 
@@ -840,6 +1051,7 @@ bool submit_particles(RenderQueue& queue, const ParticleFieldComponent& field) {
                                 .pixel_grid = field.state.pixel_grid,
                                 .sprites = field.sprites,
                                 .sort = queue.sort() != RenderSortMode::Submission,
+                                .blend = field.blend,
                             });
 }
 
@@ -1059,6 +1271,126 @@ void render_top_down_filtered(flecs::world& world,
                       .view = &view,
                   });
     queue.flush(renderer, view);
+}
+
+std::string_view shape_kind_name(ShapeKind kind) {
+    switch (kind) {
+    case ShapeKind::None: return "none";
+    case ShapeKind::Rect: return "rect";
+    case ShapeKind::RoundedRect: return "rounded_rect";
+    case ShapeKind::Ellipse: return "ellipse";
+    case ShapeKind::Polygon: return "polygon";
+    case ShapeKind::Svg: return "svg";
+    }
+    return "none";
+}
+
+std::optional<ShapeKind> shape_kind_named(std::string_view name) {
+    for (const ShapeKind kind : {ShapeKind::None, ShapeKind::Rect, ShapeKind::RoundedRect, ShapeKind::Ellipse,
+                                 ShapeKind::Polygon, ShapeKind::Svg}) {
+        if (shape_kind_name(kind) == name) {
+            return kind;
+        }
+    }
+    return std::nullopt;
+}
+
+Shape make_shape(const ShapeSpec& spec, const Shape* svg) {
+    Shape shape;
+    const Vec2f half{std::abs(spec.size.x) * 0.5f, std::abs(spec.size.y) * 0.5f};
+    const Rectf box{-half.x, -half.y, half.x * 2.0f, half.y * 2.0f};
+    if (spec.kind == ShapeKind::Svg) {
+        if (!svg || svg->empty()) {
+            return shape;
+        }
+        // Centred, and fitted in `size` when it has one.
+        const Rectf area = svg->view_box.w > 0.0f && svg->view_box.h > 0.0f ? svg->view_box : svg->bounds();
+        f32 scale = 1.0f;
+        if (box.w > 0.0f && box.h > 0.0f && area.w > 0.0f && area.h > 0.0f) {
+            scale = std::min(box.w / area.w, box.h / area.h);
+        }
+        const Vec2f centre{area.x + area.w * 0.5f, area.y + area.h * 0.5f};
+        shape.add(*svg, Affine2::scaling({scale, scale}) * Affine2::translation({-centre.x, -centre.y}));
+        return shape;
+    }
+    Path path;
+    switch (spec.kind) {
+    case ShapeKind::None:
+    case ShapeKind::Svg: return shape;
+    case ShapeKind::Rect: path = Path::rect(box); break;
+    case ShapeKind::RoundedRect:
+        path = Path::rounded_rect(box, std::clamp(spec.radius, 0.0f, std::min(half.x, half.y)));
+        break;
+    case ShapeKind::Ellipse: path = Path::ellipse({}, half); break;
+    case ShapeKind::Polygon: {
+        // Its first corner straight up, stretched to fill `size`.
+        const i32 sides = std::clamp(spec.sides, 3, 256);
+        std::vector<Vec2f> corners;
+        corners.reserve(static_cast<std::size_t>(sides));
+        constexpr f32 pi = 3.14159265358979323846f;
+        for (i32 i = 0; i < sides; ++i) {
+            const f32 angle = -pi * 0.5f + 2.0f * pi * static_cast<f32>(i) / static_cast<f32>(sides);
+            corners.push_back({std::cos(angle) * half.x, std::sin(angle) * half.y});
+        }
+        path = Path::polygon(corners);
+        break;
+    }
+    }
+    const bool filled = spec.fill.a > 0;
+    const bool stroked = spec.stroke.a > 0 && spec.stroke_width > 0.0f;
+    if (filled && stroked) {
+        shape.fill_and_stroke(std::move(path), spec.fill, spec.stroke, {.width = spec.stroke_width});
+    } else if (filled) {
+        shape.fill(std::move(path), spec.fill);
+    } else if (stroked) {
+        shape.stroke(std::move(path), spec.stroke, {.width = spec.stroke_width});
+    }
+    return shape;
+}
+
+void reshape_clip(ClipGroup& group) {
+    const Vec2f half{std::abs(group.size.x) * 0.5f, std::abs(group.size.y) * 0.5f};
+    const Rectf box{group.offset.x - half.x, group.offset.y - half.y, half.x * 2.0f, half.y * 2.0f};
+    switch (group.shape) {
+    case ClipShape::None: group.clip = {}; break;
+    case ClipShape::Rect: group.clip = ClipRegion::to_rect(box); break;
+    case ClipShape::RoundedRect:
+        group.clip = ClipRegion::to_path(Path::rounded_rect(box, std::clamp(group.radius, 0.0f, std::min(half.x, half.y))));
+        break;
+    case ClipShape::Ellipse: group.clip = ClipRegion::to_path(Path::ellipse(group.offset, half)); break;
+    }
+}
+
+Vec2f parallax_shift(const Parallax& layer, Vec2f view_centre) {
+    return {(view_centre.x - layer.anchor.x) * (1.0f - layer.factor.x) + layer.offset.x,
+            (view_centre.y - layer.anchor.y) * (1.0f - layer.factor.y) + layer.offset.y};
+}
+
+void update_parallax(EcsWorld& world, f32 dt) {
+    std::vector<flecs::entity> moving;
+    world.each([&](flecs::entity entity, const Parallax& layer) {
+        if (layer.scroll.x != 0.0f || layer.scroll.y != 0.0f) {
+            moving.push_back(entity);
+        }
+    });
+    const auto wrapped = [](f32 value, f32 period) { return period > 0.0f ? std::fmod(value, period) : value; };
+    for (flecs::entity entity : moving) {
+        Parallax* layer = entity.get_mut<Parallax>(); // its own, when a prefab's
+        layer->offset = {wrapped(layer->offset.x + layer->scroll.x * dt, layer->repeat.x),
+                         wrapped(layer->offset.y + layer->scroll.y * dt, layer->repeat.y)};
+    }
+}
+
+void update_tilemaps(EcsWorld& world, f32 dt) {
+    std::vector<flecs::entity> animated_maps;
+    world.each([&](flecs::entity entity, const TilemapComponent& tilemap) {
+        if (animated(tilemap)) {
+            animated_maps.push_back(entity);
+        }
+    });
+    for (flecs::entity entity : animated_maps) {
+        entity.get_mut<TilemapComponent>()->clock += std::max(dt, 0.0f);
+    }
 }
 
 } // namespace kin

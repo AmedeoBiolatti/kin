@@ -204,18 +204,22 @@ std::vector<SkinBound3D> compute_skin_bounds(const MeshData3D& mesh, u32 joints)
 
 f32 stretch_bound(const Mat4f& m) {
     // The largest eigenvalue of A^T A is at most the largest row sum of its absolute values (Gershgorin); its square
-    // root bounds how much A stretches. Exact (1) for a rotation, and for a uniform scale.
-    f32 g[3][3];
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            g[i][j] = m.at(0, i) * m.at(0, j) + m.at(1, i) * m.at(1, j) + m.at(2, i) * m.at(2, j);
-        }
-    }
-    f32 worst = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        worst = std::max(worst, std::fabs(g[i][0]) + std::fabs(g[i][1]) + std::fabs(g[i][2]));
-    }
-    return std::sqrt(worst);
+    // root bounds how much A stretches, including shear. Double intermediates avoid overflowing/underflowing the
+    // squares of finite float scales. Round outward by a float ULP, also covering the intermediate rounding.
+    const auto gram = [&](int i, int j) {
+        return f64(m.at(0, i)) * m.at(0, j) + f64(m.at(1, i)) * m.at(1, j) + f64(m.at(2, i)) * m.at(2, j);
+    };
+    const f64 xx = gram(0, 0), yy = gram(1, 1), zz = gram(2, 2);
+    if (!std::isfinite(xx + yy + zz))
+        return std::numeric_limits<f32>::infinity();
+    const f64 xy = std::fabs(gram(0, 1)), xz = std::fabs(gram(0, 2)), yz = std::fabs(gram(1, 2));
+    const f64 worst = std::max({xx + xy + xz, yy + xy + yz, zz + xz + yz});
+    if (worst == 0.0)
+        return 0.0f;
+    const f64 bound = std::sqrt(worst);
+    if (bound >= std::numeric_limits<f32>::max())
+        return std::numeric_limits<f32>::infinity();
+    return std::nextafter(static_cast<f32>(bound), std::numeric_limits<f32>::infinity());
 }
 
 bool skin_sphere(std::span<const SkinBound3D> bounds, std::span<const Mat4f> matrices, Vec3f& center, f32& radius) {

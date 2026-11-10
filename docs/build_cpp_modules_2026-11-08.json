@@ -1,0 +1,4942 @@
+{
+  "base": "5eb0c06ce78481002b655902ece812f3910f3672",
+  "prototype_commit": "baa5621032100adeb2fd48d84eb3170456ae5640",
+  "source": "/home/bamedeo/.codex/worktrees/1910/kin",
+  "build": "/home/bamedeo/kin-module-build/prototype",
+  "compiler": "Clang 21.1.8",
+  "cmake": "4.2.3",
+  "ninja": "1.13.2",
+  "status": "measured; balanced module and final production PCH comparisons complete",
+  "purpose": "Native Linux Clang module facade versus current and matched-coverage PCHs; not a whole-engine module migration",
+  "conditions": {
+    "build_type": "Release",
+    "optimization": "-O2",
+    "cpp_standard": 23,
+    "pch": true,
+    "compiler_cache": false,
+    "lto": false,
+    "jobs": 4,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "dependencies": "project-pinned versions, external dependencies already built for timed runs",
+    "linker": "GNU BFD 2.46; default linker"
+  },
+  "scope": {
+    "game": "source edit through final Hex executable link",
+    "cold": "game and API precompilation rebuilt; engine and dependencies already built",
+    "native": "one pathfinding C++ source edit through Hex link",
+    "header": "pathfinding API header comment edit through Hex link; exported declarations unchanged",
+    "noop": "settled game target"
+  },
+  "limitations": [
+    "One game, one host and one compiler; background host load and CPU frequency vary.",
+    "Balanced run rotates case order; exploratory batches were sequential.",
+    "Maximum RSS is the largest individual child process, not aggregate concurrent memory.",
+    "Only native interface parsing is modularized; engine implementation files remain header-based."
+  ],
+  "tool_versions": {
+    "clang++": "Ubuntu clang version 21.1.8 (6ubuntu1)",
+    "cmake": "cmake version 4.2.3",
+    "ninja": "1.13.2",
+    "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46"
+  },
+  "dependency_commits": {
+    "sdl3": "8e37db5e797b6167f3a00d697d816a684bd259c7",
+    "sdl3_image": "bec9134a26c7d0f31b36d6083c25296e04cabff5",
+    "sdl3_ttf": "a1ce3670aec736ecbf0936c43f2f0cc53aa61e5b",
+    "sol2": "9190880c593dfb018ccf5cc9729ab87739709862",
+    "flecs": "3b0ca37ec8bc41fc763068e728c6da2577ae9dae",
+    "box2d": "9ebbbcd960ad424e03e5de6e66a40764c16f51bc",
+    "earcut": "92acda9e2ed96ff1f910cda35de444727e9da7b0"
+  },
+  "runs": {
+    "initial": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "source": "/home/bamedeo/.codex/worktrees/1910/kin",
+      "build": "/home/bamedeo/kin-module-build/prototype",
+      "summary": {
+        "baseline": {
+          "game": 1.719165457005147,
+          "noop": 0.06045957900641952
+        },
+        "modules": {
+          "game": 1.5682090599875664,
+          "noop": 0.05716428899904713
+        },
+        "matched": {
+          "game": 1.6047712569998112,
+          "noop": 0.060430539000662975
+        }
+      },
+      "results": [
+        {
+          "name": "baseline-game-0",
+          "wall_s": 1.7695787709963042,
+          "load_before": [
+            5.11669921875,
+            4.5927734375,
+            3.0732421875
+          ],
+          "load_after": [
+            5.11669921875,
+            4.5927734375,
+            3.0732421875
+          ],
+          "user_s": 1.51,
+          "system_s": 0.25,
+          "max_process_rss_kib": 192556,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-0",
+          "wall_s": 0.06013123299635481,
+          "load_before": [
+            5.11669921875,
+            4.5927734375,
+            3.0732421875
+          ],
+          "load_after": [
+            5.11669921875,
+            4.5927734375,
+            3.0732421875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20316,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-1",
+          "wall_s": 1.7038678120006807,
+          "load_before": [
+            5.11669921875,
+            4.5927734375,
+            3.0732421875
+          ],
+          "load_after": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "user_s": 1.44,
+          "system_s": 0.25,
+          "max_process_rss_kib": 192668,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-1",
+          "wall_s": 0.05815642900415696,
+          "load_before": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "load_after": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20308,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-2",
+          "wall_s": 1.677993115998106,
+          "load_before": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "load_after": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "user_s": 1.43,
+          "system_s": 0.24,
+          "max_process_rss_kib": 192612,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-2",
+          "wall_s": 0.060521092993440107,
+          "load_before": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "load_after": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20328,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-3",
+          "wall_s": 1.719165457005147,
+          "load_before": [
+            5.1875,
+            4.6162109375,
+            3.08935546875
+          ],
+          "load_after": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "user_s": 1.47,
+          "system_s": 0.24,
+          "max_process_rss_kib": 192556,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-3",
+          "wall_s": 0.06135669500508811,
+          "load_before": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "load_after": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20672,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-4",
+          "wall_s": 1.8439720580063295,
+          "load_before": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "load_after": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "user_s": 1.56,
+          "system_s": 0.28,
+          "max_process_rss_kib": 192664,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-4",
+          "wall_s": 0.06045957900641952,
+          "load_before": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "load_after": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20568,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-cold-game-api",
+          "wall_s": 3.902060991997132,
+          "load_before": [
+            5.17236328125,
+            4.623046875,
+            3.10009765625
+          ],
+          "load_after": [
+            5.078125,
+            4.6123046875,
+            3.10498046875
+          ],
+          "user_s": 3.51,
+          "system_s": 0.37,
+          "max_process_rss_kib": 283532,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "modules-game-0",
+          "wall_s": 1.592577547999099,
+          "load_before": [
+            5.15234375,
+            4.6357421875,
+            3.12060546875
+          ],
+          "load_after": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "user_s": 1.32,
+          "system_s": 0.26,
+          "max_process_rss_kib": 191944,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-0",
+          "wall_s": 0.055369228997733444,
+          "load_before": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "load_after": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20592,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-1",
+          "wall_s": 1.6487572709884262,
+          "load_before": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "load_after": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "user_s": 1.38,
+          "system_s": 0.26,
+          "max_process_rss_kib": 192224,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-1",
+          "wall_s": 0.05883729600463994,
+          "load_before": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "load_after": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20492,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-2",
+          "wall_s": 1.4874492820090381,
+          "load_before": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "load_after": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "user_s": 1.23,
+          "system_s": 0.25,
+          "max_process_rss_kib": 191912,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-2",
+          "wall_s": 0.05716428899904713,
+          "load_before": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "load_after": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20196,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-3",
+          "wall_s": 1.5682090599875664,
+          "load_before": [
+            5.06005859375,
+            4.625,
+            3.12548828125
+          ],
+          "load_after": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "user_s": 1.31,
+          "system_s": 0.24,
+          "max_process_rss_kib": 191976,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-3",
+          "wall_s": 0.05581665999488905,
+          "load_before": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "load_after": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20444,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-4",
+          "wall_s": 1.5583405869983835,
+          "load_before": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "load_after": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "user_s": 1.3,
+          "system_s": 0.24,
+          "max_process_rss_kib": 191940,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-4",
+          "wall_s": 0.059532712009968236,
+          "load_before": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "load_after": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20708,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-cold-game-api",
+          "wall_s": 4.266266073012957,
+          "load_before": [
+            4.97509765625,
+            4.6142578125,
+            3.13037109375
+          ],
+          "load_after": [
+            4.9775390625,
+            4.62109375,
+            3.140625
+          ],
+          "user_s": 4.7,
+          "system_s": 0.55,
+          "max_process_rss_kib": 309388,
+          "cpp_compiles": 3,
+          "scans": 2,
+          "links": 2
+        },
+        {
+          "name": "matched-game-0",
+          "wall_s": 1.4954451499943389,
+          "load_before": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "load_after": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "user_s": 1.27,
+          "system_s": 0.21,
+          "max_process_rss_kib": 177340,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-0",
+          "wall_s": 0.06605803599813953,
+          "load_before": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "load_after": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20340,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-1",
+          "wall_s": 1.5440903229900869,
+          "load_before": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "load_after": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "user_s": 1.29,
+          "system_s": 0.24,
+          "max_process_rss_kib": 177268,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-1",
+          "wall_s": 0.06304218599689193,
+          "load_before": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "load_after": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20548,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-2",
+          "wall_s": 1.6047712569998112,
+          "load_before": [
+            4.974609375,
+            4.63330078125,
+            3.1611328125
+          ],
+          "load_after": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "user_s": 1.34,
+          "system_s": 0.25,
+          "max_process_rss_kib": 177368,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-2",
+          "wall_s": 0.05751133299781941,
+          "load_before": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "load_after": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20532,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-3",
+          "wall_s": 1.6362058759987121,
+          "load_before": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "load_after": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "user_s": 1.36,
+          "system_s": 0.26,
+          "max_process_rss_kib": 177168,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-3",
+          "wall_s": 0.060430539000662975,
+          "load_before": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "load_after": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20452,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-4",
+          "wall_s": 1.6655067700048676,
+          "load_before": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "load_after": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "user_s": 1.41,
+          "system_s": 0.23,
+          "max_process_rss_kib": 177292,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-4",
+          "wall_s": 0.057919612008845434,
+          "load_before": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "load_after": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20336,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-cold-game-api",
+          "wall_s": 4.110610001007444,
+          "load_before": [
+            4.896484375,
+            4.62255859375,
+            3.166015625
+          ],
+          "load_after": [
+            4.82421875,
+            4.61181640625,
+            3.1708984375
+          ],
+          "user_s": 3.7,
+          "system_s": 0.39,
+          "max_process_rss_kib": 313168,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        }
+      ]
+    },
+    "variants": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "source": "/home/bamedeo/.codex/worktrees/1910/kin",
+      "build": "/home/bamedeo/kin-module-build/prototype",
+      "summary": {
+        "baseline": {
+          "game": 1.3073082070040982,
+          "noop": 0.04657353700895328
+        },
+        "modules": {
+          "game": 1.214838908999809,
+          "noop": 0.045216452999738976
+        },
+        "modules-reduced": {
+          "game": 1.2589731760090217,
+          "noop": 0.04726163001032546
+        },
+        "modules-no-pch": {
+          "game": 1.5736757289996604,
+          "noop": 0.04575254498922732
+        },
+        "matched": {
+          "game": 1.1813635309954407,
+          "noop": 0.04709337299573235
+        }
+      },
+      "results": [
+        {
+          "name": "modules-reduced-game-0",
+          "wall_s": 1.2686598120053532,
+          "load_before": [
+            2.6943359375,
+            3.95361328125,
+            3.09814453125
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 1.05,
+          "system_s": 0.21,
+          "max_process_rss_kib": 186516,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-reduced-noop-0",
+          "wall_s": 0.04672124500211794,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20568,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-reduced-game-1",
+          "wall_s": 1.2986453980120132,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 1.07,
+          "system_s": 0.21,
+          "max_process_rss_kib": 187424,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-reduced-noop-1",
+          "wall_s": 0.04726163001032546,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20588,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-reduced-game-2",
+          "wall_s": 1.2479051419941243,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 1.04,
+          "system_s": 0.19,
+          "max_process_rss_kib": 187416,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-reduced-noop-2",
+          "wall_s": 0.04807702300604433,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20156,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-reduced-game-3",
+          "wall_s": 1.2589731760090217,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 1.06,
+          "system_s": 0.19,
+          "max_process_rss_kib": 187468,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-reduced-noop-3",
+          "wall_s": 0.044534290995216,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20292,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-reduced-game-4",
+          "wall_s": 1.2362050450028619,
+          "load_before": [
+            2.638671875,
+            3.9208984375,
+            3.091796875
+          ],
+          "load_after": [
+            2.58740234375,
+            3.888671875,
+            3.08544921875
+          ],
+          "user_s": 1.02,
+          "system_s": 0.21,
+          "max_process_rss_kib": 187264,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-reduced-noop-4",
+          "wall_s": 0.05312683299416676,
+          "load_before": [
+            2.58740234375,
+            3.888671875,
+            3.08544921875
+          ],
+          "load_after": [
+            2.58740234375,
+            3.888671875,
+            3.08544921875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20684,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-reduced-cold-game-api",
+          "wall_s": 3.306131812991225,
+          "load_before": [
+            2.58740234375,
+            3.888671875,
+            3.08544921875
+          ],
+          "load_after": [
+            2.58740234375,
+            3.888671875,
+            3.08544921875
+          ],
+          "user_s": 3.65,
+          "system_s": 0.39,
+          "max_process_rss_kib": 306480,
+          "cpp_compiles": 3,
+          "scans": 2,
+          "links": 2
+        },
+        {
+          "name": "matched-game-0",
+          "wall_s": 1.1804291090084007,
+          "load_before": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "load_after": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "user_s": 0.98,
+          "system_s": 0.19,
+          "max_process_rss_kib": 177324,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-0",
+          "wall_s": 0.046732624003198,
+          "load_before": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "load_after": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20372,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-1",
+          "wall_s": 1.1813635309954407,
+          "load_before": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "load_after": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "user_s": 0.97,
+          "system_s": 0.2,
+          "max_process_rss_kib": 177308,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-1",
+          "wall_s": 0.04979831700620707,
+          "load_before": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "load_after": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20748,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-2",
+          "wall_s": 1.159962350007845,
+          "load_before": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "load_after": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "user_s": 0.97,
+          "system_s": 0.18,
+          "max_process_rss_kib": 177348,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-2",
+          "wall_s": 0.04688333299418446,
+          "load_before": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "load_after": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20524,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-3",
+          "wall_s": 1.192717101002927,
+          "load_before": [
+            2.64453125,
+            3.85888671875,
+            3.0849609375
+          ],
+          "load_after": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "user_s": 0.99,
+          "system_s": 0.19,
+          "max_process_rss_kib": 177272,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-3",
+          "wall_s": 0.04713767999783158,
+          "load_before": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "load_after": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20624,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-4",
+          "wall_s": 1.2321235020062886,
+          "load_before": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "load_after": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "user_s": 1.03,
+          "system_s": 0.19,
+          "max_process_rss_kib": 177244,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-4",
+          "wall_s": 0.04709337299573235,
+          "load_before": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "load_after": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20540,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-cold-game-api",
+          "wall_s": 3.2521293519967003,
+          "load_before": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "load_after": [
+            2.5927734375,
+            3.82763671875,
+            3.0791015625
+          ],
+          "user_s": 2.92,
+          "system_s": 0.32,
+          "max_process_rss_kib": 312948,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-game-0",
+          "wall_s": 1.4068680339987623,
+          "load_before": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "load_after": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "user_s": 1.19,
+          "system_s": 0.19,
+          "max_process_rss_kib": 192560,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-0",
+          "wall_s": 0.04702991900558118,
+          "load_before": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "load_after": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20448,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-1",
+          "wall_s": 1.3000697059906088,
+          "load_before": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "load_after": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "user_s": 1.09,
+          "system_s": 0.2,
+          "max_process_rss_kib": 192592,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-1",
+          "wall_s": 0.04481842799577862,
+          "load_before": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "load_after": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20368,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-2",
+          "wall_s": 1.3048189230030403,
+          "load_before": [
+            3.38525390625,
+            3.96337890625,
+            3.1318359375
+          ],
+          "load_after": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "user_s": 1.12,
+          "system_s": 0.17,
+          "max_process_rss_kib": 192600,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-2",
+          "wall_s": 0.04811378200247418,
+          "load_before": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "load_after": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20632,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-3",
+          "wall_s": 1.3073082070040982,
+          "load_before": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "load_after": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "user_s": 1.11,
+          "system_s": 0.19,
+          "max_process_rss_kib": 192556,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-3",
+          "wall_s": 0.04545883400714956,
+          "load_before": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "load_after": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20276,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-4",
+          "wall_s": 1.3255978759989375,
+          "load_before": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "load_after": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "user_s": 1.09,
+          "system_s": 0.21,
+          "max_process_rss_kib": 192532,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-4",
+          "wall_s": 0.04657353700895328,
+          "load_before": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "load_after": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20556,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-cold-game-api",
+          "wall_s": 2.998213394996128,
+          "load_before": [
+            3.27392578125,
+            3.9306640625,
+            3.12548828125
+          ],
+          "load_after": [
+            3.171875,
+            3.8984375,
+            3.119140625
+          ],
+          "user_s": 2.72,
+          "system_s": 0.27,
+          "max_process_rss_kib": 283732,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "modules-no-pch-game-0",
+          "wall_s": 1.5943293050077045,
+          "load_before": [
+            3.07763671875,
+            3.86669921875,
+            3.11279296875
+          ],
+          "load_after": [
+            3.07763671875,
+            3.86669921875,
+            3.11279296875
+          ],
+          "user_s": 1.38,
+          "system_s": 0.21,
+          "max_process_rss_kib": 208912,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-no-pch-noop-0",
+          "wall_s": 0.04556426900671795,
+          "load_before": [
+            3.07763671875,
+            3.86669921875,
+            3.11279296875
+          ],
+          "load_after": [
+            3.07763671875,
+            3.86669921875,
+            3.11279296875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20636,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-no-pch-game-1",
+          "wall_s": 1.5957532749889651,
+          "load_before": [
+            3.07763671875,
+            3.86669921875,
+            3.11279296875
+          ],
+          "load_after": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "user_s": 1.36,
+          "system_s": 0.22,
+          "max_process_rss_kib": 208760,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-no-pch-noop-1",
+          "wall_s": 0.04594315400754567,
+          "load_before": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "load_after": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20144,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-no-pch-game-2",
+          "wall_s": 1.5736757289996604,
+          "load_before": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "load_after": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "user_s": 1.36,
+          "system_s": 0.2,
+          "max_process_rss_kib": 208728,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-no-pch-noop-2",
+          "wall_s": 0.044804874996771105,
+          "load_before": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "load_after": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20628,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-no-pch-game-3",
+          "wall_s": 1.5498427429993171,
+          "load_before": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "load_after": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "user_s": 1.32,
+          "system_s": 0.21,
+          "max_process_rss_kib": 208928,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-no-pch-noop-3",
+          "wall_s": 0.0461208279884886,
+          "load_before": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "load_after": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20144,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-no-pch-game-4",
+          "wall_s": 1.5615321969962679,
+          "load_before": [
+            2.9912109375,
+            3.83544921875,
+            3.1064453125
+          ],
+          "load_after": [
+            2.91162109375,
+            3.8046875,
+            3.10009765625
+          ],
+          "user_s": 1.31,
+          "system_s": 0.24,
+          "max_process_rss_kib": 208756,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-no-pch-noop-4",
+          "wall_s": 0.04575254498922732,
+          "load_before": [
+            2.91162109375,
+            3.8046875,
+            3.10009765625
+          ],
+          "load_after": [
+            2.91162109375,
+            3.8046875,
+            3.10009765625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20556,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-no-pch-cold-game-api",
+          "wall_s": 3.494614459006698,
+          "load_before": [
+            2.91162109375,
+            3.8046875,
+            3.10009765625
+          ],
+          "load_after": [
+            2.91162109375,
+            3.8046875,
+            3.10009765625
+          ],
+          "user_s": 3.18,
+          "system_s": 0.37,
+          "max_process_rss_kib": 309920,
+          "cpp_compiles": 2,
+          "scans": 2,
+          "links": 2
+        },
+        {
+          "name": "modules-game-0",
+          "wall_s": 1.2082191779918503,
+          "load_before": [
+            3.1591796875,
+            3.84130859375,
+            3.11572265625
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 0.98,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192192,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-0",
+          "wall_s": 0.045216452999738976,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20308,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-1",
+          "wall_s": 1.214838908999809,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 0.99,
+          "system_s": 0.21,
+          "max_process_rss_kib": 191784,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-1",
+          "wall_s": 0.044661131003522314,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20348,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-2",
+          "wall_s": 1.2051144129945897,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 0.98,
+          "system_s": 0.21,
+          "max_process_rss_kib": 192192,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-2",
+          "wall_s": 0.04509647600934841,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20844,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-3",
+          "wall_s": 1.2493570359947626,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 1.05,
+          "system_s": 0.18,
+          "max_process_rss_kib": 192212,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-3",
+          "wall_s": 0.047088070001336746,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20280,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-4",
+          "wall_s": 1.2469097269931808,
+          "load_before": [
+            3.06591796875,
+            3.810546875,
+            3.109375
+          ],
+          "load_after": [
+            2.98046875,
+            3.7802734375,
+            3.10302734375
+          ],
+          "user_s": 1.02,
+          "system_s": 0.22,
+          "max_process_rss_kib": 191868,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-4",
+          "wall_s": 0.047847438996541314,
+          "load_before": [
+            2.98046875,
+            3.7802734375,
+            3.10302734375
+          ],
+          "load_after": [
+            2.98046875,
+            3.7802734375,
+            3.10302734375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.01,
+          "max_process_rss_kib": 20320,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-cold-game-api",
+          "wall_s": 3.201078788988525,
+          "load_before": [
+            2.98046875,
+            3.7802734375,
+            3.10302734375
+          ],
+          "load_after": [
+            2.98046875,
+            3.7802734375,
+            3.10302734375
+          ],
+          "user_s": 3.52,
+          "system_s": 0.41,
+          "max_process_rss_kib": 309824,
+          "cpp_compiles": 3,
+          "scans": 2,
+          "links": 2
+        }
+      ]
+    },
+    "balanced": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "orders": [
+        [
+          "baseline",
+          "modules",
+          "matched"
+        ],
+        [
+          "modules",
+          "matched",
+          "baseline"
+        ],
+        [
+          "matched",
+          "baseline",
+          "modules"
+        ],
+        [
+          "baseline",
+          "matched",
+          "modules"
+        ],
+        [
+          "matched",
+          "modules",
+          "baseline"
+        ],
+        [
+          "modules",
+          "baseline",
+          "matched"
+        ]
+      ],
+      "source": "/home/bamedeo/.codex/worktrees/1910/kin",
+      "build": "/home/bamedeo/kin-module-build/prototype",
+      "summary": {
+        "baseline": {
+          "game": 1.7229439335060306,
+          "noop": 0.05943662950448925,
+          "cold": 3.765720826006145,
+          "native": 1.932250205994933,
+          "header": 7.429007287995773
+        },
+        "modules": {
+          "game": 1.5672950130028767,
+          "noop": 0.05971623800724046,
+          "cold": 4.0201119700068375,
+          "native": 1.946502242994029,
+          "header": 8.42313807499886
+        },
+        "matched": {
+          "game": 1.463353034494503,
+          "noop": 0.058104183997784276,
+          "cold": 3.7885235989961075,
+          "native": 1.9252233369916212,
+          "header": 8.249157768004807
+        }
+      },
+      "results": [
+        {
+          "name": "baseline-game-r0-s0",
+          "wall_s": 1.6024611150060082,
+          "load_before": [
+            5.37890625,
+            3.49951171875,
+            3.06298828125
+          ],
+          "load_after": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "user_s": 1.38,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192452,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r0-s0",
+          "wall_s": 0.055372582995914854,
+          "load_before": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "load_after": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20492,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-r0-s1",
+          "wall_s": 1.589464787990437,
+          "load_before": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "load_after": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "user_s": 1.35,
+          "system_s": 0.23,
+          "max_process_rss_kib": 192520,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r0-s1",
+          "wall_s": 0.05687931699503679,
+          "load_before": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "load_after": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20664,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-cold-r0",
+          "wall_s": 3.69901791200391,
+          "load_before": [
+            5.5087890625,
+            3.55810546875,
+            3.08447265625
+          ],
+          "load_after": [
+            6.26904296875,
+            3.74853515625,
+            3.14892578125
+          ],
+          "user_s": 3.38,
+          "system_s": 0.31,
+          "max_process_rss_kib": 283620,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "modules-game-r0-s0",
+          "wall_s": 1.476067644005525,
+          "load_before": [
+            6.48779296875,
+            3.8359375,
+            3.1806640625
+          ],
+          "load_after": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "user_s": 1.2,
+          "system_s": 0.26,
+          "max_process_rss_kib": 191948,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r0-s0",
+          "wall_s": 0.0639021649985807,
+          "load_before": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "load_after": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20784,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-r0-s1",
+          "wall_s": 1.4437026900122873,
+          "load_before": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "load_after": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "user_s": 1.22,
+          "system_s": 0.21,
+          "max_process_rss_kib": 192292,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r0-s1",
+          "wall_s": 0.06096315300965216,
+          "load_before": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "load_after": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20360,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-cold-r0",
+          "wall_s": 3.8939317960030166,
+          "load_before": [
+            6.44873046875,
+            3.8720703125,
+            3.1962890625
+          ],
+          "load_after": [
+            6.6533203125,
+            3.95751953125,
+            3.2275390625
+          ],
+          "user_s": 4.3,
+          "system_s": 0.45,
+          "max_process_rss_kib": 309932,
+          "cpp_compiles": 3,
+          "scans": 2,
+          "links": 2
+        },
+        {
+          "name": "matched-game-r0-s0",
+          "wall_s": 1.4521058669924969,
+          "load_before": [
+            7.32177734375,
+            4.14111328125,
+            3.291015625
+          ],
+          "load_after": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "user_s": 1.21,
+          "system_s": 0.22,
+          "max_process_rss_kib": 177024,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r0-s0",
+          "wall_s": 0.055143288991530426,
+          "load_before": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "load_after": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20540,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-r0-s1",
+          "wall_s": 1.471598805001122,
+          "load_before": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "load_after": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "user_s": 1.24,
+          "system_s": 0.22,
+          "max_process_rss_kib": 177316,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r0-s1",
+          "wall_s": 0.05905887400149368,
+          "load_before": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "load_after": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20556,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-cold-r0",
+          "wall_s": 3.796436625998467,
+          "load_before": [
+            8.01708984375,
+            4.33837890625,
+            3.359375
+          ],
+          "load_after": [
+            8.41650390625,
+            4.482421875,
+            3.41162109375
+          ],
+          "user_s": 3.46,
+          "system_s": 0.33,
+          "max_process_rss_kib": 313012,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "modules-game-r1-s0",
+          "wall_s": 1.631417161988793,
+          "load_before": [
+            9.10400390625,
+            4.6904296875,
+            3.48486328125
+          ],
+          "load_after": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "user_s": 1.37,
+          "system_s": 0.25,
+          "max_process_rss_kib": 192236,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r1-s0",
+          "wall_s": 0.05755107299773954,
+          "load_before": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "load_after": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20520,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-r1-s1",
+          "wall_s": 1.5729923809994943,
+          "load_before": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "load_after": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "user_s": 1.3,
+          "system_s": 0.26,
+          "max_process_rss_kib": 191784,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r1-s1",
+          "wall_s": 0.05786086499574594,
+          "load_before": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "load_after": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20388,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-cold-r1",
+          "wall_s": 4.0201119700068375,
+          "load_before": [
+            9.49609375,
+            4.84521484375,
+            3.54150390625
+          ],
+          "load_after": [
+            9.2158203125,
+            4.86474609375,
+            3.55517578125
+          ],
+          "user_s": 4.42,
+          "system_s": 0.49,
+          "max_process_rss_kib": 309920,
+          "cpp_compiles": 3,
+          "scans": 2,
+          "links": 2
+        },
+        {
+          "name": "matched-game-r1-s0",
+          "wall_s": 1.4558638899907237,
+          "load_before": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "load_after": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "user_s": 1.24,
+          "system_s": 0.2,
+          "max_process_rss_kib": 177344,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r1-s0",
+          "wall_s": 0.05724204800208099,
+          "load_before": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "load_after": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20568,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-r1-s1",
+          "wall_s": 1.440341627007001,
+          "load_before": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "load_after": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "user_s": 1.22,
+          "system_s": 0.21,
+          "max_process_rss_kib": 177300,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r1-s1",
+          "wall_s": 0.05758034999598749,
+          "load_before": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "load_after": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20224,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-cold-r1",
+          "wall_s": 3.711047144010081,
+          "load_before": [
+            8.8681640625,
+            4.93505859375,
+            3.59228515625
+          ],
+          "load_after": [
+            8.71826171875,
+            4.9697265625,
+            3.61083984375
+          ],
+          "user_s": 3.37,
+          "system_s": 0.33,
+          "max_process_rss_kib": 312964,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-game-r1-s0",
+          "wall_s": 1.6747115639882395,
+          "load_before": [
+            8.66064453125,
+            5.0205078125,
+            3.634765625
+          ],
+          "load_after": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "user_s": 1.45,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192692,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r1-s0",
+          "wall_s": 0.057384829997317865,
+          "load_before": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "load_after": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20540,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-r1-s1",
+          "wall_s": 1.5684930760035058,
+          "load_before": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "load_after": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "user_s": 1.34,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192572,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r1-s1",
+          "wall_s": 0.06005089600512292,
+          "load_before": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "load_after": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "user_s": 0.02,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20292,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-cold-r1",
+          "wall_s": 3.765720826006145,
+          "load_before": [
+            8.607421875,
+            5.0703125,
+            3.65869140625
+          ],
+          "load_after": [
+            8.478515625,
+            5.1025390625,
+            3.6767578125
+          ],
+          "user_s": 3.42,
+          "system_s": 0.33,
+          "max_process_rss_kib": 283268,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-game-r2-s0",
+          "wall_s": 1.4708421789982822,
+          "load_before": [
+            8.6806640625,
+            5.20068359375,
+            3.71630859375
+          ],
+          "load_after": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "user_s": 1.24,
+          "system_s": 0.21,
+          "max_process_rss_kib": 177404,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r2-s0",
+          "wall_s": 0.054710159995011054,
+          "load_before": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "load_after": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20328,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-r2-s1",
+          "wall_s": 1.4372156960016582,
+          "load_before": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "load_after": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "user_s": 1.21,
+          "system_s": 0.21,
+          "max_process_rss_kib": 177328,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r2-s1",
+          "wall_s": 0.05678894100128673,
+          "load_before": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "load_after": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20256,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-cold-r2",
+          "wall_s": 3.7885235989961075,
+          "load_before": [
+            8.6259765625,
+            5.24755859375,
+            3.73974609375
+          ],
+          "load_after": [
+            8.57568359375,
+            5.29345703125,
+            3.7626953125
+          ],
+          "user_s": 3.46,
+          "system_s": 0.32,
+          "max_process_rss_kib": 313012,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-game-r2-s0",
+          "wall_s": 1.7154779670090647,
+          "load_before": [
+            8.60986328125,
+            5.35546875,
+            3.791015625
+          ],
+          "load_after": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "user_s": 1.48,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192296,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r2-s0",
+          "wall_s": 0.05608922000101302,
+          "load_before": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "load_after": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20244,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-r2-s1",
+          "wall_s": 1.9312442210066365,
+          "load_before": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "load_after": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "user_s": 1.62,
+          "system_s": 0.27,
+          "max_process_rss_kib": 191968,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r2-s1",
+          "wall_s": 0.06759472399426159,
+          "load_before": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "load_after": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20368,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-cold-r2",
+          "wall_s": 4.330868061006186,
+          "load_before": [
+            9.04150390625,
+            5.4990234375,
+            3.84619140625
+          ],
+          "load_after": [
+            9.0380859375,
+            5.5576171875,
+            3.8740234375
+          ],
+          "user_s": 3.88,
+          "system_s": 0.41,
+          "max_process_rss_kib": 283264,
+          "cpp_compiles": 2,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "modules-game-r2-s0",
+          "wall_s": 1.5979117620008765,
+          "load_before": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "load_after": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "user_s": 1.35,
+          "system_s": 0.23,
+          "max_process_rss_kib": 191860,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r2-s0",
+          "wall_s": 0.05939827700785827,
+          "load_before": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "load_after": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20676,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-r2-s1",
+          "wall_s": 1.561597645006259,
+          "load_before": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "load_after": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "user_s": 1.32,
+          "system_s": 0.21,
+          "max_process_rss_kib": 191788,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r2-s1",
+          "wall_s": 0.06036493901046924,
+          "load_before": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "load_after": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20800,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-cold-r2",
+          "wall_s": 4.523238449008204,
+          "load_before": [
+            8.86572265625,
+            5.63818359375,
+            3.9189453125
+          ],
+          "load_after": [
+            8.79638671875,
+            5.677734375,
+            3.94091796875
+          ],
+          "user_s": 4.88,
+          "system_s": 0.59,
+          "max_process_rss_kib": 309504,
+          "cpp_compiles": 3,
+          "scans": 2,
+          "links": 2
+        },
+        {
+          "name": "baseline-game-r3-s0",
+          "wall_s": 1.7304099000029964,
+          "load_before": [
+            9.67724609375,
+            5.96875,
+            4.0546875
+          ],
+          "load_after": [
+            9.67724609375,
+            5.96875,
+            4.0546875
+          ],
+          "user_s": 1.5,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192504,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r3-s0",
+          "wall_s": 0.05882236300385557,
+          "load_before": [
+            9.67724609375,
+            5.96875,
+            4.0546875
+          ],
+          "load_after": [
+            9.67724609375,
+            5.96875,
+            4.0546875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20224,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-r3-s1",
+          "wall_s": 1.7311427030072082,
+          "load_before": [
+            9.67724609375,
+            5.96875,
+            4.0546875
+          ],
+          "load_after": [
+            9.54248046875,
+            6.0029296875,
+            4.076171875
+          ],
+          "user_s": 1.48,
+          "system_s": 0.24,
+          "max_process_rss_kib": 192544,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r3-s1",
+          "wall_s": 0.06074526300653815,
+          "load_before": [
+            9.54248046875,
+            6.0029296875,
+            4.076171875
+          ],
+          "load_after": [
+            9.54248046875,
+            6.0029296875,
+            4.076171875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20476,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-native-r3",
+          "wall_s": 1.9214558800013037,
+          "load_before": [
+            9.54248046875,
+            6.0029296875,
+            4.076171875
+          ],
+          "load_after": [
+            9.54248046875,
+            6.0029296875,
+            4.076171875
+          ],
+          "user_s": 1.54,
+          "system_s": 0.33,
+          "max_process_rss_kib": 209096,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "baseline-header-r3",
+          "wall_s": 7.043198955012485,
+          "load_before": [
+            9.54248046875,
+            6.0029296875,
+            4.076171875
+          ],
+          "load_after": [
+            9.37890625,
+            6.08544921875,
+            4.1240234375
+          ],
+          "user_s": 20.23,
+          "system_s": 0.87,
+          "max_process_rss_kib": 288784,
+          "cpp_compiles": 6,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "matched-game-r3-s0",
+          "wall_s": 1.4505917630012846,
+          "load_before": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "load_after": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "user_s": 1.22,
+          "system_s": 0.22,
+          "max_process_rss_kib": 177404,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r3-s0",
+          "wall_s": 0.05862801799958106,
+          "load_before": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "load_after": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20384,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-r3-s1",
+          "wall_s": 1.4382184449932538,
+          "load_before": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "load_after": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "user_s": 1.22,
+          "system_s": 0.21,
+          "max_process_rss_kib": 177316,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r3-s1",
+          "wall_s": 0.055688755004666746,
+          "load_before": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "load_after": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20120,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-native-r3",
+          "wall_s": 1.8260194169997703,
+          "load_before": [
+            8.9072265625,
+            6.14599609375,
+            4.17626953125
+          ],
+          "load_after": [
+            8.75439453125,
+            6.16064453125,
+            4.19189453125
+          ],
+          "user_s": 1.56,
+          "system_s": 0.25,
+          "max_process_rss_kib": 208888,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "matched-header-r3",
+          "wall_s": 7.648235216998728,
+          "load_before": [
+            8.75439453125,
+            6.16064453125,
+            4.19189453125
+          ],
+          "load_after": [
+            8.69384765625,
+            6.19140625,
+            4.21240234375
+          ],
+          "user_s": 22.63,
+          "system_s": 1.04,
+          "max_process_rss_kib": 312924,
+          "cpp_compiles": 7,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "modules-game-r3-s0",
+          "wall_s": 1.527492748995428,
+          "load_before": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "load_after": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "user_s": 1.24,
+          "system_s": 0.26,
+          "max_process_rss_kib": 191912,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r3-s0",
+          "wall_s": 0.05160721699940041,
+          "load_before": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "load_after": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20612,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-r3-s1",
+          "wall_s": 1.5084211539942771,
+          "load_before": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "load_after": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "user_s": 1.24,
+          "system_s": 0.25,
+          "max_process_rss_kib": 192020,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r3-s1",
+          "wall_s": 0.056458698003552854,
+          "load_before": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "load_after": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20284,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-native-r3",
+          "wall_s": 1.9446778779965825,
+          "load_before": [
+            8.39892578125,
+            6.291015625,
+            4.28857421875
+          ],
+          "load_after": [
+            8.28662109375,
+            6.30322265625,
+            4.30322265625
+          ],
+          "user_s": 1.62,
+          "system_s": 0.31,
+          "max_process_rss_kib": 208840,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "modules-header-r3",
+          "wall_s": 8.28870040300535,
+          "load_before": [
+            8.28662109375,
+            6.30322265625,
+            4.30322265625
+          ],
+          "load_after": [
+            8.3896484375,
+            6.39208984375,
+            4.35400390625
+          ],
+          "user_s": 24.12,
+          "system_s": 1.04,
+          "max_process_rss_kib": 309744,
+          "cpp_compiles": 7,
+          "scans": 1,
+          "links": 3
+        },
+        {
+          "name": "matched-game-r4-s0",
+          "wall_s": 1.6408475619973615,
+          "load_before": [
+            8.52587890625,
+            6.5205078125,
+            4.42919921875
+          ],
+          "load_after": [
+            8.52587890625,
+            6.5205078125,
+            4.42919921875
+          ],
+          "user_s": 1.41,
+          "system_s": 0.22,
+          "max_process_rss_kib": 177324,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r4-s0",
+          "wall_s": 0.06286838900996372,
+          "load_before": [
+            8.52587890625,
+            6.5205078125,
+            4.42919921875
+          ],
+          "load_after": [
+            8.52587890625,
+            6.5205078125,
+            4.42919921875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20204,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-r4-s1",
+          "wall_s": 1.6057637140038423,
+          "load_before": [
+            8.52587890625,
+            6.5205078125,
+            4.42919921875
+          ],
+          "load_after": [
+            9.12451171875,
+            6.67822265625,
+            4.49169921875
+          ],
+          "user_s": 1.37,
+          "system_s": 0.22,
+          "max_process_rss_kib": 177344,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r4-s1",
+          "wall_s": 0.06111225200584158,
+          "load_before": [
+            9.12451171875,
+            6.67822265625,
+            4.49169921875
+          ],
+          "load_after": [
+            9.12451171875,
+            6.67822265625,
+            4.49169921875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20344,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-native-r4",
+          "wall_s": 2.0273937140009366,
+          "load_before": [
+            9.12451171875,
+            6.67822265625,
+            4.49169921875
+          ],
+          "load_after": [
+            9.12451171875,
+            6.67822265625,
+            4.49169921875
+          ],
+          "user_s": 1.69,
+          "system_s": 0.33,
+          "max_process_rss_kib": 208916,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "matched-header-r4",
+          "wall_s": 8.249157768004807,
+          "load_before": [
+            9.0341796875,
+            6.7001953125,
+            4.5107421875
+          ],
+          "load_after": [
+            9.03125,
+            6.73876953125,
+            4.53515625
+          ],
+          "user_s": 23.69,
+          "system_s": 1.1,
+          "max_process_rss_kib": 312884,
+          "cpp_compiles": 7,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "modules-game-r4-s0",
+          "wall_s": 1.6811383640015265,
+          "load_before": [
+            9.3203125,
+            6.91552734375,
+            4.62890625
+          ],
+          "load_after": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "user_s": 1.41,
+          "system_s": 0.26,
+          "max_process_rss_kib": 191964,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r4-s0",
+          "wall_s": 0.06200581099255942,
+          "load_before": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "load_after": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20440,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-r4-s1",
+          "wall_s": 1.5533085820061387,
+          "load_before": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "load_after": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "user_s": 1.31,
+          "system_s": 0.23,
+          "max_process_rss_kib": 192008,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r4-s1",
+          "wall_s": 0.05878095999651123,
+          "load_before": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "load_after": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20364,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-native-r4",
+          "wall_s": 1.946502242994029,
+          "load_before": [
+            9.29443359375,
+            6.9501953125,
+            4.65283203125
+          ],
+          "load_after": [
+            9.1904296875,
+            6.9677734375,
+            4.6708984375
+          ],
+          "user_s": 1.63,
+          "system_s": 0.3,
+          "max_process_rss_kib": 209100,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "modules-header-r4",
+          "wall_s": 8.646651451999787,
+          "load_before": [
+            9.1904296875,
+            6.9677734375,
+            4.6708984375
+          ],
+          "load_after": [
+            9.14794921875,
+            7.0341796875,
+            4.7177734375
+          ],
+          "user_s": 25.19,
+          "system_s": 1.16,
+          "max_process_rss_kib": 309832,
+          "cpp_compiles": 7,
+          "scans": 1,
+          "links": 3
+        },
+        {
+          "name": "baseline-game-r4-s0",
+          "wall_s": 1.7605703870067373,
+          "load_before": [
+            8.955078125,
+            7.09765625,
+            4.7763671875
+          ],
+          "load_after": [
+            8.955078125,
+            7.09765625,
+            4.7763671875
+          ],
+          "user_s": 1.53,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192568,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r4-s0",
+          "wall_s": 0.06106547999661416,
+          "load_before": [
+            8.955078125,
+            7.09765625,
+            4.7763671875
+          ],
+          "load_after": [
+            8.955078125,
+            7.09765625,
+            4.7763671875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20316,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-r4-s1",
+          "wall_s": 1.7578123700077413,
+          "load_before": [
+            8.955078125,
+            7.09765625,
+            4.7763671875
+          ],
+          "load_after": [
+            9.0390625,
+            7.14599609375,
+            4.8046875
+          ],
+          "user_s": 1.52,
+          "system_s": 0.23,
+          "max_process_rss_kib": 192560,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r4-s1",
+          "wall_s": 0.060189195995917544,
+          "load_before": [
+            9.0390625,
+            7.14599609375,
+            4.8046875
+          ],
+          "load_after": [
+            9.0390625,
+            7.14599609375,
+            4.8046875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20420,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-native-r4",
+          "wall_s": 1.9640176009997958,
+          "load_before": [
+            9.0390625,
+            7.14599609375,
+            4.8046875
+          ],
+          "load_after": [
+            9.0390625,
+            7.14599609375,
+            4.8046875
+          ],
+          "user_s": 1.67,
+          "system_s": 0.29,
+          "max_process_rss_kib": 208940,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "baseline-header-r4",
+          "wall_s": 7.429007287995773,
+          "load_before": [
+            9.1162109375,
+            7.19384765625,
+            4.8330078125
+          ],
+          "load_after": [
+            9.1064453125,
+            7.22412109375,
+            4.85546875
+          ],
+          "user_s": 20.61,
+          "system_s": 0.96,
+          "max_process_rss_kib": 288556,
+          "cpp_compiles": 6,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "modules-game-r5-s0",
+          "wall_s": 1.6298417189973406,
+          "load_before": [
+            9.2314453125,
+            7.34423828125,
+            4.93359375
+          ],
+          "load_after": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "user_s": 1.37,
+          "system_s": 0.25,
+          "max_process_rss_kib": 191924,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r5-s0",
+          "wall_s": 0.060660590999759734,
+          "load_before": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "load_after": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20380,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-game-r5-s1",
+          "wall_s": 1.614813886990305,
+          "load_before": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "load_after": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "user_s": 1.39,
+          "system_s": 0.21,
+          "max_process_rss_kib": 192140,
+          "cpp_compiles": 1,
+          "scans": 1,
+          "links": 1
+        },
+        {
+          "name": "modules-noop-r5-s1",
+          "wall_s": 0.06003419900662266,
+          "load_before": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "load_after": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20612,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "modules-native-r5",
+          "wall_s": 1.9915560449881013,
+          "load_before": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "load_after": [
+            9.1328125,
+            7.35546875,
+            4.9501953125
+          ],
+          "user_s": 1.7,
+          "system_s": 0.28,
+          "max_process_rss_kib": 208972,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "modules-header-r5",
+          "wall_s": 8.42313807499886,
+          "load_before": [
+            9.0419921875,
+            7.3662109375,
+            4.966796875
+          ],
+          "load_after": [
+            9.119140625,
+            7.41015625,
+            4.994140625
+          ],
+          "user_s": 24.63,
+          "system_s": 1.07,
+          "max_process_rss_kib": 309832,
+          "cpp_compiles": 7,
+          "scans": 1,
+          "links": 3
+        },
+        {
+          "name": "baseline-game-r5-s0",
+          "wall_s": 1.7541604790021665,
+          "load_before": [
+            9.1064453125,
+            7.52783203125,
+            5.0859375
+          ],
+          "load_after": [
+            9.1064453125,
+            7.52783203125,
+            5.0859375
+          ],
+          "user_s": 1.51,
+          "system_s": 0.23,
+          "max_process_rss_kib": 192580,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r5-s0",
+          "wall_s": 0.06138895600452088,
+          "load_before": [
+            9.1064453125,
+            7.52783203125,
+            5.0859375
+          ],
+          "load_after": [
+            9.1064453125,
+            7.52783203125,
+            5.0859375
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20620,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-game-r5-s1",
+          "wall_s": 1.666759578991332,
+          "load_before": [
+            9.1064453125,
+            7.52783203125,
+            5.0859375
+          ],
+          "load_after": [
+            9.017578125,
+            7.5361328125,
+            5.10205078125
+          ],
+          "user_s": 1.43,
+          "system_s": 0.22,
+          "max_process_rss_kib": 192616,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "baseline-noop-r5-s1",
+          "wall_s": 0.058276117997593246,
+          "load_before": [
+            9.017578125,
+            7.5361328125,
+            5.10205078125
+          ],
+          "load_after": [
+            9.017578125,
+            7.5361328125,
+            5.10205078125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20640,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "baseline-native-r5",
+          "wall_s": 1.932250205994933,
+          "load_before": [
+            9.017578125,
+            7.5361328125,
+            5.10205078125
+          ],
+          "load_after": [
+            9.017578125,
+            7.5361328125,
+            5.10205078125
+          ],
+          "user_s": 1.6,
+          "system_s": 0.32,
+          "max_process_rss_kib": 208936,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "baseline-header-r5",
+          "wall_s": 7.531096652994165,
+          "load_before": [
+            9.017578125,
+            7.5361328125,
+            5.10205078125
+          ],
+          "load_after": [
+            9.00244140625,
+            7.58349609375,
+            5.14404296875
+          ],
+          "user_s": 21.15,
+          "system_s": 0.9,
+          "max_process_rss_kib": 288564,
+          "cpp_compiles": 6,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "matched-game-r5-s0",
+          "wall_s": 1.484348220998072,
+          "load_before": [
+            9.13720703125,
+            7.68603515625,
+            5.21728515625
+          ],
+          "load_after": [
+            9.13720703125,
+            7.68603515625,
+            5.21728515625
+          ],
+          "user_s": 1.25,
+          "system_s": 0.23,
+          "max_process_rss_kib": 177332,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r5-s0",
+          "wall_s": 0.059253920990158804,
+          "load_before": [
+            9.13720703125,
+            7.68603515625,
+            5.21728515625
+          ],
+          "load_after": [
+            9.13720703125,
+            7.68603515625,
+            5.21728515625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20632,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-game-r5-s1",
+          "wall_s": 1.5056554909970146,
+          "load_before": [
+            9.13720703125,
+            7.68603515625,
+            5.21728515625
+          ],
+          "load_after": [
+            9.1259765625,
+            7.7080078125,
+            5.23779296875
+          ],
+          "user_s": 1.27,
+          "system_s": 0.22,
+          "max_process_rss_kib": 177148,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "matched-noop-r5-s1",
+          "wall_s": 0.059440109005663544,
+          "load_before": [
+            9.1259765625,
+            7.7080078125,
+            5.23779296875
+          ],
+          "load_after": [
+            9.1259765625,
+            7.7080078125,
+            5.23779296875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20444,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "matched-native-r5",
+          "wall_s": 1.9252233369916212,
+          "load_before": [
+            9.1259765625,
+            7.7080078125,
+            5.23779296875
+          ],
+          "load_after": [
+            9.1259765625,
+            7.7080078125,
+            5.23779296875
+          ],
+          "user_s": 1.62,
+          "system_s": 0.3,
+          "max_process_rss_kib": 208976,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 2
+        },
+        {
+          "name": "matched-header-r5",
+          "wall_s": 8.316107696999097,
+          "load_before": [
+            9.1259765625,
+            7.7080078125,
+            5.23779296875
+          ],
+          "load_after": [
+            9.32763671875,
+            7.7998046875,
+            5.29443359375
+          ],
+          "user_s": 24.28,
+          "system_s": 1.11,
+          "max_process_rss_kib": 313020,
+          "cpp_compiles": 7,
+          "scans": 0,
+          "links": 2
+        }
+      ]
+    },
+    "production_pch": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "source": "/home/bamedeo/.codex/worktrees/1910/kin",
+      "build": "/home/bamedeo/kin-module-build/prototype",
+      "summary": {
+        "before": {
+          "game": 2.38007192400255,
+          "noop": 0.08131456649425672
+        },
+        "after": {
+          "game": 1.9808462115033763,
+          "noop": 0.07213212000351632
+        }
+      },
+      "results": [
+        {
+          "name": "before-game-r0-s0",
+          "wall_s": 1.826941249993979,
+          "load_before": [
+            7.029296875,
+            6.74072265625,
+            5.76220703125
+          ],
+          "load_after": [
+            7.029296875,
+            6.74072265625,
+            5.76220703125
+          ],
+          "user_s": 1.56,
+          "system_s": 0.26,
+          "max_process_rss_kib": 193776,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r0-s0",
+          "wall_s": 0.06153156500658952,
+          "load_before": [
+            7.029296875,
+            6.74072265625,
+            5.76220703125
+          ],
+          "load_after": [
+            7.029296875,
+            6.74072265625,
+            5.76220703125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20396,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r0-s1",
+          "wall_s": 2.019079933001194,
+          "load_before": [
+            7.029296875,
+            6.74072265625,
+            5.76220703125
+          ],
+          "load_after": [
+            7.107421875,
+            6.76171875,
+            5.7744140625
+          ],
+          "user_s": 1.72,
+          "system_s": 0.29,
+          "max_process_rss_kib": 193504,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r0-s1",
+          "wall_s": 0.09501121799985413,
+          "load_before": [
+            7.107421875,
+            6.76171875,
+            5.7744140625
+          ],
+          "load_after": [
+            7.107421875,
+            6.76171875,
+            5.7744140625
+          ],
+          "user_s": 0.04,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20408,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r0-s0",
+          "wall_s": 1.6679343569994671,
+          "load_before": [
+            7.25927734375,
+            6.79931640625,
+            5.7919921875
+          ],
+          "load_after": [
+            7.39892578125,
+            6.8359375,
+            5.8095703125
+          ],
+          "user_s": 1.4,
+          "system_s": 0.25,
+          "max_process_rss_kib": 178344,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r0-s0",
+          "wall_s": 0.06693586100300308,
+          "load_before": [
+            7.39892578125,
+            6.8359375,
+            5.8095703125
+          ],
+          "load_after": [
+            7.39892578125,
+            6.8359375,
+            5.8095703125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20256,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r0-s1",
+          "wall_s": 1.6957851070037577,
+          "load_before": [
+            7.39892578125,
+            6.8359375,
+            5.8095703125
+          ],
+          "load_after": [
+            7.39892578125,
+            6.8359375,
+            5.8095703125
+          ],
+          "user_s": 1.46,
+          "system_s": 0.22,
+          "max_process_rss_kib": 178184,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r0-s1",
+          "wall_s": 0.06774758499523159,
+          "load_before": [
+            7.39892578125,
+            6.8359375,
+            5.8095703125
+          ],
+          "load_after": [
+            7.39892578125,
+            6.8359375,
+            5.8095703125
+          ],
+          "user_s": 0.02,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20336,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r1-s0",
+          "wall_s": 1.7618710870010545,
+          "load_before": [
+            7.447265625,
+            6.85546875,
+            5.82177734375
+          ],
+          "load_after": [
+            7.447265625,
+            6.85546875,
+            5.82177734375
+          ],
+          "user_s": 1.48,
+          "system_s": 0.26,
+          "max_process_rss_kib": 178228,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r1-s0",
+          "wall_s": 0.06886152298829984,
+          "load_before": [
+            7.447265625,
+            6.85546875,
+            5.82177734375
+          ],
+          "load_after": [
+            7.447265625,
+            6.85546875,
+            5.82177734375
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20432,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r1-s1",
+          "wall_s": 1.7562222800042946,
+          "load_before": [
+            7.447265625,
+            6.85546875,
+            5.82177734375
+          ],
+          "load_after": [
+            7.65185546875,
+            6.90771484375,
+            5.84423828125
+          ],
+          "user_s": 1.49,
+          "system_s": 0.25,
+          "max_process_rss_kib": 178152,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r1-s1",
+          "wall_s": 0.06924323299608659,
+          "load_before": [
+            7.65185546875,
+            6.90771484375,
+            5.84423828125
+          ],
+          "load_after": [
+            7.65185546875,
+            6.90771484375,
+            5.84423828125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20596,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r1-s0",
+          "wall_s": 2.1378021349955816,
+          "load_before": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "load_after": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "user_s": 1.85,
+          "system_s": 0.28,
+          "max_process_rss_kib": 192592,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r1-s0",
+          "wall_s": 0.07403694100503344,
+          "load_before": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "load_after": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "user_s": 0.04,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20468,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r1-s1",
+          "wall_s": 2.1489264520059805,
+          "load_before": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "load_after": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "user_s": 1.82,
+          "system_s": 0.31,
+          "max_process_rss_kib": 192092,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r1-s1",
+          "wall_s": 0.07430384900362696,
+          "load_before": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "load_after": [
+            8.30810546875,
+            7.07568359375,
+            5.91064453125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20168,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r2-s0",
+          "wall_s": 2.4678643189981813,
+          "load_before": [
+            9.63232421875,
+            7.40234375,
+            6.02978515625
+          ],
+          "load_after": [
+            9.63232421875,
+            7.40234375,
+            6.02978515625
+          ],
+          "user_s": 2.15,
+          "system_s": 0.31,
+          "max_process_rss_kib": 192524,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r2-s0",
+          "wall_s": 0.10439995299384464,
+          "load_before": [
+            9.63232421875,
+            7.40234375,
+            6.02978515625
+          ],
+          "load_after": [
+            9.63232421875,
+            7.40234375,
+            6.02978515625
+          ],
+          "user_s": 0.05,
+          "system_s": 0.04,
+          "max_process_rss_kib": 20436,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r2-s1",
+          "wall_s": 3.3782994950015564,
+          "load_before": [
+            9.63232421875,
+            7.40234375,
+            6.02978515625
+          ],
+          "load_after": [
+            9.50146484375,
+            7.41259765625,
+            6.04052734375
+          ],
+          "user_s": 3.02,
+          "system_s": 0.34,
+          "max_process_rss_kib": 192512,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r2-s1",
+          "wall_s": 0.08791306399507448,
+          "load_before": [
+            9.50146484375,
+            7.41259765625,
+            6.04052734375
+          ],
+          "load_after": [
+            9.50146484375,
+            7.41259765625,
+            6.04052734375
+          ],
+          "user_s": 0.05,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20144,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r2-s0",
+          "wall_s": 1.9887552610016428,
+          "load_before": [
+            9.8125,
+            7.54736328125,
+            6.099609375
+          ],
+          "load_after": [
+            9.98779296875,
+            7.62158203125,
+            6.13134765625
+          ],
+          "user_s": 1.7,
+          "system_s": 0.27,
+          "max_process_rss_kib": 178164,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r2-s0",
+          "wall_s": 0.07259391900151968,
+          "load_before": [
+            9.98779296875,
+            7.62158203125,
+            6.13134765625
+          ],
+          "load_after": [
+            9.98779296875,
+            7.62158203125,
+            6.13134765625
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20504,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r2-s1",
+          "wall_s": 2.083227473005536,
+          "load_before": [
+            9.98779296875,
+            7.62158203125,
+            6.13134765625
+          ],
+          "load_after": [
+            9.98779296875,
+            7.62158203125,
+            6.13134765625
+          ],
+          "user_s": 1.75,
+          "system_s": 0.32,
+          "max_process_rss_kib": 177940,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r2-s1",
+          "wall_s": 0.07518988898664247,
+          "load_before": [
+            9.98779296875,
+            7.62158203125,
+            6.13134765625
+          ],
+          "load_after": [
+            9.98779296875,
+            7.62158203125,
+            6.13134765625
+          ],
+          "user_s": 0.04,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20140,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r3-s0",
+          "wall_s": 1.9729371620051097,
+          "load_before": [
+            10.4697265625,
+            7.7607421875,
+            6.1845703125
+          ],
+          "load_after": [
+            10.51220703125,
+            7.81494140625,
+            6.21044921875
+          ],
+          "user_s": 1.68,
+          "system_s": 0.29,
+          "max_process_rss_kib": 178172,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r3-s0",
+          "wall_s": 0.07167032100551296,
+          "load_before": [
+            10.51220703125,
+            7.81494140625,
+            6.21044921875
+          ],
+          "load_after": [
+            10.51220703125,
+            7.81494140625,
+            6.21044921875
+          ],
+          "user_s": 0.03,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20380,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r3-s1",
+          "wall_s": 2.0084462009981507,
+          "load_before": [
+            10.51220703125,
+            7.81494140625,
+            6.21044921875
+          ],
+          "load_after": [
+            10.51220703125,
+            7.81494140625,
+            6.21044921875
+          ],
+          "user_s": 1.7,
+          "system_s": 0.3,
+          "max_process_rss_kib": 178124,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r3-s1",
+          "wall_s": 0.07695667499501724,
+          "load_before": [
+            10.51220703125,
+            7.81494140625,
+            6.21044921875
+          ],
+          "load_after": [
+            10.51220703125,
+            7.81494140625,
+            6.21044921875
+          ],
+          "user_s": 0.04,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20296,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r3-s0",
+          "wall_s": 2.4222202969976934,
+          "load_before": [
+            10.51953125,
+            7.904296875,
+            6.2568359375
+          ],
+          "load_after": [
+            10.55810546875,
+            7.9560546875,
+            6.28271484375
+          ],
+          "user_s": 2.07,
+          "system_s": 0.34,
+          "max_process_rss_kib": 193156,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r3-s0",
+          "wall_s": 0.09129491800558753,
+          "load_before": [
+            10.55810546875,
+            7.9560546875,
+            6.28271484375
+          ],
+          "load_after": [
+            10.55810546875,
+            7.9560546875,
+            6.28271484375
+          ],
+          "user_s": 0.05,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20388,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r3-s1",
+          "wall_s": 2.310355791996699,
+          "load_before": [
+            10.55810546875,
+            7.9560546875,
+            6.28271484375
+          ],
+          "load_after": [
+            10.55810546875,
+            7.9560546875,
+            6.28271484375
+          ],
+          "user_s": 1.97,
+          "system_s": 0.33,
+          "max_process_rss_kib": 193784,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r3-s1",
+          "wall_s": 0.08060867799213156,
+          "load_before": [
+            10.55810546875,
+            7.9560546875,
+            6.28271484375
+          ],
+          "load_after": [
+            10.55810546875,
+            7.9560546875,
+            6.28271484375
+          ],
+          "user_s": 0.04,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20440,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r4-s0",
+          "wall_s": 2.3471993480052333,
+          "load_before": [
+            10.51318359375,
+            7.990234375,
+            6.302734375
+          ],
+          "load_after": [
+            10.4716796875,
+            8.02392578125,
+            6.32275390625
+          ],
+          "user_s": 2.03,
+          "system_s": 0.31,
+          "max_process_rss_kib": 193692,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r4-s0",
+          "wall_s": 0.08134175899613183,
+          "load_before": [
+            10.4716796875,
+            8.02392578125,
+            6.32275390625
+          ],
+          "load_after": [
+            10.4716796875,
+            8.02392578125,
+            6.32275390625
+          ],
+          "user_s": 0.05,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20272,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r4-s1",
+          "wall_s": 3.0542957989964634,
+          "load_before": [
+            10.4716796875,
+            8.02392578125,
+            6.32275390625
+          ],
+          "load_after": [
+            10.4716796875,
+            8.02392578125,
+            6.32275390625
+          ],
+          "user_s": 2.64,
+          "system_s": 0.4,
+          "max_process_rss_kib": 193456,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r4-s1",
+          "wall_s": 0.1023047869966831,
+          "load_before": [
+            10.4716796875,
+            8.02392578125,
+            6.32275390625
+          ],
+          "load_after": [
+            10.4716796875,
+            8.02392578125,
+            6.32275390625
+          ],
+          "user_s": 0.05,
+          "system_s": 0.04,
+          "max_process_rss_kib": 20292,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r4-s0",
+          "wall_s": 2.307165054997313,
+          "load_before": [
+            11.0439453125,
+            8.26904296875,
+            6.4306640625
+          ],
+          "load_after": [
+            11.0439453125,
+            8.26904296875,
+            6.4306640625
+          ],
+          "user_s": 1.7,
+          "system_s": 0.24,
+          "max_process_rss_kib": 176732,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r4-s0",
+          "wall_s": 0.07721561800281052,
+          "load_before": [
+            11.0439453125,
+            8.26904296875,
+            6.4306640625
+          ],
+          "load_after": [
+            11.0439453125,
+            8.26904296875,
+            6.4306640625
+          ],
+          "user_s": 0.04,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20476,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r4-s1",
+          "wall_s": 2.0871143130061682,
+          "load_before": [
+            11.0439453125,
+            8.26904296875,
+            6.4306640625
+          ],
+          "load_after": [
+            10.7998046875,
+            8.26416015625,
+            6.439453125
+          ],
+          "user_s": 1.76,
+          "system_s": 0.31,
+          "max_process_rss_kib": 177700,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r4-s1",
+          "wall_s": 0.0903886500018416,
+          "load_before": [
+            10.7998046875,
+            8.26416015625,
+            6.439453125
+          ],
+          "load_after": [
+            10.7998046875,
+            8.26416015625,
+            6.439453125
+          ],
+          "user_s": 0.04,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20488,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r5-s0",
+          "wall_s": 1.8597348440089263,
+          "load_before": [
+            10.7998046875,
+            8.26416015625,
+            6.439453125
+          ],
+          "load_after": [
+            10.6552734375,
+            8.27685546875,
+            6.45361328125
+          ],
+          "user_s": 1.59,
+          "system_s": 0.25,
+          "max_process_rss_kib": 177792,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r5-s0",
+          "wall_s": 0.06969992800441105,
+          "load_before": [
+            10.6552734375,
+            8.27685546875,
+            6.45361328125
+          ],
+          "load_after": [
+            10.6552734375,
+            8.27685546875,
+            6.45361328125
+          ],
+          "user_s": 0.04,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20480,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "after-game-r5-s1",
+          "wall_s": 2.420959187002154,
+          "load_before": [
+            10.6552734375,
+            8.27685546875,
+            6.45361328125
+          ],
+          "load_after": [
+            10.6552734375,
+            8.27685546875,
+            6.45361328125
+          ],
+          "user_s": 1.79,
+          "system_s": 0.38,
+          "max_process_rss_kib": 177696,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "after-noop-r5-s1",
+          "wall_s": 0.07650870601355564,
+          "load_before": [
+            10.6552734375,
+            8.27685546875,
+            6.45361328125
+          ],
+          "load_after": [
+            10.6552734375,
+            8.27685546875,
+            6.45361328125
+          ],
+          "user_s": 0.04,
+          "system_s": 0.02,
+          "max_process_rss_kib": 20260,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r5-s0",
+          "wall_s": 2.4224216129950946,
+          "load_before": [
+            11.0322265625,
+            8.4765625,
+            6.548828125
+          ],
+          "load_after": [
+            11.0322265625,
+            8.4765625,
+            6.548828125
+          ],
+          "user_s": 2.11,
+          "system_s": 0.3,
+          "max_process_rss_kib": 193184,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r5-s0",
+          "wall_s": 0.07947407200117595,
+          "load_before": [
+            11.0322265625,
+            8.4765625,
+            6.548828125
+          ],
+          "load_after": [
+            11.0322265625,
+            8.4765625,
+            6.548828125
+          ],
+          "user_s": 0.03,
+          "system_s": 0.04,
+          "max_process_rss_kib": 20640,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        },
+        {
+          "name": "before-game-r5-s1",
+          "wall_s": 2.412944499999867,
+          "load_before": [
+            11.0322265625,
+            8.4765625,
+            6.548828125
+          ],
+          "load_after": [
+            10.7890625,
+            8.46826171875,
+            6.556640625
+          ],
+          "user_s": 2.07,
+          "system_s": 0.33,
+          "max_process_rss_kib": 193196,
+          "cpp_compiles": 1,
+          "scans": 0,
+          "links": 1
+        },
+        {
+          "name": "before-noop-r5-s1",
+          "wall_s": 0.08128737399238162,
+          "load_before": [
+            10.7890625,
+            8.46826171875,
+            6.556640625
+          ],
+          "load_after": [
+            10.7890625,
+            8.46826171875,
+            6.556640625
+          ],
+          "user_s": 0.04,
+          "system_s": 0.03,
+          "max_process_rss_kib": 20508,
+          "cpp_compiles": 0,
+          "scans": 0,
+          "links": 0
+        }
+      ]
+    }
+  },
+  "production_pch_scope": "Original game source include order, normal build plumbing, five additional PCH headers versus the prior common PCH; 12 warm edits and no-ops per case, alternating order over 6 rounds",
+  "reproducers": {
+    "bench_snapshot.py": "42c3c8b520c4ccaf9b00e274353108a89b035cf554f212f0407bc5b6c4467d44",
+    "bench_pch.py": "47101c5657ce98fd0ba72f70b385cd5f7cef6519ce1ca245544f607c5f7c4c6f"
+  },
+  "measured_balanced_script_sha256": "6f291aad2faeedaa5e2ac3f24f7d808e3bdc3af4382684f8b78b85defbe38a70",
+  "reproducer_note": "Published scripts add clean-worktree/input guards and remove an unused argument; bench_pch also removes an overwritten module hook. Timed commands and orderings are unchanged.",
+  "host": {
+    "os": "Linux-7.0.0-42-generic-x86_64-with-glibc2.43",
+    "logical_cpus": 32,
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "memory_kib": 15571804
+  },
+  "validation": {
+    "native_2d_suite": {
+      "registered": 120,
+      "passed": 118,
+      "failed": 0,
+      "skipped": [
+        "kin-normal-lighting2d-gpu",
+        "kin-gpu-memory"
+      ],
+      "configuration": "Release Clang 21, PCH ON, 3D OFF, scripting/physics/audio/image/TTF ON, examples and benchmarks OFF; SDL dummy drivers"
+    },
+    "gcc_15_pch_smoke": "Built the final generated Hex PCH and compiled the real game source; -Werror=invalid-pch and -H confirmed GCC used the PCH. Compile-only, not a GCC module test.",
+    "standalone": {
+      "configure": "native Linux Clang 21, Release, project-pinned dependency sources shared read-only with the measured build",
+      "build": "all three client targets and their engine/dependency prerequisites passed",
+      "tests": {
+        "passed": 3,
+        "failed": 0
+      },
+      "generated_game_bodies": "all three main/header pairs match the real Hex namespace bodies exactly"
+    }
+  }
+}

@@ -1,5 +1,7 @@
+#include <kin/renderer/backend.hpp>
 #include "sdl_renderer2d_backend.hpp"
 #include "rounded_rect_loop.hpp"
+#include "../platform/window_points.hpp"
 
 #include <kin/platform/log.hpp>
 
@@ -14,6 +16,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <cstring>
 
 namespace kin {
@@ -278,6 +281,10 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
     if (vsync) {
         SDL_SetRenderVSync(_handle, 1);
     }
+    const char* driver_name = SDL_GetRendererName(_handle);
+    if (driver_name && std::string_view{driver_name} == "software") {
+        _soft_edge_pixels = 1.0f; // its triangles snap to half pixels: a half pixel fade would come and go
+    }
     // Max and Min are custom blend modes, which only some drivers take (not
     // the software one): ask once.
     _min_max_blend = SDL_SetRenderDrawBlendMode(_handle, to_sdl_blend(BlendMode::Max)) &&
@@ -534,16 +541,19 @@ Vec2i SdlRenderer2DBackend::output_size() const {
     return size;
 }
 
+// kin's window coordinates are points; SDL's its own window units (window_points.hpp).
 Vec2f SdlRenderer2DBackend::window_to_logical(Vec2f window_px) const {
+    const f32 scale = detail::window_units_per_point(SDL_GetRenderWindow(_handle));
     Vec2f logical{};
-    SDL_RenderCoordinatesFromWindow(_handle, window_px.x, window_px.y, &logical.x, &logical.y);
+    SDL_RenderCoordinatesFromWindow(_handle, window_px.x * scale, window_px.y * scale, &logical.x, &logical.y);
     return logical;
 }
 
 Vec2f SdlRenderer2DBackend::logical_to_window(Vec2f logical) const {
+    const f32 scale = detail::window_units_per_point(SDL_GetRenderWindow(_handle));
     Vec2f window{};
     SDL_RenderCoordinatesToWindow(_handle, logical.x, logical.y, &window.x, &window.y);
-    return window;
+    return {window.x / scale, window.y / scale};
 }
 
 void SdlRenderer2DBackend::fill_rect(Rectf rect, Color color) {
@@ -613,6 +623,20 @@ Texture SdlRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
     return Texture{std::make_shared<SdlTextureBackend>(texture, size, _alive)};
 }
 
+bool SdlRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) {
+    const auto* sdl_texture = as_sdl(texture.backend().get());
+    if (!sdl_texture || !sdl_texture->handle() || !pixels) {
+        return false;
+    }
+    flush_batch(); // what is queued to draw from it draws what it held
+    const SDL_Rect area{at.x, at.y, size.x, size.y};
+    if (!SDL_UpdateTexture(sdl_texture->handle(), &area, pixels, size.x * 4)) {
+        KIN_LOG_ERROR_F("render", "texture update failed", (LogFields{{.name = "error", .value = std::string{SDL_GetError()}}}));
+        return false;
+    }
+    return true;
+}
+
 void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf dest) {
     const Vec2i size = texture.size();
     draw_texture(texture, {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)}, dest);
@@ -665,6 +689,26 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
     }
 }
 
+bool SdlRenderer2DBackend::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                                  std::span<const u32> indices) {
+    const auto* backend = as_sdl(texture.backend().get());
+    if (!backend || !backend->handle()) {
+        return false;
+    }
+    flush_batch();
+    _shape_vertices.clear();
+    _shape_vertices.reserve(vertices.size());
+    for (const auto& v : vertices) {
+        const auto p = _transformed ? _transform.apply(v.position) : v.position;
+        _shape_vertices.push_back({{p.x, p.y}, to_sdl_color(v.color), {v.uv.x, v.uv.y}});
+    }
+    _shape_indices.assign(indices.begin(), indices.end());
+    const TextureBlendScope blend{backend->handle(), _blend};
+    return SDL_RenderGeometry(_handle, backend->handle(), _shape_vertices.data(),
+                              static_cast<int>(_shape_vertices.size()), _shape_indices.data(),
+                              static_cast<int>(_shape_indices.size()));
+}
+
 void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,
                                            u32 index_base, Color tint) {
     if (indices.empty() || tint.a == 0) {
@@ -682,8 +726,11 @@ void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
     }
     _shape_vertices.clear();
     _shape_vertices.reserve(vertices.size());
-    // A soft edge wider than a pixel is pulled in to one, along `outward`.
-    const f32 rim = -1.0f / std::max(pixels_per_unit, 1e-6f);
+    // A soft edge wider than half a pixel (a whole one on the software driver)
+    // is pulled in to it, along `outward`, and faded across it: the outline's
+    // vertices are shared with the inside, so the fade starts whole there rather
+    // than at half as the GPU shader's does (docs/rendering.md, "Shape edges").
+    const f32 rim = -_soft_edge_pixels / std::max(pixels_per_unit, 1e-6f);
     for (const ShapeVertex& v : vertices) {
         Vec2f p = v.position;
         f32 edge = v.edge;
@@ -692,7 +739,7 @@ void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
             edge = rim;
         }
         p = _transformed ? _transform.apply(p) : p;
-        const f32 cover = std::clamp(1.0f + edge * pixels_per_unit, 0.0f, 1.0f);
+        const f32 cover = std::clamp(1.0f + edge * pixels_per_unit / _soft_edge_pixels, 0.0f, 1.0f);
         _shape_vertices.push_back(SDL_Vertex{
             .position = {p.x, p.y},
             .color = {static_cast<f32>(v.color.r) * static_cast<f32>(tint.r) / 65025.0f,

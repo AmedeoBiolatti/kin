@@ -1,0 +1,27 @@
+{
+  "schema": "kin.scenario/1", "name": "Workshop gameplay and UI", "seed": 7,
+  "requires": ["ui", "world", "reset", "image_io"],
+  "dependencies": ["../content", "../art"],
+  "steps": [
+    {"name":"Initial room becomes ready", "wait":{"observe":"scene.current","path":"/state/rooms","op":"eq","value":1,"within":16}},
+    {"call":"ui.action","params":{"selector":{"key":"fire","role":"button","within":{"key":"control_room"}}}},
+    {"wait":{"observe":"scene.current","path":"/state/shots","value":1,"within":3}},
+    {"wait":{"observe":"scene.current","path":"/state/active","value":0,"within":40}},
+    {"expect":{"observe":"scene.current","path":"/state/recycled","value":1}},
+    {"expect":{"observe":"world.query","params":{"selector":{"authored_id":"player","all":["Transform2D"]}},"path":"/count","value":1}},
+    {"call":"input.action","params":{"name":"fire"}},
+    {"wait":{"observe":"scene.current","path":"/state/shots","value":2,"within":2}},
+    {"call":"ui.action","params":{"selector":{"key":"pause","role":"button"}}},
+    {"wait":{"observe":"scene.current","path":"/state/paused","value":true,"within":3}},
+    {"always":{"observe":"scene.current","path":"/state/paused","value":true,"ticks":4}},
+    {"expect":{"observe":"ui.query","params":{"selector":{"key":"pause","label":"Resume","within":{"role":"group","key":"control_room"}}},"path":"/count","value":1}},
+    {"call":"ui.action","params":{"selector":{"key":"pause","role":"button"}}},
+    {"wait":{"observe":"scene.current","path":"/state/paused","value":false,"within":3}},
+    {"call":"input.action","params":{"name":"next_room"}},
+    {"wait":{"observe":"scene.current","path":"/state/rooms","value":2,"within":16}},
+    {"capture":"ready"},
+    {"call":"sim.reset","params":{"seed":7}},
+    {"wait":{"observe":"scene.current","path":"/state/rooms","value":1,"within":16}},
+    {"expect":{"observe":"scene.current","path":"/state/shots","value":0}}
+  ]
+}

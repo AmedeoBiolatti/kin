@@ -25,6 +25,7 @@ void register_scene3d_settings(EcsWorld& world) {
                         return false;
                     return true;
                 })
+            .choices({"perspective", "orthographic"})
             .property<f32>(
                 "fov", [](const auto& value) { return value.camera.fov; },
                 [](auto& value, const f32& fov) {
@@ -33,6 +34,8 @@ void register_scene3d_settings(EcsWorld& world) {
                     value.camera.fov = fov;
                     return true;
                 })
+            .units("degrees")
+            .description("A perspective camera's view, top to bottom.")
             .property<f32>(
                 "height", [](const auto& value) { return value.camera.height; },
                 [](auto& value, const f32& height) {
@@ -41,6 +44,8 @@ void register_scene3d_settings(EcsWorld& world) {
                     value.camera.height = height;
                     return true;
                 })
+            .units("m")
+            .description("An orthographic camera's view, top to bottom.")
             .property<f32>(
                 "near", [](const auto& value) { return value.camera.z_near; },
                 [](auto& value, const f32& near) {
@@ -49,6 +54,7 @@ void register_scene3d_settings(EcsWorld& world) {
                     value.camera.z_near = near;
                     return true;
                 })
+            .units("m")
             .property<f32>(
                 "far", [](const auto& value) { return std::isinf(value.camera.z_far) ? 0.0f : value.camera.z_far; },
                 [](auto& value, const f32& far) {
@@ -56,7 +62,9 @@ void register_scene3d_settings(EcsWorld& world) {
                         return false;
                     value.camera.z_far = far == 0 ? std::numeric_limits<f32>::infinity() : far;
                     return true;
-                });
+                })
+            .units("m")
+            .description("Nothing further is drawn; 0: no limit.");
 
     if (!registry.find("SceneEnvironment3D")) {
         auto builder = registry.native<SceneEnvironment3D>("SceneEnvironment3D");
@@ -151,6 +159,15 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("fog_color_from_sky", fog.colour_from_sky);
         SETTING("fog_sun_scatter", fog.sun_scatter);
         SETTING("fog_sun_anisotropy", fog.sun_anisotropy);
+        SETTING("fog_sun_shadows", fog.sun_shadows);
+        SETTING("fog_volumetric", fog.volumetric.enabled);
+        SETTING("fog_volumetric_intensity", fog.volumetric.intensity);
+        SETTING("fog_volumetric_anisotropy", fog.volumetric.anisotropy);
+        SETTING("fog_volumetric_distance", fog.volumetric.distance);
+        SETTING("fog_volumetric_tile", fog.volumetric.tile);
+        SETTING("fog_volumetric_slices", fog.volumetric.slices);
+        SETTING("fog_volumetric_history", fog.volumetric.history);
+        SETTING("fog_volumetric_sun_and_moon", fog.volumetric.sun_and_moon);
         SETTING("ao_enabled", ambient_occlusion.enabled);
         SETTING("ao_radius", ambient_occlusion.radius);
         SETTING("ao_intensity", ambient_occlusion.intensity);
@@ -169,13 +186,64 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("occlusion_pixel_margin", lod.occlusion.pixel_margin);
         SETTING("taa_enabled", taa.enabled);
         SETTING("taa_blend", taa.blend);
+        SETTING("taa_still_blend", taa.still_blend);
         SETTING("taa_sharpness", taa.sharpness);
+        SETTING("ssr_enabled", ssr.enabled);
+        SETTING("ssr_max_roughness", ssr.max_roughness);
+        SETTING("ssr_thickness", ssr.thickness);
+        SETTING("ssr_max_distance", ssr.max_distance);
+        SETTING("ssr_steps", ssr.steps);
+        SETTING("ssr_intensity", ssr.intensity);
+        SETTING("anisotropy", anisotropy);
+        SETTING("texture_lod_bias", texture_lod_bias);
+        SETTING("specular_aa", specular_aa);
+        SETTING("gi_enabled", global_illumination.enabled);
+        SETTING("gi_min", global_illumination.area.min);
+        SETTING("gi_max", global_illumination.area.max);
+        SETTING("gi_cell", global_illumination.cell);
+        SETTING("gi_levels", global_illumination.levels);
+        SETTING("gi_side", global_illumination.side);
+        SETTING("gi_height", global_illumination.height);
+        SETTING("gi_skinned", global_illumination.skinned);
+        SETTING("gi_probes", global_illumination.probes.enabled);
+        SETTING("gi_probe_spacing", global_illumination.probes.spacing);
+        SETTING("gi_probe_rays", global_illumination.probes.rays);
+        SETTING("gi_probes_per_render", global_illumination.probes.per_render);
+        SETTING("gi_hysteresis", global_illumination.probes.hysteresis);
+        SETTING("gi_intensity", global_illumination.probes.intensity);
+        builder.property<std::string>(
+            "gi_emitters",
+            [](const auto& v) {
+                return std::string(v.global_illumination.emitters == GiEmitters3D::Probes ? "probes" : "exact");
+            },
+            [](auto& v, const std::string& mode) {
+                if (mode == "exact")
+                    v.global_illumination.emitters = GiEmitters3D::Exact;
+                else if (mode == "probes")
+                    v.global_illumination.emitters = GiEmitters3D::Probes;
+                else
+                    return false;
+                return true;
+            });
+        SETTING("gi_area_max_emitters", global_illumination.area_lights.max_emitters);
+        SETTING("gi_area_max_triangles", global_illumination.area_lights.max_triangles);
+        SETTING("gi_area_interleave", global_illumination.area_lights.interleave);
         SETTING("samples", view.samples);
         SETTING("background", view.background);
         SETTING("hdr", view.hdr);
         SETTING("exposure", view.exposure);
         SETTING("bloom", view.bloom);
         SETTING("bloom_threshold", view.bloom_threshold);
+        SETTING("auto_exposure", view.auto_exposure.enabled);
+        SETTING("auto_exposure_key", view.auto_exposure.key);
+        SETTING("auto_exposure_min_ev", view.auto_exposure.min_ev);
+        SETTING("auto_exposure_max_ev", view.auto_exposure.max_ev);
+        SETTING("auto_exposure_compensation", view.auto_exposure.compensation_ev);
+        SETTING("auto_exposure_speed_up", view.auto_exposure.speed_up);
+        SETTING("auto_exposure_speed_down", view.auto_exposure.speed_down);
+        SETTING("auto_exposure_low", view.auto_exposure.low);
+        SETTING("auto_exposure_high", view.auto_exposure.high);
+        SETTING("auto_exposure_centre_weight", view.auto_exposure.centre_weight);
 #undef SETTING
 #undef RGB_SETTING
     }
@@ -199,7 +267,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             return only.has<T>() ? only : EcsEntity{};
         EcsEntity selected;
         i32 priority = std::numeric_limits<i32>::min();
-        world.raw().each([&](flecs::entity entity, const T& settings) {
+        world.each([&](flecs::entity entity, const T& settings) {
             if (settings.enabled && (!selected || settings.priority > priority ||
                                      (settings.priority == priority && entity.id() < selected.id()))) {
                 selected = EcsEntity{entity};
@@ -279,10 +347,40 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.lights.fill_shadow.distance >= 0 && settings.lod.error_pixels > 0 && settings.lod.bias > 0 &&
                  settings.lod.max_cluster_triangles > 0 && settings.lod.occlusion.depth_margin >= 0 &&
                  settings.view.exposure >= 0 && settings.view.bloom >= 0 && settings.view.bloom_threshold >= 0 &&
-                 settings.ambient_occlusion.radius > 0 && settings.ambient_occlusion.intensity >= 0 &&
-                 settings.contact_shadows.distance >= 0 && settings.contact_shadows.thickness > 0 &&
-                 settings.contact_shadows.intensity >= 0 && settings.taa.blend >= 0 && settings.taa.blend <= .98f &&
-                 settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 &&
+                 settings.view.auto_exposure.key > 0 &&
+                 settings.view.auto_exposure.min_ev <= settings.view.auto_exposure.max_ev &&
+                 settings.view.auto_exposure.speed_up >= 0 && settings.view.auto_exposure.speed_down >= 0 &&
+                 settings.view.auto_exposure.low >= 0 &&
+                 settings.view.auto_exposure.low <= settings.view.auto_exposure.high &&
+                 settings.view.auto_exposure.high <= 1 && settings.view.auto_exposure.centre_weight >= 0 &&
+                 settings.view.auto_exposure.centre_weight <= 1 && settings.ambient_occlusion.radius > 0 &&
+                 settings.ambient_occlusion.intensity >= 0 && settings.contact_shadows.distance >= 0 &&
+                 settings.contact_shadows.thickness > 0 && settings.contact_shadows.intensity >= 0 &&
+                 settings.taa.blend >= 0 && settings.taa.blend <= .98f && settings.taa.still_blend >= 0 &&
+                 settings.taa.still_blend <= .98f && settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 &&
+                 settings.ssr.max_roughness >= 0 && settings.ssr.max_roughness <= 1 && settings.ssr.thickness > 0 &&
+                 settings.ssr.max_distance > 0 && settings.ssr.steps >= 8 && settings.ssr.steps <= 128 &&
+                 settings.ssr.intensity >= 0 && settings.ssr.intensity <= 1 && settings.anisotropy >= 1 &&
+                 settings.anisotropy <= 16 && std::abs(settings.texture_lod_bias) <= 2 && settings.specular_aa >= 0 &&
+                 settings.specular_aa <= 1 && std::isfinite(settings.global_illumination.cell) &&
+                 settings.global_illumination.cell > 0 && settings.global_illumination.levels >= 1 &&
+                 settings.global_illumination.levels <= max_gi_levels && settings.global_illumination.side >= 32 &&
+                 settings.global_illumination.side <= max_gi_side && settings.global_illumination.height >= 32 &&
+                 settings.global_illumination.height <= max_gi_side &&
+                 static_cast<u64>(settings.global_illumination.side) * settings.global_illumination.side *
+                         settings.global_illumination.height <=
+                     max_gi_voxels &&
+                 settings.global_illumination.probes.spacing >= 2 && settings.global_illumination.probes.rays >= 16 &&
+                 settings.global_illumination.probes.rays <= 256 &&
+                 settings.global_illumination.probes.hysteresis >= 0 &&
+                 settings.global_illumination.probes.hysteresis <= .99f &&
+                 settings.global_illumination.probes.intensity >= 0 &&
+                 std::isfinite(settings.global_illumination.probes.intensity) &&
+                 settings.global_illumination.area_lights.max_emitters >= 1 &&
+                 settings.global_illumination.area_lights.max_triangles >= 1 &&
+                 (settings.global_illumination.area_lights.interleave == 1 ||
+                  settings.global_illumination.area_lights.interleave == 2 ||
+                  settings.global_illumination.area_lights.interleave == 4) &&
                  (settings.view.samples == 1 || settings.view.samples == 2 || settings.view.samples == 4 ||
                   settings.view.samples == 8);
         if (!valid)
@@ -299,7 +397,12 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.ambient_occlusion = settings.ambient_occlusion;
             scene.contact_shadows = settings.contact_shadows;
             scene.taa = settings.taa;
+            scene.ssr = settings.ssr;
+            scene.anisotropy = settings.anisotropy;
+            scene.texture_lod_bias = settings.texture_lod_bias;
+            scene.specular_aa = settings.specular_aa;
             scene.lod = settings.lod;
+            scene.global_illumination = settings.global_illumination;
             if (view)
                 *view = scene3d_view_options(settings.view, *view);
         }

@@ -23,6 +23,9 @@ Image load_image(const std::filesystem::path& path);
 // reads), such as one inside a model file; `name` is for the log. Invalid
 // (with the reason logged) when it can't be read.
 Image decode_image(std::span<const u8> bytes, std::string_view name = "image");
+// An SVG document drawn into an image of `size` pixels (its view box scaled to
+// fit). Invalid (with the reason logged) when it can't be read.
+Image rasterize_svg(std::string_view svg, Vec2i size, std::string_view name = "svg");
 
 // Write an RGBA image to a PNG file (creates parent directories). Returns false on
 // failure. Useful for tooling and for generating procedural texture assets.

@@ -2,24 +2,29 @@
 
 #include <kin/core/json_value.hpp>
 #include <kin/core/rng.hpp>
+#include <kin/core/script_debugger.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/windowed_app.hpp>
 #include <kin/scene/scene_manager.hpp>
 
+#include <array>
 #include <deque>
 #include <functional>
 #include <iosfwd>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace kin {
 
 class AssetServer;
+class AutomationRecorder;
 
 enum class ServerMode {
     // Time only advances when the client calls sim.tick. Single-threaded,
@@ -29,6 +34,16 @@ enum class ServerMode {
     // between frames from a background reader.
     Realtime,
 };
+
+// How automation reaches the game: a driven or realtime server (--server), or
+// the live inspector of a game playing in its window (--inspect), which only
+// answers reads and debugger commands.
+enum class AutomationMode {
+    Driven,
+    Realtime,
+    Inspect,
+};
+std::string_view automation_mode_name(AutomationMode mode);
 
 enum class ServerTransport {
     // Newline-delimited JSON-RPC over stdin/stdout. Single client.
@@ -69,11 +84,25 @@ public:
     Window& window() { return _window; }
     Renderer2D& renderer() { return _renderer; }
     SceneManager& scenes() { return _scenes; }
+    Renderer3D* renderer3d() { return _renderer3d; } // null without 3D
+    // The app's, as it is now (made with the first scene context, after an inspector's context may be).
+    void set_renderer3d(Renderer3D* renderer3d) { _renderer3d = renderer3d; }
     const WindowedAppConfig& window_config() const { return _window_config; }
     RngKey rng() const { return _rng; }
     f32 fixed_dt() const { return _fixed_dt; }
     i64 frame() const { return _frame; }
     const RunReport& report() const { return _report; }
+    // Writes every command and each step's checkpoint to a JSONL recording at
+    // `path` (docs/automation.md) until stop_recording(). Throws if it cannot.
+    void start_recording(const std::filesystem::path& path, const GameInfo* game = nullptr,
+                         std::optional<u64> seed = {});
+    void stop_recording() { _recording.reset(); }
+    bool is_recording() const { return _recording != nullptr; }
+    // How the server is driven, as server.capabilities reports it.
+    void set_automation_mode(AutomationMode mode) { _automation_mode = mode; }
+    AutomationMode automation_mode() const { return _automation_mode; }
+    // Scenes get SceneContext::development, and their development sessions advance before each step.
+    void enable_development(bool enabled) { _development = enabled; }
 
     // Advance exactly one fixed-timestep frame. Queued input actions are applied
     // immediately after begin_frame so the scene observes them this frame.
@@ -105,6 +134,9 @@ public:
     // step and released at the start of the one after, which sees the release),
     // "hold", or "release".
     void queue_action(std::string name, std::string mode);
+    // One semantic UI action per step. Deferred like physical input so a
+    // screenshot between the request and sim.tick cannot activate the control.
+    bool queue_ui_action(std::function<void()> action);
 
     // Queue a pointer move to window-space pos for the next step.
     void queue_mouse_move(Vec2f window_pos);
@@ -119,29 +151,63 @@ public:
     // Queue a key for the next step, with modifiers held alongside it. mode is
     // "press" (a tap), "hold" or "release", as for actions.
     void queue_key(Key key, std::string mode, KeyModifiers modifiers);
+    // Queue a file dropped on the window at window-space pos, as from the desktop.
+    void queue_drop(std::string path, Vec2f window_pos);
+    // Queue a player's game controller input for the next step: a button
+    // (`button` a GamepadButton's PadControl, mode as for actions), analog
+    // values (sticks -1..1, triggers 0..1; kept until changed), or it
+    // unplugged (`connected` false). A player's controller driven once stays
+    // plugged in; the game reads it as Input::player_gamepad(player), and the
+    // first player's (else the lowest driven) as Input::gamepad().
+    struct PadInput {
+        i32 player = 0;
+        std::optional<PadControl> button;
+        std::string mode = "press";
+        std::array<std::optional<f32>, 6> axes{}; // by PadAxis
+        bool connected = true;
+    };
+    void queue_pad(PadInput pad);
+    // Queue a finger for the next step at window-space pos: mode "down",
+    // "move", "up", or "tap" (down this step, up at the start of the next).
+    // Its time is the steps' (frame * fixed dt), so a long press is a finger
+    // held over enough steps.
+    void queue_touch(u64 id, Vec2f window_pos, std::string mode);
 
-    // Wall time of the scene update and render in recent steps, oldest first.
+    // Wall time of recent frames, oldest first: a driven server's steps, or the
+    // frames a game run with --inspect draws (frame.timing reports them).
     struct FrameTiming {
-        f64 update_ms = 0.0;
-        f64 render_ms = 0.0;
+        f64 update_ms = 0.0;   // the scenes' updates (every fixed step run for it)
+        f64 render_ms = 0.0;   // drawing it
+        f64 present_ms = 0.0;  // presenting it (with any wait for the display)
+        f64 interval_ms = 0.0; // since the frame before began: what a player sees (0: not known)
+        i64 frame = 0;         // its number among those recorded
     };
     static constexpr std::size_t frame_timing_window = 600;
     const std::deque<FrameTiming>& frame_timings() const { return _timings; }
     void clear_frame_timings() { _timings.clear(); }
+    // Keeps a frame's times, numbered after the last (the last
+    // frame_timing_window of them).
+    void record_frame_timing(FrameTiming timing);
 
 private:
     struct PendingInput {
-        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion };
+        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion, Drop, Pad, Touch };
         Kind kind;
-        std::string text;  // action name / button name / text input
+        std::string text;  // action name / button name / text input / dropped file
         std::string mode;  // press / hold / release
         Vec2f pos{};       // window-space pointer position
         f32 value = 0.0f;  // wheel delta
         Key key = Key::Unknown;
         KeyModifiers modifiers = KeyModifiers::None;
+        PadInput pad{};
+        u64 touch = 0; // a finger's id
     };
 
+    friend ServerResponse dispatch_server_command(ServerContext&, const GameInfo*, std::string_view, const JsonValue&);
+
     SceneContext make_context();
+    void begin_record_command(std::string_view method, const JsonValue& params);
+    void record_command(std::string_view method, const JsonValue& params, const ServerResponse& response);
 
     App& _app;
     Window& _window;
@@ -156,12 +222,22 @@ private:
     i64 _frame = 0;
     RunReport _report;
     std::vector<PendingInput> _pending;
+    std::function<void()> _pending_ui_action;
     // Taps pressed in the last step, released at the start of the next.
     std::vector<std::string> _tapped_actions;
     std::vector<MouseButton> _tapped_buttons;
     std::vector<std::pair<Key, KeyModifiers>> _tapped_keys;
+    // The players' controllers driven (input.pad), and the buttons tapped last step.
+    std::array<GamepadState, max_input_players> _pads{};
+    std::array<bool, max_input_players> _driven_pads{};
+    std::vector<std::pair<i32, GamepadButton>> _tapped_pad_buttons;
+    std::vector<u64> _tapped_touches;
     std::deque<FrameTiming> _timings;
+    i64 _timed_frames = 0; // frames recorded, the forgotten too
     std::function<void(SceneManager&)> _reset_scenes;
+    std::shared_ptr<AutomationRecorder> _recording;
+    AutomationMode _automation_mode = AutomationMode::Driven;
+    bool _development = false;
 };
 
 // Routes one command (method + params) to its handler. Transport-agnostic: the
@@ -190,9 +266,82 @@ struct ServerConfig {
     // so existing positional aggregate initialization remains source-compatible.
     AssetServer* asset_server = nullptr;
     bool rendering_3d = false;
+    std::filesystem::path automation_record_path;
+    bool development = false;
 };
 
 // Runs the game as a long-lived command server. Returns a process exit code.
 int run_scene_server(const ServerConfig& config, SceneManager& scenes);
+
+// A game played in its window that also answers server commands, between
+// frames (--inspect): a tool such as an editor watches it while it runs.
+// Requests and responses are the stdio server's, one JSON line each; the log
+// stays on the error stream.
+//
+// It answers what reads the game (game.info, scene.stack, scene.current,
+// scene.actions, world.snapshot, animation.diagnostics, frame.timing, ping),
+// server.status (with "paused"), and holds or advances its updates:
+// sim.pause, sim.resume, sim.step {count} (the game keeps drawing meanwhile).
+// server.shutdown quits the game. What drives a headless server (sim.tick,
+// sim.reset, input.*, view.screenshot) is refused: the player drives this one.
+//
+// It debugs the game's scripts (script_debugger(), while it lives):
+// debug.breakpoints {files: {"scripts/a.lua": [3, 7]}} sets them all,
+// debug.pause stops at the next line run, debug.state tells the stop (if a
+// script is held at one: its frames, their locals and upvalues), and
+// debug.continue or debug.step {how: "into"|"over"|"out"} goes on from it.
+// While a script is stopped the game is held inside it (it does not draw):
+// only debug.*, server.status (with "stopped"), ping and server.shutdown are
+// answered then, the rest when it goes on.
+class LiveInspector {
+public:
+    // Reads requests from `in` on a thread of its own; answers on `out`, from
+    // another: a tool slow to read a large answer (a world's snapshot) holds
+    // that thread, never the game. On std::cout (in step with stdio, as it is
+    // unless a game turns that off) an answer is written under stdout's lock,
+    // so the game's own prints do not land inside it.
+    LiveInspector(std::istream& in, std::ostream& out);
+    ~LiveInspector();
+    LiveInspector(const LiveInspector&) = delete;
+    LiveInspector& operator=(const LiveInspector&) = delete;
+
+    // Answers the requests that have arrived, on the calling (main) thread:
+    // once a frame, outside the scenes' update and render.
+    void poll(ServerContext& ctx, const GameInfo* game);
+    // Whether the next update runs (false while paused with no step left);
+    // counts those that do.
+    bool admit_update();
+
+    bool paused() const { return _paused; }
+    i64 frame() const { return _frame; }
+    // The tool closed its end: nothing more comes, and nothing holds the game.
+    bool finished() const { return _finished; }
+    // Waits until the answers given so far are written (a test reading `out`).
+    void flush();
+
+private:
+    struct Shared;
+    struct Outbox;
+
+    void answer(ServerContext& ctx, const GameInfo* game, std::string_view line);
+    void send(const JsonValue* id, const ServerResponse& response);
+    // A debug.* request; while stopped, how the script goes on, when it says.
+    ServerResponse answer_debug(std::string_view method, const JsonValue& params, bool stopped,
+                                std::optional<ScriptResume>& resume);
+    // The debugger's waiter: answers the tool while a script is stopped.
+    ScriptResume wait_stopped();
+    ServerResponse status(bool stopped) const;
+
+    std::shared_ptr<Shared> _shared;
+    std::thread _reader;
+    std::shared_ptr<Outbox> _outbox;
+    std::thread _writer;
+    std::ostream& _out;
+    ServerContext* _ctx = nullptr; // the last poll's
+    bool _paused = false;
+    i64 _steps = 0; // updates to run while paused
+    i64 _frame = 0;
+    bool _finished = false;
+};
 
 } // namespace kin

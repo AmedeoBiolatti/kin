@@ -38,16 +38,8 @@ std::size_t shown_bytes(const StateItem& item) {
     return std::min(item.bytes.size(), item.component == "(report)" ? max_report_bytes : max_value_bytes);
 }
 
-constexpr char hex_digits[] = "0123456789abcdef";
-
 std::string to_hex(const u8* data, std::size_t size) {
-    std::string out;
-    out.reserve(size * 2);
-    for (std::size_t i = 0; i < size; ++i) {
-        out.push_back(hex_digits[data[i] >> 4]);
-        out.push_back(hex_digits[data[i] & 15]);
-    }
-    return out;
+    return hex_encode({reinterpret_cast<const char*>(data), size});
 }
 
 std::vector<u8> from_hex(std::string_view text) {
@@ -97,7 +89,7 @@ std::vector<std::string> child_args(const HeadlessOptions& options, i32 frames) 
                                                      "--frames", "--server", "--port=", "--log-level",
                                                      "--max-fps"};
     constexpr std::string_view dropped[] = {"--headless", "--state-lockstep", "--list-actions", "--game-info",
-                                            "--list-info"};
+                                            "--list-info", "--inspect"};
     for (std::size_t i = 1; i < options.args.size(); ++i) {
         const std::string_view arg = options.args[i];
         if (std::ranges::find(dropped_with_value, arg) != std::end(dropped_with_value)) {

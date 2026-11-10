@@ -57,6 +57,7 @@ SunBox3D fit_sun_box(const Bounds3D& area, Vec3f to_sun) {
 ShadowCascades3D fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_sun, const Bounds3D& area,
                                      u32 cascades, f32 distance, u32 resolution) {
     ShadowCascades3D out;
+    aspect = camera.frame_aspect(aspect); // a windowed camera's whole frame: its window is within the cascades' fit
     const Vec3f area_size = area.size();
     if (!(area_size.x > 0 && area_size.y >= 0 && area_size.z > 0) || length_squared(to_sun) <= 0.0f ||
         resolution == 0) {

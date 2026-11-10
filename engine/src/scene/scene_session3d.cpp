@@ -5,9 +5,11 @@
 #include <atomic>
 #include <cmath>
 #include <kin/assets/content.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
@@ -32,7 +34,7 @@ std::vector<flecs::entity> children_of(flecs::entity entity) {
 // so an expected configuration failure cannot strand a locked table.
 template <class T, class F> void inspect_components(flecs::world& world, F&& inspect) {
     std::vector<flecs::entity> entities;
-    world.each([&](flecs::entity entity, const T&) { entities.push_back(entity); });
+    kin::each(world, [&](flecs::entity entity, const T&) { entities.push_back(entity); });
     for (auto entity : entities)
         if (const auto* value = entity.get<T>())
             inspect(entity, *value);
@@ -376,7 +378,8 @@ struct BoolScope {
 };
 bool same_options(const ViewOptions3D& a, const ViewOptions3D& b) {
     return a.samples == b.samples && a.background == b.background && a.hdr == b.hdr && a.exposure == b.exposure &&
-           a.bloom == b.bloom && a.bloom_threshold == b.bloom_threshold && a.pick == b.pick;
+           a.bloom == b.bloom && a.bloom_threshold == b.bloom_threshold && a.pick == b.pick &&
+           a.auto_exposure == b.auto_exposure;
 }
 bool runtime_script_field(std::string_view component, std::string_view field) {
     if (component == "Transform3D" && (field == "position" || field == "rotation"))
@@ -452,6 +455,10 @@ struct SceneSession3D::Data {
         Scene3D scene;
         View3D view;
         ViewOptions3D options;
+        std::unique_ptr<PlanarViews3D> planar;      // made for the first Mirror3D or Portal3D
+        std::unique_ptr<ReflectionProbes3D> probes; // made for the first ReflectionProbe3D
+        std::unique_ptr<PortalTravel3D> travel;     // made for the first PortalTraveller3D
+        f64 clock = 0;                              // seconds stepped: Scene3D::time (a material graph's `time`)
         std::vector<std::filesystem::path> dependencies;
         std::map<std::filesystem::path, SourceStamp> watches;
         std::map<u64, Spawned> spawned;
@@ -711,11 +718,23 @@ struct SceneSession3D::Data {
                 for (const auto& source : collider.asset_binding->source_files)
                     watch(state, source);
         });
+        inspect_components<Mirror3D>(state.world.raw(), [&](flecs::entity, const Mirror3D& mirror) {
+            if (!mirror.normal_asset.id.empty())
+                watch(state, mirror.normal_asset.id);
+            if (!mirror.bound_normal.empty())
+                watch(state, mirror.bound_normal);
+        });
         inspect_components<ParticleEmitter3D>(state.world.raw(), [&](flecs::entity, const ParticleEmitter3D& emitter) {
             if (!emitter.texture_asset.id.empty())
                 watch(state, emitter.texture_asset.id);
             if (!emitter.bound_texture.empty())
                 watch(state, emitter.bound_texture);
+        });
+        inspect_components<DecalRenderer3D>(state.world.raw(), [&](flecs::entity, const DecalRenderer3D& decal) {
+            for (const std::string* path :
+                 {&decal.texture_asset.id, &decal.normal_asset.id, &decal.bound_texture, &decal.bound_normal})
+                if (!path->empty())
+                    watch(state, *path);
         });
         inspect_components<ModelMaterials3D>(state.world.raw(), [&](flecs::entity, const ModelMaterials3D& material) {
             if (!material.asset.id.empty())
@@ -729,6 +748,10 @@ struct SceneSession3D::Data {
                 watch(state, animator.asset.id);
             if (animator.configuration)
                 watch(state, animator.configuration->machine_asset);
+        });
+        inspect_components<Animator>(state.world.raw(), [&](flecs::entity, const Animator& animator) {
+            if (!animator.asset.id.empty())
+                watch(state, animator.asset.id);
         });
         for (const auto& source : state.dependencies)
             watch(state, source);
@@ -765,6 +788,8 @@ struct SceneSession3D::Data {
             if (c->configuration)
                 watch(state, c->configuration->machine_asset);
         }
+        if (const auto* c = entity.get<Animator>(); c && !c->asset.id.empty())
+            watch(state, c->asset.id);
         if (const auto* c = entity.get<Collider3D>()) {
             watch(state, c->asset.id);
             if (c->asset_binding)
@@ -864,6 +889,7 @@ struct SceneSession3D::Data {
         if (options.limits.max_entities && state.world.entities().all().size() > options.limits.max_entities)
             throw std::runtime_error("initialization exceeds scene entity limit");
         append(errors, resolve_render3d_assets(state.world, assets, options.particle_limits).diagnostics);
+        append(errors, resolve_animators3d(state.world, assets.root()).diagnostics);
         if (!errors.empty())
             return false;
         if (state.bodies)
@@ -890,6 +916,7 @@ struct SceneSession3D::Data {
             append(errors, frame.diagnostics());
             return false;
         }
+        state.scene.time = f32(state.clock); // (compose may set its own)
         if (state.script_background)
             view_options.background = *state.script_background;
         if (options.compose) {
@@ -938,19 +965,19 @@ struct SceneSession3D::Data {
         if (!state.bodies)
             return;
         state.bodies->sync_bodies();
-        state.world.raw().each([&](flecs::entity entity, const Transform3D&, const Collider3D&) {
+        state.world.each([&](flecs::entity entity, const Transform3D&, const Collider3D&) {
             if (!entity.has<CharacterController3D>() && !state.bodies->body_of(entity))
                 errors.push_back("physics body creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
-        state.world.raw().each([&](flecs::entity entity, const CharacterController3D&) {
+        state.world.each([&](flecs::entity entity, const CharacterController3D&) {
             if (!state.bodies->character_of(entity))
                 errors.push_back("character creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
-        state.world.raw().each([&](flecs::entity entity, const Ragdoll3D&) {
+        state.world.each([&](flecs::entity entity, const Ragdoll3D&) {
             if (!state.bodies->ragdoll_of(entity))
                 errors.push_back("ragdoll creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
-        state.world.raw().each([&](flecs::entity entity, const Rope3D&) {
+        state.world.each([&](flecs::entity entity, const Rope3D&) {
             if (!state.bodies->rope_of(entity))
                 errors.push_back("rope creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
@@ -970,7 +997,7 @@ struct SceneSession3D::Data {
         }
         flecs::entity found;
         const auto scan = [&]<class T>() {
-            state.world.raw().each([&](flecs::entity e, const T& r) {
+            state.world.each([&](flecs::entity e, const T& r) {
                 if (r.visible && r.id == id && (!found || e.id() < found.id()))
                     found = e;
             });
@@ -1040,7 +1067,7 @@ bool SceneSession3D::prepare_operation(const std::filesystem::path& path, bool r
             }
             // Also invalidate owning models if bounded cache metadata was evicted.
             const auto invalidate = [&]<class T>() {
-                d.current->world.raw().each([&](flecs::entity, const T& component) {
+                d.current->world.each([&](flecs::entity, const T& component) {
                     if (!component.model || component.asset.id.empty())
                         return;
                     for (const auto& file : changed)
@@ -1062,6 +1089,7 @@ bool SceneSession3D::prepare_operation(const std::filesystem::path& path, bool r
             return false;
         }
         append(d.errors, resolve_render3d_assets(candidate->world, d.assets, d.options.particle_limits).diagnostics);
+        append(d.errors, resolve_animators3d(candidate->world, d.assets.root()).diagnostics);
         if (!d.errors.empty())
             return false;
         if (d.options.physics) {
@@ -1238,6 +1266,41 @@ Status3D SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
     return status3d(std::move(value), _data->errors);
 }
 
+Status3D SceneSession3D::edit_authored(const JsonValue& entities) {
+    if (!active()) {
+        return status3d(false, {"no active scene to edit"});
+    }
+    std::vector<SceneFieldEdit3D> edits;
+    std::vector<std::string> errors;
+    if (!entities.is_array()) {
+        errors.push_back("the edits must be an array of {id, components}");
+    } else {
+        const EcsComponentRegistry& registry = world()->components();
+        for (const JsonValue& item : entities.items()) {
+            const std::string id = item.is_object() ? item.string_at("id") : std::string{};
+            const JsonValue* components = item.is_object() ? item.find("components") : nullptr;
+            const EcsEntity target = id.empty() ? EcsEntity{} : entity(id);
+            if (!target || !components || !components->is_object()) {
+                errors.push_back(id.empty() ? std::string("an edit names no entity, or no components")
+                                            : "no entity '" + id + "' to edit, or no components");
+                continue;
+            }
+            for (const auto& [component, fields] : components->members()) {
+                for (ComponentFieldSnapshot& field : parse_component_fields(component, fields, registry, errors)) {
+                    edits.push_back({.entity = target,
+                                     .component = component,
+                                     .field = std::move(field.name),
+                                     .value = std::move(field.value)});
+                }
+            }
+        }
+    }
+    if (!errors.empty()) {
+        return status3d(false, std::move(errors));
+    }
+    return edit(edits);
+}
+
 // Own only one edit's staging state. Phase order is deliberate: no live fields
 // or ordinary field events are published until all validation/resources succeed.
 struct SceneSession3D::Data::EditTransaction {
@@ -1251,7 +1314,8 @@ struct SceneSession3D::Data::EditTransaction {
         bool full = false, pose = false, move = false, body = false;
     };
     std::map<EcsId, Entry> entries;
-    bool models = false, materials = false, animation = false, particles = false, physics = false;
+    bool models = false, materials = false, animation = false, particles = false, decals = false, physics = false;
+    bool animators = false; // an Animator edited (kin/ecs/animator.hpp): its file bound again
 
     EditTransaction(Data& data, std::span<const SceneFieldEdit3D> changes)
         : d(data), active(*data.current), edits(changes) {
@@ -1344,7 +1408,9 @@ struct SceneSession3D::Data::EditTransaction {
             models |= has("ModelRenderer3D") || has("SkinnedMeshRenderer");
             materials |= has("ModelMaterials3D");
             animation |= has("AnimatorAsset3D");
+            animators |= has("Animator");
             particles |= has("ParticleEmitter3D");
+            decals |= has("DecalRenderer3D");
             entry.body = d.options.physics && (entry.pose || has("Collider3D") || has("RigidBody3D"));
             if (d.options.physics && (has("CharacterController3D") || has("Ragdoll3D") || has("Rope3D") ||
                                       (entry.pose && (entry.copy.has<CharacterController3D>() ||
@@ -1375,7 +1441,19 @@ struct SceneSession3D::Data::EditTransaction {
             if (particles)
                 append(d.errors,
                        resolve_particles3d_assets(staging.world, d.assets, d.options.particle_limits).diagnostics);
+            if (decals)
+                append(d.errors, resolve_decals3d_assets(staging.world, d.assets).diagnostics);
         }
+        if (animators) // their files read here first, to refuse an edit naming one that can't be
+            append(d.errors, resolve_animators3d(staging.world, d.assets.root(), animated(true)).diagnostics);
+    }
+    // The entities whose Animator was edited: their copies, or the running world's.
+    std::vector<EcsId> animated(bool copies) const {
+        std::vector<EcsId> ids;
+        for (const auto& [id, entry] : entries)
+            if (entry.full && entry.changed.contains("Animator"))
+                ids.push_back(copies ? entry.copy.id() : id);
+        return ids;
     }
     void validate_capacity() {
         // Combine staged capacities with untouched live emitters without copying
@@ -1384,7 +1462,7 @@ struct SceneSession3D::Data::EditTransaction {
             append(d.errors, validate_particles3d(staging.world, d.options.particle_limits).diagnostics);
             u64 capacity = 0;
             size_t emitters = 0;
-            active.world.raw().each([&](flecs::entity e, const ParticleEmitter3D& original) {
+            active.world.each([&](flecs::entity e, const ParticleEmitter3D& original) {
                 const auto it = entries.find(e.id());
                 const auto* emitter =
                     it != entries.end() && it->second.full ? it->second.copy.get<ParticleEmitter3D>() : &original;
@@ -1425,7 +1503,7 @@ struct SceneSession3D::Data::EditTransaction {
     void prepare_view(View3D& new_view, ViewOptions3D& new_options) {
         i32 priority = std::numeric_limits<i32>::min();
         EcsId selected = 0;
-        active.world.raw().each([&](flecs::entity entity, const SceneEnvironment3D& original) {
+        active.world.each([&](flecs::entity entity, const SceneEnvironment3D& original) {
             const auto it = entries.find(entity.id());
             const auto* c =
                 it != entries.end() && it->second.full ? it->second.copy.get<SceneEnvironment3D>() : &original;
@@ -1467,6 +1545,8 @@ struct SceneSession3D::Data::EditTransaction {
                     active.world.events().suppress_next_observer(EcsEventKind::ComponentChanged, id, descriptor->id);
                 staging.world.components().copy_component(entry.copy, name, active.world.components(), entry.source);
             }
+        if (animators) // as read above: kept as they were bound, or bound again
+            (void)resolve_animators3d(active.world, d.assets.root(), animated(false));
         active.watches.merge(staging.watches);
         if (new_view) {
             active.view = std::move(new_view);
@@ -1798,6 +1878,8 @@ ScenePrefab3D SceneSession3D::spawn_now(const std::filesystem::path& path, Scene
             if (state.bodies)
                 append(d.errors, resolve_physics3d_assets(state.world, d.collision_assets, ids).diagnostics);
         }
+        if (!ids.empty())
+            append(d.errors, resolve_animators3d(state.world, d.assets.root(), ids).diagnostics);
         std::map<std::filesystem::path, SourceStamp> dependencies;
         if (!prepared) {
             for (const auto& file : source->source_files)
@@ -2384,6 +2466,7 @@ bool SceneSession3D::step_operation(f32 dt) {
     }
     try {
         auto& state = *d.current;
+        state.clock += dt;
         if (state.script) {
             BoolScope callback(state.script_callback);
             if (!state.script->call_update(d.script_context(dt))) {
@@ -2438,8 +2521,21 @@ bool SceneSession3D::step_operation(f32 dt) {
             default:
                 break;
             }
-            if (driver.after_phase(phase, dt))
+            if (driver.after_phase(phase, dt)) {
+                // After the physics: what crossed a portal's opening goes out of its exit (PortalTraveller3D).
+                if (phase == SystemPhase::Physics &&
+                    (state.travel || state.world.raw().count<PortalTraveller3D>() > 0)) {
+                    if (!state.travel)
+                        state.travel = std::make_unique<PortalTravel3D>();
+                    if (const auto travelled = state.travel->step(state.world, state.bodies.get()); !travelled) {
+                        append(d.errors, travelled.diagnostics);
+                        for (const auto& message : travelled.diagnostics)
+                            error += (error.empty() ? "" : "\n") + message;
+                        return false;
+                    }
+                }
                 return true;
+            }
             append(d.errors, driver.diagnostics());
             for (const auto& message : driver.diagnostics()) {
                 if (!error.empty())
@@ -2549,6 +2645,28 @@ bool SceneSession3D::render_operation(f32 alpha) {
         return configuration_error("no renderer");
     if (!collect_operation(alpha))
         return false;
+    auto& state = *_data->current;
+    // The reflection probes first: the mirrors' and portals' pictures reflect them too.
+    if (state.probes || state.world.raw().count<ReflectionProbe3D>() > 0) {
+        if (!state.probes)
+            state.probes = std::make_unique<ReflectionProbes3D>(_data->renderer, _data->assets.root());
+        const auto probes = state.probes->update(state.world, state.scene, &state.view);
+        if (!probes) {
+            _data->errors = probes.diagnostics;
+            return false;
+        }
+    }
+    if (state.planar || state.world.raw().count<Mirror3D>() > 0 || state.world.raw().count<Portal3D>() > 0) {
+        if (!state.planar)
+            state.planar = std::make_unique<PlanarViews3D>(_data->renderer, _data->options.planar_surfaces);
+        // (Its pictures lit by the view's GI, as it stands: the view is rendered after them.)
+        const auto planar = state.planar->render(state.world, state.scene, _data->options.viewport, state.options,
+                                                 state.view ? &state.view : nullptr);
+        if (!planar) {
+            _data->errors = planar.diagnostics;
+            return false;
+        }
+    }
     if (_data->renderer.render(_data->current->view, _data->current->scene))
         return true;
     _data->errors = _data->renderer.diagnostics();
@@ -2654,6 +2772,9 @@ Scene3D* SceneSession3D::scene() {
 }
 const View3D* SceneSession3D::view() const {
     return active() && _data->current->view ? &_data->current->view : nullptr;
+}
+const ViewOptions3D* SceneSession3D::view_options() const {
+    return active() && _data->current->view ? &_data->current->options : nullptr;
 }
 const std::vector<std::string>& SceneSession3D::diagnostics() const {
     return _data->errors;

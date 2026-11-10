@@ -87,6 +87,9 @@ bool default_widget_style(const WidgetStyle& style) {
 }
 
 TextStyle themed_text_style(const TextStyle& style, const TextStyle& themed) {
+    if (!style.inherit) {
+        return style;
+    }
     TextStyle merged = style;
     const TextStyle defaults{};
     if (!merged.font) {
@@ -158,6 +161,9 @@ SurfaceStyle themed_surface_style(const SurfaceStyle& style, const SurfaceStyle&
 }
 
 WidgetStyle themed_widget_style(const WidgetStyle& style, const WidgetStyle& themed) {
+    if (!style.inherit) {
+        return style;
+    }
     const WidgetStyle defaults{};
     WidgetStyle merged = style;
     merged.surface.normal = themed_surface_style(merged.surface.normal, themed.surface.normal);

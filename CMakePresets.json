@@ -7,6 +7,80 @@
   },
   "configurePresets": [
     {
+      "name": "dev",
+      "displayName": "Development: 2D, build targets on demand",
+      "description": "Reuse out/build/dev and request a game, tool or test target explicitly. Examples and benchmarks remain opt-in.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "KIN_EXPERIMENTAL_3D": "OFF",
+        "KIN_ENABLE_PCH": "ON",
+        "KIN_DEV_FAST_SCRIPTING": "OFF",
+        "KIN_COMPILER_CACHE": "auto",
+        "KIN_ENABLE_LTO": "OFF",
+        "KIN_BUILD_ON_DEMAND": "ON",
+        "KIN_BUILD_EXAMPLES": "OFF",
+        "KIN_BUILD_2D_WORKFLOW": "OFF",
+        "KIN_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "dev-3d",
+      "displayName": "Development: experimental 3D",
+      "inherits": "dev",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON"
+      }
+    },
+    {
+      "name": "dev-clang",
+      "displayName": "Development: Linux Clang",
+      "description": "Release development build with Clang (clang and clang++ must be on PATH), PCH and optional compiler cache.",
+      "inherits": "dev",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "dev-3d-clang",
+      "displayName": "Development: experimental 3D, Linux Clang",
+      "inherits": "dev-clang",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON"
+      }
+    },
+    {
+      "name": "dev-fast",
+      "displayName": "Development: Linux, faster scripting compilation",
+      "description": "Uses -O1 for scene/entity Lua bindings; trades some binding runtime speed for shorter builds. Other targets retain their usual optimization.",
+      "inherits": "dev",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "KIN_DEV_FAST_SCRIPTING": "ON"
+      }
+    },
+    {
+      "name": "dev-clang-fast",
+      "displayName": "Development: Linux Clang, faster scripting compilation",
+      "description": "Uses -O1 for scene/entity Lua bindings; trades some binding runtime speed for shorter builds.",
+      "inherits": "dev-clang",
+      "cacheVariables": {
+        "KIN_DEV_FAST_SCRIPTING": "ON"
+      }
+    },
+    {
       "name": "ship",
       "displayName": "Shipping (Ninja)",
       "description": "Games for players: KIN_SHIPPING, Release, no tests, no experimental 3D engine. On Windows, run from a Visual Studio developer prompt.",
@@ -72,6 +146,7 @@
         "KIN_ENABLE_PHYSICS": "OFF",
         "KIN_ENABLE_AUDIO": "OFF",
         "KIN_ENABLE_SCENE_SERVER": "OFF",
+        "KIN_ENABLE_DEVELOPMENT": "OFF",
         "KIN_ENABLE_DEBUG_OVERLAY": "OFF",
         "KIN_ENABLE_RENDER_PROBE": "OFF",
         "KIN_ENABLE_DETERMINISM_CHECK": "OFF",
@@ -363,6 +438,22 @@
       }
     },
     {
+      "name": "hex-webgl2-modules",
+      "displayName": "Hex demo with the 2D game modules (WebGL2)",
+      "description": "What a 2D game made in Kin Studio builds for the web: Lua scripts, physics, audio, images, fonts, runtime assets and browser saves",
+      "inherits": "hex-webgl2",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "KIN_ENABLE_SCRIPTING": "ON",
+        "KIN_ENABLE_PHYSICS": "ON",
+        "KIN_ENABLE_AUDIO": "ON",
+        "KIN_ENABLE_IMAGE_IO": "ON",
+        "KIN_ENABLE_TTF": "ON",
+        "KIN_ENABLE_RUNTIME_ASSETS": "ON",
+        "KIN_WEB_PERSISTENCE": "ON"
+      }
+    },
+    {
       "name": "webgl2-3d",
       "displayName": "WebGL2 3D rendering fixture",
       "inherits": "webgl2",
@@ -393,6 +484,36 @@
     }
   ],
   "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "jobs": 4
+    },
+    {
+      "name": "dev-3d",
+      "configurePreset": "dev-3d",
+      "jobs": 4
+    },
+    {
+      "name": "dev-clang",
+      "inherits": "dev",
+      "configurePreset": "dev-clang"
+    },
+    {
+      "name": "dev-3d-clang",
+      "inherits": "dev-3d",
+      "configurePreset": "dev-3d-clang"
+    },
+    {
+      "name": "dev-fast",
+      "inherits": "dev",
+      "configurePreset": "dev-fast"
+    },
+    {
+      "name": "dev-clang-fast",
+      "inherits": "dev-clang",
+      "configurePreset": "dev-clang-fast"
+    },
     {
       "name": "ship",
       "configurePreset": "ship",
@@ -521,6 +642,36 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "dev",
+      "inherits": "2d",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "dev-3d",
+      "inherits": "3d",
+      "configurePreset": "dev-3d"
+    },
+    {
+      "name": "dev-clang",
+      "inherits": "dev",
+      "configurePreset": "dev-clang"
+    },
+    {
+      "name": "dev-3d-clang",
+      "inherits": "dev-3d",
+      "configurePreset": "dev-3d-clang"
+    },
+    {
+      "name": "dev-fast",
+      "inherits": "dev",
+      "configurePreset": "dev-fast"
+    },
+    {
+      "name": "dev-clang-fast",
+      "inherits": "dev-clang",
+      "configurePreset": "dev-clang-fast"
+    },
     {
       "name": "2d",
       "configurePreset": "2d",

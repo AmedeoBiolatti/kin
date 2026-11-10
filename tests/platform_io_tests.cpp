@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -26,7 +27,8 @@ using namespace std::chrono_literals;
 
 // This program is also the child the process tests start: `--echo` answers
 // each line with "echo:<line>" and exits with N on "exit N" (0 at end of
-// input); `--burst N` writes N numbered lines; `--complain` writes to stderr.
+// input); `--burst N` writes N numbered lines; `--complain` writes to stderr;
+// `--both` writes to each, in turns; `--touch FILE` makes FILE.
 int child_main(int argc, char** argv) {
     const std::string mode = argv[1];
     if (mode == "--echo") {
@@ -53,6 +55,18 @@ int child_main(int argc, char** argv) {
     if (mode == "--complain") {
         std::cerr << "oops" << std::endl;
         return 2;
+    }
+    if (mode == "--touch" && argc > 2) {
+        std::ofstream(argv[2]) << "touched\n";
+        return 0;
+    }
+    if (mode == "--both") {
+        for (int i = 0; i < 3; ++i) {
+            std::cout << "said " << i << std::endl;
+            std::cerr << "logged " << i << std::endl;
+        }
+        std::cerr << "last" << std::flush;
+        return 0;
     }
     return 99;
 }
@@ -137,6 +151,109 @@ void test_process_kill_and_errors() {
     assert((lines_from(moved, 1) == std::vector<std::string>{"echo:still here"}));
 }
 
+// Output and errors read apart: an answer on one, a log on the other.
+void test_process_errors_apart() {
+    kin::Process child;
+    assert(child.start({.args = {self, "--both"}, .pipe_input = false, .capture_errors = true}));
+    assert(child.wait(10s) && child.exit_code() == 0);
+    std::vector<std::string> said;
+    while (auto line = child.read_line()) {
+        said.push_back(std::move(*line));
+    }
+    std::vector<std::string> logged;
+    while (auto line = child.read_error_line()) {
+        logged.push_back(std::move(*line));
+    }
+    assert((said == std::vector<std::string>{"said 0", "said 1", "said 2"}));
+    assert((logged == std::vector<std::string>{"logged 0", "logged 1", "logged 2", "last"}));
+    assert(child.read_errors().empty());
+}
+
+// Launched and left: it runs on its own (and would after this program ends).
+void test_launch() {
+    const std::filesystem::path mark = std::filesystem::temp_directory_path() / "kin_launch_test_mark.txt";
+    std::error_code ignored;
+    std::filesystem::remove(mark, ignored);
+    std::string error;
+    assert(kin::launch({self, "--touch", mark.string()}, {}, &error) && error.empty());
+    // The mark is there once the child has written all of it: it exists as
+    // soon as the child opens it, still empty.
+    const auto written = [&] {
+        std::ifstream in(mark);
+        std::string text;
+        std::getline(in, text);
+        return text == "touched";
+    };
+    const auto until = std::chrono::steady_clock::now() + 10s;
+    while (!written() && std::chrono::steady_clock::now() < until) {
+        SDL_Delay(5);
+    }
+    assert(written());
+    // On Windows a file another process still has open cannot be deleted
+    // (and the throwing remove() ended this program without a word, 0xc0000409):
+    // try again until the child has let it go.
+    std::error_code removed;
+    while (!std::filesystem::remove(mark, removed) && std::filesystem::exists(mark) &&
+           std::chrono::steady_clock::now() < until) {
+        SDL_Delay(5);
+    }
+    assert(!std::filesystem::exists(mark));
+    assert(!kin::launch({}, {}, &error) && !error.empty());
+}
+
+// Fingers from the system: down, moving and up; the mouse events it makes
+// from them are not used (the finger is the pointer itself), a real mouse
+// turns the pointer back.
+void test_touch_events() {
+    kin::Input input;
+    SDL_Event down{};
+    down.type = SDL_EVENT_FINGER_DOWN;
+    down.tfinger.touchID = 1;
+    down.tfinger.fingerID = 7;
+    down.tfinger.x = 30.0f; // no window: as given
+    down.tfinger.y = 40.0f;
+    down.tfinger.timestamp = 2'000'000'000;
+    kin::InputFrameTestHook::event(input, down);
+    assert(input.touches().size() == 1 && (input.touches()[0].pos == kin::Vec2f{30, 40}) && input.touches()[0].down_at == 2.0);
+    input.begin_frame(); // its press
+    assert(input.pointer_is_touch() && input.mouse_held(kin::MouseButton::Left));
+    SDL_Event fake{};
+    fake.type = SDL_EVENT_MOUSE_BUTTON_UP;
+    fake.button.which = SDL_TOUCH_MOUSEID;
+    fake.button.button = SDL_BUTTON_LEFT;
+    fake.button.x = 500.0f;
+    kin::InputFrameTestHook::event(input, fake);
+    SDL_Event fake_motion{};
+    fake_motion.type = SDL_EVENT_MOUSE_MOTION;
+    fake_motion.motion.which = SDL_TOUCH_MOUSEID;
+    fake_motion.motion.x = 500.0f;
+    kin::InputFrameTestHook::event(input, fake_motion);
+    assert(input.mouse_held(kin::MouseButton::Left) && input.pointer_is_touch() && (input.mouse_pos() == kin::Vec2f{30, 40}));
+    SDL_Event moved = down;
+    moved.type = SDL_EVENT_FINGER_MOTION;
+    moved.tfinger.x = 32.0f;
+    kin::InputFrameTestHook::event(input, moved);
+    assert((input.mouse_pos() == kin::Vec2f{32, 40}) && (input.mouse_motion() == kin::Vec2f{2, 0}));
+    SDL_Event up = moved;
+    up.type = SDL_EVENT_FINGER_UP;
+    up.tfinger.timestamp = 2'100'000'000;
+    kin::InputFrameTestHook::event(input, up);
+    assert(input.touches().empty() && input.touch_pressed(kin::TouchControl::Tap) && input.mouse_released(kin::MouseButton::Left));
+    // Taken away by the system: no tap, no click.
+    input.advance_step_edges();
+    input.begin_frame();
+    kin::InputFrameTestHook::event(input, down);
+    SDL_Event cancelled = down;
+    cancelled.type = SDL_EVENT_FINGER_CANCELED;
+    kin::InputFrameTestHook::event(input, cancelled);
+    assert(input.touches().empty() && !input.touch_pressed(kin::TouchControl::Tap) && !input.mouse_released(kin::MouseButton::Left));
+    SDL_Event mouse{};
+    mouse.type = SDL_EVENT_MOUSE_MOTION;
+    mouse.motion.x = 5.0f;
+    kin::InputFrameTestHook::event(input, mouse);
+    assert(!input.pointer_is_touch() && (input.mouse_pos() == kin::Vec2f{5, 0}));
+}
+
 void test_dropped_files() {
     kin::Input input;
     assert(!input.has_dropped_files() && !input.drop_position());
@@ -197,6 +314,22 @@ void test_file_dialogs() {
 
 } // namespace
 
+// A phone's Back (the system's Back key) is Escape.
+void test_back_key() {
+    kin::Input input;
+    SDL_Event down{};
+    down.type = SDL_EVENT_KEY_DOWN;
+    down.key.scancode = SDL_SCANCODE_AC_BACK;
+    input.begin_frame();
+    kin::InputFrameTestHook::event(input, down);
+    assert(input.frame_pressed(kin::Key::Escape) && input.held(kin::Key::Escape));
+    SDL_Event up = down;
+    up.type = SDL_EVENT_KEY_UP;
+    input.begin_frame();
+    kin::InputFrameTestHook::event(input, up);
+    assert(!input.held(kin::Key::Escape));
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         return child_main(argc, argv);
@@ -206,7 +339,11 @@ int main(int argc, char** argv) {
     test_process_end_of_input();
     test_process_burst_and_last_words();
     test_process_kill_and_errors();
+    test_process_errors_apart();
+    test_launch();
     test_dropped_files();
+    test_touch_events();
+    test_back_key();
     test_file_dialogs();
     return 0;
 }

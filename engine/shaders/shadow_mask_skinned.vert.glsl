@@ -16,6 +16,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Casters {
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance; y: where its list starts, plus one (0: no list)
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 } draw;
 
 uint instance_index() {
@@ -24,11 +25,15 @@ uint instance_index() {
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out float vAlpha; // the instance's and the vertex's
+layout(location = 2) out vec3 vWorld;  // for a surface's cut-out (kin_cutout.inc.glsl)
 
 void main() {
     const uint slot = instance_index();
     const Instance instance = instances[slot];
-    gl_Position = draw.view_projection * (instance.model * (skin_matrix(slot) * vec4(aPos, 1.0)));
+    const vec4 world = instance.model * (skin_matrix(slot) * vec4(aPos, 1.0));
+    gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = dot(draw.clip.xyz, world.xyz) + draw.clip.w;
+    vWorld = world.xyz;
     vUV = aUV;
     vAlpha = instance.color.a * aColor.a;
 }

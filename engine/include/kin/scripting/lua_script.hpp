@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/scripting/lua_runtime.hpp>
 
 #include <sol/sol.hpp>
 
@@ -15,6 +16,7 @@
 namespace kin {
 
 class FileWatcher;
+struct LuaVm;
 
 // A Lua script for code that does not live in the ECS: a game's rules, AI,
 // balance formulas or level logic, run by plain C++ (e.g. an engine-free
@@ -41,12 +43,18 @@ struct LuaScriptOptions {
     std::function<void(sol::state&)> setup;
     // Where require("a.b") finds a/b.lua. Empty: require is not available.
     std::filesystem::path module_root;
-    // Lua instructions one load or call may run (checked every 1,000); 0: no limit.
-    u64 instruction_limit = 50'000'000;
+    // Lua instructions one load or call may run (checked every 1,000) and the
+    // bytes the state may hold; 0: no limit. runtime().set_limits() changes
+    // them for the loads that follow.
+    LuaRuntimeLimits limits;
     // Told every failure (load or call, with script:line). Default: logged as a
     // warning under "script".
     std::function<void(std::string_view message)> on_error;
 };
+
+// Whether `code` is Lua that reads (it is not run): false, and `error` says
+// where (name:line) and why, when it does not.
+bool check_lua_syntax(std::string_view code, std::string_view name, std::string& error);
 
 class LuaScript {
 public:
@@ -63,6 +71,10 @@ public:
 
     // Whether the loaded script defines a global function `function`.
     bool has(std::string_view function) const;
+    // The loaded script's global function `function` as it is now (invalid
+    // when it defines none), for a host calling it many times in a row:
+    // call_function() then skips looking it up each time.
+    sol::protected_function function(std::string_view function) const { return find(function); }
 
     // Calls the script's global `function` with `args`, if it defines one.
     // Returns false if it does not, or if the call fails (error() says why).
@@ -72,6 +84,10 @@ public:
     // missing, failing, or not an R.
     template <typename R, typename... Args>
     std::optional<R> call_for(std::string_view function, Args&&... args);
+    // Calls `target`, found by function(name) in this script's state (false
+    // when it is invalid or fails); `name` is what failures and profiles say.
+    template <typename... Args>
+    bool call_function(const sol::protected_function& target, std::string_view name, Args&&... args);
 
     // The last failure, with script:line where Lua knows it; empty after a
     // successful load.
@@ -85,24 +101,26 @@ public:
     void watch(FileWatcher& files);
 
     // The live Lua state, for what this API does not cover. A load replaces it.
-    sol::state& lua() { return *_lua; }
+    sol::state& lua();
+    // Its limits, memory and per-call profiles (a load starts a fresh one,
+    // with the same limits).
+    LuaRuntime& runtime();
+    const LuaRuntime& runtime() const;
+
+    // The script's `task`s, stepped only by the host's simulation, never wall
+    // time. A task belongs to the owner set when it starts (0: none); one
+    // whose owner is not owner_alive(owner) is cancelled.
+    bool advance_tasks(f32 dt, const std::function<bool(u64)>& owner_alive = {});
+    void set_task_owner(u64 owner);
+    void cancel_tasks();
+    void cancel_tasks(u64 owner);
+
+    // What the state binds, for kin_lua api.
+    LuaApiSurface api_surface() const;
 
 private:
-    // Holds the instruction budget for one load or call (see lua_script.cpp).
-    class Budget {
-    public:
-        explicit Budget(const LuaScript& script);
-        ~Budget();
-        Budget(const Budget&) = delete;
-        Budget& operator=(const Budget&) = delete;
-
-    private:
-        u64 _remaining;
-        u64* _previous;
-    };
-
     using Dependencies = std::shared_ptr<std::vector<std::filesystem::path>>;
-    std::unique_ptr<sol::state> make_state(const Dependencies& dependencies) const;
+    std::unique_ptr<LuaVm> make_vm(const Dependencies& dependencies) const;
     bool run(std::string_view code, const std::string& chunk_name, std::vector<std::filesystem::path> dependencies);
     sol::protected_function find(std::string_view function) const;
     bool check(const sol::protected_function_result& result, std::string_view function);
@@ -110,7 +128,7 @@ private:
     void rewatch();
 
     LuaScriptOptions _options;
-    std::unique_ptr<sol::state> _lua;
+    std::unique_ptr<LuaVm> _vm;
     bool _loaded = false;
     std::string _error;
     std::filesystem::path _path;
@@ -122,12 +140,17 @@ private:
 
 template <typename... Args>
 bool LuaScript::call(std::string_view function, Args&&... args) {
-    sol::protected_function target = find(function);
+    return call_function(find(function), function, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+bool LuaScript::call_function(const sol::protected_function& target, std::string_view name, Args&&... args) {
     if (!target.valid()) {
         return false;
     }
-    const Budget budget{*this};
-    return check(target(std::forward<Args>(args)...), function);
+    LuaCall call{runtime(), lua().lua_state(), name};
+    const auto result = call.invoke(target, std::forward<Args>(args)...);
+    return check(result, name);
 }
 
 template <typename R, typename... Args>
@@ -136,8 +159,8 @@ std::optional<R> LuaScript::call_for(std::string_view function, Args&&... args) 
     if (!target.valid()) {
         return std::nullopt;
     }
-    const Budget budget{*this};
-    const sol::protected_function_result result = target(std::forward<Args>(args)...);
+    LuaCall call{runtime(), lua().lua_state(), function};
+    const sol::protected_function_result result = call.invoke(target, std::forward<Args>(args)...);
     if (!check(result, function)) {
         return std::nullopt;
     }

@@ -7,8 +7,83 @@ target_compile_options(kin_pack PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
 )
 kin_enable_release_optimizations(kin_pack)
+if(KIN_ENABLE_SCRIPTING)
+    # kin_lua: API listing, syntax checks, Lua tests and scenario compiles (docs/lua_development.md).
+    add_executable(kin_lua kin_lua/main.cpp)
+    target_link_libraries(kin_lua PRIVATE kin::scripting_scenes)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_custom_target(kin_lua_api
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host scene generate --output "${PROJECT_BINARY_DIR}/lua-api/scene"
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host entity generate --output "${PROJECT_BINARY_DIR}/lua-api/entity"
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host test generate --output "${PROJECT_BINARY_DIR}/lua-api/test"
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host scenario generate --output "${PROJECT_BINARY_DIR}/lua-api/scenario"
+            DEPENDS kin_lua VERBATIM)
+    endif()
+endif()
 
 if(KIN_EXPERIMENTAL_3D)
+    add_executable(kin_vision3d vision3d/main.cpp)
+    target_link_libraries(kin_vision3d PRIVATE kin::engine)
+    kin_compile_glsl(_vision_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/vision3d/shaders"
+        SOURCES vision3d/reduce.comp.glsl vision3d/pack.frag.glsl vision3d/show.frag.glsl)
+    kin_embed_files(kin_vision3d NAME vision3d_shader FILES ${_vision_spv})
+    if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER AND _vision_spv)
+        add_test(NAME kin-vision3d-graph COMMAND kin_vision3d --test)
+        set_tests_properties(kin-vision3d-graph PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endif()
+    # Standalone experiment: solver/history/shaders stay under tools/slowlight3d.
+    add_executable(kin_slowlight3d slowlight3d/main.cpp)
+    target_link_libraries(kin_slowlight3d PRIVATE kin::engine)
+    kin_compile_glsl(_slowlight_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/slowlight3d/shaders"
+        SOURCES slowlight3d/transport.comp.glsl slowlight3d/receiver.frag.glsl slowlight3d/probe.frag.glsl)
+    kin_embed_files(kin_slowlight3d NAME slowlight3d_shader FILES ${_slowlight_spv})
+    if(BUILD_TESTING)
+        add_executable(kin_slowlight3d_tests slowlight3d/simulation_tests.cpp)
+        target_compile_features(kin_slowlight3d_tests PRIVATE cxx_std_23)
+        add_test(NAME kin-slowlight3d-cpu COMMAND kin_slowlight3d_tests)
+        if(KIN_HAS_GPU_RENDERER AND _slowlight_spv)
+            add_test(NAME kin-slowlight3d-graph COMMAND kin_slowlight3d --test)
+            set_tests_properties(kin-slowlight3d-graph PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+        endif()
+    endif()
+    add_executable(kin_outline3d outline3d/main.cpp)
+    target_link_libraries(kin_outline3d PRIVATE kin::engine)
+    kin_compile_glsl(_outline_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/outline3d/shaders"
+        SOURCES outline3d/outline.frag.glsl)
+    kin_embed_files(kin_outline3d NAME outline3d_shader FILES ${_outline_spv})
+    if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER AND _outline_spv)
+        add_test(NAME kin-outline3d-graph COMMAND kin_outline3d --test)
+        set_tests_properties(kin-outline3d-graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+    add_executable(kin_surface3d surface3d/main.cpp)
+    target_link_libraries(kin_surface3d PRIVATE kin::engine)
+    kin_compile_glsl(_surface_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/surface3d/shaders"
+        SOURCES surface3d/toon.frag.glsl surface3d/field.comp.glsl)
+    kin_embed_files(kin_surface3d NAME surface3d_shader FILES ${_surface_spv})
+    if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER)
+        add_test(NAME kin-surface3d-graph COMMAND kin_surface3d --test)
+        set_tests_properties(kin-surface3d-graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+    add_executable(kin_ascii3d ascii3d/main.cpp)
+    target_link_libraries(kin_ascii3d PRIVATE kin::engine)
+    if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER)
+        add_test(NAME kin-ascii3d-graph COMMAND kin_ascii3d --test)
+        set_tests_properties(kin-ascii3d-graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+    # kin_import_material: Godot's (later Unity's, Unreal's) materials as .kinmaterials (material_import3d.hpp).
+    add_executable(kin_import_material import_material/main.cpp)
+    target_link_libraries(kin_import_material PRIVATE kin::engine)
+    # kin_material_graph: material graphs checked, written as GLSL, cooked (material_graph3d.hpp).
+    add_executable(kin_material_graph material_graph/main.cpp)
+    target_link_libraries(kin_material_graph PRIVATE kin::engine)
+    # kin_material_lineup: the material lineup (import_material/lineup) rendered for comparison with Godot and Unreal.
+    add_executable(kin_material_lineup import_material/lineup/main.cpp)
+    target_link_libraries(kin_material_lineup PRIVATE kin::engine)
     add_executable(kin_asset_preview asset_preview/main.cpp)
     target_link_libraries(kin_asset_preview PRIVATE kin::engine)
     kin_compile_glsl(_preview_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/asset_preview/shaders"
@@ -26,4 +101,28 @@ if(KIN_EXPERIMENTAL_3D)
             set_tests_properties(kin-asset-preview PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE ENVIRONMENT "KIN_RENDER_BACKEND=gpu")
         endif()
     endif()
+endif()
+
+# Evaluation workload: also available in audio-free tool builds.
+if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME AND NOT TARGET industrial_yard)
+    add_executable(kin_eval_yard ../examples/industrial_yard/main.cpp)
+    target_link_libraries(kin_eval_yard PRIVATE kin::engine)
+endif()
+
+# Optional external game adapter, compiled against the same engine as the tools.
+# Content remains outside this repository and is selected with --content at run time.
+set(KIN_EVAL_BISTRO_SOURCE "" CACHE PATH "Existing gallery/bistro source for the evaluation workload")
+if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME AND KIN_EVAL_BISTRO_SOURCE)
+    if(NOT KIN_ENABLE_AUDIO OR NOT KIN_ENABLE_TTF)
+        message(FATAL_ERROR "KIN_EVAL_BISTRO_SOURCE requires KIN_ENABLE_AUDIO and KIN_ENABLE_TTF")
+    endif()
+    set(_bistro_sources
+        src/core/camera_path.cpp src/core/human.cpp src/core/level.cpp src/core/light_budget.cpp
+        src/core/lighting.cpp src/core/physics.cpp src/core/prop_audio.cpp src/core/sky.cpp src/core/tour.cpp
+        src/main.cpp src/game/audio.cpp src/game/bistro_scene.cpp src/game/level_view.cpp src/game/panel.cpp src/game/player_view.cpp)
+    list(TRANSFORM _bistro_sources PREPEND "${KIN_EVAL_BISTRO_SOURCE}/")
+    add_executable(kin_eval_bistro ${_bistro_sources})
+    target_include_directories(kin_eval_bistro PRIVATE "${KIN_EVAL_BISTRO_SOURCE}/src")
+    target_link_libraries(kin_eval_bistro PRIVATE kin::engine)
+    kin_game(kin_eval_bistro TITLE "Bistro evaluation" NO_CONTENT)
 endif()

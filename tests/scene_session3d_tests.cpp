@@ -1,6 +1,7 @@
 #include "result3d_helpers.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -9,10 +10,14 @@
 #include <iostream>
 #include <kin/assets/content.hpp>
 #include <kin/audio/audio.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/scene/planar_views3d.hpp>
+#include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
@@ -161,6 +166,7 @@ void gpu_live_edits(Renderer2D& renderer) {
               left.get<ModelRenderer3D>()->model == model,
           "material edit lost sharing/isolation");
     const auto blue = left.get<ModelMaterials3D>()->binding;
+    world->events().record(true);
     auto before = world->events().dirty_state().last_event_sequence;
     check(!change(left, "ModelMaterials3D", "variant", std::string("missing")), "unknown material variant accepted");
     check(!change(left, "ModelMaterials3D", "variant", std::string(65537, 'x')), "oversized edit text accepted");
@@ -699,6 +705,78 @@ void gpu_prepared_requests(Renderer2D& renderer) {
 }
 // Without a GPU (an SDL_Renderer over the dummy video driver: what a server or a CI job without a GPU has, no 3D): the
 // whole session but drawing, on CPU-only models, over the real camp and its prefabs.
+// Animators in a 3D scene: a .kinanim's tracks place, turn and size entities (Transform3D's fields, by vec3 and quat
+// keys), a child's too, as the session steps; their world placings follow. An edit to what plays plays that from its
+// start; one naming a file that can't be read is refused.
+void animators() {
+    Scratch scratch;
+    write(scratch.path / "door.kinanim", R"(
+animation swing
+  clip 1
+    track Transform3D.position
+      key 0 vec3 0 0 0 linear
+      key 1 vec3 2 0 0 linear
+    track Transform3D.rotation target=panel
+      key 0 quat 0 0 0 1 linear
+      key 1 quat 0 0.7071068 0 0.7071068 linear
+
+animation lift
+  clip 1
+    track Transform3D.scale
+      key 0 vec3 1 1 1 linear
+      key 1 vec3 1 3 1 linear
+)");
+    write(scratch.path / "door.kinscene", R"({"entities":[
+      {"id":"door","name":"door","components":{"Transform3D":{},"Animator":{"asset":"door.kinanim","animation":"swing"}}},
+      {"id":"panel","name":"panel","parent":"door","components":{"Transform3D":{"position":[1,0,0]}}}]})");
+    App app{{.mode = AppMode::Headless}};
+    auto& window = app.create_window({.title = "scene-session-animators", .width = 64, .height = 64, .hidden = true});
+    Renderer2D renderer{window};
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {64, 64};
+    SceneSession3D session{r3d, assets, options};
+    const auto ok = [&](const auto& result, const char* message) {
+        if (!result)
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        check(result, message);
+    };
+    ok(session.load("door.kinscene"), "animated scene load failed");
+    const auto door = session.entity("door"), panel = session.entity("panel");
+    check(door && panel && door.get<Animator>()->library, "the door's Animator is not bound");
+    const auto near = [](f32 a, f32 b) { return std::abs(a - b) < 1e-3f; };
+    for (int i = 0; i < 5; ++i)
+        ok(session.step(0.1f), "animated step failed");
+    const auto half = std::sqrt(0.5f);
+    const Vec3f at = door.get<Transform3D>()->position;
+    const Quatf turned = panel.get<Transform3D>()->rotation;
+    // Halfway: a metre along, a quarter turn's half (a turn eased the short way at a steady speed).
+    check(near(at.x, 1.0f) && near(at.y, 0.0f) && near(at.z, 0.0f), "a vec3 track did not place the door");
+    const f32 eighth = std::sin(3.14159265f / 8.0f);
+    check(near(turned.y, eighth) && near(turned.w, std::cos(3.14159265f / 8.0f)) && near(turned.x, 0.0f),
+          "a quat track did not turn the panel");
+    // The panel's world place: the door's, then its own a metre along, turned.
+    const Mat4f world = panel.get<WorldTransform3D>()->matrix;
+    check(near(world.at(0, 3), 2.0f), "the panel's world place did not follow its animated parent");
+    for (int i = 0; i < 10; ++i)
+        ok(session.step(0.1f), "animated step failed");
+    check(near(door.get<Transform3D>()->position.x, 2.0f) && near(panel.get<Transform3D>()->rotation.y, half) &&
+              door.get<Animator>()->finished,
+          "an animation that ends stays on its last frame");
+
+    const SceneFieldEdit3D lift[] = {{door, "Animator", "animation", std::string{"lift"}}};
+    ok(session.edit(lift), "an edit to what an Animator plays was refused");
+    ok(session.step(0.5f), "animated step failed");
+    check(door.get<Animator>()->library && near(door.get<Transform3D>()->scale.y, 2.0f) &&
+              !door.get<Animator>()->finished,
+          "the edited Animator did not play its new animation from its start");
+    const SceneFieldEdit3D missing[] = {{door, "Animator", "asset", std::string{"absent.kinanim"}}};
+    check(!session.edit(missing) && door.get<Animator>()->asset.id == "door.kinanim",
+          "an Animator naming a file that can't be read was accepted");
+}
+
 void headless() {
     App app{{.mode = AppMode::Headless}};
     auto& window = app.create_window({.title = "scene-session-headless", .width = 64, .height = 64, .hidden = true});
@@ -844,6 +922,19 @@ void headless() {
     check(hit && session.queries().resolve(*hit).id() == crate_entity.id(), "headless query did not find the crate");
     const SceneFieldEdit3D move[] = {{barrel, "Transform3D", "position", Vec3f{2.5f, 0, 0}}};
     ok(session.edit(move), "headless edit failed");
+    // The same written as the scene file writes it (a tool's view.edit); a batch naming an entity, component or
+    // field that is not there fails whole, changing nothing.
+    const auto authored = [](std::string_view text) { return *parse_json(text).value; };
+    ok(session.edit_authored(authored(R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[3,0,0]}}}])")),
+       "authored edit failed");
+    check(barrel.get<Transform3D>()->position == Vec3f{3, 0, 0}, "authored edit did not move the barrel");
+    for (const char* bad :
+         {R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0]}}},{"id":"ghost","components":{}}])",
+          R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0],"wobble":1}}}])",
+          R"([{"id":"blue-barrel","components":{"Transform3D":{"position":"left"}}}])", R"({"id":"blue-barrel"})"}) {
+        check(!session.edit_authored(authored(bad)) && barrel.get<Transform3D>()->position == Vec3f{3, 0, 0},
+              "a bad authored edit was taken");
+    }
     ok(session.despawn(pooled) && session.despawn(crate) && session.runtime_prefabs() == 1 &&
            session.pool_stats(pool).available == 2,
        "headless despawn");
@@ -872,6 +963,78 @@ void headless() {
 // pick names the entity drawn under a pixel of the last render (its index, or a renderer id of its own), with the point
 // there; nothing over the background; and says why without ViewOptions3D::pick, which an environment's view settings do
 // not turn off.
+// Physics through portals (PortalTraveller3D, carried after the physics step): a character walking into a portal comes
+// out of its exit, turned with it (the exit faces +X, the entry +Z: walking -Z, it comes out walking +X), its facing,
+// velocity and reported state turned; a ball thrown through keeps its speed, turned; neither is taken for a teleport.
+void portal_travel() {
+    App app{{.mode = AppMode::Headless}};
+    auto& window =
+        app.create_window({.title = "scene-session-portal-travel", .width = 64, .height = 64, .hidden = true});
+    Renderer2D renderer{window};
+    Renderer3D r3d{renderer};
+    Scratch scratch;
+    write(scratch.path / "travel.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"floor","components":{"Transform3D":{"position":[10,-0.1,0]},"Collider3D":{"kind":"box","half_extents":[20,0.1,20]}}},
+      {"id":"entry","components":{"Transform3D":{"position":[0,1.5,0]},"Portal3D":{"size":[2,3],"exit":"exit"}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,1.5,0],"rotation":[0,0.7071068,0,0.7071068]},
+        "Portal3D":{"size":[2,3],"exit":"entry"}}},
+      {"id":"walker","components":{"Transform3D":{"position":[0,0,2],"rotation":[0,1,0,0]},
+        "CharacterController3D":{"radius":0.25,"height":1.8,"walk_speed":3,"facing":[0,1,0,0]},
+        "PortalTraveller3D":{"height":1}}},
+      {"id":"ball","components":{"Transform3D":{"position":[0.6,2,3]},"Collider3D":{"kind":"sphere","radius":0.1},
+        "RigidBody3D":{"gravity_factor":0,"linear_velocity":[0,0,-4]},"PortalTraveller3D":{"height":0}}}]})");
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.warm_up = false;
+    options.physics = World3DConfig{.max_bodies = 16,
+                                    .max_body_pairs = 64,
+                                    .max_contact_constraints = 64,
+                                    .temp_memory_bytes = 1024 * 1024,
+                                    .single_threaded = true};
+    SceneSession3D session{r3d, assets, options};
+    const auto ok = [&](bool result, const char* why) {
+        if (!result)
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        check(result, why);
+    };
+    ok(bool(session.load("travel.kinscene")), "portal travel scene failed");
+    auto walker = session.entity("walker"), ball = session.entity("ball");
+    bool walker_through = false, ball_through = false;
+    for (int i = 0; i < 120 && !(walker_through && ball_through); ++i) {
+        auto* controller = walker.get_mut<CharacterController3D>();
+        controller->input.move = {0, 1};
+        controller->input.forward = controller->facing.rotate({0, 0, 1});
+        ok(bool(session.step(1.0f / 60.0f)), "portal travel step failed");
+        const Vec3f at = walker.get<Transform3D>()->position;
+        if (!walker_through && at.x > 10) {
+            walker_through = true;
+            const auto& state = walker.get<CharacterController3D>()->state;
+            check(std::abs(state.position.x - at.x) < 1e-3f && std::abs(state.position.z - at.z) < 1e-3f,
+                  "a carried character's state is not where it was carried");
+            check(state.velocity.x > 1 && std::abs(state.velocity.z) < 0.5f,
+                  "a carried character's velocity is not turned with the portal");
+            check(walker.get<CharacterController3D>()->facing.rotate({0, 0, 1}).x > 0.9f,
+                  "a carried character's facing is not turned with the portal");
+            check(at.x > 20 && at.x < 21 && std::abs(at.z) < 1 && at.y > -0.1f,
+                  "a carried character is not just out of the exit, on the floor");
+        }
+        if (!ball_through && ball.get<Transform3D>()->position.x > 10)
+            ball_through = true;
+    }
+    check(walker_through && ball_through, "physics did not carry the character and the ball through the portal");
+    // Out of the exit, they go on the way it faces (+X) and stay this side.
+    for (int i = 0; i < 30; ++i) {
+        walker.get_mut<CharacterController3D>()->input.forward = {1, 0, 0};
+        ok(bool(session.step(1.0f / 60.0f)), "portal travel step failed");
+    }
+    const Vec3f walked = walker.get<Transform3D>()->position, flew = ball.get<Transform3D>()->position;
+    const Vec3f flying = session.physics()->linear_velocity(session.bodies()->body_of(ball.raw()));
+    check(walked.x > 21 && std::abs(walked.z) < 1, "the character did not walk on out of the exit");
+    check(flew.x > 21 && std::abs(flying.x - 4) < 0.05f && std::abs(flying.z) < 0.05f,
+          "the ball did not keep its speed out of the exit, turned");
+    std::cout << "portal travel: a character and a ball carried through\n";
+}
 void gpu_pick(Renderer2D& renderer) {
     Scratch scratch;
     std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
@@ -931,6 +1094,328 @@ void gpu_pick(Renderer2D& renderer) {
           "pick without a pick pass did not say why");
     renderer.present();
 }
+// Mirrors and portals authored in a scene (Mirror3D, Portal3D; PlanarViews3D through render()): through the portal
+// the view shows what a camera standing where the portals take the eye sees; without the planar surfaces the portal
+// is its stand-in colour; portal_step goes through it; a mirror's scene renders.
+void gpu_planar(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
+    // Two portals facing +Z, 20 m apart; the model in front of the exit; the eye 6 m in front of the entry.
+    write(scratch.path / "portals.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"entry","components":{"Transform3D":{},"Portal3D":{"size":[2,2],"exit":"exit","stand_in":[255,0,0,255],
+        "resolution":1}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[2,2],"exit":"entry",
+        "effect":"vortex","effect_strength":0.5}}},
+      {"id":"box","components":{"Transform3D":{"position":[20,0,4]},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    // What the eye sees through it: from 6 m behind the exit, turned half round (looking +Z), no portals.
+    write(scratch.path / "direct.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[20,0,-6],"rotation":[0,1,0,0]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"box","components":{"Transform3D":{"position":[20,0,4]},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    write(scratch.path / "mirror.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,2,6],"rotation":[-0.1305,0,0,0.9914]},
+        "SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"floor","components":{"Transform3D":{"rotation":[-0.7071068,0,0,0.7071068]},"Mirror3D":{"size":[12,12]}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,1,0]},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    const auto surfaces = compile_planar_surfaces(r3d);
+    if (!surfaces) {
+        std::cout << "planar session checks skipped (no glslc for the planar surfaces)\n";
+        return;
+    }
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    const auto centre = [&](SceneSession3D& session) {
+        renderer.clear();
+        if (!session.render())
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        renderer.draw_texture(session.view()->texture(), {0, 0, 160, 120});
+        std::vector<u8> pixels;
+        Vec2i size;
+        check(renderer.read_rgba({0, 0, 160, 120}, pixels, size) && size == Vec2i{160, 120}, "planar read failed");
+        renderer.present();
+        const u8* c = &pixels[(60 * 160 + 80) * 4];
+        return std::array<int, 3>{c[0], c[1], c[2]};
+    };
+    SceneSession3D direct{r3d, assets, options};
+    check(direct.load("direct.kinscene"), "direct scene failed");
+    const auto expected = centre(direct);
+    check(!(expected[0] > 200 && expected[1] < 50), "the direct view is red");
+    // Without the planar surfaces: the stand-in.
+    SceneSession3D plain{r3d, assets, options};
+    check(plain.load("portals.kinscene"), "portal scene failed");
+    const auto red = centre(plain);
+    check(red[0] > 240 && red[1] < 15 && red[2] < 15, "a portal without its surface is not its stand-in");
+    // With them: the box, as the direct view has it.
+    options.planar_surfaces = *surfaces;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("portals.kinscene"), "portal scene failed");
+    const auto seen = centre(session);
+    for (int i = 0; i < 3; ++i)
+        check(std::abs(seen[size_t(i)] - expected[size_t(i)]) <= 12, "the portal does not show what is beyond it");
+    // The exit's effect as authored (not seen from here: the entry shows the picture as ever).
+    const auto* exit_portal = session.entity("exit").get<Portal3D>();
+    check(exit_portal && exit_portal->effect == Portal3D::Effect::Vortex && exit_portal->effect_strength == 0.5f,
+          "a portal's effect did not load");
+    // Going through it: in at the entry's front, out of the exit's, the rest of the step after.
+    const auto step = portal_step(*session.world(), {0.5f, 0, 1}, {0.5f, 0, -1});
+    check(step && step->portal.id() == session.entity("entry").id() && step->exit.id() == session.entity("exit").id(),
+          "portal_step missed the portal");
+    check(std::abs(step->position.x - 19.5f) < 1e-4f && std::abs(step->position.z - 1) < 1e-4f,
+          "portal_step did not come out of the exit's front");
+    check(!portal_step(*session.world(), {5, 0, 1}, {5, 0, -1}), "portal_step went through beside the opening");
+    // Half-way through: a model straddling the entry is drawn at the exit too (PlanarViews3D's images), so the view
+    // through the portal shows it beyond the exit. The model is mostly through the entry (its front face just behind
+    // the entry's plane: none of it shows before the portal), right of centre; through the portal, the eye sees its
+    // image where it would see the model's far part.
+    write(scratch.path / "straddle.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"entry","components":{"Transform3D":{},"Portal3D":{"size":[4,4],"exit":"exit","stand_in":[255,0,0,255]}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[4,4],"exit":"entry"}}},
+      {"id":"box","components":{"Transform3D":{"position":[0.8,0,-0.35],"scale":[0.6,0.6,0.6]},
+        "ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    SceneSession3D straddle{r3d, assets, options};
+    check(straddle.load("straddle.kinscene"), "straddle scene failed");
+    renderer.clear();
+    check(straddle.render(), "straddle render failed");
+    renderer.draw_texture(straddle.view()->texture(), {0, 0, 160, 120});
+    std::vector<u8> pixels;
+    Vec2i size;
+    check(renderer.read_rgba({0, 0, 160, 120}, pixels, size), "straddle read failed");
+    renderer.present();
+    const auto image_at = straddle.scene()->camera.project({0.8f, 0, -0.35f}, {0, 0, 160, 120});
+    check(bool(image_at), "straddle point off screen");
+    const u8* image = &pixels[(std::size_t(image_at->pos.y) * 160 + std::size_t(image_at->pos.x)) * 4];
+    const u8* empty = &pixels[(60 * 160 + 80) * 4]; // the picture's background beyond the exit, nothing in it
+    check(std::abs(int(image[0]) - int(empty[0])) + std::abs(int(image[1]) - int(empty[1])) +
+                  std::abs(int(image[2]) - int(empty[2])) >
+              30,
+          "the part through the portal is not drawn beyond its exit");
+    // Neither half is cut by the pictures' clip planes: the image whole, the box again whole in the pictures only.
+    std::size_t whole = 0, if_cut = 0;
+    for (const Scene3D::Draw& draw : straddle.scene()->draws()) {
+        whole += draw.clip == DrawClip3D::whole ? draw.count : 0;
+        if_cut += draw.clip == DrawClip3D::whole_if_cut ? draw.count : 0;
+    }
+    check(whole > 0 && if_cut == whole, "the straddling box's draws are cut by the pictures' clip planes");
+    // A floor through the portal's plane is too large to be going through it: no image of it (drawn whole, it would
+    // stand in front of every picture).
+    write(scratch.path / "straddle_floor.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"entry","components":{"Transform3D":{},"Portal3D":{"size":[4,4],"exit":"exit","stand_in":[255,0,0,255]}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,0,0]},"Portal3D":{"size":[4,4],"exit":"entry"}}},
+      {"id":"box","components":{"Transform3D":{"position":[0.8,0,-0.35],"scale":[0.6,0.6,0.6]},
+        "ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"floor","components":{"Transform3D":{"position":[0,-1.5,0],"scale":[30,0.1,30]},
+        "ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    SceneSession3D floored{r3d, assets, options};
+    check(floored.load("straddle_floor.kinscene") && floored.render(), "straddle floor scene failed");
+    std::size_t floored_whole = 0;
+    for (const Scene3D::Draw& draw : floored.scene()->draws())
+        floored_whole += draw.clip == DrawClip3D::whole ? draw.count : 0;
+    check(floored_whole == whole, "a floor through a portal's plane is drawn as going through it");
+    // Water you see into (Mirror3D::refraction): seen from above, a red box just under the surface shows red, one deep
+    // down shows the murk's blue; without refraction neither shows (the water reflects).
+    write(scratch.path / "red.kinmaterials",
+          R"({"schema":"kin.materials3d/1","material":{"color":[230,20,20,255],"unlit":true}})");
+    const auto water_scene = [&](f32 depth, f32 refraction) {
+        const std::string name =
+            "water_" + std::to_string(int(depth * 10)) + "_" + std::to_string(int(refraction)) + ".kinscene";
+        write(scratch.path / name, std::string(R"({"schema":"kin.scene/1","entities":[
+          {"id":"camera","components":{"Transform3D":{"position":[0,3,0],"rotation":[-0.7071068,0,0,0.7071068]},
+            "SceneCamera3D":{"fov":40}}},
+          {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+          {"id":"water","components":{"Transform3D":{"rotation":[-0.7071068,0,0,0.7071068]},
+            "Mirror3D":{"size":[20,20],"metallic":0,"roughness":0.05,"color":[255,255,255,255],
+              "murk":[0,0,255,255],"murk_depth":1,"refraction":)") +
+                                       std::to_string(refraction) + R"(}}},
+          {"id":"box","components":{"Transform3D":{"position":[0,)" +
+                                       std::to_string(-depth) +
+                                       R"(,0],"scale":[1.5,0.1,1.5]},"ModelRenderer3D":{"asset":"parts.glb"},
+            "ModelMaterials3D":{"asset":"red.kinmaterials"}}}]})");
+        SceneSession3D water{r3d, assets, options};
+        check(water.load(name), "water scene failed");
+        (void)centre(water);
+        return centre(water);
+    };
+    const auto shallow = water_scene(0.2f, 1), deep = water_scene(4.0f, 1), still = water_scene(0.2f, 0);
+    std::cerr << "water: shallow " << shallow[0] << "," << shallow[1] << "," << shallow[2] << " deep " << deep[0] << ","
+              << deep[1] << "," << deep[2] << " no refraction " << still[0] << "," << still[1] << "," << still[2]
+              << '\n';
+    check(shallow[0] > shallow[2] + 40, "a box just under the water does not show through it");
+    check(deep[2] > deep[0] + 20, "a box deep under the water does not fade into its murk");
+    check(!(still[0] > still[2] + 40), "the water shows what is below it without refraction");
+    // A mirror renders, and shows something else than kin's own metal does.
+    SceneSession3D mirror{r3d, assets, options};
+    check(mirror.load("mirror.kinscene"), "mirror scene failed");
+    const auto reflected = centre(mirror);
+    options.planar_surfaces = {};
+    SceneSession3D metal{r3d, assets, options};
+    check(metal.load("mirror.kinscene"), "metal scene failed");
+    const auto stock = centre(metal);
+    check(std::abs(reflected[0] - stock[0]) + std::abs(reflected[1] - stock[1]) + std::abs(reflected[2] - stock[2]) >
+              30,
+          "the mirror shows what kin's metal shows");
+    // A portal in a mirror shows what is beyond it, as the mirror's camera sees through it (not its stand-in): a floor
+    // mirror under a portal whose far side holds a green box; where the mirror shows the portal, green.
+    write(scratch.path / "green.kinmaterials",
+          R"({"schema":"kin.materials3d/1","material":{"color":[20,230,20,255],"unlit":true}})");
+    write(scratch.path / "mirror_portal.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1.5,6],"rotation":[-0.1602,0,0,0.9871]},
+        "SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"floor","components":{"Transform3D":{"rotation":[-0.7071068,0,0,0.7071068]},"Mirror3D":{"size":[30,30]}}},
+      {"id":"entry","components":{"Transform3D":{"position":[0,1.5,-3]},"Portal3D":{"size":[2,2],"exit":"exit",
+        "stand_in":[255,0,0,255]}}},
+      {"id":"exit","components":{"Transform3D":{"position":[20,1.5,0]},"Portal3D":{"size":[2,2],"exit":"entry"}}},
+      {"id":"box","components":{"Transform3D":{"position":[20,1.5,4],"scale":[4,4,1]},
+        "ModelRenderer3D":{"asset":"parts.glb"},"ModelMaterials3D":{"asset":"green.kinmaterials"}}}]})");
+    options.planar_surfaces = *surfaces;
+    SceneSession3D mirrored{r3d, assets, options};
+    check(mirrored.load("mirror_portal.kinscene"), "mirror portal scene failed");
+    (void)centre(mirrored);
+    renderer.clear();
+    check(mirrored.render(), "mirror portal render failed");
+    renderer.draw_texture(mirrored.view()->texture(), {0, 0, 160, 120});
+    std::vector<u8> seen_pixels;
+    Vec2i seen_size;
+    check(renderer.read_rgba({0, 0, 160, 120}, seen_pixels, seen_size), "mirror portal read failed");
+    renderer.present();
+    const auto in_mirror = mirrored.scene()->camera.project({0, -1.5f, -3}, {0, 0, 160, 120});
+    check(bool(in_mirror), "the portal's reflection is off screen");
+    const u8* c = &seen_pixels[(std::size_t(in_mirror->pos.y) * 160 + std::size_t(in_mirror->pos.x)) * 4];
+    std::cerr << "portal in a mirror: " << int(c[0]) << "," << int(c[1]) << "," << int(c[2]) << '\n';
+    check(c[1] > c[0] + 60 && c[1] > c[2] + 60, "a portal in a mirror does not show what is beyond it");
+    std::cout << "planar session: portals, portal_step, mirror\n";
+}
+// Reflection probes as entities (ReflectionProbe3D): placed in the scene's lights each frame, captured when first shown
+// (filtered by the render that reads it), not again until it moves or `recapture` changes; a shiny sphere's own probe,
+// every frame, leaves the sphere out of its picture (hide_self).
+void gpu_probes(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
+    write(scratch.path / "probes.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"ssr_enabled":true,"ssr_steps":24}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,0.5,0]},"ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"room","components":{"Transform3D":{"position":[0,1,0]},
+        "ReflectionProbe3D":{"extent":[6,3,6],"resolution":32}}},
+      {"id":"shiny","components":{"Transform3D":{"position":[2,1,0]},
+        "ReflectionProbe3D":{"extent":[1,1,1],"parallax":false,"every_frame":true,"hide_self":true,
+          "resolution":16,"priority":1}}}]})");
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("probes.kinscene"), "probes scene failed");
+    const auto frame = [&] {
+        renderer.clear();
+        if (!session.render())
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        renderer.present();
+        return r3d.debug_stats();
+    };
+    const auto first = frame();
+    const auto& placed = session.scene()->lights.reflection_probes;
+    check(placed.size() == 2, "the probes were not placed");
+    const auto probe = [&](Vec3f at) {
+        const auto found = std::find_if(placed.begin(), placed.end(),
+                                        [&](const ReflectionProbeSource3D& p) { return p.position == at; });
+        check(found != placed.end() && found->capture, "a probe is not where its entity is");
+        return *found;
+    };
+    // Captures so far, each probe's.
+    const auto captures = [&](Vec3f at) { return probe(at).capture.backend()->generation(); };
+    check(probe({0, 1, 0}).extent == Vec3f{6, 3, 6}, "the room's probe's box is not its entity's");
+    check(first.reflection_probes == 2, "the render did not read both probes");
+    // The authored screen-space reflections: traced from the second frame (the first keeps a picture to read).
+    check(session.scene()->ssr.enabled && session.scene()->ssr.steps == 24, "ssr settings were not applied");
+    check(first.ssr_traces == 0, "screen-space reflections traced without a picture to read");
+    check(captures({0, 1, 0}) == 1 && captures({2, 1, 0}) == 1, "the probes were not captured once");
+    // The room's again only when asked or moved; the shiny one's every frame.
+    check(frame().ssr_traces == 1, "screen-space reflections were not traced");
+    check(captures({0, 1, 0}) == 1 && captures({2, 1, 0}) == 2, "the probes were captured at the wrong times");
+    session.entity("room").get_mut<ReflectionProbe3D>()->recapture = 1;
+    frame();
+    check(captures({0, 1, 0}) == 2, "recapture did not capture the room's probe again");
+    session.entity("room").get_mut<Transform3D>()->position = {0, 1.5f, 0};
+    frame();
+    check(captures({0, 1.5f, 0}) == 3, "moving the room's probe did not capture it again");
+    // Baked: every probe captured and written to the content (probes/<authored id>.hdr), its `baked` set; a scene
+    // naming that picture loads it instead of capturing it, and moving it does not capture it again.
+    ReflectionProbes3D baker{r3d, scratch.path};
+    check(baker.bake(*session.world(), *session.scene(), scratch.path), "bake failed");
+    check(std::filesystem::exists(scratch.path / "probes" / "room.hdr") &&
+              session.entity("room").get<ReflectionProbe3D>()->baked.id == "probes/room.hdr",
+          "the room's probe was not baked");
+    write(scratch.path / "baked.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,0.5,0]},"ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"room","components":{"Transform3D":{"position":[0,1,0]},
+        "ReflectionProbe3D":{"extent":[6,3,6],"resolution":32,"baked":"probes/room.hdr"}}}]})");
+    SceneSession3D baked{r3d, assets, options};
+    check(baked.load("baked.kinscene"), "baked scene failed");
+    const auto baked_frame = [&] {
+        renderer.clear();
+        if (!baked.render())
+            for (const auto& e : baked.diagnostics())
+                std::cerr << e << '\n';
+        renderer.present();
+        return r3d.debug_stats();
+    };
+    check(baked_frame().reflection_probes == 1, "the baked probe was not read");
+    const auto& baked_placed = baked.scene()->lights.reflection_probes;
+    check(baked_placed.size() == 1 && baked_placed[0].capture.backend()->generation() == 1,
+          "the baked probe was captured instead of loaded");
+    baked.entity("room").get_mut<Transform3D>()->position = {0, 1.5f, 0};
+    baked_frame();
+    check(baked.scene()->lights.reflection_probes[0].capture.backend()->generation() == 1,
+          "moving a baked probe captured it");
+    // With global illumination: the probes are lit by the session's view's GI; one captured before it had settled (its
+    // first frame) is captured once more when it has (ReflectionProbes3D::gi_settle updates of light), then not again.
+    write(scratch.path / "probes_gi.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,1,6]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"gi_enabled":true,
+        "gi_min":[-4,-1,-4],"gi_max":[4,4,4]}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,0.5,0]},"ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"room","components":{"Transform3D":{"position":[0,1,0]},
+        "ReflectionProbe3D":{"extent":[6,3,6],"resolution":16}}}]})");
+    if (r3d.capabilities().global_illumination) {
+        SceneSession3D lit{r3d, assets, options};
+        check(lit.load("probes_gi.kinscene"), "GI probes scene failed");
+        std::vector<u64> captured;
+        u32 borrowed = 0;
+        for (int i = 0; i < 90; ++i) {
+            renderer.clear();
+            if (!lit.render())
+                for (const auto& e : lit.diagnostics())
+                    std::cerr << e << '\n';
+            renderer.present();
+            captured.push_back(lit.scene()->lights.reflection_probes.at(0).capture.backend()->generation());
+            borrowed += r3d.debug_stats().gi_resolved ? 1 : 0;
+        }
+        std::cerr << "GI probe captures: first " << captured.front() << ", last " << captured.back() << '\n';
+        check(captured.front() == 1 && captured.back() == 2 && captured[captured.size() - 2] == 2,
+              "a probe captured before the GI settled was not captured again, once");
+        check(borrowed > 0, "the session's GI did not light its view");
+    }
+    std::cout << "probe session: placed, captured when needed, baked, lit by the GI\n";
+}
+
 // The same over a game-owned world (SceneFrame3D::collect, no session): the authored SceneEnvironment3D sets the
 // picture (samples) and the game's `pick` survives it, so a view made from the collected options can be picked.
 void gpu_frame_pick(Renderer2D& renderer) {
@@ -1084,7 +1569,9 @@ int main(int argc, char** argv) {
     // The CPU and headless checks run everywhere (CI's jobs without a GPU too); only the GPU checks are skipped there.
     try {
         cpu();
+        animators();
         headless();
+        portal_travel();
         std::cout << "Headless scene session checks passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
@@ -1105,6 +1592,8 @@ int main(int argc, char** argv) {
         gpu_session(renderer);
         gpu_prepared_requests(renderer);
         gpu_pick(renderer);
+        gpu_planar(renderer);
+        gpu_probes(renderer);
         gpu_frame_pick(renderer);
         gpu_frame_cost(renderer);
         std::cout << "Transactional scene lifecycle, reload, budgets and ownership checks passed\n";

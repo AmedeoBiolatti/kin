@@ -1,4 +1,6 @@
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/build.hpp>
 
 #include <kin/assets/texture_file.hpp>
@@ -76,6 +78,11 @@ struct Renderer2D::OpenClip {
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     const auto choice = requested_renderer();
+#if defined(__ANDROID__)
+    // A phone draws at its display's rate, never faster: frames it cannot show
+    // only drain the battery and heat it (App::set_max_fps lowers the rate).
+    vsync = true;
+#endif
 #if KIN_HAS_WEBGL2_RENDERER
     return std::make_unique<WebGL2Renderer2DBackend>(window, vsync);
 #elif KIN_HAS_COMPACT_RENDERER
@@ -106,6 +113,8 @@ Texture::Texture(std::shared_ptr<ITextureBackend> backend)
 Vec2i Texture::size() const {
     return _backend ? _backend->size() : Vec2i{};
 }
+
+u32 Texture::array_layers() const { return _backend ? _backend->array_layers() : 0; }
 
 TextureFormat Texture::format() const {
     return _backend ? _backend->format() : TextureFormat::Rgba8;
@@ -255,6 +264,22 @@ std::string_view Renderer2D::backend_name() const {
     return _backend->name();
 }
 
+IRendererBackend3D* Renderer2D::renderer_3d() {
+    return _backend->renderer_3d();
+}
+
+void Renderer2D::set_overdraw_view(bool enabled) {
+    _backend->set_overdraw_view(enabled);
+}
+
+std::string Renderer2D::pipeline_record() const {
+    return _backend->pipeline_record();
+}
+
+void Renderer2D::prewarm_pipelines(std::string_view record) {
+    _backend->prewarm_pipelines(record);
+}
+
 RendererBackendCapabilities Renderer2D::capabilities() const {
     RendererBackendCapabilities capabilities = _backend->capabilities();
     capabilities.queued_2d = true;
@@ -331,6 +356,42 @@ bool Renderer2D::read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& ou
     return _backend->read_rgba(logical_region, out, out_size);
 }
 
+u64 Renderer2D::request_read_rgba(Rectf logical_region) {
+    return request_read_rgba(logical_region, true);
+}
+
+u64 Renderer2D::request_read_rgba(Rectf logical_region, bool allow_wait_fallback) {
+    if (const u64 ticket = _backend->request_read_rgba(logical_region)) {
+        return ticket;
+    }
+    if (!allow_wait_fallback) {
+        return 0;
+    }
+    WaitedRead read{.ticket = waited_read | _next_waited_read++};
+    if (!_backend->read_rgba(logical_region, read.pixels, read.size)) {
+        read.pixels.clear();
+        read.size = {};
+    }
+    _waited_reads.push_back(std::move(read));
+    return _waited_reads.back().ticket;
+}
+
+bool Renderer2D::take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait) {
+    if ((ticket & waited_read) == 0) {
+        return _backend->take_read_rgba(ticket, out, out_size, wait);
+    }
+    out.clear();
+    out_size = {};
+    const auto it = std::find_if(_waited_reads.begin(), _waited_reads.end(),
+                                 [ticket](const WaitedRead& r) { return r.ticket == ticket; });
+    if (it != _waited_reads.end()) {
+        out = std::move(it->pixels);
+        out_size = it->size;
+        _waited_reads.erase(it);
+    }
+    return true;
+}
+
 void Renderer2D::set_logical_size(i32 width, i32 height) {
     set_logical_size(Vec2i{width, height});
 }
@@ -361,6 +422,27 @@ void Renderer2D::set_integer_logical_size(Vec2i size) {
                    }));
 }
 
+bool Renderer2D::set_content_scale(f32 scale) {
+    if (!(scale >= 0.0f) || !std::isfinite(scale)) {
+        return false;
+    }
+    if (scale == _backend->content_scale()) {
+        return true;
+    }
+    const bool done = _backend->set_content_scale(scale);
+    KIN_LOG_INFO_F("render",
+                   "content scale set",
+                   (LogFields{
+                       {.name = "scale", .value = std::to_string(scale)},
+                       {.name = "supported", .value = done ? "true" : "false"},
+                   }));
+    return done;
+}
+
+f32 Renderer2D::content_scale() const {
+    return _backend->content_scale();
+}
+
 Vec2i Renderer2D::output_size() const {
     return _backend->output_size();
 }
@@ -371,6 +453,12 @@ Vec2f Renderer2D::window_to_logical(Vec2f window_px) const {
 
 Vec2f Renderer2D::logical_to_window(Vec2f logical) const {
     return _backend->logical_to_window(logical);
+}
+
+Rectf Renderer2D::window_rect_to_logical(Rectf window_rect) const {
+    const Vec2f min = window_to_logical(Vec2f{window_rect.x, window_rect.y});
+    const Vec2f max = window_to_logical(Vec2f{window_rect.x + window_rect.w, window_rect.y + window_rect.h});
+    return {min.x, min.y, max.x - min.x, max.y - min.y};
 }
 
 Texture Renderer2D::create_texture_from_rgba(const u8* pixels, i32 width, i32 height) {
@@ -698,6 +786,31 @@ void Renderer2D::set_color_output(ColorOutput output) {
     }
 }
 
+bool Renderer2D::draw_color_output(const Texture& scene, Rectf source, Rectf dest, const ColorOutput& output, bool linear) {
+    if (!scene || dest.w <= 0.0f || dest.h <= 0.0f) {
+        return false;
+    }
+    if (output.lut != _preview_lut || (output.lut && !_preview_lut_texture)) {
+        _preview_lut = output.lut;
+        _preview_lut_texture = output.lut ? create_texture({output.lut->size() * output.lut->size(), output.lut->size()}, TextureFormat::Rgba8,
+                                                           output.lut->strip().data())
+                                          : Texture{};
+    }
+    return _backend->draw_color_output(scene, source, dest,
+                                       {
+                                           .exposure = output.exposure,
+                                           .tonemap = output.tonemap,
+                                           .dither = output.dither,
+                                           .lut = _preview_lut_texture,
+                                           .lut_size = output.lut ? output.lut->size() : 0,
+                                           .lut_to = {},
+                                           .lut_to_size = 0,
+                                           .lut_mix = 0.0f,
+                                           .lut_strength = output.lut_strength,
+                                       },
+                                       linear);
+}
+
 ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
 #if KIN_HAS_GPU_RENDERER
     ShaderDesc used = desc;
@@ -869,6 +982,17 @@ void Renderer2D::end_layer() {
     // bounds are where the transformed draws landed: laid over untransformed.
     // (Colours are decoded in a linear pipeline, alpha is not: its colour
     // channels carry the opacity encoded, so they decode to it.)
+    if (layer->options.grade) {
+        const Affine2 transform = _transform;
+        apply_transform({});
+        const bool drawn = draw_color_output(layer->target.texture(), bounds->source, bounds->dest, *layer->options.grade,
+                                             _color_space == ColorSpace::Linear);
+        if (!drawn) {
+            draw_texture(layer->target.texture(), bounds->source, bounds->dest);
+        }
+        apply_transform(transform);
+        return;
+    }
     const f32 opacity = std::clamp(layer->options.opacity, 0.0f, 1.0f);
     const auto o = static_cast<u8>(opacity * 255.0f + 0.5f);
     const auto c = _color_space == ColorSpace::Linear ? static_cast<u8>(linear_to_srgb(opacity) * 255.0f + 0.5f) : o;
@@ -1009,6 +1133,29 @@ bool Renderer2D::write_data_buffer(const DataBuffer& buffer, std::size_t offset,
     }
 }
 
+bool Renderer2D::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                        std::span<const u32> indices) {
+    if (!texture || vertices.empty() || indices.empty() || indices.size() % 3 || vertices.size() > 1048576 ||
+        indices.size() > 3145728) {
+        return false;
+    }
+    if (texture.format() != TextureFormat::Rgba8 && !texture_format_compressed(texture.format())) {
+        return false;
+    }
+    for (const ShaderVertex& v : vertices) {
+        if (!std::isfinite(v.position.x) || !std::isfinite(v.position.y) || !std::isfinite(v.uv.x) ||
+            !std::isfinite(v.uv.y)) {
+            return false;
+        }
+    }
+    for (const u32 i : indices) {
+        if (i >= vertices.size()) {
+            return false;
+        }
+    }
+    return _backend->draw_textured_geometry(texture, vertices, indices);
+}
+
 void Renderer2D::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
                                       ShaderHandle shader, const ShaderParams& params,
                                       std::span<const Texture> sources, std::span<const DataBuffer> buffers) {
@@ -1058,7 +1205,14 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
         // descriptor declares (2 for the two-input combine/crossfade shaders).
         const char* file = nullptr;
         u32 samplers = 1;
+        u32 buffers = 0;
         switch (id) {
+        case BuiltinShader::Ascii: file = "pp_ascii.frag.spv"; break;
+        case BuiltinShader::NormalSprite2D:
+            file = "normal_sprite.frag.spv";
+            samplers = 3;
+            buffers = 1;
+            break;
         case BuiltinShader::Vignette: file = "pp_vignette.frag.spv"; break;
         case BuiltinShader::ColorGrade: file = "pp_color_grade.frag.spv"; break;
         case BuiltinShader::Scanline: file = "pp_scanline.frag.spv"; break;
@@ -1078,6 +1232,7 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
                 ShaderDesc desc;
                 desc.spirv = {bytes.data(), static_cast<u32>(bytes.size())};
                 desc.num_samplers = samplers;
+                desc.num_storage_buffers = buffers;
                 desc.num_uniform_buffers = 1;
                 handle = create_shader(desc);
             } else {
@@ -1336,6 +1491,31 @@ Renderer2D::ClipGuard Renderer2D::scoped_mask(const std::function<void(Renderer2
 Renderer2D::ClipGuard Renderer2D::scoped_mask(const Texture& mask, Rectf dest, MaskOptions options) {
     push_mask(mask, dest, options);
     return ClipGuard{this};
+}
+
+Texture Renderer2D::create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers) {
+    if (size.x <= 0 || size.y <= 0)
+        return {};
+    try {
+        return _backend->create_render_attachment(size, format, array_layers);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "create_render_attachment failed",
+                        (LogFields{{.name = "error", .value = error.what()}}));
+        return {};
+    }
+}
+
+bool Renderer2D::copy_texture(const Texture& source, const Texture& destination) {
+    if (!source || !destination || source == destination || source.size() != destination.size() ||
+        source.format() != destination.format() || source.array_layers() != destination.array_layers() ||
+        texture_format_compressed(source.format()) || !_backend->capabilities().texture_copies)
+        return false;
+    try {
+        return _backend->copy_texture(source, destination);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "copy_texture failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return false;
+    }
 }
 
 RenderTarget Renderer2D::create_render_target(Vec2i size, ScaleMode mode) {

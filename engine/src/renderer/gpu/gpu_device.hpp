@@ -2,7 +2,6 @@
 // Ported from v0 engine/renderer_gpu. SDL_GPU device + swapchain + upload ring,
 // and a per-frame command-buffer wrapper. kin forces the SPIR-V/Vulkan driver.
 #include <kin/core/types.hpp>
-#include <kin/platform/window.hpp>
 #include <kin/renderer/texture.hpp>
 
 #include "gpu_buffer.hpp"
@@ -21,6 +20,7 @@
 #include <vector>
 
 namespace kin {
+class Window;
 class JobSystem;
 struct CompressedImage;
 }
@@ -66,6 +66,13 @@ public:
     // layer; a shader samples the array): cascaded shadow maps.
     GpuTexture create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
                                    SDL_GPUTextureUsageFlags usage);
+    // A sampled RGBA8 (UNORM) 2D array of `layers.size()` width x height pictures (tightly packed, a layer each), with
+    // a mip chain of complete_mip_levels() levels generated on the GPU with the uploads: a material graph's maps past
+    // its five slots. Not pooled.
+    GpuTexture create_texture_array(u32 width, u32 height, std::span<const u8* const> layers);
+    // A 3D texture of `format`, width x height x depth (the GI scene's voxels); its texels are not set.
+    GpuTexture create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
+                             SDL_GPUTextureUsageFlags usage);
     // A depth-stencil target of depth_stencil_format() (stencil clips).
     GpuTexture create_depth_stencil(u32 width, u32 height);
     // The depth-stencil format this device draws into, INVALID if none.
@@ -154,6 +161,21 @@ public:
     bool read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rgba);
     // A region of `src` (`texel_bytes` a texel), tightly packed (waits for the GPU).
     bool read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out);
+    // A read under way (begin_read_texture_region): a command buffer of its own copies the region into `transfer` once
+    // the GPU has done the work submitted before it, and `fence` signals when it has.
+    struct PendingRead {
+        SDL_GPUTransferBuffer* transfer = nullptr;
+        SDL_GPUFence* fence = nullptr;
+        u32 bytes = 0;
+    };
+    // Starts reading a region of `src`, as read_texture_region does, without waiting. False when it could not start.
+    bool begin_read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes,
+                                   PendingRead& read);
+    // Whether `read` has finished (`wait`: waits until it has): its pixels are then in `out` (empty when the GPU could
+    // not copy them) and it is released. False while the GPU has yet to copy them.
+    bool finish_read(PendingRead& read, std::vector<u8>& out, bool wait);
+    // All of a 3D texture made by create_volume, `depth` slices of its width x height, tightly packed (waits for the GPU).
+    bool read_volume(const GpuTexture& src, u32 depth, u32 texel_bytes, std::vector<u8>& out);
     // `bytes` of `src` from `offset` (waits for the GPU, on a fence of its own that it releases once signalled).
     bool read_buffer(SDL_GPUBuffer* src, u32 offset, u32 bytes, std::vector<u8>& out);
 
@@ -194,6 +216,7 @@ private:
         SDL_GPUTexture* texture = nullptr;
         u32 x = 0, y = 0, w = 0, h = 0;
         u32 level = 0;
+        u32 layer = 0; // of a 2D array
         bool blocks = false; // block-compressed texels, tightly packed: Vulkan wants a row length of 0 (or whole blocks)
         SDL_GPUBuffer* buffer = nullptr;
         u32 buffer_offset = 0;

@@ -23,6 +23,9 @@ ReloadResult EcsReloadCoordinator::reload_script_scene(ScriptScene& scene) {
 }
 
 bool SceneAssetRuntime::reload_if_changed(ScriptScene& scene) {
+    if (scene.development_session()) {
+        return false; // the development session reloads it
+    }
     const SceneAssetRuntimeChange change = poll_changes();
     if (change == SceneAssetRuntimeChange::None) {
         return false;

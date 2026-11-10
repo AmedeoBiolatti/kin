@@ -25,7 +25,12 @@ struct SceneEnvironment3D {
     AmbientOcclusion3D ambient_occlusion;
     ContactShadows3D contact_shadows;
     TemporalAA3D taa;
+    ScreenSpaceReflections3D ssr; // Scene3D::ssr
+    u32 anisotropy = 1;           // Scene3D::anisotropy (1 to 16)
+    f32 texture_lod_bias = 0.0f;  // Scene3D::texture_lod_bias (-2 to 2)
+    f32 specular_aa = 0.0f;       // Scene3D::specular_aa (0 to 1)
     Lod3D lod;
+    GlobalIllumination3D global_illumination; // Scene3D::global_illumination
     // The picture (samples, background, hdr, exposure, bloom). `pick` is not
     // authored and never applied: picking is the game's (see scene3d_view_options).
     ViewOptions3D view;
@@ -75,6 +80,19 @@ struct AnimatorAsset3D {
 // Called by resolve_render3d_assets after models bind, or separately by tools.
 Status3D resolve_animator3d_assets(EcsWorld& world, const std::filesystem::path& content_root,
                                    std::span<const EcsId> entities = {});
+// Each Animator (kin/ecs/animator.hpp: an animation, or a state machine, of a .kinanim played on the entity, its
+// tracks setting its components' fields: Transform3D.position, .rotation and .scale, any described field) given
+// its file, read from content_root, and the fields its tracks can set. update_animators plays them (SceneFrame3D
+// does, in its animation phase). A file read again as it was keeps its animators where they are; one that can't be
+// read keeps the one bound before. SceneSession3D calls it; tools call it after making or loading a world.
+Status3D resolve_animators3d(EcsWorld& world, const std::filesystem::path& content_root,
+                             std::span<const EcsId> entities = {});
+// DecalRenderer3D's images (its texture as colour, its normal map as data), renderer thread. Called by
+// resolve_render3d_assets. A failed load keeps the pictures bound before; an emptied reference clears what it bound.
+Status3D resolve_decals3d_assets(EcsWorld& world, Assets3D& assets, std::span<const EcsId> entities = {});
+// MorphWeights3D's authored form: "smile=0.8, blink=1" (each weight within [-1, 1]); nullopt when it is not.
+std::string format_morph_weights3d(std::span<const MorphWeight3D> weights);
+std::optional<std::vector<MorphWeight3D>> parse_morph_weights3d(std::string_view text);
 // Atomic per entity, renderer thread. Called by resolve_render3d_assets.
 // Invalid replacements retain the last good binding; empty refs clear it.
 Status3D resolve_materials3d_assets(EcsWorld& world, Assets3D& assets, std::span<const EcsId> entities = {});

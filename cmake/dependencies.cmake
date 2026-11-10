@@ -1,5 +1,16 @@
 include(FetchContent)
 
+# SDL_image/SDL_ttf cache this global option. Establish the same default before
+# creating SDL, Lua and Box2D, or the next configure changes those targets'
+# flags and recompiles them all. An explicit caller/toolchain setting wins.
+if(KIN_ENABLE_IMAGE_IO OR KIN_ENABLE_TTF)
+    set(_kin_pic_default ON)
+    if(EMSCRIPTEN)
+        set(_kin_pic_default OFF)
+    endif()
+    option(CMAKE_POSITION_INDEPENDENT_CODE "Build static libraries with -fPIC" ${_kin_pic_default})
+endif()
+
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -7,7 +18,8 @@ set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
-set(SDL_DIALOG OFF CACHE BOOL "" FORCE)
+# kin::FileDialogs: the system's dialogs (on Linux the desktop portal over D-Bus, else zenity).
+set(SDL_DIALOG ON CACHE BOOL "" FORCE)
 set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
 set(SDL_POWER OFF CACHE BOOL "" FORCE)
 set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
@@ -98,6 +110,10 @@ function(kin_configure_sdl)
         kin_prepare_sdl_direct("${sdl3_SOURCE_DIR}" "${sdl3_BINARY_DIR}/../sdl3-direct-src")
         add_subdirectory("${KIN_SDL_DIRECT_SOURCE_DIR}" "${sdl3_BINARY_DIR}")
     endif()
+    if(KIN_HAS_GPU_RENDERER)
+        include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_sdl_gpu.cmake")
+        kin_patch_sdl_gpu_sampler_barriers(SDL3-static)
+    endif()
     if(NOT KIN_ENABLE_IMAGE_IO)
         # SDL 3.4 also embeds PNG/JPEG codecs independently of SDL_image. Keep its
         # built-in disabled-codec stubs, excluding those implementations too.
@@ -165,13 +181,29 @@ if(KIN_ENABLE_PHYSICS)
     set(BOX2D_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(BOX2D_USER_SETTINGS OFF CACHE BOOL "" FORCE)
 
-    FetchContent_Declare(box2d
-        GIT_REPOSITORY https://github.com/erincatto/box2d.git
-        GIT_TAG v2.4.1
-        GIT_SHALLOW TRUE
-    )
+    if(KIN_PHYSICS_BOX2D_V3)
+        set(BOX2D_SAMPLES OFF CACHE BOOL "" FORCE)
+        set(BOX2D_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+        set(BOX2D_BENCHMARKS OFF CACHE BOOL "" FORCE)
+        set(BOX2D_DOCS OFF CACHE BOOL "" FORCE)
+        set(BOX2D_VALIDATE OFF CACHE BOOL "" FORCE)
+        set(BOX2D_PROFILE OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(box2d3
+            GIT_REPOSITORY https://github.com/erincatto/box2d.git
+            GIT_TAG v3.2.0
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(box2d3)
+        set(box2d_SOURCE_DIR "${box2d3_SOURCE_DIR}")
+    else()
+        FetchContent_Declare(box2d
+            GIT_REPOSITORY https://github.com/erincatto/box2d.git
+            GIT_TAG v2.4.1
+            GIT_SHALLOW TRUE
+        )
 
-    FetchContent_MakeAvailable(box2d)
+        FetchContent_MakeAvailable(box2d)
+    endif()
 endif()
 
 if(KIN_ENABLE_SCRIPTING)
@@ -225,7 +257,9 @@ if(KIN_ENABLE_SCRIPTING)
 
     FetchContent_Declare(sol2
         GIT_REPOSITORY https://github.com/ThePhD/sol2.git
-        GIT_TAG v3.3.1
+        # 3.5.0: its optional<T&>::emplace compiles with GCC 15 and Clang 20+
+        # (3.3.1's was rejected before use: ThePhD/sol2#1695), Emscripten's included.
+        GIT_TAG v3.5.0
         GIT_SHALLOW TRUE
     )
 
@@ -323,6 +357,11 @@ if(KIN_ENABLE_IMAGE_IO)
         GIT_REPOSITORY https://github.com/libsdl-org/SDL_image.git
         GIT_TAG release-3.4.4
         GIT_SHALLOW TRUE
+        # Only the vendored libraries for the formats left on above (JPEG and PNG).
+        # AVIF, JXL, TIF and WEBP are off, and their submodules (aom, dav1d,
+        # libjxl, ...) are most of a full checkout's ~1 GB: a configure spent
+        # about three minutes cloning them.
+        GIT_SUBMODULES external/jpeg external/libpng external/zlib
     )
 
     FetchContent_MakeAvailable(SDL3_image)
@@ -441,4 +480,61 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_PHYSICS3D)
     if(NOT EXISTS "${joltphysics_SOURCE_DIR}/LICENSE")
         message(FATAL_ERROR "License text not found: ${joltphysics_SOURCE_DIR}/LICENSE")
     endif()
+endif()
+
+# PocketPy (kin/scripting/python_scripts.hpp, docs/python_scripting.md), only with
+# the experimental PYTHON component: a Python 3 interpreter in C, MIT. The
+# release's amalgamation (pocketpy.c and pocketpy.h) and the repository's
+# LICENSE at that tag, each pinned by its hash; engine/src/scripting/pocketpy_sandbox.c
+# compiles it. A folder holding those three files can stand in for the
+# downloads: -DFETCHCONTENT_SOURCE_DIR_POCKETPY=<folder>.
+if(KIN_ENABLE_PYTHON)
+    if(FETCHCONTENT_SOURCE_DIR_POCKETPY)
+        set(FETCHCONTENT_SOURCE_DIR_POCKETPY_HEADER "${FETCHCONTENT_SOURCE_DIR_POCKETPY}")
+        set(FETCHCONTENT_SOURCE_DIR_POCKETPY_LICENSE "${FETCHCONTENT_SOURCE_DIR_POCKETPY}")
+    endif()
+    set(_kin_pocketpy_release https://github.com/pocketpy/pocketpy/releases/download/v2.2.0)
+    FetchContent_Declare(pocketpy
+        URL ${_kin_pocketpy_release}/pocketpy.c
+        URL_HASH SHA256=0f0c19071b4fd0b37cb292e15bea49ca163f151af901b00893d3a2005bb056e6
+        DOWNLOAD_NO_EXTRACT TRUE
+    )
+    FetchContent_Declare(pocketpy_header
+        URL ${_kin_pocketpy_release}/pocketpy.h
+        URL_HASH SHA256=43864cfa090d65b80915467900430dfae52c769f13d6edb137d0227d1fbe03ad
+        DOWNLOAD_NO_EXTRACT TRUE
+    )
+    FetchContent_Declare(pocketpy_license
+        URL https://raw.githubusercontent.com/pocketpy/pocketpy/v2.2.0/LICENSE
+        URL_HASH SHA256=5ad14c41f26ed1b8c9a0039ae566bc7ce00277aec1634220eae5db2bb8fc54ef
+        DOWNLOAD_NO_EXTRACT TRUE
+    )
+    FetchContent_MakeAvailable(pocketpy pocketpy_header pocketpy_license) # files only: nothing to add_subdirectory
+    foreach(_kin_file "${pocketpy_SOURCE_DIR}/pocketpy.c" "${pocketpy_header_SOURCE_DIR}/pocketpy.h"
+                      "${pocketpy_license_SOURCE_DIR}/LICENSE")
+        if(NOT EXISTS "${_kin_file}")
+            message(FATAL_ERROR "PocketPy: ${_kin_file} not found")
+        endif()
+    endforeach()
+    # Its notice: PocketPy's license, then those of the code its amalgamation
+    # carries (fastermath's logarithms, which its math uses; the Mersenne Twister).
+    file(READ "${pocketpy_license_SOURCE_DIR}/LICENSE" _kin_pocketpy_notice)
+    file(READ "${pocketpy_SOURCE_DIR}/pocketpy.c" _kin_pocketpy_code)
+    foreach(_kin_first "Copyright (c) 2012,2013   Axel Kohlmeyer" "Copyright (c) 2011 Mutsuo Saito")
+        string(FIND "${_kin_pocketpy_code}" "${_kin_first}" _kin_begin)
+        if(_kin_begin EQUAL -1)
+            message(FATAL_ERROR "PocketPy: the notice beginning '${_kin_first}' is not in pocketpy.c")
+        endif()
+        string(SUBSTRING "${_kin_pocketpy_code}" ${_kin_begin} 4000 _kin_part)
+        string(FIND "${_kin_part}" "SUCH DAMAGE." _kin_end)
+        if(_kin_end EQUAL -1)
+            message(FATAL_ERROR "PocketPy: the notice beginning '${_kin_first}' has no end")
+        endif()
+        math(EXPR _kin_end "${_kin_end} + 12")
+        string(SUBSTRING "${_kin_part}" 0 ${_kin_end} _kin_part)
+        string(APPEND _kin_pocketpy_notice "\nPocketPy includes code under this notice:\n\n${_kin_part}\n")
+    endforeach()
+    unset(_kin_pocketpy_code)
+    file(WRITE "${CMAKE_BINARY_DIR}/licenses/PocketPy.txt" "${_kin_pocketpy_notice}")
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};PocketPy.txt|${CMAKE_BINARY_DIR}/licenses/PocketPy.txt" CACHE INTERNAL "")
 endif()

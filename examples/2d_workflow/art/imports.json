@@ -1,0 +1,14 @@
+{
+  "schema": "kin.imports/1",
+  "imports": [{
+    "kind": "atlas",
+    "sprites": [
+      {"id": "pulse", "source": "pulse.png"},
+      {"id": "drone", "source": "drone.png"}
+    ],
+    "output": "sprites/workshop.kinsprites",
+    "texture": "images/workshop.png",
+    "padding": 2,
+    "max_size": 128
+  }]
+}

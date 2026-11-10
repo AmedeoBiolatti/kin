@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/core/json.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/input.hpp>

@@ -1,0 +1,3117 @@
+{
+  "date": "2026-11-07",
+  "base_commit": "c002068aeb841bf9966e521d09e75dd1c95d3138",
+  "source_sha256": {
+    "engine/CMakeLists.txt": {
+      "before": "9a0b846008445e9d680dee0022aac099d4a5e93f159ff2b409fb54e82de31e74",
+      "after": "5eea6ec1fef2e819c96de5a9fae6bbe4bc13fe7d2363543ab3662421761bce2b"
+    },
+    "engine/src/scripting/lua_api_surface.hpp": {
+      "before": "00b21015304cecf5c4b36581221245ac8df2d447e059571df6c9b1fc38a439e9",
+      "after": "fc74632df42bcc9c4569ffe797bab26d4cba1f5ec098e037f76a89a37355a109"
+    },
+    "engine/src/scripting/lua_api_surface.cpp": {
+      "before": null,
+      "after": "1d135b4d8492c272b2e22cda4d48d21704b1f2943ec55321be89462b75a1b55a"
+    }
+  },
+  "change": "Record type metadata once in a non-template function, and move API member enumeration/inspection out of the private header into one new source in kin_scripting. Type registrations, callbacks, receiver checks, constructor/property declarations and public headers are unchanged.",
+  "configuration": {
+    "clang": "21.1.8",
+    "gcc": "15.2.0",
+    "cmake": "4.2.3",
+    "ninja": "1.13.2",
+    "cpu": "Intel Core i9-13900HX",
+    "configuration": "Release, engine/game last optimization flag -O2, KIN_DEV_FAST_SCRIPTING=OFF, PCH ON, compiler cache OFF, LTO OFF, mold",
+    "filesystem": "Linux source; NTFS/FUSE build/output/TMPDIR",
+    "representative_compile_commands": {
+      "clang": {
+        "script_engine": "/usr/bin/clang++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -Winvalid-pch -Xclang -include-pch -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx.pch -Xclang -include -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/script_engine.cpp.o -c /tmp/kin-build-time/engine/src/scripting/script_engine.cpp",
+        "lua_api_surface": "/usr/bin/clang++ -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DLUA_COMPAT_5_3 -DNDEBUG -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -Winvalid-pch -Xclang -include-pch -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting.dir/cmake_pch.hxx.pch -Xclang -include -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_scripting.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting.dir/src/scripting/lua_api_surface.cpp.o -c /tmp/kin-build-time/engine/src/scripting/lua_api_surface.cpp"
+      },
+      "gcc": {
+        "script_engine": "/usr/bin/c++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DLUA_COMPAT_5_3 -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/box2d-src/src/../include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -fpch-preprocess -Winvalid-pch -include /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/engine/CMakeFiles/kin_scripting_scenes.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting_scenes.dir/src/scripting/script_engine.cpp.o -c /tmp/kin-build-time/engine/src/scripting/script_engine.cpp",
+        "lua_api_surface": "/usr/bin/c++ -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DLUA_COMPAT_5_3 -DNDEBUG -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/lua-src/src -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/sol2-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -fpch-preprocess -Winvalid-pch -include /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/engine/CMakeFiles/kin_scripting.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_scripting.dir/src/scripting/lua_api_surface.cpp.o -c /tmp/kin-build-time/engine/src/scripting/lua_api_surface.cpp"
+      }
+    }
+  },
+  "initial_canonical_direct_compiles": [
+    {
+      "phase": "baseline",
+      "source": "/tmp/kin-build-time/engine/src/scripting/script_engine.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 47.02,
+      "user_seconds": 46.3,
+      "system_seconds": 0.65,
+      "max_child_rss_kib": 745748,
+      "object_bytes": 2753088,
+      "load_before": [
+        2.267578125,
+        2.2216796875,
+        2.2216796875
+      ],
+      "load_after": [
+        2.884765625,
+        2.40625,
+        2.28662109375
+      ]
+    },
+    {
+      "phase": "baseline",
+      "source": "/tmp/kin-build-time/engine/src/scripting/entity_scripts.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 34.57,
+      "user_seconds": 33.94,
+      "system_seconds": 0.58,
+      "max_child_rss_kib": 722456,
+      "object_bytes": 2051080,
+      "load_before": [
+        2.884765625,
+        2.40625,
+        2.28662109375
+      ],
+      "load_after": [
+        2.99951171875,
+        2.4892578125,
+        2.3193359375
+      ]
+    },
+    {
+      "phase": "baseline",
+      "source": "/tmp/kin-build-time/engine/src/scripting/lua_workflows2d.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 23.58,
+      "user_seconds": 23.1,
+      "system_seconds": 0.44,
+      "max_child_rss_kib": 597644,
+      "object_bytes": 1393400,
+      "load_before": [
+        2.99951171875,
+        2.4892578125,
+        2.3193359375
+      ],
+      "load_after": [
+        3.0,
+        2.53173828125,
+        2.3388671875
+      ]
+    },
+    {
+      "phase": "baseline",
+      "source": "/tmp/kin-build-time/engine/src/scripting/lua_script.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 3.34,
+      "user_seconds": 3.21,
+      "system_seconds": 0.09,
+      "max_child_rss_kib": 223724,
+      "object_bytes": 233944,
+      "load_before": [
+        3.0,
+        2.53173828125,
+        2.3388671875
+      ],
+      "load_after": [
+        3.0,
+        2.53173828125,
+        2.3388671875
+      ]
+    },
+    {
+      "phase": "baseline",
+      "source": "/tmp/kin-build-time/engine/src/scripting/lua_tasks.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 4.16,
+      "user_seconds": 4.06,
+      "system_seconds": 0.08,
+      "max_child_rss_kib": 234952,
+      "object_bytes": 458240,
+      "load_before": [
+        3.0,
+        2.53173828125,
+        2.3388671875
+      ],
+      "load_after": [
+        3.080078125,
+        2.55615234375,
+        2.34814453125
+      ]
+    }
+  ],
+  "pilot_canonical_direct_compiles": [
+    {
+      "phase": "pilot",
+      "source": "/tmp/kin-build-time/engine/src/scripting/script_engine.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 31.07,
+      "user_seconds": 30.51,
+      "system_seconds": 0.52,
+      "max_child_rss_kib": 733852,
+      "object_bytes": 2655872,
+      "load_before": [
+        3.208984375,
+        2.611328125,
+        2.3701171875
+      ],
+      "load_after": [
+        3.1787109375,
+        2.6650390625,
+        2.39599609375
+      ]
+    },
+    {
+      "phase": "pilot",
+      "source": "/tmp/kin-build-time/engine/src/scripting/entity_scripts.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 23.05,
+      "user_seconds": 22.59,
+      "system_seconds": 0.43,
+      "max_child_rss_kib": 716148,
+      "object_bytes": 2025312,
+      "load_before": [
+        3.1787109375,
+        2.6650390625,
+        2.39599609375
+      ],
+      "load_after": [
+        3.19775390625,
+        2.70947265625,
+        2.41845703125
+      ]
+    },
+    {
+      "phase": "pilot",
+      "source": "/tmp/kin-build-time/engine/src/scripting/lua_workflows2d.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 19.65,
+      "user_seconds": 19.26,
+      "system_seconds": 0.34,
+      "max_child_rss_kib": 586772,
+      "object_bytes": 1362328,
+      "load_before": [
+        3.19775390625,
+        2.70947265625,
+        2.41845703125
+      ],
+      "load_after": [
+        3.140625,
+        2.72900390625,
+        2.43212890625
+      ]
+    },
+    {
+      "phase": "pilot",
+      "source": "/tmp/kin-build-time/engine/src/scripting/lua_script.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 2.52,
+      "user_seconds": 2.44,
+      "system_seconds": 0.06,
+      "max_child_rss_kib": 210228,
+      "object_bytes": 159088,
+      "load_before": [
+        3.140625,
+        2.72900390625,
+        2.43212890625
+      ],
+      "load_after": [
+        3.140625,
+        2.72900390625,
+        2.43212890625
+      ]
+    },
+    {
+      "phase": "pilot",
+      "source": "/tmp/kin-build-time/engine/src/scripting/lua_tasks.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 3.81,
+      "user_seconds": 3.71,
+      "system_seconds": 0.08,
+      "max_child_rss_kib": 227664,
+      "object_bytes": 429112,
+      "load_before": [
+        3.140625,
+        2.72900390625,
+        2.43212890625
+      ],
+      "load_after": [
+        3.12890625,
+        2.73388671875,
+        2.435546875
+      ]
+    },
+    {
+      "phase": "pilot",
+      "source": "/tmp/kin-build-time/engine/src/scripting/lua_api_surface.cpp",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 1.55,
+      "user_seconds": 1.49,
+      "system_seconds": 0.05,
+      "max_child_rss_kib": 187748,
+      "object_bytes": 109264,
+      "load_before": [
+        3.12890625,
+        2.73388671875,
+        2.435546875
+      ],
+      "load_after": [
+        3.1181640625,
+        2.73876953125,
+        2.43896484375
+      ]
+    }
+  ],
+  "initial_pilot_interpretation": "These separate-phase observations have substantial changing machine performance. They are retained as diagnostic samples, not used as a causal speedup ratio. The added shared-file compilation is included in the pilot.",
+  "paired_rebuild_method": {
+    "order": [
+      "before",
+      "after",
+      "after",
+      "before",
+      "after",
+      "before",
+      "before",
+      "after"
+    ],
+    "samples_per_version": 4,
+    "workers": 4,
+    "description": "Compile all five Lua consumers from byte-identical stable source copies with the selected private header in their directory; after adds lua_api_surface.cpp. A custom Ninja manifest uses canonical target flags/PCH and dependency files verify selected-header consumption. Pin script_engine to CPU 2, entity_scripts to 0, workflows2d to 4, and remaining short jobs/control to 6. Link these replacement Lua objects into a cached hex_demo and assert its headless report. The unchanged core/json.cpp control is compiled but not linked. Linker dependency output is diverted to each sample directory. Canonical build inputs and manifests remain unchanged during timing; see the separate benchmark-log correction note.",
+    "scope_limit": "Other engine/game/dependency objects and shaders are prebuilt. Explicit replacement objects force these Lua units into the executable, even if an ordinary game link could omit unused archive members. This measures the affected compilation set and its link, not a complete clean Kin build or normal Ninja scheduling."
+  },
+  "paired_rebuild_samples": [
+    {
+      "run": 0,
+      "phase": "before",
+      "start_utc": "2026-11-07T20:07:18.469063+00:00",
+      "workers": 4,
+      "header_sha256": "00b21015304cecf5c4b36581221245ac8df2d447e059571df6c9b1fc38a439e9",
+      "wall_seconds": 33.67,
+      "user_seconds": 91.83,
+      "system_seconds": 1.67,
+      "max_child_rss_kib": 741820,
+      "load_before": [
+        3.46337890625,
+        3.20263671875,
+        2.67529296875
+      ],
+      "load_after": [
+        5.423828125,
+        3.69384765625,
+        2.8583984375
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2753232,
+          "wall_seconds": 33.47,
+          "user_seconds": 32.94,
+          "system_seconds": 0.46,
+          "max_child_rss_kib": 741820
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2051192,
+          "wall_seconds": 31.11,
+          "user_seconds": 30.48,
+          "system_seconds": 0.55,
+          "max_child_rss_kib": 719092
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1395144,
+          "wall_seconds": 20.41,
+          "user_seconds": 20.01,
+          "system_seconds": 0.36,
+          "max_child_rss_kib": 593592
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.85,
+          "system_seconds": 0.07,
+          "max_child_rss_kib": 141524
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 234016,
+          "wall_seconds": 3.4,
+          "user_seconds": 3.29,
+          "system_seconds": 0.08,
+          "max_child_rss_kib": 224088
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 458736,
+          "wall_seconds": 4.33,
+          "user_seconds": 4.21,
+          "system_seconds": 0.1,
+          "max_child_rss_kib": 235020
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.18,
+        "user_seconds": 0.01,
+        "system_seconds": 0.01,
+        "max_child_rss_kib": 69624
+      },
+      "headless_game_report_matches": true
+    },
+    {
+      "run": 1,
+      "phase": "after",
+      "start_utc": "2026-11-07T20:07:52.278933+00:00",
+      "workers": 4,
+      "header_sha256": "fc74632df42bcc9c4569ffe797bab26d4cba1f5ec098e037f76a89a37355a109",
+      "wall_seconds": 38.52,
+      "user_seconds": 99.75,
+      "system_seconds": 1.84,
+      "max_child_rss_kib": 733876,
+      "load_before": [
+        5.423828125,
+        3.69384765625,
+        2.8583984375
+      ],
+      "load_after": [
+        10.6435546875,
+        5.29150390625,
+        3.4345703125
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2656016,
+          "wall_seconds": 38.31,
+          "user_seconds": 37.61,
+          "system_seconds": 0.56,
+          "max_child_rss_kib": 733876
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2025408,
+          "wall_seconds": 29.86,
+          "user_seconds": 29.16,
+          "system_seconds": 0.5,
+          "max_child_rss_kib": 716548
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1364024,
+          "wall_seconds": 23.62,
+          "user_seconds": 22.85,
+          "system_seconds": 0.38,
+          "max_child_rss_kib": 586972
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 1.16,
+          "user_seconds": 1.07,
+          "system_seconds": 0.07,
+          "max_child_rss_kib": 143848
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 159160,
+          "wall_seconds": 3.27,
+          "user_seconds": 3.13,
+          "system_seconds": 0.1,
+          "max_child_rss_kib": 210444
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 429592,
+          "wall_seconds": 4.37,
+          "user_seconds": 4.22,
+          "system_seconds": 0.1,
+          "max_child_rss_kib": 227984
+        },
+        {
+          "source": "engine/src/scripting/lua_api_surface.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 109264,
+          "wall_seconds": 1.75,
+          "user_seconds": 1.65,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 188188
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.17,
+        "user_seconds": 0.01,
+        "system_seconds": 0.02,
+        "max_child_rss_kib": 69524
+      },
+      "headless_game_report_matches": true
+    },
+    {
+      "run": 2,
+      "phase": "after",
+      "start_utc": "2026-11-07T20:08:31.041155+00:00",
+      "workers": 4,
+      "header_sha256": "fc74632df42bcc9c4569ffe797bab26d4cba1f5ec098e037f76a89a37355a109",
+      "wall_seconds": 45.13,
+      "user_seconds": 113.51,
+      "system_seconds": 2.12,
+      "max_child_rss_kib": 733904,
+      "load_before": [
+        10.6435546875,
+        5.29150390625,
+        3.4345703125
+      ],
+      "load_after": [
+        12.6650390625,
+        6.599609375,
+        3.96728515625
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2656016,
+          "wall_seconds": 44.93,
+          "user_seconds": 44.17,
+          "system_seconds": 0.63,
+          "max_child_rss_kib": 733904
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2025408,
+          "wall_seconds": 29.25,
+          "user_seconds": 28.52,
+          "system_seconds": 0.55,
+          "max_child_rss_kib": 716604
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1364024,
+          "wall_seconds": 26.33,
+          "user_seconds": 25.82,
+          "system_seconds": 0.43,
+          "max_child_rss_kib": 586748
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 1.56,
+          "user_seconds": 1.34,
+          "system_seconds": 0.08,
+          "max_child_rss_kib": 144196
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 159160,
+          "wall_seconds": 4.23,
+          "user_seconds": 4.09,
+          "system_seconds": 0.1,
+          "max_child_rss_kib": 210492
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 429592,
+          "wall_seconds": 6.96,
+          "user_seconds": 6.76,
+          "system_seconds": 0.17,
+          "max_child_rss_kib": 227968
+        },
+        {
+          "source": "engine/src/scripting/lua_api_surface.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 109264,
+          "wall_seconds": 2.87,
+          "user_seconds": 2.76,
+          "system_seconds": 0.09,
+          "max_child_rss_kib": 188084
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.17,
+        "user_seconds": 0.01,
+        "system_seconds": 0.02,
+        "max_child_rss_kib": 69832
+      },
+      "headless_game_report_matches": true
+    },
+    {
+      "run": 3,
+      "phase": "before",
+      "start_utc": "2026-11-07T20:09:16.397459+00:00",
+      "workers": 4,
+      "header_sha256": "00b21015304cecf5c4b36581221245ac8df2d447e059571df6c9b1fc38a439e9",
+      "wall_seconds": 41.79,
+      "user_seconds": 110.49,
+      "system_seconds": 1.94,
+      "max_child_rss_kib": 746052,
+      "load_before": [
+        12.6650390625,
+        6.599609375,
+        3.96728515625
+      ],
+      "load_after": [
+        13.44189453125,
+        7.5859375,
+        4.41259765625
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2753232,
+          "wall_seconds": 41.54,
+          "user_seconds": 40.76,
+          "system_seconds": 0.58,
+          "max_child_rss_kib": 746052
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2051192,
+          "wall_seconds": 31.87,
+          "user_seconds": 31.23,
+          "system_seconds": 0.53,
+          "max_child_rss_kib": 718300
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1395144,
+          "wall_seconds": 27.1,
+          "user_seconds": 26.52,
+          "system_seconds": 0.45,
+          "max_child_rss_kib": 593796
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 1.35,
+          "user_seconds": 1.24,
+          "system_seconds": 0.08,
+          "max_child_rss_kib": 143936
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 234016,
+          "wall_seconds": 5.32,
+          "user_seconds": 5.17,
+          "system_seconds": 0.12,
+          "max_child_rss_kib": 224028
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 458736,
+          "wall_seconds": 5.65,
+          "user_seconds": 5.52,
+          "system_seconds": 0.1,
+          "max_child_rss_kib": 235020
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.22,
+        "user_seconds": 0.01,
+        "system_seconds": 0.02,
+        "max_child_rss_kib": 70104
+      },
+      "headless_game_report_matches": true
+    },
+    {
+      "run": 4,
+      "phase": "after",
+      "start_utc": "2026-11-07T20:09:58.456333+00:00",
+      "workers": 4,
+      "header_sha256": "fc74632df42bcc9c4569ffe797bab26d4cba1f5ec098e037f76a89a37355a109",
+      "wall_seconds": 39.39,
+      "user_seconds": 110.2,
+      "system_seconds": 1.96,
+      "max_child_rss_kib": 734032,
+      "load_before": [
+        13.44189453125,
+        7.5859375,
+        4.41259765625
+      ],
+      "load_after": [
+        13.90771484375,
+        8.4521484375,
+        4.83935546875
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2656016,
+          "wall_seconds": 39.16,
+          "user_seconds": 38.42,
+          "system_seconds": 0.51,
+          "max_child_rss_kib": 734032
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2025408,
+          "wall_seconds": 30.06,
+          "user_seconds": 29.42,
+          "system_seconds": 0.53,
+          "max_child_rss_kib": 716444
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1364024,
+          "wall_seconds": 29.91,
+          "user_seconds": 28.96,
+          "system_seconds": 0.49,
+          "max_child_rss_kib": 587120
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 1.11,
+          "user_seconds": 1.0,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 144196
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 159160,
+          "wall_seconds": 2.89,
+          "user_seconds": 2.79,
+          "system_seconds": 0.08,
+          "max_child_rss_kib": 210544
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 429592,
+          "wall_seconds": 6.92,
+          "user_seconds": 6.72,
+          "system_seconds": 0.12,
+          "max_child_rss_kib": 227972
+        },
+        {
+          "source": "engine/src/scripting/lua_api_surface.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 109264,
+          "wall_seconds": 2.94,
+          "user_seconds": 2.84,
+          "system_seconds": 0.08,
+          "max_child_rss_kib": 188052
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.19,
+        "user_seconds": 0.01,
+        "system_seconds": 0.02,
+        "max_child_rss_kib": 69572
+      },
+      "headless_game_report_matches": true
+    },
+    {
+      "run": 5,
+      "phase": "before",
+      "start_utc": "2026-11-07T20:10:38.019752+00:00",
+      "workers": 4,
+      "header_sha256": "00b21015304cecf5c4b36581221245ac8df2d447e059571df6c9b1fc38a439e9",
+      "wall_seconds": 43.51,
+      "user_seconds": 109.03,
+      "system_seconds": 2.01,
+      "max_child_rss_kib": 746068,
+      "load_before": [
+        13.90771484375,
+        8.4521484375,
+        4.83935546875
+      ],
+      "load_after": [
+        13.85107421875,
+        9.224609375,
+        5.27392578125
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2753232,
+          "wall_seconds": 43.25,
+          "user_seconds": 42.47,
+          "system_seconds": 0.68,
+          "max_child_rss_kib": 746068
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2051192,
+          "wall_seconds": 29.17,
+          "user_seconds": 28.61,
+          "system_seconds": 0.48,
+          "max_child_rss_kib": 722732
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1395144,
+          "wall_seconds": 25.44,
+          "user_seconds": 24.93,
+          "system_seconds": 0.44,
+          "max_child_rss_kib": 598024
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 1.55,
+          "user_seconds": 1.46,
+          "system_seconds": 0.07,
+          "max_child_rss_kib": 143960
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 234016,
+          "wall_seconds": 5.45,
+          "user_seconds": 5.29,
+          "system_seconds": 0.13,
+          "max_child_rss_kib": 224100
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 458736,
+          "wall_seconds": 6.39,
+          "user_seconds": 6.23,
+          "system_seconds": 0.12,
+          "max_child_rss_kib": 234972
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.23,
+        "user_seconds": 0.01,
+        "system_seconds": 0.02,
+        "max_child_rss_kib": 69540
+      },
+      "headless_game_report_matches": true
+    },
+    {
+      "run": 6,
+      "phase": "before",
+      "start_utc": "2026-11-07T20:11:21.765007+00:00",
+      "workers": 4,
+      "header_sha256": "00b21015304cecf5c4b36581221245ac8df2d447e059571df6c9b1fc38a439e9",
+      "wall_seconds": 44.56,
+      "user_seconds": 125.9,
+      "system_seconds": 2.33,
+      "max_child_rss_kib": 745852,
+      "load_before": [
+        13.85107421875,
+        9.224609375,
+        5.27392578125
+      ],
+      "load_after": [
+        12.72412109375,
+        9.693359375,
+        5.626953125
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2753232,
+          "wall_seconds": 44.4,
+          "user_seconds": 43.72,
+          "system_seconds": 0.59,
+          "max_child_rss_kib": 745852
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2051192,
+          "wall_seconds": 35.11,
+          "user_seconds": 34.29,
+          "system_seconds": 0.71,
+          "max_child_rss_kib": 722740
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1395144,
+          "wall_seconds": 32.49,
+          "user_seconds": 31.86,
+          "system_seconds": 0.57,
+          "max_child_rss_kib": 597792
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 1.72,
+          "user_seconds": 1.6,
+          "system_seconds": 0.09,
+          "max_child_rss_kib": 143824
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 234016,
+          "wall_seconds": 6.47,
+          "user_seconds": 6.3,
+          "system_seconds": 0.16,
+          "max_child_rss_kib": 224068
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 458736,
+          "wall_seconds": 8.29,
+          "user_seconds": 8.08,
+          "system_seconds": 0.16,
+          "max_child_rss_kib": 235000
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.12,
+        "user_seconds": 0.01,
+        "system_seconds": 0.01,
+        "max_child_rss_kib": 69580
+      },
+      "headless_game_report_matches": true
+    },
+    {
+      "run": 7,
+      "phase": "after",
+      "start_utc": "2026-11-07T20:12:06.462150+00:00",
+      "workers": 4,
+      "header_sha256": "fc74632df42bcc9c4569ffe797bab26d4cba1f5ec098e037f76a89a37355a109",
+      "wall_seconds": 32.41,
+      "user_seconds": 84.69,
+      "system_seconds": 1.67,
+      "max_child_rss_kib": 732448,
+      "load_before": [
+        12.72412109375,
+        9.693359375,
+        5.626953125
+      ],
+      "load_after": [
+        10.13330078125,
+        9.35498046875,
+        5.64453125
+      ],
+      "compiles": [
+        {
+          "source": "engine/src/scripting/script_engine.cpp",
+          "cpu": 2,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2656016,
+          "wall_seconds": 32.24,
+          "user_seconds": 31.65,
+          "system_seconds": 0.49,
+          "max_child_rss_kib": 732448
+        },
+        {
+          "source": "engine/src/scripting/entity_scripts.cpp",
+          "cpu": 0,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 2025408,
+          "wall_seconds": 24.1,
+          "user_seconds": 23.56,
+          "system_seconds": 0.48,
+          "max_child_rss_kib": 714840
+        },
+        {
+          "source": "engine/src/scripting/lua_workflows2d.cpp",
+          "cpu": 4,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 1364024,
+          "wall_seconds": 21.13,
+          "user_seconds": 20.72,
+          "system_seconds": 0.36,
+          "max_child_rss_kib": 586892
+        },
+        {
+          "source": "engine/src/core/json.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": false,
+          "object_bytes": 15376,
+          "wall_seconds": 0.94,
+          "user_seconds": 0.85,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 143752
+        },
+        {
+          "source": "engine/src/scripting/lua_script.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 159160,
+          "wall_seconds": 2.58,
+          "user_seconds": 2.49,
+          "system_seconds": 0.07,
+          "max_child_rss_kib": 210492
+        },
+        {
+          "source": "engine/src/scripting/lua_tasks.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 429592,
+          "wall_seconds": 3.98,
+          "user_seconds": 3.87,
+          "system_seconds": 0.08,
+          "max_child_rss_kib": 227992
+        },
+        {
+          "source": "engine/src/scripting/lua_api_surface.cpp",
+          "cpu": 6,
+          "selected_variant_header_consumed": true,
+          "object_bytes": 109264,
+          "wall_seconds": 1.57,
+          "user_seconds": 1.48,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 188036
+        }
+      ],
+      "link": {
+        "wall_seconds": 0.15,
+        "user_seconds": 0.01,
+        "system_seconds": 0.01,
+        "max_child_rss_kib": 69848
+      },
+      "headless_game_report_matches": true
+    }
+  ],
+  "benchmark_log_correction": {
+    "issue": "The completed custom-manifest batches used the canonical build working directory without setting Ninja builddir, appending 60 unique benchmark-only output records to its .ninja_log. There was no concurrent Ninja/configure, no canonical output replacement, and the canonical object records were retained (227 canonical engine records in the captured log).",
+    "remedy": "Keep all completed measurements and the original harness/log snapshot. Set builddir to each sample directory in the reproduction harness. The implementation-edit probe requires a clean canonical plan; finish all compilers before metadata cleanup and final build verification. Ninja recompact retains existing unknown outputs, so cleanup filters exactly the 60 recorded benchmark object/executable paths, retaining all other log rows byte-for-byte, then requires a no-compile/no-link canonical build.",
+    "original_harness": "import datetime,hashlib,json,os,pathlib,re,shlex,subprocess\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');base=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');build=base/'kin-build-time-clang';out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};db=json.loads((build/'compile_commands.json').read_text());results=out/'paired-builds.json';assert not results.exists(),'Keep previous observations; do not overwrite.'\nnames=['script_engine','entity_scripts','lua_workflows2d','json','lua_script','lua_tasks'];cpus={'script_engine':2,'entity_scripts':0,'lua_workflows2d':4,'json':6,'lua_script':6,'lua_tasks':6,'lua_api_surface':6};source_map={name:('engine/src/core/json.cpp' if name=='json' else 'engine/src/scripting/'+name+'.cpp') for name in names+['lua_api_surface']}\nfor phase,header in [('before','before-lua_api_surface.hpp'),('after','pilot-lua_api_surface.hpp')]:\n variant=out/('variant-'+phase);variant.mkdir(exist_ok=True);(variant/'lua_api_surface.hpp').write_bytes((out/header).read_bytes())\n for name in names+(['lua_api_surface'] if phase=='after' else []):\n  if name=='json':continue\n  source=repo/source_map[name]\n  if name!='lua_api_surface':assert source.read_bytes()==subprocess.check_output(['git','show','c002068:'+source_map[name]],cwd=repo)\n  (variant/(name+'.cpp')).write_bytes(source.read_bytes())\ncommands=subprocess.check_output(['ninja','-C',str(build),'-t','commands','hex_demo'],env=env,text=True);line=next(l for l in commands.splitlines() if '-o bin/hex_demo ' in l);args=shlex.split(line);begin=next(i for i,x in enumerate(args) if x in ['/usr/bin/clang++','/usr/bin/c++']);end=next((i for i in range(begin,len(args)) if args[i]=='&&'),len(args));canonical_link=args[begin:end];rows=[]\ndef ninja_escape(s):return s.replace('$','$$')\nfor run,phase in enumerate(['before','after','after','before','after','before','before','after']):\n assert_no_active_compilers()\n work=out/f'paired-{run}-{phase}';work.mkdir();variant=out/('variant-'+phase);selected=names+(['lua_api_surface'] if phase=='after' else []);manifest=[];objects={}\n for index,name in enumerate(selected):\n  entry=next(e for e in db if e['file'].endswith('/'+source_map[name]));cmd=shlex.split(entry['command']);obj=work/(name+'.o');objects[name]=obj;cmd[cmd.index('-o')+1]=str(obj)\n  if name!='json':cmd[cmd.index('-c')+1]=str(variant/(name+'.cpp'));cmd[1:1]=['-iquote',str(repo/'engine/src/scripting')]\n  cmd+=['-MD','-MF',str(work/(name+'.d'))]\n  measured=['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(work/(name+'.stats.json')),'taskset','-c',str(cpus[name]),*cmd]\n  manifest+=['rule compile_'+name,'  command = '+ninja_escape(shlex.join(measured)),'  description = CXX '+name,'build '+str(obj)+': compile_'+name,'']\n exe=work/'hex_demo';link=list(canonical_link);link[link.index('-o')+1]=str(exe);link=[('--dependency-file='+str(work/'link.d')) if a.startswith('--dependency-file=') else a for a in link];first_archive=next(i for i,a in enumerate(link) if a.endswith('.a'));link[first_archive:first_archive]=[str(objects[n]) for n in selected if n!='json'];link=['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(work/'link.stats.json'),*link]\n manifest+=['rule game_link','  command = '+ninja_escape(shlex.join(link)),'  description = LINK hex_demo','build '+str(exe)+': game_link '+' '.join(str(o) for o in objects.values()),'default '+str(exe),''];(work/'build.ninja').write_text('\\n'.join(manifest));load=os.getloadavg();started=datetime.datetime.now(datetime.timezone.utc).isoformat()\n with (work/'build.log').open('w') as log:r=subprocess.run(['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(work/'build.stats.json'),'taskset','-c','0,2,4,6','ninja','-f',str(work/'build.ninja'),'-j4'],cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT)\n if r.returncode:print((work/'build.log').read_text()[-7000:],flush=True);raise SystemExit(r.returncode)\n compiler_rows=[]\n for name in selected:\n  consumed=str(variant/'lua_api_surface.hpp') in (work/(name+'.d')).read_text();assert consumed==(name!='json'),(name,phase,'private-header selection')\n  if name!='json':assert str(repo/'engine/src/scripting/lua_api_surface.hpp') not in (work/(name+'.d')).read_text()\n  compiler_rows.append({'source':source_map[name],'cpu':cpus[name],'selected_variant_header_consumed':consumed,'object_bytes':objects[name].stat().st_size,**json.loads((work/(name+'.stats.json')).read_text())})\n smoke=subprocess.run([str(exe),'--headless','--render','--frames=10','--report=-'],cwd=build/'games/hex_demo',env=env,text=True,capture_output=True);(work/'smoke.log').write_text(smoke.stdout+smoke.stderr);assert smoke.returncode==0,smoke.stderr;assert re.search(r'\"path_cells\":\\s*17,\\s*\"path_cost\":\\s*170,\\s*\"reachable_cells\":\\s*28',smoke.stdout),smoke.stdout\n row={'run':run,'phase':phase,'start_utc':started,'workers':4,'header_sha256':hashlib.sha256((variant/'lua_api_surface.hpp').read_bytes()).hexdigest(),**json.loads((work/'build.stats.json').read_text()),'load_before':load,'load_after':os.getloadavg(),'compiles':compiler_rows,'link':json.loads((work/'link.stats.json').read_text()),'headless_game_report_matches':True};rows.append(row);results.write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps({'run':run,'phase':phase,'build_wall_seconds':row['wall_seconds'],'script_engine_seconds':next(r['wall_seconds'] for r in compiler_rows if r['source'].endswith('/script_engine.cpp')),'lua_compile_cpu_seconds':sum(r['user_seconds']+r['system_seconds'] for r in compiler_rows if not r['source'].endswith('/core/json.cpp')),'control_seconds':next(r['wall_seconds'] for r in compiler_rows if r['source'].endswith('/core/json.cpp'))}),flush=True)\n"
+  },
+  "serial_method": "Follow-up because the unchanged control varied substantially in the parallel batch. One ABBA then one BAAB block, four observations/version, matching target flags/PCH and stable source/header copies. Pin each operation to CPU 2. Bracket each uninstrumented script_engine compile with an unchanged core/json.cpp compile on that same CPU. Keep every original parallel and serial sample; do not normalize by control timing or discard outliers.",
+  "serial_samples": [
+    {
+      "run": 0,
+      "phase": "before",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        10.482421875,
+        9.533203125,
+        5.86083984375
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 1.49,
+          "user_seconds": 1.39,
+          "system_seconds": 0.09,
+          "max_child_rss_kib": 143928
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2753232,
+          "wall_seconds": 35.07,
+          "user_seconds": 34.45,
+          "system_seconds": 0.55,
+          "max_child_rss_kib": 745852
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.85,
+          "system_seconds": 0.07,
+          "max_child_rss_kib": 143980
+        }
+      ],
+      "load_after": [
+        7.91357421875,
+        9.00537109375,
+        5.83935546875
+      ]
+    },
+    {
+      "run": 1,
+      "phase": "after",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        7.91357421875,
+        9.00537109375,
+        5.83935546875
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.91,
+          "user_seconds": 0.85,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 143972
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2656016,
+          "wall_seconds": 31.23,
+          "user_seconds": 30.75,
+          "system_seconds": 0.43,
+          "max_child_rss_kib": 733676
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.86,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 143680
+        }
+      ],
+      "load_after": [
+        7.21875,
+        8.732421875,
+        5.84912109375
+      ]
+    },
+    {
+      "run": 2,
+      "phase": "after",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        7.21875,
+        8.732421875,
+        5.84912109375
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.85,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 144236
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2656016,
+          "wall_seconds": 31.8,
+          "user_seconds": 31.31,
+          "system_seconds": 0.43,
+          "max_child_rss_kib": 733904
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.85,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 143640
+        }
+      ],
+      "load_after": [
+        6.01611328125,
+        8.25634765625,
+        5.79541015625
+      ]
+    },
+    {
+      "run": 3,
+      "phase": "before",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        6.01611328125,
+        8.25634765625,
+        5.79541015625
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.9,
+          "user_seconds": 0.85,
+          "system_seconds": 0.04,
+          "max_child_rss_kib": 144248
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2753232,
+          "wall_seconds": 32.2,
+          "user_seconds": 31.68,
+          "system_seconds": 0.47,
+          "max_child_rss_kib": 745804
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.91,
+          "user_seconds": 0.84,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 143984
+        }
+      ],
+      "load_after": [
+        5.02685546875,
+        7.7666015625,
+        5.72216796875
+      ]
+    },
+    {
+      "run": 4,
+      "phase": "after",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        5.02685546875,
+        7.7666015625,
+        5.72216796875
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.91,
+          "user_seconds": 0.84,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 143988
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2656016,
+          "wall_seconds": 31.82,
+          "user_seconds": 31.36,
+          "system_seconds": 0.41,
+          "max_child_rss_kib": 733676
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.92,
+          "user_seconds": 0.87,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 144212
+        }
+      ],
+      "load_after": [
+        5.1162109375,
+        7.51904296875,
+        5.70458984375
+      ]
+    },
+    {
+      "run": 5,
+      "phase": "before",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        5.1162109375,
+        7.51904296875,
+        5.70458984375
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.87,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 143660
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2753232,
+          "wall_seconds": 32.73,
+          "user_seconds": 32.2,
+          "system_seconds": 0.45,
+          "max_child_rss_kib": 745796
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.91,
+          "user_seconds": 0.84,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 144240
+        }
+      ],
+      "load_after": [
+        4.65869140625,
+        7.1552734375,
+        5.65087890625
+      ]
+    },
+    {
+      "run": 6,
+      "phase": "before",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        4.65869140625,
+        7.1552734375,
+        5.65087890625
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.9,
+          "user_seconds": 0.83,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 143940
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2753232,
+          "wall_seconds": 31.76,
+          "user_seconds": 31.21,
+          "system_seconds": 0.49,
+          "max_child_rss_kib": 745528
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.93,
+          "user_seconds": 0.84,
+          "system_seconds": 0.08,
+          "max_child_rss_kib": 143952
+        }
+      ],
+      "load_after": [
+        3.72119140625,
+        6.6455078125,
+        5.53515625
+      ]
+    },
+    {
+      "run": 7,
+      "phase": "after",
+      "affinity": [
+        2
+      ],
+      "load_before": [
+        3.72119140625,
+        6.6455078125,
+        5.53515625
+      ],
+      "steps": [
+        {
+          "step": "control-before",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.92,
+          "user_seconds": 0.86,
+          "system_seconds": 0.05,
+          "max_child_rss_kib": 143920
+        },
+        {
+          "step": "binding",
+          "source": "engine/src/scripting/script_engine.cpp",
+          "object_bytes": 2656016,
+          "wall_seconds": 31.13,
+          "user_seconds": 30.64,
+          "system_seconds": 0.44,
+          "max_child_rss_kib": 733640
+        },
+        {
+          "step": "control-after",
+          "source": "engine/src/core/json.cpp",
+          "object_bytes": 15376,
+          "wall_seconds": 0.92,
+          "user_seconds": 0.85,
+          "system_seconds": 0.06,
+          "max_child_rss_kib": 143940
+        }
+      ],
+      "load_after": [
+        3.17919921875,
+        6.19287109375,
+        5.423828125
+      ]
+    }
+  ],
+  "summary": {
+    "before": {
+      "paired_lua_rebuild_link_wall_seconds": {
+        "median": 42.65,
+        "min": 33.67,
+        "max": 44.56
+      },
+      "paired_lua_compile_cpu_seconds": {
+        "median": 110.17999999999999,
+        "min": 92.48,
+        "max": 126.44
+      },
+      "parallel_unchanged_control_seconds": {
+        "median": 1.4500000000000002,
+        "min": 0.93,
+        "max": 1.72
+      },
+      "serial_script_engine_wall_seconds": {
+        "median": 32.465,
+        "min": 31.76,
+        "max": 35.07
+      },
+      "serial_control_before_seconds": {
+        "median": 0.915,
+        "min": 0.9,
+        "max": 1.49
+      },
+      "serial_control_after_seconds": {
+        "median": 0.92,
+        "min": 0.91,
+        "max": 0.93
+      }
+    },
+    "after": {
+      "paired_lua_rebuild_link_wall_seconds": {
+        "median": 38.955,
+        "min": 32.41,
+        "max": 45.13
+      },
+      "paired_lua_compile_cpu_seconds": {
+        "median": 105.64000000000001,
+        "min": 85.31,
+        "max": 114.09
+      },
+      "parallel_unchanged_control_seconds": {
+        "median": 1.135,
+        "min": 0.94,
+        "max": 1.56
+      },
+      "serial_script_engine_wall_seconds": {
+        "median": 31.515,
+        "min": 31.13,
+        "max": 31.82
+      },
+      "serial_control_before_seconds": {
+        "median": 0.915,
+        "min": 0.91,
+        "max": 0.93
+      },
+      "serial_control_after_seconds": {
+        "median": 0.925,
+        "min": 0.92,
+        "max": 0.93
+      }
+    }
+  },
+  "timing_limits": "Host processes, SMT siblings, CPU frequency and I/O are not isolated. The parallel control changed substantially, so its before/after ratio is not a reliable causal estimate. Serial brackets expose within-run variation as well. These data cannot establish a precise whole-project clean-build improvement or cumulative speedup.",
+  "fresh_clang_traces": [
+    {
+      "phase": "before",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "instrumentation": "-ftime-trace -ftime-trace-granularity=1000",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 34.74,
+      "user_seconds": 34.16,
+      "system_seconds": 0.49,
+      "max_child_rss_kib": 752356,
+      "load_before": [
+        3.17919921875,
+        6.19287109375,
+        5.423828125
+      ],
+      "load_after": [
+        2.79833984375,
+        5.759765625,
+        5.30615234375
+      ],
+      "totals": {
+        "ExecuteCompiler": {
+          "seconds": 34.621261,
+          "count": 1
+        },
+        "Backend": {
+          "seconds": 22.99582,
+          "count": 1
+        },
+        "Optimizer": {
+          "seconds": 16.548995,
+          "count": 1
+        },
+        "ModuleInlinerWrapperPass": {
+          "seconds": 13.888578,
+          "count": 1
+        },
+        "ModuleToPostOrderCGSCCPassAdaptor": {
+          "seconds": 13.797829,
+          "count": 1
+        },
+        "DevirtSCCRepeatedPass": {
+          "seconds": 13.577284,
+          "count": 15767
+        },
+        "PassManager<LazyCallGraph::SCC, CGSCCAnalysisManager, LazyCallGraph &, CGSCCUpdateResult &>": {
+          "seconds": 13.513791,
+          "count": 15842
+        },
+        "PassManager<Function>": {
+          "seconds": 11.735592,
+          "count": 51347
+        },
+        "Frontend": {
+          "seconds": 11.535246,
+          "count": 2
+        },
+        "CGSCCToFunctionPassAdaptor": {
+          "seconds": 9.962997,
+          "count": 31684
+        },
+        "InstantiateFunction": {
+          "seconds": 7.329785,
+          "count": 2277
+        },
+        "CodeGenPasses": {
+          "seconds": 6.440418,
+          "count": 1
+        },
+        "OptModule": {
+          "seconds": 6.439863,
+          "count": 1
+        },
+        "OptFunction": {
+          "seconds": 6.368625,
+          "count": 2212
+        },
+        "RunPass": {
+          "seconds": 6.317331,
+          "count": 437976
+        },
+        "PerformPendingInstantiations": {
+          "seconds": 5.55541,
+          "count": 1
+        },
+        "InstantiateClass": {
+          "seconds": 5.122376,
+          "count": 12352
+        },
+        "ParseDeclarationOrFunctionDefinition": {
+          "seconds": 3.765187,
+          "count": 1327
+        },
+        "InlinerPass": {
+          "seconds": 2.967132,
+          "count": 15842
+        },
+        "Source": {
+          "seconds": 2.863864,
+          "count": 20
+        },
+        "InstCombinePass": {
+          "seconds": 2.844701,
+          "count": 86638
+        },
+        "ParseClass": {
+          "seconds": 2.67268,
+          "count": 608
+        },
+        "ModuleToFunctionPassAdaptor": {
+          "seconds": 1.968618,
+          "count": 6
+        },
+        "CodeGen Function": {
+          "seconds": 1.616204,
+          "count": 19254
+        },
+        "ParseFunctionDefinition": {
+          "seconds": 1.469122,
+          "count": 632
+        },
+        "GVNPass": {
+          "seconds": 1.03265,
+          "count": 15840
+        },
+        "FunctionToLoopPassAdaptor": {
+          "seconds": 0.932082,
+          "count": 51944
+        },
+        "SimplifyCFGPass": {
+          "seconds": 0.840067,
+          "count": 101079
+        },
+        "DSEPass": {
+          "seconds": 0.786022,
+          "count": 15840
+        },
+        "EarlyCSEPass": {
+          "seconds": 0.773936,
+          "count": 32493
+        },
+        "CorrelatedValuePropagationPass": {
+          "seconds": 0.645817,
+          "count": 31680
+        },
+        "MemorySSAAnalysis": {
+          "seconds": 0.590735,
+          "count": 27037
+        },
+        "BlockFrequencyAnalysis": {
+          "seconds": 0.538066,
+          "count": 32971
+        },
+        "PassManager<Loop, LoopAnalysisManager, LoopStandardAnalysisResults &, LPMUpdater &>": {
+          "seconds": 0.502323,
+          "count": 3926
+        },
+        "JumpThreadingPass": {
+          "seconds": 0.486138,
+          "count": 31680
+        },
+        "SROAPass": {
+          "seconds": 0.485584,
+          "count": 50545
+        },
+        "EvaluateAsRValue": {
+          "seconds": 0.435961,
+          "count": 68337
+        },
+        "ConstraintEliminationPass": {
+          "seconds": 0.423967,
+          "count": 15840
+        },
+        "PostOrderFunctionAttrsPass": {
+          "seconds": 0.417026,
+          "count": 31684
+        },
+        "BranchProbabilityAnalysis": {
+          "seconds": 0.381565,
+          "count": 32971
+        },
+        "Load External Specializations for ": {
+          "seconds": 0.343168,
+          "count": 161403
+        },
+        "MemCpyOptPass": {
+          "seconds": 0.295034,
+          "count": 15840
+        },
+        "EvaluateAsConstantExpr": {
+          "seconds": 0.29317,
+          "count": 169781
+        },
+        "SCCPPass": {
+          "seconds": 0.287354,
+          "count": 15840
+        },
+        "AAManager": {
+          "seconds": 0.275552,
+          "count": 67784
+        },
+        "ADCEPass": {
+          "seconds": 0.274963,
+          "count": 15840
+        },
+        "GlobalOptPass": {
+          "seconds": 0.236691,
+          "count": 2
+        },
+        "IPSCCPPass": {
+          "seconds": 0.193743,
+          "count": 1
+        },
+        "LoopAnalysis": {
+          "seconds": 0.188273,
+          "count": 52621
+        },
+        "BDCEPass": {
+          "seconds": 0.182571,
+          "count": 15840
+        },
+        "DominatorTreeAnalysis": {
+          "seconds": 0.17827,
+          "count": 84456
+        },
+        "ReassociatePass": {
+          "seconds": 0.16319,
+          "count": 15840
+        },
+        "RunLoopPass": {
+          "seconds": 0.161859,
+          "count": 1662
+        },
+        "SLPVectorizerPass": {
+          "seconds": 0.149687,
+          "count": 2212
+        },
+        "LoopIdiomRecognizePass": {
+          "seconds": 0.147276,
+          "count": 1717
+        },
+        "TailCallElimPass": {
+          "seconds": 0.140417,
+          "count": 18052
+        },
+        "PostDominatorTreeAnalysis": {
+          "seconds": 0.13228,
+          "count": 48321
+        },
+        "EvaluateAsInitializer": {
+          "seconds": 0.125421,
+          "count": 22317
+        },
+        "LICMPass": {
+          "seconds": 0.121009,
+          "count": 5620
+        },
+        "BasicAA": {
+          "seconds": 0.105027,
+          "count": 67784
+        },
+        "IndVarSimplifyPass": {
+          "seconds": 0.104242,
+          "count": 1717
+        },
+        "LoopSimplifyPass": {
+          "seconds": 0.094637,
+          "count": 51944
+        },
+        "CalledValuePropagationPass": {
+          "seconds": 0.081156,
+          "count": 1
+        },
+        "EvaluateAsBooleanCondition": {
+          "seconds": 0.073026,
+          "count": 23370
+        },
+        "ScalarEvolutionAnalysis": {
+          "seconds": 0.068959,
+          "count": 19946
+        },
+        "LoopVectorizePass": {
+          "seconds": 0.065699,
+          "count": 2212
+        },
+        "AlwaysInlinerPass": {
+          "seconds": 0.062263,
+          "count": 1
+        },
+        "AggressiveInstCombinePass": {
+          "seconds": 0.062227,
+          "count": 15840
+        },
+        "LoopDeletionPass": {
+          "seconds": 0.060417,
+          "count": 2206
+        },
+        "LoopUnrollPass": {
+          "seconds": 0.059442,
+          "count": 2212
+        },
+        "RequireAnalysisPass<llvm::GlobalsAA, llvm::Module, llvm::AnalysisManager<Module>>": {
+          "seconds": 0.054238,
+          "count": 1
+        },
+        "GlobalsAA": {
+          "seconds": 0.05423,
+          "count": 1
+        },
+        "CallGraphAnalysis": {
+          "seconds": 0.054076,
+          "count": 2
+        },
+        "AssumptionAnalysis": {
+          "seconds": 0.048488,
+          "count": 34638
+        },
+        "EvaluateForOverflow": {
+          "seconds": 0.044734,
+          "count": 13282
+        },
+        "LoopFullUnrollPass": {
+          "seconds": 0.04311,
+          "count": 1675
+        },
+        "DeadArgumentEliminationPass": {
+          "seconds": 0.03898,
+          "count": 1
+        },
+        "Stable Hash for Template Arguments": {
+          "seconds": 0.03823,
+          "count": 161519
+        },
+        "VectorCombinePass": {
+          "seconds": 0.037429,
+          "count": 18052
+        },
+        "LCSSAPass": {
+          "seconds": 0.035686,
+          "count": 51944
+        },
+        "LoopLoadEliminationPass": {
+          "seconds": 0.033255,
+          "count": 2212
+        },
+        "InstSimplifyPass": {
+          "seconds": 0.033145,
+          "count": 2212
+        },
+        "EvaluateAsInt": {
+          "seconds": 0.032111,
+          "count": 17524
+        },
+        "Float2IntPass": {
+          "seconds": 0.031889,
+          "count": 2212
+        },
+        "GlobalDCEPass": {
+          "seconds": 0.031204,
+          "count": 2
+        },
+        "TargetIRAnalysis": {
+          "seconds": 0.030836,
+          "count": 34639
+        },
+        "InferAlignmentPass": {
+          "seconds": 0.028312,
+          "count": 4424
+        },
+        "RecomputeGlobalsAAPass": {
+          "seconds": 0.026515,
+          "count": 1
+        },
+        "FunctionAnalysisManagerCGSCCProxy": {
+          "seconds": 0.025544,
+          "count": 15791
+        },
+        "LoopRotatePass": {
+          "seconds": 0.022079,
+          "count": 2209
+        },
+        "LoopDistributePass": {
+          "seconds": 0.02206,
+          "count": 2212
+        },
+        "LazyCallGraphAnalysis": {
+          "seconds": 0.021799,
+          "count": 2
+        },
+        "LowerExpectIntrinsicPass": {
+          "seconds": 0.020791,
+          "count": 16653
+        },
+        "ReversePostOrderFunctionAttrsPass": {
+          "seconds": 0.020701,
+          "count": 1
+        },
+        "LoopInstSimplifyPass": {
+          "seconds": 0.018518,
+          "count": 1720
+        },
+        "CoroAnnotationElidePass": {
+          "seconds": 0.017935,
+          "count": 15842
+        },
+        "InnerAnalysisManagerProxy<CGSCCAnalysisManager, Module>": {
+          "seconds": 0.017893,
+          "count": 1
+        },
+        "RequireAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis, llvm::Function, llvm::AnalysisManager<Function>>": {
+          "seconds": 0.017631,
+          "count": 15844
+        },
+        "LibCallsShrinkWrapPass": {
+          "seconds": 0.015626,
+          "count": 15840
+        },
+        "TargetLibraryAnalysis": {
+          "seconds": 0.015474,
+          "count": 37264
+        },
+        "MemoryDependenceAnalysis": {
+          "seconds": 0.014636,
+          "count": 15840
+        },
+        "LastRunTrackingAnalysis": {
+          "seconds": 0.013698,
+          "count": 47822
+        },
+        "LoopAccessAnalysis": {
+          "seconds": 0.01246,
+          "count": 2212
+        },
+        "CGProfilePass": {
+          "seconds": 0.012437,
+          "count": 1
+        },
+        "EphemeralValuesAnalysis": {
+          "seconds": 0.012347,
+          "count": 27950
+        },
+        "AssignmentTrackingPass": {
+          "seconds": 0.012272,
+          "count": 1
+        },
+        "MergedLoadStoreMotionPass": {
+          "seconds": 0.011619,
+          "count": 15840
+        },
+        "isIntegerConstantExpr": {
+          "seconds": 0.011349,
+          "count": 12008
+        },
+        "OuterAnalysisManagerProxy<ModuleAnalysisManager, Function>": {
+          "seconds": 0.011211,
+          "count": 34622
+        },
+        "LoopSimplifyCFGPass": {
+          "seconds": 0.010905,
+          "count": 1720
+        },
+        "LazyValueAnalysis": {
+          "seconds": 0.010564,
+          "count": 31680
+        },
+        "ScopedNoAliasAA": {
+          "seconds": 0.010077,
+          "count": 34622
+        },
+        "OptimizationRemarkEmitterAnalysis": {
+          "seconds": 0.009701,
+          "count": 34627
+        },
+        "DemandedBitsAnalysis": {
+          "seconds": 0.00929,
+          "count": 18228
+        },
+        "PromotePass": {
+          "seconds": 0.009216,
+          "count": 16642
+        },
+        "CoroSplitPass": {
+          "seconds": 0.009212,
+          "count": 15842
+        },
+        "TypeBasedAA": {
+          "seconds": 0.008959,
+          "count": 34622
+        },
+        "EvaluateKnownConstInt": {
+          "seconds": 0.008206,
+          "count": 13227
+        },
+        "LowerConstantIntrinsicsPass": {
+          "seconds": 0.008087,
+          "count": 2212
+        },
+        "CoroElidePass": {
+          "seconds": 0.007279,
+          "count": 15840
+        },
+        "MoveAutoInitPass": {
+          "seconds": 0.0072,
+          "count": 15840
+        },
+        "OpenMPOptCGSCCPass": {
+          "seconds": 0.006705,
+          "count": 15842
+        },
+        "OuterAnalysisManagerProxy<ModuleAnalysisManager, LazyCallGraph::SCC, LazyCallGraph &>": {
+          "seconds": 0.006162,
+          "count": 15791
+        },
+        "InvalidateAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis>": {
+          "seconds": 0.0057,
+          "count": 2259
+        },
+        "SpeculativeExecutionPass": {
+          "seconds": 0.005443,
+          "count": 15840
+        },
+        "SimpleLoopUnswitchPass": {
+          "seconds": 0.005212,
+          "count": 1729
+        },
+        "InjectTLIMappings": {
+          "seconds": 0.004923,
+          "count": 2212
+        },
+        "EntryExitInstrumenterPass": {
+          "seconds": 0.004078,
+          "count": 16653
+        },
+        "AnnotationRemarksPass": {
+          "seconds": 0.003691,
+          "count": 2212
+        },
+        "InvalidateAnalysisPass<llvm::AAManager>": {
+          "seconds": 0.003551,
+          "count": 15773
+        },
+        "ShouldNotRunFunctionPassesAnalysis": {
+          "seconds": 0.003376,
+          "count": 15840
+        },
+        "InferFunctionAttrsPass": {
+          "seconds": 0.003329,
+          "count": 1
+        },
+        "DivRemPairsPass": {
+          "seconds": 0.003026,
+          "count": 2212
+        },
+        "ReadAST": {
+          "seconds": 0.002345,
+          "count": 1
+        },
+        "WarnMissedTransformationsPass": {
+          "seconds": 0.001319,
+          "count": 2212
+        },
+        "InnerAnalysisManagerProxy<LoopAnalysisManager, Function>": {
+          "seconds": 0.001248,
+          "count": 2576
+        },
+        "OuterAnalysisManagerProxy<FunctionAnalysisManager, Loop, LoopStandardAnalysisResults &>": {
+          "seconds": 0.000955,
+          "count": 1721
+        },
+        "ConstantMergePass": {
+          "seconds": 0.000948,
+          "count": 1
+        },
+        "AlignmentFromAssumptionsPass": {
+          "seconds": 0.000929,
+          "count": 2212
+        },
+        "ExtraLoopPassManager<llvm::ShouldRunExtraSimpleLoopUnswitch>": {
+          "seconds": 0.000736,
+          "count": 1717
+        },
+        "LoopSinkPass": {
+          "seconds": 0.000491,
+          "count": 2212
+        },
+        "Read Loaded AST": {
+          "seconds": 0.0004,
+          "count": 1
+        },
+        "EvaluateAsLValue": {
+          "seconds": 0.000283,
+          "count": 156
+        },
+        "EliminateAvailableExternallyPass": {
+          "seconds": 0.000188,
+          "count": 1
+        },
+        "RelLookupTableConverterPass": {
+          "seconds": 0.000116,
+          "count": 1
+        },
+        "ShouldRunExtraVectorPasses": {
+          "seconds": 3.9e-05,
+          "count": 33
+        },
+        "CoroEarlyPass": {
+          "seconds": 1.2e-05,
+          "count": 1
+        },
+        "CoroCleanupPass": {
+          "seconds": 5e-06,
+          "count": 1
+        },
+        "ShouldRunExtraSimpleLoopUnswitch": {
+          "seconds": 3e-06,
+          "count": 9
+        },
+        "InnerAnalysisManagerProxy<FunctionAnalysisManager, Module>": {
+          "seconds": 3e-06,
+          "count": 5
+        },
+        "Annotation2MetadataPass": {
+          "seconds": 3e-06,
+          "count": 1
+        },
+        "ProfileSummaryAnalysis": {
+          "seconds": 1e-06,
+          "count": 1
+        },
+        "OpenMPOptPass": {
+          "seconds": 1e-06,
+          "count": 1
+        },
+        "ForceFunctionAttrsPass": {
+          "seconds": 1e-06,
+          "count": 1
+        },
+        "InlineAdvisorAnalysis": {
+          "seconds": 0.0,
+          "count": 1
+        },
+        "RequireAnalysisPass<llvm::ProfileSummaryAnalysis, llvm::Module, llvm::AnalysisManager<Module>>": {
+          "seconds": 0.0,
+          "count": 1
+        }
+      }
+    },
+    {
+      "phase": "after",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "instrumentation": "-ftime-trace -ftime-trace-granularity=1000",
+      "affinity": [
+        2
+      ],
+      "wall_seconds": 33.86,
+      "user_seconds": 33.29,
+      "system_seconds": 0.49,
+      "max_child_rss_kib": 740156,
+      "load_before": [
+        2.79833984375,
+        5.759765625,
+        5.30615234375
+      ],
+      "load_after": [
+        2.7685546875,
+        5.4638671875,
+        5.22119140625
+      ],
+      "totals": {
+        "ExecuteCompiler": {
+          "seconds": 33.733571,
+          "count": 1
+        },
+        "Backend": {
+          "seconds": 22.339399,
+          "count": 1
+        },
+        "Optimizer": {
+          "seconds": 16.244977,
+          "count": 1
+        },
+        "ModuleInlinerWrapperPass": {
+          "seconds": 13.820275,
+          "count": 1
+        },
+        "ModuleToPostOrderCGSCCPassAdaptor": {
+          "seconds": 13.73748,
+          "count": 1
+        },
+        "DevirtSCCRepeatedPass": {
+          "seconds": 13.530407,
+          "count": 15429
+        },
+        "PassManager<LazyCallGraph::SCC, CGSCCAnalysisManager, LazyCallGraph &, CGSCCUpdateResult &>": {
+          "seconds": 13.464619,
+          "count": 15501
+        },
+        "PassManager<Function>": {
+          "seconds": 11.544441,
+          "count": 50236
+        },
+        "Frontend": {
+          "seconds": 11.302651,
+          "count": 2
+        },
+        "CGSCCToFunctionPassAdaptor": {
+          "seconds": 9.915885,
+          "count": 31002
+        },
+        "InstantiateFunction": {
+          "seconds": 7.148286,
+          "count": 2233
+        },
+        "CodeGenPasses": {
+          "seconds": 6.089664,
+          "count": 1
+        },
+        "OptModule": {
+          "seconds": 6.089046,
+          "count": 1
+        },
+        "OptFunction": {
+          "seconds": 6.019043,
+          "count": 2160
+        },
+        "RunPass": {
+          "seconds": 5.968328,
+          "count": 427680
+        },
+        "PerformPendingInstantiations": {
+          "seconds": 5.418364,
+          "count": 1
+        },
+        "InstantiateClass": {
+          "seconds": 5.033565,
+          "count": 12103
+        },
+        "ParseDeclarationOrFunctionDefinition": {
+          "seconds": 3.746268,
+          "count": 1327
+        },
+        "InlinerPass": {
+          "seconds": 2.968991,
+          "count": 15501
+        },
+        "Source": {
+          "seconds": 2.806119,
+          "count": 20
+        },
+        "InstCombinePass": {
+          "seconds": 2.803817,
+          "count": 84759
+        },
+        "ParseClass": {
+          "seconds": 2.766758,
+          "count": 608
+        },
+        "ModuleToFunctionPassAdaptor": {
+          "seconds": 1.811596,
+          "count": 6
+        },
+        "CodeGen Function": {
+          "seconds": 1.575945,
+          "count": 18845
+        },
+        "ParseFunctionDefinition": {
+          "seconds": 1.331434,
+          "count": 630
+        },
+        "GVNPass": {
+          "seconds": 1.02781,
+          "count": 15499
+        },
+        "FunctionToLoopPassAdaptor": {
+          "seconds": 0.901386,
+          "count": 50817
+        },
+        "SimplifyCFGPass": {
+          "seconds": 0.824945,
+          "count": 98893
+        },
+        "DSEPass": {
+          "seconds": 0.789569,
+          "count": 15499
+        },
+        "EarlyCSEPass": {
+          "seconds": 0.768347,
+          "count": 31793
+        },
+        "CorrelatedValuePropagationPass": {
+          "seconds": 0.646724,
+          "count": 30998
+        },
+        "MemorySSAAnalysis": {
+          "seconds": 0.581221,
+          "count": 26410
+        },
+        "BlockFrequencyAnalysis": {
+          "seconds": 0.533984,
+          "count": 32372
+        },
+        "PassManager<Loop, LoopAnalysisManager, LoopStandardAnalysisResults &, LPMUpdater &>": {
+          "seconds": 0.490008,
+          "count": 3752
+        },
+        "JumpThreadingPass": {
+          "seconds": 0.482973,
+          "count": 30998
+        },
+        "SROAPass": {
+          "seconds": 0.468531,
+          "count": 49452
+        },
+        "EvaluateAsRValue": {
+          "seconds": 0.428867,
+          "count": 66508
+        },
+        "ConstraintEliminationPass": {
+          "seconds": 0.422549,
+          "count": 15499
+        },
+        "PostOrderFunctionAttrsPass": {
+          "seconds": 0.418199,
+          "count": 31002
+        },
+        "BranchProbabilityAnalysis": {
+          "seconds": 0.376416,
+          "count": 32372
+        },
+        "Load External Specializations for ": {
+          "seconds": 0.337412,
+          "count": 158780
+        },
+        "MemCpyOptPass": {
+          "seconds": 0.294282,
+          "count": 15499
+        },
+        "EvaluateAsConstantExpr": {
+          "seconds": 0.287981,
+          "count": 165909
+        },
+        "SCCPPass": {
+          "seconds": 0.284259,
+          "count": 15499
+        },
+        "ADCEPass": {
+          "seconds": 0.273715,
+          "count": 15499
+        },
+        "AAManager": {
+          "seconds": 0.272012,
+          "count": 66259
+        },
+        "GlobalOptPass": {
+          "seconds": 0.200501,
+          "count": 2
+        },
+        "IPSCCPPass": {
+          "seconds": 0.18553,
+          "count": 1
+        },
+        "LoopAnalysis": {
+          "seconds": 0.185017,
+          "count": 51538
+        },
+        "BDCEPass": {
+          "seconds": 0.180858,
+          "count": 15499
+        },
+        "DominatorTreeAnalysis": {
+          "seconds": 0.167587,
+          "count": 82572
+        },
+        "ReassociatePass": {
+          "seconds": 0.163031,
+          "count": 15499
+        },
+        "LoopIdiomRecognizePass": {
+          "seconds": 0.149769,
+          "count": 1650
+        },
+        "RunLoopPass": {
+          "seconds": 0.147246,
+          "count": 1545
+        },
+        "TailCallElimPass": {
+          "seconds": 0.138011,
+          "count": 17659
+        },
+        "SLPVectorizerPass": {
+          "seconds": 0.132981,
+          "count": 2160
+        },
+        "PostDominatorTreeAnalysis": {
+          "seconds": 0.131918,
+          "count": 47394
+        },
+        "EvaluateAsInitializer": {
+          "seconds": 0.122796,
+          "count": 21775
+        },
+        "LICMPass": {
+          "seconds": 0.116665,
+          "count": 5379
+        },
+        "BasicAA": {
+          "seconds": 0.104527,
+          "count": 66259
+        },
+        "IndVarSimplifyPass": {
+          "seconds": 0.10307,
+          "count": 1650
+        },
+        "LoopSimplifyPass": {
+          "seconds": 0.091278,
+          "count": 50817
+        },
+        "CalledValuePropagationPass": {
+          "seconds": 0.078859,
+          "count": 1
+        },
+        "EvaluateAsBooleanCondition": {
+          "seconds": 0.069649,
+          "count": 22332
+        },
+        "ScalarEvolutionAnalysis": {
+          "seconds": 0.064819,
+          "count": 19443
+        },
+        "AggressiveInstCombinePass": {
+          "seconds": 0.061825,
+          "count": 15499
+        },
+        "AlwaysInlinerPass": {
+          "seconds": 0.059381,
+          "count": 1
+        },
+        "LoopVectorizePass": {
+          "seconds": 0.059185,
+          "count": 2160
+        },
+        "LoopDeletionPass": {
+          "seconds": 0.055101,
+          "count": 2100
+        },
+        "LoopUnrollPass": {
+          "seconds": 0.052987,
+          "count": 2160
+        },
+        "RequireAnalysisPass<llvm::GlobalsAA, llvm::Module, llvm::AnalysisManager<Module>>": {
+          "seconds": 0.050084,
+          "count": 1
+        },
+        "GlobalsAA": {
+          "seconds": 0.050074,
+          "count": 1
+        },
+        "AssumptionAnalysis": {
+          "seconds": 0.048291,
+          "count": 33889
+        },
+        "CallGraphAnalysis": {
+          "seconds": 0.047269,
+          "count": 2
+        },
+        "EvaluateForOverflow": {
+          "seconds": 0.043776,
+          "count": 13111
+        },
+        "LoopFullUnrollPass": {
+          "seconds": 0.041977,
+          "count": 1608
+        },
+        "Stable Hash for Template Arguments": {
+          "seconds": 0.037582,
+          "count": 158900
+        },
+        "VectorCombinePass": {
+          "seconds": 0.037027,
+          "count": 17659
+        },
+        "LCSSAPass": {
+          "seconds": 0.034539,
+          "count": 50817
+        },
+        "LoopLoadEliminationPass": {
+          "seconds": 0.031252,
+          "count": 2160
+        },
+        "EvaluateAsInt": {
+          "seconds": 0.030955,
+          "count": 17144
+        },
+        "TargetIRAnalysis": {
+          "seconds": 0.030237,
+          "count": 33890
+        },
+        "InstSimplifyPass": {
+          "seconds": 0.029989,
+          "count": 2160
+        },
+        "DeadArgumentEliminationPass": {
+          "seconds": 0.02794,
+          "count": 1
+        },
+        "InferAlignmentPass": {
+          "seconds": 0.025503,
+          "count": 4320
+        },
+        "FunctionAnalysisManagerCGSCCProxy": {
+          "seconds": 0.025348,
+          "count": 15453
+        },
+        "GlobalDCEPass": {
+          "seconds": 0.023648,
+          "count": 2
+        },
+        "Float2IntPass": {
+          "seconds": 0.023211,
+          "count": 2160
+        },
+        "LazyCallGraphAnalysis": {
+          "seconds": 0.022463,
+          "count": 2
+        },
+        "RecomputeGlobalsAAPass": {
+          "seconds": 0.022457,
+          "count": 1
+        },
+        "InnerAnalysisManagerProxy<CGSCCAnalysisManager, Module>": {
+          "seconds": 0.019162,
+          "count": 1
+        },
+        "LoopDistributePass": {
+          "seconds": 0.019096,
+          "count": 2160
+        },
+        "LoopRotatePass": {
+          "seconds": 0.018007,
+          "count": 2102
+        },
+        "LoopInstSimplifyPass": {
+          "seconds": 0.017925,
+          "count": 1652
+        },
+        "CoroAnnotationElidePass": {
+          "seconds": 0.017507,
+          "count": 15501
+        },
+        "ReversePostOrderFunctionAttrsPass": {
+          "seconds": 0.017013,
+          "count": 1
+        },
+        "RequireAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis, llvm::Function, llvm::AnalysisManager<Function>>": {
+          "seconds": 0.016967,
+          "count": 15503
+        },
+        "LowerExpectIntrinsicPass": {
+          "seconds": 0.015854,
+          "count": 16294
+        },
+        "LibCallsShrinkWrapPass": {
+          "seconds": 0.01545,
+          "count": 15499
+        },
+        "TargetLibraryAnalysis": {
+          "seconds": 0.014713,
+          "count": 36464
+        },
+        "MemoryDependenceAnalysis": {
+          "seconds": 0.014314,
+          "count": 15499
+        },
+        "LastRunTrackingAnalysis": {
+          "seconds": 0.01337,
+          "count": 46740
+        },
+        "EphemeralValuesAnalysis": {
+          "seconds": 0.012977,
+          "count": 27328
+        },
+        "MergedLoadStoreMotionPass": {
+          "seconds": 0.011408,
+          "count": 15499
+        },
+        "CGProfilePass": {
+          "seconds": 0.011225,
+          "count": 1
+        },
+        "isIntegerConstantExpr": {
+          "seconds": 0.011138,
+          "count": 11862
+        },
+        "OuterAnalysisManagerProxy<ModuleAnalysisManager, Function>": {
+          "seconds": 0.011001,
+          "count": 33873
+        },
+        "LoopSimplifyCFGPass": {
+          "seconds": 0.010726,
+          "count": 1652
+        },
+        "LazyValueAnalysis": {
+          "seconds": 0.0104,
+          "count": 30998
+        },
+        "LoopAccessAnalysis": {
+          "seconds": 0.010099,
+          "count": 2160
+        },
+        "ScopedNoAliasAA": {
+          "seconds": 0.00986,
+          "count": 33873
+        },
+        "OptimizationRemarkEmitterAnalysis": {
+          "seconds": 0.009481,
+          "count": 33878
+        },
+        "CoroSplitPass": {
+          "seconds": 0.009019,
+          "count": 15501
+        },
+        "PromotePass": {
+          "seconds": 0.008949,
+          "count": 16283
+        },
+        "DemandedBitsAnalysis": {
+          "seconds": 0.008919,
+          "count": 17818
+        },
+        "AssignmentTrackingPass": {
+          "seconds": 0.008914,
+          "count": 1
+        },
+        "TypeBasedAA": {
+          "seconds": 0.008762,
+          "count": 33873
+        },
+        "EvaluateKnownConstInt": {
+          "seconds": 0.008256,
+          "count": 13081
+        },
+        "LowerConstantIntrinsicsPass": {
+          "seconds": 0.007312,
+          "count": 2160
+        },
+        "MoveAutoInitPass": {
+          "seconds": 0.007165,
+          "count": 15499
+        },
+        "CoroElidePass": {
+          "seconds": 0.006865,
+          "count": 15499
+        },
+        "OpenMPOptCGSCCPass": {
+          "seconds": 0.006428,
+          "count": 15501
+        },
+        "OuterAnalysisManagerProxy<ModuleAnalysisManager, LazyCallGraph::SCC, LazyCallGraph &>": {
+          "seconds": 0.006101,
+          "count": 15453
+        },
+        "SpeculativeExecutionPass": {
+          "seconds": 0.005376,
+          "count": 15499
+        },
+        "SimpleLoopUnswitchPass": {
+          "seconds": 0.005189,
+          "count": 1661
+        },
+        "InvalidateAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis>": {
+          "seconds": 0.004341,
+          "count": 2207
+        },
+        "InjectTLIMappings": {
+          "seconds": 0.00414,
+          "count": 2160
+        },
+        "EntryExitInstrumenterPass": {
+          "seconds": 0.003951,
+          "count": 16294
+        },
+        "InvalidateAnalysisPass<llvm::AAManager>": {
+          "seconds": 0.003497,
+          "count": 15435
+        },
+        "ShouldNotRunFunctionPassesAnalysis": {
+          "seconds": 0.003362,
+          "count": 15499
+        },
+        "DivRemPairsPass": {
+          "seconds": 0.002805,
+          "count": 2160
+        },
+        "AnnotationRemarksPass": {
+          "seconds": 0.002551,
+          "count": 2160
+        },
+        "InferFunctionAttrsPass": {
+          "seconds": 0.002371,
+          "count": 1
+        },
+        "ReadAST": {
+          "seconds": 0.002189,
+          "count": 1
+        },
+        "WarnMissedTransformationsPass": {
+          "seconds": 0.001241,
+          "count": 2160
+        },
+        "InnerAnalysisManagerProxy<LoopAnalysisManager, Function>": {
+          "seconds": 0.00114,
+          "count": 2420
+        },
+        "OuterAnalysisManagerProxy<FunctionAnalysisManager, Loop, LoopStandardAnalysisResults &>": {
+          "seconds": 0.000944,
+          "count": 1653
+        },
+        "AlignmentFromAssumptionsPass": {
+          "seconds": 0.000908,
+          "count": 2160
+        },
+        "ExtraLoopPassManager<llvm::ShouldRunExtraSimpleLoopUnswitch>": {
+          "seconds": 0.000756,
+          "count": 1650
+        },
+        "ConstantMergePass": {
+          "seconds": 0.00057,
+          "count": 1
+        },
+        "LoopSinkPass": {
+          "seconds": 0.000479,
+          "count": 2160
+        },
+        "Read Loaded AST": {
+          "seconds": 0.00044,
+          "count": 1
+        },
+        "EvaluateAsLValue": {
+          "seconds": 0.000282,
+          "count": 156
+        },
+        "EliminateAvailableExternallyPass": {
+          "seconds": 0.000179,
+          "count": 1
+        },
+        "RelLookupTableConverterPass": {
+          "seconds": 8.5e-05,
+          "count": 1
+        },
+        "ShouldRunExtraVectorPasses": {
+          "seconds": 3.6e-05,
+          "count": 32
+        },
+        "CoroEarlyPass": {
+          "seconds": 1e-05,
+          "count": 1
+        },
+        "CoroCleanupPass": {
+          "seconds": 4e-06,
+          "count": 1
+        },
+        "ShouldRunExtraSimpleLoopUnswitch": {
+          "seconds": 3e-06,
+          "count": 9
+        },
+        "InnerAnalysisManagerProxy<FunctionAnalysisManager, Module>": {
+          "seconds": 2e-06,
+          "count": 5
+        },
+        "Annotation2MetadataPass": {
+          "seconds": 2e-06,
+          "count": 1
+        },
+        "ProfileSummaryAnalysis": {
+          "seconds": 1e-06,
+          "count": 1
+        },
+        "OpenMPOptPass": {
+          "seconds": 1e-06,
+          "count": 1
+        },
+        "ForceFunctionAttrsPass": {
+          "seconds": 1e-06,
+          "count": 1
+        },
+        "InlineAdvisorAnalysis": {
+          "seconds": 0.0,
+          "count": 1
+        },
+        "RequireAnalysisPass<llvm::ProfileSummaryAnalysis, llvm::Module, llvm::AnalysisManager<Module>>": {
+          "seconds": 0.0,
+          "count": 1
+        }
+      }
+    }
+  ],
+  "trace_note": "Diagnostic -ftime-trace runs on CPU 2 are separate from uninstrumented measurements. Nested totals overlap and must not be added. Only the script_engine translation unit is traced, not the new shared source; its compile cost is included in pilot and complete affected-set batches.",
+  "implementation_edit": {
+    "before_cpp_sources": 5,
+    "before_evidence": "Five byte-identical baseline Lua source copies consume the original private header, verified by their dependency files. API recording/inspection implementations formerly lived in that header.",
+    "after_cpp_sources": 1,
+    "after_evidence": "Three actual comment edits to lua_api_surface.cpp each rebuild exactly the single planned kin_scripting object, its archive and the final hex_demo link; source bytes and nanosecond mtime are restored after each sample.",
+    "samples": [
+      {
+        "run": 0,
+        "scope": "Implementation-only trailing-comment edit through final hex_demo link",
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting.dir/src/scripting/lua_api_surface.cpp.o"
+        ],
+        "wall_seconds": 1.95,
+        "user_seconds": 1.61,
+        "system_seconds": 0.15,
+        "max_child_rss_kib": 187300,
+        "load_before": [
+          2.787109375,
+          5.4228515625,
+          5.208984375
+        ],
+        "load_after": [
+          2.787109375,
+          5.4228515625,
+          5.208984375
+        ]
+      },
+      {
+        "run": 1,
+        "scope": "Implementation-only trailing-comment edit through final hex_demo link",
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting.dir/src/scripting/lua_api_surface.cpp.o"
+        ],
+        "wall_seconds": 1.97,
+        "user_seconds": 1.63,
+        "system_seconds": 0.15,
+        "max_child_rss_kib": 187732,
+        "load_before": [
+          2.787109375,
+          5.4228515625,
+          5.208984375
+        ],
+        "load_after": [
+          2.787109375,
+          5.4228515625,
+          5.208984375
+        ]
+      },
+      {
+        "run": 2,
+        "scope": "Implementation-only trailing-comment edit through final hex_demo link",
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_scripting.dir/src/scripting/lua_api_surface.cpp.o"
+        ],
+        "wall_seconds": 1.95,
+        "user_seconds": 1.61,
+        "system_seconds": 0.17,
+        "max_child_rss_kib": 187764,
+        "load_before": [
+          2.787109375,
+          5.4228515625,
+          5.208984375
+        ],
+        "load_after": [
+          2.80419921875,
+          5.38232421875,
+          5.19677734375
+        ]
+      }
+    ],
+    "wall_seconds": {
+      "median": 1.95,
+      "min": 1.95,
+      "max": 1.97
+    },
+    "scope": "Implementation-only edits to moved metadata/inspection code. Binding-list edits still compile their containing Lua source; shared declaration/template header edits reach all six consumers."
+  },
+  "runtime_probe": {
+    "method": "Same -O2/assertions-enabled probe source linked before extraction and after canonical Clang validation. Three processes/version in alternating order, each taking 30 measured samples after three warmups on CPU 2. Measure fresh scene VM creation, 20,000 scene bridge calls and 50,000 entity bridge calls. Assert final positions 330000 and 3300. These synthetic loops do not establish full-game FPS.",
+    "samples": [
+      {
+        "phase": "before",
+        "run": 0,
+        "scene_vm_create_ms": 0.788686,
+        "scene_20000_calls_ms": 6.49174,
+        "entity_50000_calls_ms": 37.4195,
+        "positions_match": true
+      },
+      {
+        "phase": "after",
+        "run": 0,
+        "scene_vm_create_ms": 0.776923,
+        "scene_20000_calls_ms": 6.37384,
+        "entity_50000_calls_ms": 37.4401,
+        "positions_match": true
+      },
+      {
+        "phase": "after",
+        "run": 1,
+        "scene_vm_create_ms": 0.778934,
+        "scene_20000_calls_ms": 6.29088,
+        "entity_50000_calls_ms": 37.323,
+        "positions_match": true
+      },
+      {
+        "phase": "before",
+        "run": 1,
+        "scene_vm_create_ms": 0.798531,
+        "scene_20000_calls_ms": 6.39717,
+        "entity_50000_calls_ms": 37.69,
+        "positions_match": true
+      },
+      {
+        "phase": "before",
+        "run": 2,
+        "scene_vm_create_ms": 0.796723,
+        "scene_20000_calls_ms": 6.33068,
+        "entity_50000_calls_ms": 37.4372,
+        "positions_match": true
+      },
+      {
+        "phase": "after",
+        "run": 2,
+        "scene_vm_create_ms": 0.779085,
+        "scene_20000_calls_ms": 6.55448,
+        "entity_50000_calls_ms": 37.3792,
+        "positions_match": true
+      }
+    ]
+  },
+  "mechanical_checks": {
+    "base_commit": "c002068aeb841bf9966e521d09e75dd1c95d3138",
+    "inspection_function_bodies_moved_unchanged": true,
+    "recording_statements_preserved_except_metatable_argument": true,
+    "registration_templates_preserved_except_shared_record_call": true,
+    "all_five_lua_consumer_sources_unchanged": true,
+    "cmake_only_adds_shared_source_to_base_scripting_library": true,
+    "optimization_and_safety_flags_unchanged": true,
+    "properties_passed_by_const_reference": "The shared recording function reads the property-name vector; sol::as_table copies its entries into the same Lua table."
+  },
+  "validation": [
+    {
+      "compiler": "clang",
+      "selected_tests_passed": 39,
+      "test_regex": "^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$",
+      "api_matches_baseline": {
+        "scene": "08470f48946f2eaa38dde430c5535d8caf01a02b13d7d911acc55092a635cc7b",
+        "entity": "54894ae4057667ea1ababbb13dfe12ec019adbab7c4129c4280e532dca48b786",
+        "test": "7dd4d5cd07817d20596c66b7186d0a126c67dd1b929afc918b3950d6997a3bc8",
+        "scenario": "06a2650d93f6bf9ddb4ada71fdbaf95941cef05d64f1eba5cb7151cbf7ce3d28"
+      }
+    },
+    {
+      "compiler": "gcc",
+      "selected_tests_passed": 39,
+      "test_regex": "^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$",
+      "api_matches_baseline": {
+        "scene": "08470f48946f2eaa38dde430c5535d8caf01a02b13d7d911acc55092a635cc7b",
+        "entity": "54894ae4057667ea1ababbb13dfe12ec019adbab7c4129c4280e532dca48b786",
+        "test": "7dd4d5cd07817d20596c66b7186d0a126c67dd1b929afc918b3950d6997a3bc8",
+        "scenario": "06a2650d93f6bf9ddb4ada71fdbaf95941cef05d64f1eba5cb7151cbf7ce3d28"
+      }
+    }
+  ],
+  "no_pch_optional_configuration_checks": [
+    {
+      "configuration": "clang-3d",
+      "source": "engine/src/scripting/lua_script.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 3.28
+    },
+    {
+      "configuration": "clang-3d",
+      "source": "engine/src/scripting/lua_tasks.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 3.186
+    },
+    {
+      "configuration": "clang-3d",
+      "source": "engine/src/scripting/lua_workflows2d.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 8.381
+    },
+    {
+      "configuration": "clang-3d",
+      "source": "engine/src/scripting/lua_api_surface.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 3.013
+    },
+    {
+      "configuration": "clang-3d",
+      "source": "engine/src/scripting/entity_scripts.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 10.27
+    },
+    {
+      "configuration": "clang-3d",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 10.531
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "engine/src/scripting/lua_script.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 2.76
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "engine/src/scripting/lua_tasks.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 2.732
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "engine/src/scripting/lua_workflows2d.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 7.001
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 9.039
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "engine/src/scripting/entity_scripts.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 8.508
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "engine/src/scripting/lua_api_surface.cpp",
+      "pch": false,
+      "exit_code": 0,
+      "wall_seconds": 2.552
+    }
+  ],
+  "final_state": [
+    {
+      "compiler": "clang",
+      "measured_header_and_shared_source_bytes_match": true,
+      "canonical_helper_recompiled_after_comment_probe": true,
+      "final_smoke_tests_passed": [
+        "hex-demo",
+        "shapes-demo",
+        "kin-scripting",
+        "kin-lua-runtime"
+      ],
+      "four_api_reports_match": true,
+      "no_change_hex_shapes_lua_compiles_and_links": 0,
+      "benchmark_log_entries_remaining": 0,
+      "only_explicit_benchmark_records_removed": 60,
+      "canonical_records_preserved_byte_for_byte": true,
+      "no_change_after_log_cleanup_compiles_and_links": 0
+    },
+    {
+      "compiler": "gcc",
+      "measured_header_and_shared_source_bytes_match": true,
+      "canonical_helper_recompiled_after_comment_probe": false,
+      "final_smoke_tests_passed": [
+        "hex-demo",
+        "shapes-demo",
+        "kin-scripting",
+        "kin-lua-runtime"
+      ],
+      "four_api_reports_match": true,
+      "no_change_hex_shapes_lua_compiles_and_links": 0,
+      "benchmark_log_entries_remaining": 0
+    }
+  ],
+  "reproduction": {
+    "artifact_directory": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-lua-surface-bench",
+    "steps": [
+      "At base_commit, prepare the recorded Clang/GCC configurations, cached dependencies and normal targets. Save the original private header and engine CMakeLists.txt under before-<basename> in the artifact directory. Set TMPDIR to a filesystem with room and adjust paths/CPU affinity.",
+      "Run lua_surface_compile.py baseline script_engine entity_scripts lua_workflows2d lua_script lua_tasks, then lua_surface_runtime.py before.",
+      "Run lua_surface_transform.py, configure the Clang build with normal flags, and lua_surface_compile.py pilot script_engine entity_scripts lua_workflows2d lua_script lua_tasks lua_api_surface.",
+      "Run lua_surface_validate.py clang before any timings; this also prepares canonical objects/libraries used by the replacement-object links.",
+      "Run lua_surface_pairs.py, then lua_surface_post.py serially. Its first pass is the serial bracketed follow-up and fresh compiler traces, followed by the real implementation-edit probes, runtime samples, GCC validation and optional configuration compilation.",
+      "Run lua_surface_final.py to refresh the canonical helper after comment probes, verify both compilers final smoke tests/API reports/no-change builds, then lua_surface_record.py. Finish all compiler processes before any source/header edit, configuration or metadata probe."
+    ],
+    "scripts": {
+      "lua_surface_compile.py": "import json,os,pathlib,shlex,subprocess,sys\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');build=base/'kin-build-time-clang';out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp')};phase=sys.argv[1];names=sys.argv[2:] or ['script_engine'];db=json.loads((build/'compile_commands.json').read_text());rows=[]\nfor name in names:\n entry=next(e for e in db if e['file'].endswith('/scripting/'+name+'.cpp'));args=shlex.split(entry['command']);label=phase+'-'+name;obj=out/(label+'.o');args[args.index('-o')+1]=str(obj);load=os.getloadavg();stats=out/(label+'.stats.json')\n with (out/(label+'.log')).open('w') as log:r=subprocess.run(['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(stats),'taskset','-c','2',*args],cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT)\n if r.returncode:print((out/(label+'.log')).read_text()[-6000:]);raise SystemExit(r.returncode)\n row={'phase':phase,'source':entry['file'],'affinity':[2],**json.loads(stats.read_text()),'object_bytes':obj.stat().st_size,'load_before':load,'load_after':os.getloadavg()};rows.append(row);print(json.dumps(row),flush=True)\n(out/(phase+'-compiles.json')).write_text(json.dumps(rows,indent=2)+'\\n')\n",
+      "lua_surface_transform.py": "import pathlib\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');out=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev/kin-lua-surface-bench');p=repo/'engine/src/scripting/lua_api_surface.hpp';s=p.read_text();assert s==(out/'before-lua_api_surface.hpp').read_text()\nrecord='''    sol::table types = lua.registry()[\"kin.api_types\"].get_or_create<sol::table>();\n    types[name] = lua.registry()[sol::usertype_traits<T>::metatable()];\n    sol::table fields = lua.registry()[\"kin.api_properties\"].get_or_create<sol::table>();\n    fields[name] = sol::as_table(properties);\n'''\nassert s.count(record)==2\ns=s.replace(record,'    record_api_type(lua, name, sol::usertype_traits<T>::metatable(), properties);\\n')\nstart=s.index('inline std::vector<std::string> api_members(');middle=s.index('inline LuaApiSurface lua_api_surface(',start);end=s.index('\\n} // namespace kin::scripting_detail',middle)\napi_members=s[start:middle].replace('inline std::vector','std::vector',1).rstrip();surface=s[middle:end].replace('inline LuaApiSurface','LuaApiSurface',1).rstrip();s=s[:start]+'LuaApiSurface lua_api_surface(sol::state& lua);\\n'+s[end:]\nrecord_decl='''// Keep API bookkeeping out of each bound type's registration templates.\nvoid record_api_type(sol::state& lua, const char* name, const std::string& metatable,\n                     const std::vector<std::string>& properties);\n\n'''\ns=s.replace('namespace kin::scripting_detail {\\n\\n','namespace kin::scripting_detail {\\n\\n'+record_decl,1)\ns=s.replace('#include <algorithm>\\n','').replace('#include <map>\\n','')\np.write_text(s)\ncpp='''#include \"lua_api_surface.hpp\"\n\n#include <algorithm>\n#include <iterator>\n\nnamespace kin::scripting_detail {\n\nnamespace {\n\n'''+api_members+'''\n\n} // namespace\n\nvoid record_api_type(sol::state& lua, const char* name, const std::string& metatable,\n                     const std::vector<std::string>& properties) {\n'''+record.replace('sol::usertype_traits<T>::metatable()','metatable')+'''}\n\n'''+surface+'\\n\\n} // namespace kin::scripting_detail\\n'\n(repo/'engine/src/scripting/lua_api_surface.cpp').write_text(cpp)\np=repo/'engine/CMakeLists.txt';s=p.read_text();assert '        src/scripting/lua_l10n.cpp\\n' in s;s=s.replace('        src/scripting/lua_l10n.cpp\\n','        src/scripting/lua_api_surface.cpp\\n        src/scripting/lua_l10n.cpp\\n',1);p.write_text(s)\n(out/'pilot-lua_api_surface.hpp').write_bytes((repo/'engine/src/scripting/lua_api_surface.hpp').read_bytes())\n(out/'pilot-lua_api_surface.cpp').write_bytes((repo/'engine/src/scripting/lua_api_surface.cpp').read_bytes())\nprint('Moved API recording and inspection into one shared translation unit.',flush=True)\n",
+      "lua_surface_validate.py": "import hashlib,json,os,pathlib,re,subprocess,sys\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');out=base/'kin-lua-surface-bench';results=json.loads((out/'validation-results.json').read_text()) if (out/'validation-results.json').exists() else []\npattern='^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$'\ntargets=['kin_ecs_tests','kin_ecs_entity_tests','kin_ecs_events_tests','kin_ecs_component_tests','kin_ecs_inspection_tests','kin_ecs_editor_tests','kin_ecs_system_tests','kin_ecs_animation_tests','kin_ecs_time_tests','kin_ecs_spawn_tests','kin_ecs_lifecycle_tests','kin_platform_headers_check','kin_platform_tests','kin_window_points_tests','kin_input_workflow_tests','kin_renderer_headers_check','kin_renderer_tests','kin_rendering_tests','kin_ecs_render_tests','kin_sprite_animation_tests','kin_particle_tests','kin_tilemap_tests','kin_animation_lighting2d_tests','kin_scene_headers_check','kin_lua','kin_lua_script_tests','kin_scripting_tests','kin_entity_scripts_tests','kin_lua_workflows2d_tests','kin_lua_runtime_tests','kin_scene_tests','kin_scene_asset_tests','kin_scene_flow_tests','kin_scene_workflow2d_tests','kin_development_tests','kin_ui2_tests','kin_ui2_text_edit_tests','kin_ui2_touch_controls_tests','kin_ui2_text_tests','kin_ui2_theme_file_tests','hex_demo','shapes_demo']\nfor compiler in sys.argv[1:] or ['clang','gcc']:\n build=base/('kin-build-time-clang' if compiler=='clang' else 'kin-build-time-out');env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'}\n with (out/(compiler+'-validation-build.log')).open('w') as log:\n  subprocess.run(['cmake','-S','/tmp/kin-build-time','-B',str(build),'-DKIN_DEV_FAST_SCRIPTING=OFF','-DKIN_COMPILER_CACHE=off','-DKIN_ENABLE_PCH=ON','-DKIN_ENABLE_LTO=OFF'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n  subprocess.run(['cmake','--build',str(build),'--parallel','4','--target',*targets,'--','-k','0'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n with (out/(compiler+'-tests.log')).open('w') as log:subprocess.run(['ctest','--test-dir',str(build),'--output-on-failure','-j','2','-R',pattern],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n count=re.search(r'100% tests passed, 0 tests failed out of (\\d+)',(out/(compiler+'-tests.log')).read_text());assert count and int(count[1])==39\n reports={}\n for host in ['scene','entity','test','scenario']:\n  p=subprocess.run([str(build/'bin/kin_lua'),'api','--host',host],env=env,text=True,capture_output=True,check=True);actual=json.loads(p.stdout);reference=json.loads((base/'kin-workflow-build-bench'/('api-after-'+compiler)/(host+'.json')).read_text());assert actual==reference,(compiler,host);(out/(compiler+'-api-'+host+'.json')).write_text(p.stdout);reports[host]=hashlib.sha256(json.dumps(actual,sort_keys=True,separators=(',',':')).encode()).hexdigest()\n row={'compiler':compiler,'selected_tests_passed':39,'test_regex':pattern,'api_matches_baseline':reports};results=[r for r in results if r['compiler']!=compiler]+[row];(out/'validation-results.json').write_text(json.dumps(results,indent=2)+'\\n');print('39 tests and four API reports pass: '+compiler,flush=True)\n",
+      "lua_surface_pairs.py": "import datetime,hashlib,json,os,pathlib,re,shlex,subprocess\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');base=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');build=base/'kin-build-time-clang';out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};db=json.loads((build/'compile_commands.json').read_text());results=out/'paired-builds.json';assert not results.exists(),'Keep previous observations; do not overwrite.'\nnames=['script_engine','entity_scripts','lua_workflows2d','json','lua_script','lua_tasks'];cpus={'script_engine':2,'entity_scripts':0,'lua_workflows2d':4,'json':6,'lua_script':6,'lua_tasks':6,'lua_api_surface':6};source_map={name:('engine/src/core/json.cpp' if name=='json' else 'engine/src/scripting/'+name+'.cpp') for name in names+['lua_api_surface']}\nfor phase,header in [('before','before-lua_api_surface.hpp'),('after','pilot-lua_api_surface.hpp')]:\n variant=out/('variant-'+phase);variant.mkdir(exist_ok=True);(variant/'lua_api_surface.hpp').write_bytes((out/header).read_bytes())\n for name in names+(['lua_api_surface'] if phase=='after' else []):\n  if name=='json':continue\n  source=repo/source_map[name]\n  if name!='lua_api_surface':assert source.read_bytes()==subprocess.check_output(['git','show','c002068:'+source_map[name]],cwd=repo)\n  (variant/(name+'.cpp')).write_bytes(source.read_bytes())\ncommands=subprocess.check_output(['ninja','-C',str(build),'-t','commands','hex_demo'],env=env,text=True);line=next(l for l in commands.splitlines() if '-o bin/hex_demo ' in l);args=shlex.split(line);begin=next(i for i,x in enumerate(args) if x in ['/usr/bin/clang++','/usr/bin/c++']);end=next((i for i in range(begin,len(args)) if args[i]=='&&'),len(args));canonical_link=args[begin:end];rows=[]\ndef ninja_escape(s):return s.replace('$','$$')\nfor run,phase in enumerate(['before','after','after','before','after','before','before','after']):\n assert_no_active_compilers()\n work=out/f'paired-{run}-{phase}';work.mkdir();variant=out/('variant-'+phase);selected=names+(['lua_api_surface'] if phase=='after' else []);manifest=['builddir = '+str(work),''];objects={}\n for index,name in enumerate(selected):\n  entry=next(e for e in db if e['file'].endswith('/'+source_map[name]));cmd=shlex.split(entry['command']);obj=work/(name+'.o');objects[name]=obj;cmd[cmd.index('-o')+1]=str(obj)\n  if name!='json':cmd[cmd.index('-c')+1]=str(variant/(name+'.cpp'));cmd[1:1]=['-iquote',str(repo/'engine/src/scripting')]\n  cmd+=['-MD','-MF',str(work/(name+'.d'))]\n  measured=['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(work/(name+'.stats.json')),'taskset','-c',str(cpus[name]),*cmd]\n  manifest+=['rule compile_'+name,'  command = '+ninja_escape(shlex.join(measured)),'  description = CXX '+name,'build '+str(obj)+': compile_'+name,'']\n exe=work/'hex_demo';link=list(canonical_link);link[link.index('-o')+1]=str(exe);link=[('--dependency-file='+str(work/'link.d')) if a.startswith('--dependency-file=') else a for a in link];first_archive=next(i for i,a in enumerate(link) if a.endswith('.a'));link[first_archive:first_archive]=[str(objects[n]) for n in selected if n!='json'];link=['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(work/'link.stats.json'),*link]\n manifest+=['rule game_link','  command = '+ninja_escape(shlex.join(link)),'  description = LINK hex_demo','build '+str(exe)+': game_link '+' '.join(str(o) for o in objects.values()),'default '+str(exe),''];(work/'build.ninja').write_text('\\n'.join(manifest));load=os.getloadavg();started=datetime.datetime.now(datetime.timezone.utc).isoformat()\n with (work/'build.log').open('w') as log:r=subprocess.run(['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(work/'build.stats.json'),'taskset','-c','0,2,4,6','ninja','-f',str(work/'build.ninja'),'-j4'],cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT)\n if r.returncode:print((work/'build.log').read_text()[-7000:],flush=True);raise SystemExit(r.returncode)\n compiler_rows=[]\n for name in selected:\n  consumed=str(variant/'lua_api_surface.hpp') in (work/(name+'.d')).read_text();assert consumed==(name!='json'),(name,phase,'private-header selection')\n  if name!='json':assert str(repo/'engine/src/scripting/lua_api_surface.hpp') not in (work/(name+'.d')).read_text()\n  compiler_rows.append({'source':source_map[name],'cpu':cpus[name],'selected_variant_header_consumed':consumed,'object_bytes':objects[name].stat().st_size,**json.loads((work/(name+'.stats.json')).read_text())})\n smoke=subprocess.run([str(exe),'--headless','--render','--frames=10','--report=-'],cwd=build/'games/hex_demo',env=env,text=True,capture_output=True);(work/'smoke.log').write_text(smoke.stdout+smoke.stderr);assert smoke.returncode==0,smoke.stderr;assert re.search(r'\"path_cells\":\\s*17,\\s*\"path_cost\":\\s*170,\\s*\"reachable_cells\":\\s*28',smoke.stdout),smoke.stdout\n row={'run':run,'phase':phase,'start_utc':started,'workers':4,'header_sha256':hashlib.sha256((variant/'lua_api_surface.hpp').read_bytes()).hexdigest(),**json.loads((work/'build.stats.json').read_text()),'load_before':load,'load_after':os.getloadavg(),'compiles':compiler_rows,'link':json.loads((work/'link.stats.json').read_text()),'headless_game_report_matches':True};rows.append(row);results.write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps({'run':run,'phase':phase,'build_wall_seconds':row['wall_seconds'],'script_engine_seconds':next(r['wall_seconds'] for r in compiler_rows if r['source'].endswith('/script_engine.cpp')),'lua_compile_cpu_seconds':sum(r['user_seconds']+r['system_seconds'] for r in compiler_rows if not r['source'].endswith('/core/json.cpp')),'control_seconds':next(r['wall_seconds'] for r in compiler_rows if r['source'].endswith('/core/json.cpp'))}),flush=True)\n",
+      "lua_surface_serial.py": "import json,os,pathlib,shlex,subprocess\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');base=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');build=base/'kin-build-time-clang';out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp')};db=json.loads((build/'compile_commands.json').read_text());rows=[];assert not (out/'serial-results.json').exists()\nfor run,phase in enumerate(['before','after','after','before','after','before','before','after']):\n assert_no_active_compilers();row={'run':run,'phase':phase,'affinity':[2],'load_before':os.getloadavg(),'steps':[]}\n for step,name in [('control-before','json'),('binding','script_engine'),('control-after','json')]:\n  source='engine/src/core/json.cpp' if name=='json' else 'engine/src/scripting/script_engine.cpp';entry=next(e for e in db if e['file'].endswith('/'+source));args=shlex.split(entry['command']);label=f'serial-{run}-{phase}-{step}';obj=out/(label+'.o');args[args.index('-o')+1]=str(obj)\n  if name=='script_engine':args[1:1]=['-iquote',str(repo/'engine/src/scripting')];args[args.index('-c')+1]=str(out/('variant-'+phase)/'script_engine.cpp')\n  stats=out/(label+'.stats.json')\n  with (out/(label+'.log')).open('w') as log:subprocess.run(['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(stats),'taskset','-c','2',*args],cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n  row['steps'].append({'step':step,'source':source,'object_bytes':obj.stat().st_size,**json.loads(stats.read_text())})\n row['load_after']=os.getloadavg();rows.append(row);(out/'serial-results.json').write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps({'run':run,'phase':phase,'times':{s['step']:s['wall_seconds'] for s in row['steps']}}),flush=True)\n",
+      "lua_surface_trace.py": "import json,os,pathlib,shlex,subprocess\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');base=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');build=base/'kin-build-time-clang';out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp')};db=json.loads((build/'compile_commands.json').read_text());entry=next(e for e in db if e['file'].endswith('/scripting/script_engine.cpp'));rows=[]\nfor phase in ['before','after']:\n args=shlex.split(entry['command']);args[1:1]=['-iquote',str(repo/'engine/src/scripting')];args[args.index('-c')+1]=str(out/('variant-'+phase)/'script_engine.cpp');label='trace-'+phase;args[args.index('-o')+1]=str(out/(label+'.o'));args+=['-ftime-trace','-ftime-trace-granularity=1000'];stats=out/(label+'.stats.json');load=os.getloadavg()\n with (out/(label+'.log')).open('w') as log:subprocess.run(['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(stats),'taskset','-c','2',*args],cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n events=json.loads((out/(label+'.json')).read_text())['traceEvents'];totals={e['name'][6:]:{'seconds':e['dur']/1e6,'count':e.get('args',{}).get('count')} for e in events if e['name'].startswith('Total ')};row={'phase':phase,'source':'engine/src/scripting/script_engine.cpp','instrumentation':'-ftime-trace -ftime-trace-granularity=1000','affinity':[2],**json.loads(stats.read_text()),'load_before':load,'load_after':os.getloadavg(),'totals':totals};rows.append(row);(out/'trace-results.json').write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps({'phase':phase,'totals':{k:totals[k] for k in ['ExecuteCompiler','Frontend','Backend','Optimizer','InstantiateFunction','InstantiateClass','CodeGen Function','OptFunction'] if k in totals}}),flush=True)\n",
+      "lua_surface_edit.py": "import hashlib,json,os,pathlib,re,shutil,subprocess\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');repo=pathlib.Path('/home/bamedeo/kin-wt/build-time');build=base/'kin-build-time-clang';out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};source=repo/'engine/src/scripting/lua_api_surface.cpp';original=source.read_bytes();stat=source.stat();manifest=out/'implementation-edit.ninja';shutil.copy2(build/'build.ninja',manifest)\nclean=subprocess.check_output(['ninja','-C',str(build),'-f',str(manifest),'-n','hex_demo'],env=env,text=True);assert 'Building C' not in clean and 'Linking C' not in clean,clean\nrows=[]\ntry:\n for run in range(3):\n  assert_no_active_compilers();source.write_bytes(original+f'\\n// API bookkeeping implementation edit probe {run}.\\n'.encode());plan=subprocess.check_output(['ninja','-C',str(build),'-f',str(manifest),'-n','hex_demo'],env=env,text=True);(out/f'implementation-edit-{run}-plan.log').write_text(plan);planned=re.findall(r'Building CXX object ([^\\n]+)',plan);assert planned==['engine/CMakeFiles/kin_scripting.dir/src/scripting/lua_api_surface.cpp.o'],planned\n  load=os.getloadavg();stats=out/f'implementation-edit-{run}.stats.json'\n  try:\n   with (out/f'implementation-edit-{run}.log').open('w') as log:subprocess.run(['/usr/bin/time','-f','{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}','-o',str(stats),'taskset','-c','0,2,4,6','ninja','-C',str(build),'-j4','hex_demo'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n   actions=(out/f'implementation-edit-{run}.log').read_text();actual=re.findall(r'Building CXX object ([^\\n]+)',actions);assert actual==planned\n   row={'run':run,'scope':'Implementation-only trailing-comment edit through final hex_demo link','planned_and_actual_cpp_outputs':actual,**json.loads(stats.read_text()),'load_before':load,'load_after':os.getloadavg()};rows.append(row);(out/'implementation-edits.json').write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps(row),flush=True)\n  finally:source.write_bytes(original);os.utime(source,ns=(stat.st_atime_ns,stat.st_mtime_ns))\nfinally:source.write_bytes(original);os.utime(source,ns=(stat.st_atime_ns,stat.st_mtime_ns))\n",
+      "lua_surface_runtime.py": "import json,os,pathlib,shlex,subprocess,sys\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');build=base/'kin-build-time-clang';out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};phase=sys.argv[1];label='runtime-'+phase;db=json.loads((build/'compile_commands.json').read_text());entry=next(e for e in db if e['file'].endswith('/tests/scripting_tests.cpp'));cmd=shlex.split(entry['command']);cmd[cmd.index('-o')+1]=str(out/(label+'.o'));cmd[cmd.index('-c')+1]='/tmp/kin-build-bench/lua_runtime_probe.cpp';cmd+=['-O2']\nwith (out/(label+'-build.log')).open('w') as log:\n subprocess.run(cmd,cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n commands=subprocess.check_output(['ninja','-C',str(build),'-t','commands','kin_scripting_tests'],env=env,text=True);line=next(l for l in commands.splitlines() if '-o bin/kin_scripting_tests ' in l);args=shlex.split(line);begin=next(i for i,x in enumerate(args) if x in ['/usr/bin/c++','/usr/bin/clang++']);end=next((i for i in range(begin,len(args)) if args[i]=='&&'),len(args));args=args[begin:end];args[args.index('-o')+1]=str(out/label);args[args.index('tests/CMakeFiles/kin_scripting_tests.dir/scripting_tests.cpp.o')]=str(out/(label+'.o'));subprocess.run(args,cwd=build,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\nprint('Linked '+label,flush=True)\n",
+      "lua_runtime_probe.cpp": "#include <kin/ecs/render.hpp>\n#include <kin/ecs/script.hpp>\n#include <kin/platform/input.hpp>\n#include <kin/scene/scene_asset.hpp>\n#include <kin/scripting/entity_scripts.hpp>\n#include <kin/scripting/script_engine.hpp>\n#include <algorithm>\n#include <cassert>\n#include <chrono>\n#include <filesystem>\n#include <fstream>\n#include <iostream>\n#include <vector>\nusing Clock = std::chrono::steady_clock;\ndouble ms(Clock::time_point start) { return std::chrono::duration<double,std::milli>(Clock::now()-start).count(); }\ntemplate<class F> void samples(const char* name,F fn) {\n    std::vector<double> times;\n    for(int i=0;i<33;++i) { auto start=Clock::now(); fn(); if(i>=3)times.push_back(ms(start)); }\n    std::sort(times.begin(),times.end());\n    std::cout << name << ' ' << times[times.size()/2] << '\\n';\n}\nint main(int argc,char**argv) {\n    assert(argc==2);\n    const std::filesystem::path root=argv[1]; std::filesystem::create_directories(root);\n    std::ofstream(root/\"scene.lua\") << R\"lua(\nlocal entity\nfunction on_load(scene)\n    entity=scene:entity('scene_probe')\n    entity:set_transform(0,0)\nend\nfunction update(ctx)\n    assert(ctx.dt>0)\n    for i=1,10000 do\n        assert(entity:alive())\n        entity:translate(1,-1)\n    end\nend\n)lua\";\n    std::ofstream(root/\"entity.lua\") << R\"lua(\nfunction on_update(self,dt)\n    for i=1,100 do\n        assert(self:alive())\n        local x,y=self:position()\n        self:move(1,-1)\n        self:set_rotation(self:rotation()+1)\n    end\nend\n)lua\";\n    samples(\"scene_vm_create_ms\",[&]{kin::ScriptEngine engine;});\n    kin::EcsWorld scene_world;kin::register_builtin_editor_components(scene_world);\n    kin::ScriptEngine scene;\n    assert(scene.load_file(root,\"scene.lua\"));\n    assert(scene.call_on_load({.world=&scene_world,.script_path=root/\"scene.lua\"}));\n    samples(\"scene_20000_calls_ms\",[&]{\n        if(!scene.call_update(kin::ScriptFrameContext{.dt=1.f/60})) {\n            std::cerr<<scene.last_error()<<'\\n';std::abort();\n        }\n    });\n    const auto entity=scene_world.entities().find_by_name(\"scene_probe\");\n    assert(entity.get<kin::Transform2D>()->pos.x==330000.f);\n    kin::EcsWorld world;kin::register_builtin_editor_components(world);\n    for(int i=0;i<100;++i)\n        world.entity(\"entity_probe_\"+std::to_string(i)).set(kin::Transform2D{}).set(kin::ScriptComponent{.asset={.id=\"entity.lua\"}});\n    kin::EntityScripts scripts{{.content=root,.check_frames=0}};kin::Input input;\n    samples(\"entity_50000_calls_ms\",[&]{scripts.update(world,input,1.f/60);});\n    const auto actor=world.entities().find_by_name(\"entity_probe_0\");\n    assert(actor.get<kin::Transform2D>()->pos.x==3300.f);\n    std::cout<<\"positions \"<<entity.get<kin::Transform2D>()->pos.x<<' '<<actor.get<kin::Transform2D>()->pos.x<<'\\n';\n}\n",
+      "lua_surface_runtime_samples.py": "import json,os,pathlib,subprocess\nout=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev/kin-lua-surface-bench');env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};rows=[]\nfor run in range(3):\n for phase in (['before','after'] if run%2==0 else ['after','before']):\n  p=subprocess.run(['taskset','-c','2',str(out/('runtime-'+phase)),str(out/('runtime-content-'+phase))],env=env,text=True,capture_output=True,check=True);(out/f'runtime-{phase}-{run}.log').write_text(p.stdout+p.stderr);values={}\n  for line in p.stdout.splitlines():\n   parts=line.split()\n   if len(parts)==2 and parts[0].endswith('_ms'):values[parts[0]]=float(parts[1])\n  assert len(values)==3 and 'positions 330000 3300' in p.stdout,p.stdout\n  row={'phase':phase,'run':run,**values,'positions_match':True};rows.append(row);(out/'runtime-results.json').write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps(row),flush=True)\n",
+      "lua_surface_syntax.py": "import concurrent.futures,json,os,pathlib,shlex,subprocess,time\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');base=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp')};build3d=base/'kin-build-time-3d-clang'\nwith (out/'3d-configure.log').open('w') as log:subprocess.run(['cmake','-S','/tmp/kin-build-time','-B',str(build3d),'-DKIN_DEV_FAST_SCRIPTING=OFF','-DKIN_COMPILER_CACHE=off','-DKIN_ENABLE_PCH=ON','-DKIN_ENABLE_LTO=OFF'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\nnames=['script_engine','entity_scripts','lua_workflows2d','lua_script','lua_tasks','lua_api_surface'];tasks=[]\nfor mode,dirname in [('clang-3d','kin-build-time-3d-clang'),('gcc-no-physics-audio','kin-build-time-out')]:\n build=base/dirname;db=json.loads((build/'compile_commands.json').read_text())\n for name in names:\n  entry=next(e for e in db if e['file'].endswith('/scripting/'+name+'.cpp'));args=shlex.split(entry['command']);cmd=[];i=0\n  while i<len(args):\n   if args[i:i+2] in [['-Xclang','-include-pch'],['-Xclang','-include']] and i+3<len(args) and args[i+2]=='-Xclang' and 'cmake_pch.' in args[i+3]:i+=4;continue\n   if args[i] in ['-include','-include-pch'] and i+1<len(args) and 'cmake_pch.' in args[i+1]:i+=2;continue\n   if args[i]=='-o':i+=2;continue\n   if args[i] in ['-c','-fpch-preprocess','-Winvalid-pch','-fpch-instantiate-templates']:i+=1;continue\n   if mode=='gcc-no-physics-audio' and args[i].split('=')[0] in ['-DKIN_ENABLE_PHYSICS','-DKIN_ENABLE_AUDIO']:i+=1;continue\n   cmd.append(args[i]);i+=1\n  if mode=='gcc-no-physics-audio':cmd+=['-UKIN_ENABLE_PHYSICS','-UKIN_ENABLE_AUDIO']\n  cmd.append('-fsyntax-only');tasks.append((mode,name,build,cmd))\ndef check(task):\n mode,name,build,cmd=task;log=out/('syntax-'+mode+'-'+name+'.log');start=time.monotonic()\n with log.open('w') as f:r=subprocess.run(cmd,cwd=build,env=env,stdout=f,stderr=subprocess.STDOUT)\n row={'configuration':mode,'source':'engine/src/scripting/'+name+'.cpp','pch':False,'exit_code':r.returncode,'wall_seconds':round(time.monotonic()-start,3)}\n if r.returncode:print('FAIL '+mode+' '+name+'\\n'+log.read_text()[:5000],flush=True)\n return row\nrows=[]\nwith concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:\n for f in concurrent.futures.as_completed([pool.submit(check,t) for t in tasks]):\n  rows.append(f.result());(out/'syntax-results.json').write_text(json.dumps(rows,indent=2)+'\\n')\nprint(json.dumps({'checked':len(rows),'failures':sum(r['exit_code']!=0 for r in rows)}),flush=True);raise SystemExit(any(r['exit_code'] for r in rows))\n",
+      "lua_surface_mechanical.py": "import hashlib,json,pathlib,re,subprocess\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');out=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev/kin-lua-surface-bench');old=(out/'before-lua_api_surface.hpp').read_text();hpp=(repo/'engine/src/scripting/lua_api_surface.hpp').read_text();cpp=(repo/'engine/src/scripting/lua_api_surface.cpp').read_text()\nstart=old.index('inline std::vector<std::string> api_members(');middle=old.index('inline LuaApiSurface lua_api_surface(',start);end=old.index('\\n} // namespace kin::scripting_detail',middle)\na=old[start:middle].replace('inline std::vector','std::vector',1).rstrip();b=old[middle:end].replace('inline LuaApiSurface','LuaApiSurface',1).rstrip();assert a in cpp and b in cpp\nrecord='''    sol::table types = lua.registry()[\"kin.api_types\"].get_or_create<sol::table>();\n    types[name] = lua.registry()[sol::usertype_traits<T>::metatable()];\n    sol::table fields = lua.registry()[\"kin.api_properties\"].get_or_create<sol::table>();\n    fields[name] = sol::as_table(properties);\n'''\nassert record.replace('sol::usertype_traits<T>::metatable()','metatable') in cpp\nrestored=hpp.replace('LuaApiSurface lua_api_surface(sol::state& lua);',old[start:end].rstrip()).replace('    record_api_type(lua, name, sol::usertype_traits<T>::metatable(), properties);\\n',record)\nrestored=re.sub(r'// Keep API bookkeeping out of each bound type\\'s registration templates\\.\\nvoid record_api_type\\(.*?\\);\\n\\n','',restored,flags=re.S)\nrestored=restored.replace('#include <sol/sol.hpp>','#include <algorithm>\\n#include <map>\\n#include <sol/sol.hpp>');assert restored==old\ncmake=(repo/'engine/CMakeLists.txt').read_text().replace('        src/scripting/lua_api_surface.cpp\\n','');assert cmake==(out/'before-CMakeLists.txt').read_text()\nfor name in ['script_engine','entity_scripts','lua_workflows2d','lua_script','lua_tasks']:\n p='engine/src/scripting/'+name+'.cpp';assert (repo/p).read_bytes()==subprocess.check_output(['git','show','c002068:'+p],cwd=repo)\nrow={'base_commit':subprocess.check_output(['git','rev-parse','c002068'],cwd=repo,text=True).strip(),'inspection_function_bodies_moved_unchanged':True,'recording_statements_preserved_except_metatable_argument':True,'registration_templates_preserved_except_shared_record_call':True,'all_five_lua_consumer_sources_unchanged':True,'cmake_only_adds_shared_source_to_base_scripting_library':True,'optimization_and_safety_flags_unchanged':True,'properties_passed_by_const_reference':'The shared recording function reads the property-name vector; sol::as_table copies its entries into the same Lua table.'};(out/'mechanical-results.json').write_text(json.dumps(row,indent=2)+'\\n');print(json.dumps(row),flush=True)\n",
+      "lua_surface_post.py": "import subprocess,sys\nfrom bench_compiler_guard import assert_no_active_compilers\nsteps=[('lua_surface_serial.py',[]),('lua_surface_trace.py',[]),('lua_surface_edit.py',[]),('lua_surface_runtime.py',['after']),('lua_surface_runtime_samples.py',[]),('lua_surface_validate.py',['gcc']),('lua_surface_syntax.py',[]),('lua_surface_mechanical.py',[])]\nfor name,args in steps:\n assert_no_active_compilers();print('Starting '+name,flush=True);subprocess.run([sys.executable,'/tmp/kin-build-bench/'+name,*args],check=True)\nprint('Remaining measurements and compiler checks complete.',flush=True)\n",
+      "lua_surface_final.py": "import json,os,pathlib,subprocess\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');base=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');out=base/'kin-lua-surface-bench';env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'};rows=[]\nfor name in ['lua_api_surface.hpp','lua_api_surface.cpp']:assert (repo/'engine/src/scripting'/name).read_bytes()==(out/('pilot-'+name)).read_bytes()\nfor compiler,dirname in [('clang','kin-build-time-clang'),('gcc','kin-build-time-out')]:\n build=base/dirname\n if compiler=='clang':\n  # The comment edit probe restored source bytes and timestamps. Compile the\n  # canonical source again for the final library and executables.\n  (build/'engine/CMakeFiles/kin_scripting.dir/src/scripting/lua_api_surface.cpp.o').unlink()\n with (out/(compiler+'-final.log')).open('w') as log:\n  subprocess.run(['cmake','--build',str(build),'--parallel','4','--target','hex_demo','shapes_demo','kin_lua','kin_scripting_tests','kin_lua_runtime_tests'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n  subprocess.run(['ctest','--test-dir',str(build),'--output-on-failure','-R','^(hex-demo|shapes-demo|kin-scripting|kin-lua-runtime)$'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n p=subprocess.run(['cmake','--build',str(build),'--target','hex_demo','shapes_demo','kin_lua'],env=env,text=True,capture_output=True,check=True);(out/(compiler+'-noop.log')).write_text(p.stdout+p.stderr);assert 'Building C' not in p.stdout and 'Linking C' not in p.stdout,p.stdout\n for host in ['scene','entity','test','scenario']:\n  actual=json.loads(subprocess.check_output([str(build/'bin/kin_lua'),'api','--host',host],env=env,text=True));reference=json.loads((base/'kin-workflow-build-bench'/('api-after-'+compiler)/(host+'.json')).read_text());assert actual==reference,(compiler,host)\n row={'compiler':compiler,'measured_header_and_shared_source_bytes_match':True,'canonical_helper_recompiled_after_comment_probe':compiler=='clang','final_smoke_tests_passed':['hex-demo','shapes-demo','kin-scripting','kin-lua-runtime'],'four_api_reports_match':True,'no_change_hex_shapes_lua_compiles_and_links':0,'benchmark_log_entries_remaining':sum('/kin-lua-surface-bench/paired-' in line for line in (build/'.ninja_log').read_text().splitlines())};rows.append(row);(out/'final-results.json').write_text(json.dumps(rows,indent=2)+'\\n');print(json.dumps(row),flush=True)\n",
+      "lua_surface_record.py": "import hashlib,json,pathlib,statistics,subprocess\nrepo=pathlib.Path('/home/bamedeo/kin-wt/build-time');base=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');out=base/'kin-lua-surface-bench';scripts=pathlib.Path('/tmp/kin-build-bench')\ndef read(name):return json.loads((out/name).read_text())\ndef summary(values):return {'median':statistics.median(values),'min':min(values),'max':max(values)}\nbatches=read('paired-builds.json');serial=read('serial-results.json');assert len(batches)==len(serial)==8\nsummaries={}\nfor phase in ['before','after']:\n batch=[r for r in batches if r['phase']==phase];single=[r for r in serial if r['phase']==phase];assert len(batch)==len(single)==4\n summaries[phase]={'paired_lua_rebuild_link_wall_seconds':summary([r['wall_seconds'] for r in batch]),'paired_lua_compile_cpu_seconds':summary([sum(c['user_seconds']+c['system_seconds'] for c in r['compiles'] if not c['source'].endswith('/core/json.cpp')) for r in batch]),'parallel_unchanged_control_seconds':summary([next(c['wall_seconds'] for c in r['compiles'] if c['source'].endswith('/core/json.cpp')) for r in batch]),'serial_script_engine_wall_seconds':summary([next(s['wall_seconds'] for s in r['steps'] if s['step']=='binding') for r in single]),'serial_control_before_seconds':summary([next(s['wall_seconds'] for s in r['steps'] if s['step']=='control-before') for r in single]),'serial_control_after_seconds':summary([next(s['wall_seconds'] for s in r['steps'] if s['step']=='control-after') for r in single])}\nsource_hashes={}\nfor rel in ['engine/CMakeLists.txt','engine/src/scripting/lua_api_surface.hpp','engine/src/scripting/lua_api_surface.cpp']:\n p=subprocess.run(['git','show','c002068:'+rel],cwd=repo,capture_output=True);source_hashes[rel]={'before':hashlib.sha256(p.stdout).hexdigest() if p.returncode==0 else None,'after':hashlib.sha256((repo/rel).read_bytes()).hexdigest()}\nvalidation=read('validation-results.json');syntax=read('syntax-results.json');final=read('final-results.json');assert len(validation)==2 and all(r['selected_tests_passed']==39 for r in validation);assert len(syntax)==12 and not any(r['exit_code'] for r in syntax);assert len(final)==2 and all(r['benchmark_log_entries_remaining']==0 for r in final)\nedit=read('implementation-edits.json');assert len(edit)==3 and all(len(r['planned_and_actual_cpp_outputs'])==1 for r in edit)\nflags={}\nfor compiler,dirname in [('clang','kin-build-time-clang'),('gcc','kin-build-time-out')]:\n db=json.loads((base/dirname/'compile_commands.json').read_text());flags[compiler]={name:next(e['command'] for e in db if e['file'].endswith('/scripting/'+name+'.cpp')) for name in ['script_engine','lua_api_surface']}\nnames=['lua_surface_compile.py','lua_surface_transform.py','lua_surface_validate.py','lua_surface_pairs.py','lua_surface_serial.py','lua_surface_trace.py','lua_surface_edit.py','lua_surface_runtime.py','lua_runtime_probe.cpp','lua_surface_runtime_samples.py','lua_surface_syntax.py','lua_surface_mechanical.py','lua_surface_post.py','lua_surface_final.py','lua_surface_record.py','bench_compiler_guard.py']\ndata={\n 'date':'2026-11-07','base_commit':subprocess.check_output(['git','rev-parse','c002068'],cwd=repo,text=True).strip(),'source_sha256':source_hashes,\n 'change':'Record type metadata once in a non-template function, and move API member enumeration/inspection out of the private header into one new source in kin_scripting. Type registrations, callbacks, receiver checks, constructor/property declarations and public headers are unchanged.',\n 'configuration':{'clang':'21.1.8','gcc':'15.2.0','cmake':'4.2.3','ninja':'1.13.2','cpu':'Intel Core i9-13900HX','configuration':'Release, engine/game last optimization flag -O2, KIN_DEV_FAST_SCRIPTING=OFF, PCH ON, compiler cache OFF, LTO OFF, mold','filesystem':'Linux source; NTFS/FUSE build/output/TMPDIR','representative_compile_commands':flags},\n 'initial_canonical_direct_compiles':read('baseline-compiles.json'),'pilot_canonical_direct_compiles':read('pilot-compiles.json'),\n 'initial_pilot_interpretation':'These separate-phase observations have substantial changing machine performance. They are retained as diagnostic samples, not used as a causal speedup ratio. The added shared-file compilation is included in the pilot.',\n 'paired_rebuild_method':{'order':['before','after','after','before','after','before','before','after'],'samples_per_version':4,'workers':4,'description':'Compile all five Lua consumers from byte-identical stable source copies with the selected private header in their directory; after adds lua_api_surface.cpp. A custom Ninja manifest uses canonical target flags/PCH and dependency files verify selected-header consumption. Pin script_engine to CPU 2, entity_scripts to 0, workflows2d to 4, and remaining short jobs/control to 6. Link these replacement Lua objects into a cached hex_demo and assert its headless report. The unchanged core/json.cpp control is compiled but not linked. Linker dependency output is diverted to each sample directory. Canonical build inputs and manifests remain unchanged during timing; see the separate benchmark-log correction note.','scope_limit':'Other engine/game/dependency objects and shaders are prebuilt. Explicit replacement objects force these Lua units into the executable, even if an ordinary game link could omit unused archive members. This measures the affected compilation set and its link, not a complete clean Kin build or normal Ninja scheduling.'},\n 'paired_rebuild_samples':batches,\n 'benchmark_log_correction':{'issue':'The completed custom-manifest batches used the canonical build working directory without setting Ninja builddir, appending 60 unique benchmark-only output records to its .ninja_log. There was no concurrent Ninja/configure, no canonical output replacement, and the canonical object records were retained (227 canonical engine records in the captured log).','remedy':'Keep all completed measurements and the original harness/log snapshot. Set builddir to each sample directory in the reproduction harness. The implementation-edit probe requires a clean canonical plan; finish all compilers before metadata cleanup and final build verification. Ninja recompact retains existing unknown outputs, so cleanup filters exactly the 60 recorded benchmark object/executable paths, retaining all other log rows byte-for-byte, then requires a no-compile/no-link canonical build.','original_harness':(out/'lua_surface_pairs_original.py').read_text()},\n 'serial_method':'Follow-up because the unchanged control varied substantially in the parallel batch. One ABBA then one BAAB block, four observations/version, matching target flags/PCH and stable source/header copies. Pin each operation to CPU 2. Bracket each uninstrumented script_engine compile with an unchanged core/json.cpp compile on that same CPU. Keep every original parallel and serial sample; do not normalize by control timing or discard outliers.',\n 'serial_samples':serial,'summary':summaries,\n 'timing_limits':'Host processes, SMT siblings, CPU frequency and I/O are not isolated. The parallel control changed substantially, so its before/after ratio is not a reliable causal estimate. Serial brackets expose within-run variation as well. These data cannot establish a precise whole-project clean-build improvement or cumulative speedup.',\n 'fresh_clang_traces':read('trace-results.json'),'trace_note':'Diagnostic -ftime-trace runs on CPU 2 are separate from uninstrumented measurements. Nested totals overlap and must not be added. Only the script_engine translation unit is traced, not the new shared source; its compile cost is included in pilot and complete affected-set batches.',\n 'implementation_edit':{'before_cpp_sources':5,'before_evidence':'Five byte-identical baseline Lua source copies consume the original private header, verified by their dependency files. API recording/inspection implementations formerly lived in that header.','after_cpp_sources':1,'after_evidence':'Three actual comment edits to lua_api_surface.cpp each rebuild exactly the single planned kin_scripting object, its archive and the final hex_demo link; source bytes and nanosecond mtime are restored after each sample.','samples':edit,'wall_seconds':summary([r['wall_seconds'] for r in edit]),'scope':'Implementation-only edits to moved metadata/inspection code. Binding-list edits still compile their containing Lua source; shared declaration/template header edits reach all six consumers.'},\n 'runtime_probe':{'method':'Same -O2/assertions-enabled probe source linked before extraction and after canonical Clang validation. Three processes/version in alternating order, each taking 30 measured samples after three warmups on CPU 2. Measure fresh scene VM creation, 20,000 scene bridge calls and 50,000 entity bridge calls. Assert final positions 330000 and 3300. These synthetic loops do not establish full-game FPS.','samples':read('runtime-results.json')},\n 'mechanical_checks':read('mechanical-results.json'),'validation':validation,'no_pch_optional_configuration_checks':syntax,'final_state':final,\n 'reproduction':{'artifact_directory':str(out),'steps':['At base_commit, prepare the recorded Clang/GCC configurations, cached dependencies and normal targets. Save the original private header and engine CMakeLists.txt under before-<basename> in the artifact directory. Set TMPDIR to a filesystem with room and adjust paths/CPU affinity.','Run lua_surface_compile.py baseline script_engine entity_scripts lua_workflows2d lua_script lua_tasks, then lua_surface_runtime.py before.','Run lua_surface_transform.py, configure the Clang build with normal flags, and lua_surface_compile.py pilot script_engine entity_scripts lua_workflows2d lua_script lua_tasks lua_api_surface.','Run lua_surface_validate.py clang before any timings; this also prepares canonical objects/libraries used by the replacement-object links.','Run lua_surface_pairs.py, then lua_surface_post.py serially. Its first pass is the serial bracketed follow-up and fresh compiler traces, followed by the real implementation-edit probes, runtime samples, GCC validation and optional configuration compilation.','Run lua_surface_final.py to refresh the canonical helper after comment probes, verify both compilers final smoke tests/API reports/no-change builds, then lua_surface_record.py. Finish all compiler processes before any source/header edit, configuration or metadata probe.'],'scripts':{name:(scripts/name).read_text() for name in names}}\n}\n(repo/'docs/build_lua_surface_2026-11-07.json').write_text(json.dumps(data,indent=2)+'\\n')\nprint(json.dumps({'summary':summaries,'implementation_edit_seconds':data['implementation_edit']['wall_seconds']},indent=2),flush=True)\n",
+      "bench_compiler_guard.py": "\"\"\"Keep header-edit experiments separate from worktree compiler processes.\"\"\"\nimport os\nfrom pathlib import Path\n\nROOTS = (b'/tmp/kin-build-time/', b'/home/bamedeo/kin-wt/build-time/')\nBUILD_ROOTS = tuple(b'/mnt/windows/Users/amedeo/Desktop/gamedev/' + name for name in (b'kin-build-time-clang', b'kin-build-time-out', b'kin-build-time-3d-clang'))\n\ndef active_compilers():\n    found = []\n    for process in Path('/proc').iterdir():\n        if not process.name.isdigit() or int(process.name) == os.getpid():\n            continue\n        try:\n            arguments = (process / 'cmdline').read_bytes().split(b'\\0')\n            program = arguments[0].rsplit(b'/', 1)[-1]\n            is_compiler = b'clang' in program or program in (b'g++', b'c++', b'cc1plus', b'cc1') or program.endswith(b'-g++')\n            is_build_tool = program in (b'ninja', b'ninja-build', b'cmake')\n            build_match = False\n            if is_build_tool:\n                cwd = os.fsencode(os.readlink(process / 'cwd'))\n                build_match = any(root in argument for argument in arguments for root in BUILD_ROOTS) or any(cwd.startswith(root) for root in BUILD_ROOTS) or any(root.rstrip(b'/') in argument for argument in arguments for root in ROOTS)\n            if (is_compiler and any(root in argument for argument in arguments for root in ROOTS)) or build_match:\n                found.append((int(process.name), program.decode(errors='replace')))\n        except (FileNotFoundError, PermissionError, ProcessLookupError):\n            continue\n    return sorted(found)\n\ndef assert_no_active_compilers():\n    found = active_compilers()\n    if found:\n        raise RuntimeError(f'Wait for worktree compiler/configure/build processes before experiments: {found}')\n"
+    }
+  }
+}

@@ -1,14 +1,20 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/platform/gamepad.hpp>
 #include <kin/platform/input.hpp>
-#include <kin/platform/window.hpp>
+#include <kin/platform/window_types.hpp>
 
 #include <functional>
 #include <memory>
+#include <string_view>
 #include <vector>
 
+union SDL_Event;
+
 namespace kin {
+
+class Window;
 
 enum class AppMode {
     Windowed,
@@ -19,6 +25,12 @@ enum class AppMode {
 // their run-loop fallbacks.
 inline constexpr f32 default_fixed_dt = 1.0f / 60.0f;
 
+// A phone's frame rate unless the game sets one (AppConfig::max_fps): a 60 Hz
+// game on a 120 Hz screen would draw each picture twice, as 2D scenes do not
+// move between steps, at twice the cost in battery and heat. A game that wants
+// the display's whole rate sets it (App::set_max_fps(120)).
+inline constexpr f32 phone_max_fps = 60.0f;
+
 struct AppConfig {
     AppMode mode = AppMode::Windowed;
     f32 fixed_dt = default_fixed_dt;
@@ -26,12 +38,23 @@ struct AppConfig {
     i32 max_steps = 8;
     bool vsync = false;
     bool yield_when_unpaced = true;
-    // Most frames a second a windowed run draws (0: no cap). Frames are paced
-    // to deadlines, so the rate holds without drift; headless runs ignore it.
+    // Most frames a second a windowed run draws (0: the system's default: no
+    // cap on a desktop, phone_max_fps on a phone). Frames are paced to
+    // deadlines, so the rate holds without drift; headless runs ignore it. On
+    // a phone the display is asked to run at it (Window::hint_frame_rate).
     f32 max_fps = 0.0f;
     // A frame time within this many seconds of a whole number of fixed steps
     // counts as exactly that many (0: off): see FrameTimeSnapper.
     f32 snap_tolerance = 0.001f;
+    // Draw only when something may have changed: after input or a window event
+    // (and two frames more, for hover that resolves a frame late), or when asked
+    // with App::request_redraw, instead of every frame. For tools and editors,
+    // which would otherwise keep the CPU and GPU busy while nobody touches them.
+    // Each frame drawn runs one fixed step. Ignored by headless runs.
+    bool wait_for_events = false;
+    // While waiting, wake at least this often anyway (0: never), so work that
+    // sends no event, such as a file watcher or an asset load, still shows.
+    f32 max_idle_wait = 0.5f;
 };
 
 // Snaps measured frame times to whole fixed steps, so ordinary jitter (a frame
@@ -65,7 +88,27 @@ struct AppFrameStats {
     bool hit_max_steps = false;
     f32 pacing_wait = 0.0f; // seconds slept after the previous frame to hold max_fps
     f32 snapped_frame_time = 0.0f; // what the accumulator was given (FrameTimeSnapper)
+    f32 idle_wait = 0.0f; // seconds waited for an event before this frame (wait_for_events)
 };
+
+// What the system does to the whole app (phones, mainly: the desktop sends
+// none of these), given to App::on_app_event as it happens.
+enum class AppEvent : u8 {
+    // The app is leaving the screen (home button, another app, screen off) and
+    // then stops until it returns, if it does: the system may end it without
+    // asking while it is away. Save what the player would lose here; the frame
+    // goes on after this, and only then does the app stop.
+    Background,
+    // Back on the screen after Background.
+    Foreground,
+    // The system is short of memory: drop caches that can be made again.
+    LowMemory,
+    // The system is ending the app (after Background): the loop stops at once,
+    // even with closing held (hold_close).
+    Terminating,
+};
+
+std::string_view app_event_name(AppEvent event);
 
 class App {
 public:
@@ -96,6 +139,27 @@ public:
                  std::function<void(f32 alpha)> render);
     void quit() { _running = false; }
 
+    // Closing the last window (or the system asking the app to quit) asks the
+    // app first while held: the app goes on, close_asked() turns true, and the
+    // app quits (quit()) or stays (forget_close()), e.g. after asking about
+    // unsaved work. Not held (the default), the app stops at once.
+    void hold_close(bool held) { _hold_close = held; }
+    // Game controllers opened (the first one SDL finds, now and when one is
+    // plugged in), their state given to input() each frame: what actions and
+    // axes bound to a controller read. Once is enough; later calls do nothing.
+    void open_gamepads();
+    bool gamepads_open() const { return _gamepads != nullptr; }
+    Gamepads* gamepads() { return _gamepads.get(); }
+    bool close_asked() const { return _close_asked; }
+    void forget_close() { _close_asked = false; }
+
+    // Called on the app's thread when an AppEvent arrives, before the rest of
+    // that frame (its fixed steps may not run); one handler, replaced by the next.
+    void on_app_event(std::function<void(AppEvent)> handler) { _app_event = std::move(handler); }
+    // Between Background and Foreground: the app is not on the screen, so it
+    // neither steps nor draws.
+    bool in_background() const { return _in_background; }
+
     bool running() const { return _running; }
     bool headless() const { return _config.mode == AppMode::Headless; }
     const AppFrameStats& frame_stats() const { return _frame_stats; }
@@ -105,15 +169,26 @@ public:
     // WITHOUT changing fixed_dt or the per-step contents. Determinism is
     // unaffected (the headless run_for path ignores this entirely). Effective
     // fast-forward is bounded by max_steps. Clamped to >= 0.
-    // The frame rate cap (0: none); a game's settings may change it at any time.
+    // The frame rate cap (0: none); a game's settings may change it at any
+    // time. Set to 0, it is the system's default (AppConfig::max_fps).
     f32 max_fps() const { return _max_fps; }
-    void set_max_fps(f32 fps) { _max_fps = fps > 0.0f ? fps : 0.0f; }
+    void set_max_fps(f32 fps);
+
+    // Draw only when something changes (see AppConfig::wait_for_events).
+    bool waits_for_events() const { return _wait_for_events; }
+    void set_wait_for_events(bool enabled) { _wait_for_events = enabled; }
+    // While waiting for events, draw another frame within `seconds` (0: next)
+    // though nothing happens. Asks for one frame: something that animates asks
+    // again each frame until it is done.
+    void request_redraw(f32 seconds = 0.0f);
 
     f32 time_scale() const { return _time_scale; }
     void set_time_scale(f32 scale) { _time_scale = scale > 0.0f ? scale : 0.0f; }
 
 private:
     void pump_events();
+    void app_event(AppEvent event);
+    static bool watch_app_events(void* userdata, ::SDL_Event* event); // an SDL_EventFilter
     void handle_window_close(WindowId window_id);
 
     AppConfig _config;
@@ -129,7 +204,18 @@ private:
     bool _advance_input = true;
 
     void pace_frame(u64& next_frame_ns);
+    bool wait_for_change();
     bool _running = false;
+    bool _hold_close = false;
+    std::function<void(AppEvent)> _app_event;
+    bool _in_background = false;
+    bool _forget_elapsed = false; // the next frame's time is time away, not play
+    std::unique_ptr<Gamepads> _gamepads;
+    bool _close_asked = false;
+    bool _wait_for_events = false;
+    f32 _redraw_in = -1.0f; // the soonest request_redraw() this frame; < 0: none
+    i32 _settle_frames = 0; // frames still to draw after an event before waiting again
+    f32 _idle_wait = 0.0f;
 };
 
 } // namespace kin

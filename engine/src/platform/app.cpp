@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/platform/app.hpp>
 
 #include <kin/platform/log.hpp>
@@ -6,6 +7,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstdlib>
 #include <string_view>
@@ -22,8 +24,18 @@ std::string_view app_mode_name(AppMode mode) {
 
 } // namespace
 
+std::string_view app_event_name(AppEvent event) {
+    switch (event) {
+    case AppEvent::Background: return "background";
+    case AppEvent::Foreground: return "foreground";
+    case AppEvent::LowMemory: return "low_memory";
+    case AppEvent::Terminating: return "terminating";
+    }
+    return "unknown";
+}
+
 App::App(AppConfig config)
-    : _config(config) {
+    : _config(config), _wait_for_events(config.wait_for_events) {
     set_max_fps(config.max_fps);
     // A GPU-only headless app still needs a real driver and a hidden window.
     const auto renderer = requested_renderer();
@@ -31,6 +43,13 @@ App::App(AppConfig config)
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
     }
 
+#if defined(SDL_PLATFORM_ANDROID)
+    // Back reaches the game (as Escape, kin/platform/input.hpp) instead of
+    // sending the app away; a game that wants Android's own sets it to "0".
+    if (!SDL_GetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON)) {
+        SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+    }
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         const std::string error = std::string("SDL_Init failed: ") + SDL_GetError();
         KIN_LOG_ERROR_F("runtime",
@@ -41,6 +60,7 @@ App::App(AppConfig config)
                         }));
         throw std::runtime_error(error);
     }
+    SDL_AddEventWatch(&App::watch_app_events, this);
     KIN_LOG_INFO_F("runtime",
                    "app initialized",
                    (LogFields{
@@ -57,9 +77,11 @@ App::~App() {
     KIN_LOG_INFO_F("runtime",
                    "app shutdown",
                    (LogFields{{.name = "windows", .value = std::to_string(_windows.size())}}));
+    _gamepads.reset(); // its subsystem stopped before SDL is
     _update = {};
     _render = {};
     _windows.clear();
+    SDL_RemoveEventWatch(&App::watch_app_events, this);
     SDL_Quit();
 }
 
@@ -118,16 +140,93 @@ void App::handle_window_close(WindowId window_id) {
     }
 }
 
+void App::open_gamepads() {
+    if (!_gamepads) {
+        _gamepads = std::make_unique<Gamepads>();
+    }
+}
+
 void App::pump_events() {
+    _input.update_touch(static_cast<f64>(SDL_GetTicksNS()) * 1e-9); // a finger held still becomes a long press
+    if (_gamepads) {
+        _input.set_gamepad(_gamepads->poll()); // it reads the controllers itself, apart from the events
+        // Each player's own, for Input's questions about one player.
+        const GamepadPlayers& players = _gamepads->players();
+        for (i32 p = 0; p < max_input_players; ++p) {
+            const auto slot = static_cast<std::size_t>(p);
+            _input.set_player_gamepad(p, slot < players.capacity() ? players.state(slot) : GamepadState{});
+        }
+    }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         _input.process_native_event(&event);
 
         if (event.type == SDL_EVENT_QUIT) {
-            _running = false;
+            if (_hold_close) {
+                _close_asked = true;
+            } else {
+                _running = false;
+            }
         } else if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-            handle_window_close(static_cast<WindowId>(event.window.windowID));
+            if (_hold_close && open_window_count() <= 1) {
+                _close_asked = true; // the last one: the app decides
+            } else {
+                handle_window_close(static_cast<WindowId>(event.window.windowID));
+            }
+        } else if (event.type == SDL_EVENT_WINDOW_SAFE_AREA_CHANGED) {
+            if (const Window* window = find_window(static_cast<WindowId>(event.window.windowID))) {
+                const Rectf safe = window->safe_area();
+                const Vec2i size = window->size();
+                KIN_LOG_INFO_F("runtime",
+                               "window safe area",
+                               (LogFields{
+                                   {.name = "size", .value = std::to_string(size.x) + "x" + std::to_string(size.y)},
+                                   {.name = "safe",
+                                    .value = std::to_string(static_cast<int>(safe.x)) + "," + std::to_string(static_cast<int>(safe.y)) +
+                                             " " + std::to_string(static_cast<int>(safe.w)) + "x" +
+                                             std::to_string(static_cast<int>(safe.h))},
+                                   {.name = "scale", .value = std::to_string(window->display_scale())},
+                               }));
+            }
         }
+    }
+}
+
+// SDL does not queue the system's app events: it gives them to event watchers
+// as they happen, inside SDL_PumpEvents on the app's thread, and on Android
+// stops the thread right after Background. So they are handled here, at once.
+bool App::watch_app_events(void* userdata, SDL_Event* event) {
+    App& app = *static_cast<App*>(userdata);
+    switch (event->type) {
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+        // (SDL then sends DID_ENTER_BACKGROUND; one Background is enough.)
+        if (!app._in_background) {
+            app._in_background = true;
+            app.app_event(AppEvent::Background);
+        }
+        break;
+    case SDL_EVENT_DID_ENTER_FOREGROUND:
+        if (app._in_background) {
+            app._in_background = false;
+            app._forget_elapsed = true;
+            app._settle_frames = 3; // drawn again at once, not when next touched
+            app.app_event(AppEvent::Foreground);
+        }
+        break;
+    case SDL_EVENT_LOW_MEMORY: app.app_event(AppEvent::LowMemory); break;
+    case SDL_EVENT_TERMINATING:
+        app.app_event(AppEvent::Terminating);
+        app._running = false; // the system is ending the app: no asking
+        break;
+    default: break;
+    }
+    return true;
+}
+
+void App::app_event(AppEvent event) {
+    KIN_LOG_INFO_F("runtime", "app event", (LogFields{{.name = "event", .value = std::string{app_event_name(event)}}}));
+    if (_app_event) {
+        _app_event(event);
     }
 }
 
@@ -161,6 +260,10 @@ void App::start_loop(std::function<void(f32)> update, std::function<void(f32)> r
     _advance_input = true;
     _frame_stats = {};
     _running = true;
+    // Under wait_for_events the first frames are drawn before any waiting: the
+    // very first steps nothing (no time has passed), and a scene draws once it
+    // has stepped, so waiting after it would show nothing until a touch.
+    _settle_frames = 3;
     KIN_LOG_INFO_F(
         "runtime", "app loop started",
         (LogFields{
@@ -178,7 +281,10 @@ bool App::step_loop(f32 elapsed_seconds) {
     const f32 fixed_dt = _config.fixed_dt > 0.0f ? _config.fixed_dt : default_fixed_dt;
     const f32 max_frame_time = std::max(0.0f, _config.max_frame_time);
     const i32 max_steps = std::max(1, _config.max_steps);
-    const f32 raw_frame_time = std::isfinite(elapsed_seconds) ? std::max(0.0f, elapsed_seconds) : 0.0f;
+    f32 raw_frame_time = std::isfinite(elapsed_seconds) ? std::max(0.0f, elapsed_seconds) : 0.0f;
+    if (std::exchange(_forget_elapsed, false)) {
+        raw_frame_time = 0.0f; // the time spent in the background (AppEvent::Foreground)
+    }
     const f32 frame_time = std::min(raw_frame_time, max_frame_time);
     const f32 pacing_wait = _frame_stats.pacing_wait;
     // time_scale paces real time into the accumulator (game-speed control);
@@ -195,10 +301,20 @@ bool App::step_loop(f32 elapsed_seconds) {
         .hit_max_steps = false,
         .pacing_wait = pacing_wait,
         .snapped_frame_time = snapped,
+        .idle_wait = std::exchange(_idle_wait, 0.0f),
     };
 
     _input.begin_frame(_advance_input);
     pump_events();
+    if (_in_background) {
+        // Off the screen until Foreground (an Android app stops in the next
+        // pump_events): no steps, and nothing drawn to a surface that is gone.
+        _accumulator = 0.0f;
+        _snapper.reset();
+        _frame_stats.accumulator_after_update = 0.0f;
+        _advance_input = false;
+        return _running;
+    }
 
     i32 steps = 0;
     while (_running && _accumulator >= fixed_dt && steps < max_steps) {
@@ -258,15 +374,88 @@ void App::run(std::function<void(f32)> update, std::function<void(f32)> render) 
         last = now;
         if (!headless()) {
             pace_frame(next_frame_ns);
+            if (_running && _wait_for_events && wait_for_change()) {
+                // However long the wait, the frame it ends runs one step: the time
+                // spent idle is not game time to catch up on.
+                const f32 fixed_dt = _config.fixed_dt > 0.0f ? _config.fixed_dt : default_fixed_dt;
+                last = SDL_GetTicksNS() - static_cast<u64>(static_cast<f64>(fixed_dt) * 1'000'000'000.0);
+            }
         }
+        _redraw_in = -1.0f;
     }
     _update = {};
     _render = {};
     KIN_LOG_INFO_F("runtime", "app loop stopped", (LogFields{{.name = "frames", .value = std::to_string(frames)}}));
 }
 
+void App::request_redraw(f32 seconds) {
+    seconds = std::max(0.0f, seconds);
+    _redraw_in = _redraw_in < 0.0f ? seconds : std::min(_redraw_in, seconds);
+}
+
+// Under wait_for_events, after a frame: blocks until an event comes, a redraw
+// falls due or max_idle_wait passes. False when the next frame starts at once.
+bool App::wait_for_change() {
+    if (_settle_frames > 0) {
+        --_settle_frames;
+        return false;
+    }
+    if (_redraw_in == 0.0f) {
+        return false;
+    }
+    f32 timeout = _config.max_idle_wait > 0.0f ? _config.max_idle_wait : -1.0f;
+    if (_redraw_in > 0.0f) {
+        timeout = timeout < 0.0f ? _redraw_in : std::min(timeout, _redraw_in);
+    }
+    const u64 start = SDL_GetTicksNS();
+#if defined(SDL_PLATFORM_ANDROID)
+    // SDL's wait spins on Android (a whole core busy while nothing happens:
+    // its lifecycle wait returns at once): sleep in short steps instead, and
+    // look for events between them: 8 ms apart at first, 25 once it has
+    // been idle a while (a touch then waits a frame and a half at most).
+    const u64 deadline = timeout < 0.0f ? std::numeric_limits<u64>::max() : start + static_cast<u64>(static_cast<f64>(timeout) * 1.0e9);
+    bool event = false;
+    for (;;) {
+        SDL_PumpEvents();
+        if (SDL_HasEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST)) {
+            event = true;
+            break;
+        }
+        const u64 now = SDL_GetTicksNS();
+        if (now >= deadline) {
+            break;
+        }
+        const u64 step = now - start < 250'000'000 ? 8'000'000 : 25'000'000;
+        SDL_DelayNS(std::min<u64>(deadline - now, step));
+    }
+#else
+    // A null event leaves it queued for pump_events().
+    const bool event = SDL_WaitEventTimeout(nullptr, timeout < 0.0f ? -1 : static_cast<Sint32>(std::ceil(timeout * 1000.0f)));
+#endif
+    _idle_wait = static_cast<f32>(SDL_GetTicksNS() - start) / 1'000'000'000.0f;
+    if (event) {
+        _settle_frames = 2;
+    }
+    return true;
+}
+
+void App::set_max_fps(f32 fps) {
+    if (std::isfinite(fps) && fps > 0.0f) {
+        _max_fps = fps;
+        return;
+    }
+#if defined(SDL_PLATFORM_ANDROID)
+    _max_fps = phone_max_fps;
+#else
+    _max_fps = 0.0f;
+#endif
+}
+
 void App::pace_frame(u64& next_frame_ns) {
     _frame_stats.pacing_wait = 0.0f;
+    for (const auto& window : _windows) {
+        window->hint_frame_rate(_max_fps); // a phone's display runs at it
+    }
     if (_max_fps <= 0.0f) {
         next_frame_ns = 0;
         if (!_config.vsync && _config.yield_when_unpaced) {

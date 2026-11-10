@@ -166,9 +166,25 @@ with the locale shown and `missing_text`:
   `"{gold} pièces"` works. `dialogue_language_file(document)` extracts a
   document's own text under those keys: a file for translators to start from,
   and, loaded as the base, what lets `validate()` see untranslated lines.
+- **UI screens** (`.kinui`): a label, button or toggle with an `id` is
+  translated under `ui.<screen>.<id>`, where `<screen>` is the file's name
+  (`hud` for `ui/hud.kinui`), and a text field's hint under
+  `ui.<screen>.<id>.hint`. An element's own `key` comes first. A text set from
+  code (`set_text`) is shown as set. Without the key in any language, the
+  text is shown as written. `screen_language_file(screen, doc, locale)`
+  gives a screen's texts under those keys.
+- **Scene text**: a `TextRenderer` shows its `key`'s text, else the text under
+  `scene.<scene>.<entity>` (the scene's name lowercased, spaces as `_`, and
+  the entity's id), else its own text. Entities a scene makes get that
+  automatic key (`TextRenderer::auto_key`).
 - **Lua**: `tr("key")`, `tr("key", {gold = 3})` and an `l10n` table
-  (`locale()`, `direction()`, `has()`, `format()`, `languages()`, and in
-  `ScriptEngine` scripts `set_locale()`).
+  (`locale()`, `direction()`, `has()`, `format()`, `languages()`,
+  `set_locale()`).
+
+Kin Studio's Translations tab (File > New > Translations) gathers every
+screen's, dialogue's and scene's text under these keys into the base
+language. It edits them as a table, a column for each language, and shows the
+studio's previews in a chosen language (the status bar's Text menu).
 
 ## Text in every script
 

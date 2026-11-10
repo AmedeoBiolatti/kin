@@ -2,7 +2,7 @@ name: Experimental WebGL2
 
 on:
   push:
-    branches: ['main']
+    branches: ['main', 'exp/rendering-*']
   pull_request:
     paths:
       - 'engine/**'
@@ -36,6 +36,9 @@ jobs:
       matrix:
         include:
           - preset: hex-webgl2
+            target: hex_demo
+            mode: hex
+          - preset: hex-webgl2-modules
             target: hex_demo
             mode: hex
           - preset: webgl2-3d

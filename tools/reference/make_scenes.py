@@ -12,6 +12,9 @@ furnace.glb  the same spheres white, without the floor: in an even white
 shadows.glb  poles, thin plates at heights, steps, a slatted fence, a sphere
              and a box resting on the floor: shadow acne, peter-panning,
              aliasing, contact.
+canyon.glb   a street 8 m wide between two warm walls 12 m high, on a wide
+             ground: one face and half the street in the sun, the other face
+             lit by the sky and what they bounce (global illumination, G5).
 skinned_bend.glb  a tube bound to a chain of three joints, with the clips
              "bend" (the middle joint swings, the top counter-swings) and
              "wave" (every joint sways in turn): skinning with no download
@@ -118,6 +121,19 @@ def shadows(path):
            rotation=(0, 0.3826834, 0, 0.9238795))
     # A long wall the low sun grazes.
     g.node("wall", mesh=g.mesh("wall", *box((8, 1.5, 0.2)), material=light), translation=(0, 0.75, -6))
+    g.save(path)
+
+
+def canyon(path):
+    # A street between two walls 8 m apart and 12 m high, 80 m long, on a wide ground: the sun lights one wall's face
+    # and half the street, the other face is in shade, lit by the sky over the street and what the sunlit wall and
+    # ground bounce: the light a shaded street in a town gets (G5).
+    g = Glb()
+    stone = g.material("stone", color=(0.6, 0.4, 0.25, 1))
+    ground = g.material("ground", color=(0.35, 0.33, 0.3, 1))
+    g.node("ground", mesh=g.mesh("ground", *box((60, 0.2, 80)), material=ground), translation=(0, -0.1, 0))
+    for name, x in (("shaded", -4.5), ("sunlit", 4.5)):
+        g.node(name, mesh=g.mesh(name, *box((1, 12, 80)), material=stone), translation=(x, 6, 0))
     g.save(path)
 
 
@@ -505,6 +521,7 @@ def main():
     spheres(os.path.join(out, "spheres.glb"))
     spheres(os.path.join(out, "furnace.glb"), furnace=True)
     shadows(os.path.join(out, "shadows.glb"))
+    canyon(os.path.join(out, "canyon.glb"))
     skinned_bend(os.path.join(out, "skinned_bend.glb"))
     skinned_bend(os.path.join(out, "skinned_dense.glb"), rings=65, segments=32)  # 4,096 triangles
     floor20(os.path.join(out, "floor20.glb"))

@@ -119,6 +119,21 @@ void apply_sorted(std::vector<std::unique_ptr<LoadJob>>& batch, AssetServer& ser
 
 void AssetServer::pump(PumpMode mode) {
     _events.clear();
+    const auto collect = [&] {
+        bool quiescent;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            quiescent = _queue.empty() && _active == 0 && _completed.empty();
+        }
+        if (quiescent) {
+            for (auto& [key, record] : _assets) {
+                record.dependency_pin.reset();
+            }
+        }
+        if (_manager.over_memory_budget()) {
+            _manager.trim_memory();
+        }
+    };
 
     if (mode == PumpMode::Budgeted) {
         // A cooperative queue has no worker to complete these tasks. Never
@@ -131,6 +146,8 @@ void AssetServer::pump(PumpMode mode) {
             batch.swap(_completed);
         }
         apply_sorted(batch, *this);
+        batch.clear(); // completed jobs no longer pin storage during collection
+        collect();
         return;
     }
 
@@ -150,6 +167,8 @@ void AssetServer::pump(PumpMode mode) {
             std::unique_lock<std::mutex> lock(_mutex);
             _done_cv.wait(lock, [&] { return _queue.empty() && _active == 0; });
             if (_completed.empty()) {
+                lock.unlock();
+                collect();
                 return; // fully quiescent
             }
             batch.swap(_completed);
@@ -193,8 +212,8 @@ bool AssetServer::ready_key(const std::string& key, std::set<std::string>& visit
     if (!visiting.insert(key).second) {
         return true; // cycle guard: already proven on this path
     }
-    if (const auto asset = _assets.find(key); asset != _assets.end()) {
-        for (const std::string& child : asset->second.dependencies) {
+    if (const std::vector<std::string>* children = _manager.dependencies(key)) {
+        for (const std::string& child : *children) {
             if (!ready_key(child, visiting)) {
                 return false;
             }

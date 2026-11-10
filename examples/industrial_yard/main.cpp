@@ -7,10 +7,12 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/runtime/scene_app.hpp>
+#include <map>
 
 namespace {
 using namespace kin;
@@ -18,11 +20,14 @@ using Clock = std::chrono::steady_clock;
 constexpr int default_warmup = 300;
 struct Options {
     std::string recipe, metrics;
+    std::string capture;
+    int width = 1280, height = 720, capture_from = 0, capture_count = 1;
     int warmup = default_warmup, frames = 1440, scale = 1, workers = 4, points = -1, actors = -1, smoke = -1,
         props = -1, offset = 0;
     bool gpu_pass_markers = false, receives = true, validate = false, animation = true, motion = true, glass = true,
          structures = true, shadows = true, taa = false, ao = false, contact = false, profile = false, visible = false,
-         preview = false, rebuild = false;
+         preview = false, rebuild = false, batch_static_props = false, retain_scene_instances = true,
+         cache_local_shadow_gather = true, cache_draw_commands = true;
 };
 double cpu(bool process) {
 #ifdef __linux__
@@ -43,7 +48,13 @@ public:
                 "cpu_ms,draws,triangles,instances,culled,lights,spots,local_shadow_maps,local_shadow_draws,local_"
                 "shadow_triangles,local_shadow_casters,skinned_copies,skin_matrices,retained_upload_bytes,instance_"
                 "upload_bytes,prepared_reused,prepared_draws,feature_bytes,local_shadow_bytes,moving_x_sum,moving_y_"
-                "sum,moving_z_sum,profile_mono_ms\n";
+                "sum,moving_z_sum,profile_mono_ms,direct_retained_instances,direct_cache_hits,direct_upload_bytes,"
+                "direct_bounds_rebuilt,bounds_instance_tests,retained_gpu_bytes,device_waits,local_instance_tests,"
+                "local_task_bytes,local_gather_cache_hits,local_gather_cache_misses,local_gather_cache_builds,"
+                "local_gather_cached_tests,local_gather_cached_copies,local_gather_cache_bytes,local_sort_cache_hits,"
+                "local_sort_cache_misses,local_sort_cached_entries,draw_plan_hits,draw_plan_builds,draw_pipeline_hits,"
+                "draw_pipeline_misses,main_batched_draws,main_merged_draws,draw_plan_bytes,draw_material_gpu_bytes,"
+                "draw_material_upload_bytes,draw_index_gpu_bytes,draw_index_upload_bytes\n";
     }
     std::string_view name() const override { return "Industrial yard"; }
     void update(SceneContext& ctx) override {
@@ -77,9 +88,14 @@ public:
                 for (const auto& o : _data.world)
                     if (_o.glass || o.material < _data.material_count)
                         draw(o);
-            for (int i = 0; i < _o.props; ++i)
-                if (!_data.props[i].moving)
-                    draw(_data.props[i]);
+            if (_o.batch_static_props) {
+                for (const auto& b : _static)
+                    (void)_scene.draw_instanced(b.batch, _materials[b.material]);
+            } else {
+                for (int i = 0; i < _o.props; ++i)
+                    if (!_data.props[i].moving)
+                        draw(_data.props[i]);
+            }
             for (const auto& b : _dynamic)
                 (void)_scene.draw_instanced(b.batch, _materials[b.material]);
             for (int i = 0; i < _o.actors; ++i) {
@@ -110,7 +126,7 @@ public:
         const auto main_ms = _o.profile ? cpu(false) - main : 0, process_ms = _o.profile ? cpu(true) - process : 0;
         const double submit_ms = std::chrono::duration<double, std::milli>(Clock::now() - submitted).count();
         ctx.renderer.clear(Color::rgb(15, 22, 35));
-        ctx.renderer.draw_texture(_view.texture(), {0, 0, 1280, 720});
+        ctx.renderer.draw_texture(_view.texture(), {0, 0, f32(_o.width), f32(_o.height)});
         if (_frame > _o.warmup) {
             const auto& st = _r->debug_stats();
             _csv << std::fixed << std::setprecision(6) << _frame << ',' << _route << ',' << interval << ','
@@ -122,7 +138,27 @@ public:
                  << st.instance_upload_bytes << ',' << st.prepared_reused << ',' << st.prepared_draws << ','
                  << st.feature_bytes << ',' << st.local_shadow_bytes << ',' << _sums[0] << ',' << _sums[1] << ','
                  << _sums[2] << ',' << std::chrono::duration<double, std::milli>(begin.time_since_epoch()).count()
-                 << '\n';
+                 << ',' << st.direct_retained_instances << ',' << st.direct_cache_hits << ',' << st.direct_upload_bytes
+                 << ',' << st.direct_bounds_rebuilt << ',' << st.bounds_instance_tests << ',' << st.retained_gpu_bytes
+                 << ',' << st.device_waits << ',' << st.local_instance_tests << ',' << st.local_task_bytes << ','
+                 << st.local_gather_cache_hits << ',' << st.local_gather_cache_misses << ','
+                 << st.local_gather_cache_builds << ',' << st.local_gather_cached_tests << ','
+                 << st.local_gather_cached_copies << ',' << st.local_gather_cache_bytes << ','
+                 << st.local_sort_cache_hits << ',' << st.local_sort_cache_misses << ',' << st.local_sort_cached_entries
+                 << ',' << st.draw_plan_hits << ',' << st.draw_plan_builds << ',' << st.draw_pipeline_hits << ','
+                 << st.draw_pipeline_misses << ',' << st.main_batched_draws << ',' << st.main_merged_draws << ','
+                 << st.draw_plan_bytes << ',' << st.draw_material_gpu_bytes << ',' << st.draw_material_upload_bytes
+                 << ',' << st.draw_index_gpu_bytes << ',' << st.draw_index_upload_bytes << '\n';
+        }
+        if (!_o.capture.empty() && _frame >= _o.warmup + _o.capture_from &&
+            _frame < _o.warmup + _o.capture_from + _o.capture_count) {
+            kin::Image image;
+            if (!ctx.renderer.read_rgba({0, 0, f32(_o.width), f32(_o.height)}, image.rgba, image.size))
+                throw std::runtime_error("yard evaluation capture failed");
+            std::filesystem::create_directories(_o.capture);
+            if (!kin::save_image(image, std::filesystem::path(_o.capture) /
+                                            ("frame_" + std::to_string(_frame - _o.warmup) + ".png")))
+                throw std::runtime_error("yard evaluation image write failed");
         }
         ++_frame;
         if (_o.visible && !_o.preview && _frame > _o.warmup + _o.frames)
@@ -150,14 +186,19 @@ public:
             .field("shadow_resolution", 1024)
             .field("shadow_near_plane", .025)
             .field("shadow_depth_bits", 32)
-            .field("render_width", 1280 * _o.scale)
-            .field("render_height", 720 * _o.scale)
+            .field("render_width", _o.width * _o.scale)
+            .field("render_height", _o.height * _o.scale)
             .field("route_frame", _route)
             .field("route_offset", _o.offset)
             .field("measured_frames", _o.frames)
             .field("warmup_frames", _o.warmup)
             .field("moving_props", _moving)
             .field("moving_batches", u64(_dynamic.size()))
+            .field("batch_static_props", _o.batch_static_props)
+            .field("static_batches", u64(_static.size()))
+            .field("retain_scene_instances", _o.retain_scene_instances)
+            .field("cache_local_shadow_gather", _o.cache_local_shadow_gather)
+            .field("cache_draw_commands", _o.cache_draw_commands)
             .field("source_triangles", _data.source_triangles)
             .field("scene_triangles", _triangles)
             .field("source_mesh_bytes", _data.mesh_bytes)
@@ -186,6 +227,9 @@ private:
     void draw(const yard::Object& o) { (void)_scene.draw(_meshes[o.mesh], o.transform, _materials[o.material]); }
     void configure() {
         _scene.debug.gpu_pass_markers = _o.gpu_pass_markers;
+        _scene.debug.retain_scene_instances = _o.retain_scene_instances;
+        _scene.debug.cache_local_shadow_gather = _o.cache_local_shadow_gather;
+        _scene.debug.cache_draw_commands = _o.cache_draw_commands;
         auto& l = _scene.lights;
         l.points.clear();
         l.spots.clear();
@@ -238,7 +282,7 @@ private:
             throw std::runtime_error("yard skinning unavailable");
         if (_o.shadows && !_r->capabilities().local_shadows)
             throw std::runtime_error("yard local shadows unavailable");
-        _view = _r->create_view({1280 * _o.scale, 720 * _o.scale}, {.hdr = true}).value_or({});
+        _view = _r->create_view({_o.width * _o.scale, _o.height * _o.scale}, {.hdr = true}).value_or({});
         for (const auto& data : _data.meshes) {
             auto mesh = _r->create_mesh(data).value_or({});
             if (!mesh)
@@ -308,6 +352,23 @@ private:
             d.batch = InstanceBatch3D::create(_meshes[mesh], d.records, {{0, u32(d.records.size())}}).value_or({});
             _dynamic.push_back(std::move(d));
         }
+        if (_o.batch_static_props) {
+            // Keep stationary copies resident as well as moving copies. Group by both mesh and material;
+            // a single spatial group per batch shares its bound without making one task per source prop.
+            std::map<std::pair<u32, u32>, std::vector<MeshInstance3D>> batches;
+            for (int i = 0; i < _o.props; ++i) {
+                const auto& o = _data.props[i];
+                if (!o.moving)
+                    batches[{o.mesh, o.material}].push_back({o.transform, colors::white, 0});
+            }
+            for (auto& [key, copies] : batches) {
+                const u32 count = static_cast<u32>(copies.size());
+                auto batch = InstanceBatch3D::create(_meshes[key.first], std::move(copies), {{0, count}});
+                if (!batch)
+                    throw std::runtime_error("yard static batch creation failed");
+                _static.push_back({key.second, batch.value_or({})});
+            }
+        }
         if (_o.structures)
             for (const auto& o : _data.world)
                 if (_o.glass || o.material < _data.material_count)
@@ -327,6 +388,10 @@ private:
         std::vector<MeshInstance3D> records;
         InstanceBatch3D batch;
     };
+    struct StaticBatch {
+        u32 material = 0;
+        InstanceBatch3D batch;
+    };
     Options _o;
     JobSystem* _jobs;
     yard::Recipe _data;
@@ -334,6 +399,7 @@ private:
     std::vector<Material3D> _materials;
     std::array<Texture, 5> _textures;
     std::vector<Dynamic> _dynamic;
+    std::vector<StaticBatch> _static;
     std::vector<u32> _actor_joints;
     std::unique_ptr<Renderer3D> _r;
     View3D _view;
@@ -367,6 +433,16 @@ int main(int argc, char** argv) {
                 o.warmup = std::stoi(value());
             else if (a == "--measured")
                 o.frames = std::stoi(value());
+            else if (a == "--size") {
+                const auto v = value();
+                if (std::sscanf(v.c_str(), "%dx%d", &o.width, &o.height) != 2)
+                    throw std::runtime_error("yard size requires WIDTHxHEIGHT");
+            } else if (a == "--eval-capture")
+                o.capture = value();
+            else if (a == "--eval-capture-from")
+                o.capture_from = std::stoi(value());
+            else if (a == "--eval-capture-count")
+                o.capture_count = std::stoi(value());
             else if (a == "--resolution-scale")
                 o.scale = std::stoi(value());
             else if (a == "--point-lights")
@@ -391,20 +467,27 @@ int main(int argc, char** argv) {
                 o.gpu_pass_markers = true;
             else if (a == "--profile-cpu")
                 o.profile = true;
+            else if (a == "--batch-static-props")
+                o.batch_static_props = true;
             else if (a == "--receive-shadows" || a == "--animation" || a == "--motion" || a == "--glass" ||
-                     a == "--structures" || a == "--local-shadows" || a == "--taa" || a == "--ao" || a == "--contact") {
+                     a == "--retain-scene-instances" || a == "--cache-local-shadow-gather" ||
+                     a == "--cache-draw-commands" || a == "--structures" || a == "--local-shadows" || a == "--taa" ||
+                     a == "--ao" || a == "--contact") {
                 auto v = value();
                 if (v != "0" && v != "1")
                     throw std::runtime_error("yard booleans require 0 or 1");
-                bool* p = a == "--receive-shadows" ? &o.receives
-                          : a == "--animation"     ? &o.animation
-                          : a == "--motion"        ? &o.motion
-                          : a == "--glass"         ? &o.glass
-                          : a == "--structures"    ? &o.structures
-                          : a == "--local-shadows" ? &o.shadows
-                          : a == "--taa"           ? &o.taa
-                          : a == "--ao"            ? &o.ao
-                                                   : &o.contact;
+                bool* p = a == "--retain-scene-instances"      ? &o.retain_scene_instances
+                          : a == "--cache-local-shadow-gather" ? &o.cache_local_shadow_gather
+                          : a == "--cache-draw-commands"       ? &o.cache_draw_commands
+                          : a == "--receive-shadows"           ? &o.receives
+                          : a == "--animation"                 ? &o.animation
+                          : a == "--motion"                    ? &o.motion
+                          : a == "--glass"                     ? &o.glass
+                          : a == "--structures"                ? &o.structures
+                          : a == "--local-shadows"             ? &o.shadows
+                          : a == "--taa"                       ? &o.taa
+                          : a == "--ao"                        ? &o.ao
+                                                               : &o.contact;
                 *p = v == "1";
             } else if (a == "--rebuild-scene")
                 o.rebuild = true;
@@ -418,9 +501,11 @@ int main(int argc, char** argv) {
                       << " source triangles\n";
             return 0;
         }
-        if (o.recipe.empty() || o.metrics.empty() || o.warmup < 0 || o.warmup > 300 || o.frames < 1 ||
-            o.frames > 6000 || (o.scale != 1 && o.scale != 2) || o.points < -1 || o.points > 16 || o.workers < 0 ||
-            o.workers > 4 || o.actors < -1 || o.smoke < -1 || o.props < -1 || o.offset < 0 || o.offset >= 1440)
+        if (o.width < 16 || o.height < 16 || o.width > 8192 || o.height > 8192 || o.capture_from < 0 ||
+            o.capture_count < 1 || o.capture_count > 6000 || o.recipe.empty() || o.metrics.empty() || o.warmup < 0 ||
+            o.warmup > 300 || o.frames < 1 || o.frames > 6000 || (o.scale != 1 && o.scale != 2) || o.points < -1 ||
+            o.points > 16 || o.workers < 0 || o.workers > 4 || o.actors < -1 || o.smoke < -1 || o.props < -1 ||
+            o.offset < 0 || o.offset >= 1440)
             throw std::runtime_error("invalid yard options");
         auto headless = parse_headless_options(int(runtime.size()), runtime.data());
         headless.enabled = !o.preview && !o.visible;
@@ -431,8 +516,8 @@ int main(int argc, char** argv) {
         SceneManager scenes;
         scenes.push(std::make_unique<Yard>(o, jobs.get()));
         return run_scene_app({.window = {.title = "Industrial yard",
-                                         .width = 1280,
-                                         .height = 720,
+                                         .width = o.width,
+                                         .height = o.height,
                                          .vsync = false,
                                          .max_fps = o.preview ? 60.f : 0.f,
                                          .high_pixel_density = false},

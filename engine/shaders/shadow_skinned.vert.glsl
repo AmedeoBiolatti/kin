@@ -16,6 +16,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Casters {
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance; y: where its list starts, plus one (0: no list)
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 } draw;
 
 uint instance_index() {
@@ -25,5 +26,7 @@ uint instance_index() {
 void main() {
     const uint slot = instance_index();
     const mat4 model = instances[slot].model;
-    gl_Position = draw.view_projection * (model * (skin_matrix(slot) * vec4(aPos, 1.0)));
+    const vec4 world = model * (skin_matrix(slot) * vec4(aPos, 1.0));
+    gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = dot(draw.clip.xyz, world.xyz) + draw.clip.w;
 }

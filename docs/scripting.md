@@ -1,5 +1,8 @@
 # Scripting
 
+Gameplay in Python, experimental and separate from Lua, is in
+[Python scripting](python_scripting.md).
+
 Kin runs Lua 5.4 (through sol2) in these hosts:
 
 - **`ScriptScene`** (`kin/scripting/script_scene.hpp`): a scene written in Lua.
@@ -9,11 +12,18 @@ Kin runs Lua 5.4 (through sol2) in these hosts:
   frame stages, with checked physics, prepared prefab pools, animation/IK, and
   traversal, ragdoll and rope controls. See the
   [3D Lua workflow](rendering_3d.md#lua-gameplay-in-a-3d-scene) and `examples/lua_range`.
+- **`EntityScripts`** (`kin/scripting/entity_scripts.hpp`): scripts on a
+  scene's entities, named by their `ScriptComponent` (see
+  [below](#scripts-on-entities)).
 - **`LuaScript`** (`kin/scripting/lua_script.hpp`): a script for code that does
   not live in the ECS, such as a game's rules, AI, balance formulas or level
   logic, run by plain C++. It knows nothing of scenes or entities: the host
-  binds what a script may ask and do, and calls the functions it defines. This
-  page is about `LuaScript`.
+  binds what a script may ask and do, and calls the functions it defines. Most
+  of this page is about `LuaScript`.
+
+See [Lua development](lua_development.md) for generated API definitions, static
+checks, limits/profiling, managed tasks, transactional entity reload and the
+headless Lua test runner.
 
 ## A rules script
 
@@ -117,12 +127,16 @@ matters. A host that wants randomness should bind its own, seeded from the
 run's `RngKey`.
 
 Every load and call has an **instruction budget**
-(`LuaScriptOptions::instruction_limit`, 50 million by default, checked every
+(`LuaScriptOptions::limits.instruction_limit`, 50 million by default, checked every
 1,000 instructions; 0 turns it off). A script stuck in a loop fails that call
 with "instruction limit reached" instead of freezing the game; the next call
 gets a fresh budget.
 
 ## Hot reload
+
+For state-preserving, transactional development reload through `reload_state`
+and `on_reload`, see [development sessions](hot_reload.md). The APIs below retain
+their legacy reload behavior outside a development session.
 
 ```cpp
 kin::FileWatcher files;
@@ -135,13 +149,150 @@ good version if the new one fails; fixing the file reloads it. The watcher and
 the script may be destroyed in either order. See
 [hot-reloading game data](assets.md#hot-reloading-game-data).
 
+## Scripts on entities
+
+A scene file gives an entity a script with a `ScriptComponent`:
+
+```json
+"ScriptComponent": {"asset": "scripts/player.lua"}
+```
+
+```lua
+function on_start(self)
+    self.speed = 200
+end
+
+function on_update(self, dt)
+    self:move(input.axis("move_x") * self.speed * dt, 0)
+    if input.pressed("jump") then
+        self:trigger("jump") -- its Animator's state machine
+    end
+end
+
+function on_contact(self, other)
+    if other:name() == "Coin" then other:destroy() end
+end
+```
+
+`EntityScripts` runs them. Call `update` each frame after physics:
+
+```cpp
+kin::EntityScripts scripts{kin::EntityScriptsConfig{.content = kin::content_root()}};
+scripts.update(world, ctx.input, ctx.dt);
+```
+
+- Each script file gets one sandboxed `LuaScript` state, which every entity
+  running it shares.
+- Each entity gets a `self` table of its own. The script keeps its own values
+  there, and `self` also has the entity's methods:
+  - `id()`, `name()`, `alive()`, `parent()`, `child(name)`;
+  - `get(component)`, `set(component, {field = value})` (adds the component when
+    it is missing), `has`, `add`, `remove`;
+  - `position()`, `set_position(x, y)`, `move(dx, dy)` (an entity with a
+    body: its body goes there too), `rotation()`, `set_rotation(degrees)`;
+  - `tween(property, to, seconds[, easing][, options])` moves one of its
+    fields over time ([tweens](animation_system.md#tweens)), for example
+    `self:tween("Transform2D.pos", {x = 300, y = 80}, 0.4, "backout")`. The
+    options are `delay`, `repeats`, `yoyo`, `relative`, `easing`, and
+    `done = function(self) end`, which runs once it gets to its end. It
+    returns the tween's id (`tweens.of(self, id)` is a handle to await).
+    `tweening([property])`, `stop_tween(id)` and `stop_tweens([property])` go
+    with it. The world's script services step tweens, once a simulation step;
+  - `after(seconds, function(self) end)` and `every(seconds, function(self)
+    end)` call back later, until `cancel(timer)` or the entity stops running
+    its script. They return the timer (a [task](lua_development.md#tasks-and-waits)):
+    its time counts from the next step, and `every` fires at most once a step.
+    They, and a tween's `done`, are the script's tasks: not kept in saves, and
+    dropped by a reload (restart them in `on_reload`);
+  - `velocity()` and `set_velocity(vx, vy)`: its `CharacterController2D`'s,
+    else its body's (`PhysicsVelocity`); `on_floor()`, `on_wall()` and
+    `on_ceiling()`, what its character found in the last step
+    ([characters](physics_2d.md#characters));
+  - `destroy()`;
+  - for its `Animator`, `play(animation)`, `set_param(name, value)`,
+    `trigger(name)` and `state()`;
+  - and, for its `ParticleSystemComponent`, `emit([effect])`, which bursts its
+    effect (or another of its catalog) where it bursts, and says whether it
+    could. Setting the component's `emitting` starts and stops an effect that
+    streams.
+- Fields are read and written the way scene files write them: numbers,
+  booleans, strings, `{x, y}` and `{r, g, b, a}` tables.
+- The `input` table reads the input map: `held`, `pressed`, `released` and
+  `axis` by name, and `mouse()` returns x and y ([input](input.md)). In a game
+  for several players at one screen, each of the four takes a player last (1
+  the first, 0 anyone). Without one it reads the player the entity's
+  `ScriptComponent` names in `player` (0, the default, is anyone), so the same
+  `player.lua` runs player 1's character and player 2's. `player()` says
+  whose input this entity reads. Joining, rumble and button labels are
+  `controllers.*` ([Lua 2D workflows](lua_2d_workflows.md#controllers-and-asset-memory)).
+  `touches()` lists the fingers down (`{id, x, y, start_x, start_y}`), and
+  `pinch()` and `pan()` give two fingers' pinch (1: none) and pan since the
+  last step. Gestures are actions an input file binds (`touch jump tap`;
+  [touch](input.md#touch)).
+- The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
+  the new prefab instance's root.
+- When the game gives the scripts its physics (`EntityScripts::set_physics`),
+  the `physics` table asks what is where, in the world
+  ([2D physics](physics_2d.md#what-is-where)):
+  - `raycast(x1, y1, x2, y2[, options])`, `cast_circle(x1, y1, x2, y2,
+    radius[, options])` and `cast_box(x1, y1, x2, y2, width, height[, options])`
+    return the nearest hit, or nil: `{entity, x, y, normal = {x, y}, fraction}`;
+  - `overlap_point(x, y[, options])`, `overlap_circle(x, y, radius[, options])`
+    and `overlap_box(x, y, width, height[, options])` (centred on x, y) return
+    a list of the entities there;
+  - `options` is a table: `mask` (the kinds of collider to find, as bits),
+    `sensors = true` to find sensors too, and `ignore`, an entity (or `self`)
+    left out.
+- The `camera` table shakes the current camera: `camera.shake(trauma)` adds
+  trauma (0 to 1) that wears off, and `camera.trauma()` says how much is left
+  ([cameras](rendering.md#a-camera-in-the-scene)).
+- When the game gives the scripts its screens (`EntityScripts::set_screens`),
+  the `ui` table reaches their elements by id ([UI screens](ui.md#screens-from-data)):
+  - reading: `clicked`, `changed`, `value`, `checked` and `text`;
+  - changing: `set_text`, `set_value`, `set_checked`, `show`, `hide`,
+    `set_image` and `set_enabled`.
+- When the game gives the scripts its dialogue (`EntityScripts::set_dialogue`),
+  they reach it through the `dialogue` table ([dialogue](dialogue.md)):
+  - `start(path[, node])`, `stop()`, `active()`, `advance()`;
+  - `choose(i or id)` (counting from 1), `node()`;
+  - `get(name)` and `set(name, value)` for its variables.
+
+  Each entity's `on_dialogue_event(self, id, node)` hears what it tells.
+- When the game gives the scripts its saves (`EntityScripts::set_saves`), the
+  `save` table writes and reads save slots and keeps the game's own values, and
+  an entity marked `Saved` keeps its `self`'s values ([saving](saving.md)).
+  `on_load(self)` runs when they are given back.
+- `on_start(self)` runs once, before the entity's first `on_update(self, dt)`.
+- `on_contact(self, other)` runs when the entity's body begins to touch
+  another, and `on_contact_end(self, other)` when it stops, when the entity
+  has a `PhysicsContactQueue`. Finding `other` looks through every entity with
+  a body (then every tilemap collider) for each contact, so a scene of
+  thousands of bodies with many contacts a step pays for it: a known gap.
+- A file's `on_update`, `on_dialogue_event`, `on_contact` and
+  `on_contact_end` are looked up once an update, not once an entity: a script
+  that defines one while it runs (in `on_start`, say) has it called from the
+  next update. `self`'s entity methods (`self:position()`) are bound to it the
+  first time each is used. A scripted foe walking to the player costs about
+  1.1 µs an update on a desktop (2.4 before;
+  [the bench](../tests/entity_scripts_bench.cpp)).
+- Script files are checked for changes every `check_frames` updates. A changed
+  file is prepared in a fresh VM, preserving each entity's data. Optional
+  `on_reload(self)` migrates it without rerunning `on_start`. Failed edits keep
+  the previous VM and instances. `on_stop(self, reason)` handles removal,
+  disabling, replacement and explicit restart. See [Lua development](lua_development.md).
+- An error never stops the game. The failed call is skipped, the error is
+  logged, and `problems()` keeps it by path until the script runs cleanly again.
+
+`check_lua_syntax(code, name, error)` checks whether a script reads, without
+running it. Kin Studio uses it to put scripts that do not read in its Problems
+panel.
 
 ## Optional build targets
 
 `KIN_ENABLE_SCRIPTING` defaults to ON. Link `kin::scripting` for plain `LuaScript`
 sandboxes, including module loading and localization; this target does not link
 ECS or the engine base. Link `kin::scripting_scenes` for `ScriptEngine`,
-`ScriptScene` and scene/editor reload integration. `kin::engine` retains both
+`ScriptScene`, `EntityScripts` and scene/editor reload integration. `kin::engine` retains both
 when enabled. Scripting OFF creates neither target and does not fetch Lua/sol2.
 `<kin/components.hpp>` exposes `KIN_HAS_SCRIPTING` and
 `kin::components::scripting`. See [component configuration](shipping.md#component-registry-and-optional-libraries).

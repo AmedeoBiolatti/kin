@@ -3,14 +3,18 @@
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
+#include <kin/renderer/path.hpp>
+#include <kin/renderer/shape.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cctype>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <numbers>
 #include <queue>
 #include <sstream>
 #include <string>
@@ -215,7 +219,11 @@ void append_tile_render_commands(const TileMap& map,
                                  bool draw_top_edge,
                                  u64 pass_mask,
                                  const SpriteCatalog* sprites,
-                                 std::vector<RenderCommand>& out) {
+                                 const SpriteSheet* sheet,
+                                 const std::shared_ptr<const ShapeMesh>& hex_mesh,
+                                 std::vector<RenderCommand>& out,
+                                 f64 time = 0.0,
+                                 std::vector<std::pair<u32, u16>>* animated = nullptr) {
     const TileDefinition* definition = tile_definition_in_layer(map, tile_layer, col, row);
     if (!definition) {
         return;
@@ -230,10 +238,17 @@ void append_tile_render_commands(const TileMap& map,
         .pass_mask = pass_mask,
     };
 
-    ResolvedSprite resolved;
-    if (sprites &&
-        !definition->sprite_id.empty() &&
-        sprites->resolve(definition->sprite_id, resolved)) {
+    // Its sprite, else its frame of the tileset's image.
+    Sprite sprite;
+    if (ResolvedSprite resolved; sprites && !definition->sprite_id.empty() && sprites->resolve(definition->sprite_id, resolved)) {
+        sprite = resolved.sprite;
+    } else if (const i32 frame = definition->frame_at(time); sheet && frame >= 0 && frame < sheet->cols() * sheet->rows()) {
+        sprite = sheet->sprite(frame);
+        if (animated && definition->animated()) {
+            animated->emplace_back(static_cast<u32>(out.size()), cell_in_layer(tile_layer, map.cols, map.rows, col, row).tile_id);
+        }
+    }
+    if (sprite.valid()) {
         Rectf sprite_rect = rect;
         sprite_rect.x += definition->render_offset_px.x;
         sprite_rect.y += definition->render_offset_px.y;
@@ -247,13 +262,21 @@ void append_tile_render_commands(const TileMap& map,
             .type = RenderCommandType::Sprite,
             .key = key,
             .rect = sprite_rect,
-            .source = resolved.sprite.source,
+            .source = sprite.source,
             .color = colors::white,
-            .texture = resolved.sprite.texture,
+            .texture = sprite.texture,
         });
         return;
     }
 
+    if (map.grid.hex() && hex_mesh) {
+        // Its hexagon, in its colour.
+        RenderCommand command{.type = RenderCommandType::Shape, .key = key, .rect = rect, .color = definition->color};
+        command.detail = std::make_shared<RenderCommandDetail>(
+            RenderCommandDetail{.shape = hex_mesh, .transform = Affine2::translation({rect.x + rect.w * 0.5f, rect.y + rect.h * 0.5f})});
+        out.push_back(std::move(command));
+        return;
+    }
     out.push_back({
         .type = RenderCommandType::FillRect,
         .key = key,
@@ -401,6 +424,101 @@ bool rects_overlap(Rectf a, Rectf b) {
     return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
+// The cells (a range of them, clipped to the map) a world rect may touch: a hex
+// map's found from its rows' and columns' steps, a cell more each way.
+TileRect cells_touching(const TileMap& map, Rectf rect) {
+    if (map.cols <= 0 || map.rows <= 0 || map.tile_w <= 0 || map.tile_h <= 0) {
+        return {};
+    }
+    i32 col0 = 0;
+    i32 row0 = 0;
+    i32 col1 = 0;
+    i32 row1 = 0;
+    if (!map.grid.hex()) {
+        col0 = map.world_col(rect.x);
+        row0 = map.world_row(rect.y);
+        col1 = map.world_col(rect.x + rect.w - 0.001f);
+        row1 = map.world_row(rect.y + rect.h - 0.001f);
+    } else {
+        const f32 w = static_cast<f32>(map.tile_w);
+        const f32 h = static_cast<f32>(map.tile_h);
+        const bool pointy = map.grid.orientation == HexOrientation::PointyTop;
+        const Vec2f step{pointy ? w : w * 0.75f, pointy ? h * 0.75f : h};
+        const Vec2f origin = map.hex_layout().origin;
+        col0 = static_cast<i32>(std::floor((rect.x - origin.x - w) / step.x));
+        col1 = static_cast<i32>(std::ceil((rect.x + rect.w - origin.x + w) / step.x));
+        row0 = static_cast<i32>(std::floor((rect.y - origin.y - h) / step.y));
+        row1 = static_cast<i32>(std::ceil((rect.y + rect.h - origin.y + h) / step.y));
+    }
+    col0 = std::max(0, col0);
+    row0 = std::max(0, row0);
+    col1 = std::min(map.cols - 1, col1);
+    row1 = std::min(map.rows - 1, row1);
+    if (col1 < col0 || row1 < row0) {
+        return {};
+    }
+    return {col0, row0, col1 - col0 + 1, row1 - row0 + 1};
+}
+
+// Whether a convex outline and a rect overlap (separated along none of the
+// rect's axes nor the outline's edges' normals).
+bool outline_overlaps(std::span<const Vec2f> outline, Rectf rect) {
+    if (outline.empty() || rect.w <= 0.0f || rect.h <= 0.0f) {
+        return false;
+    }
+    const std::array<Vec2f, 4> box{{{rect.x, rect.y}, {rect.x + rect.w, rect.y}, {rect.x + rect.w, rect.y + rect.h}, {rect.x, rect.y + rect.h}}};
+    const auto separated = [&](Vec2f axis) {
+        f32 a0 = std::numeric_limits<f32>::max();
+        f32 a1 = std::numeric_limits<f32>::lowest();
+        f32 b0 = a0;
+        f32 b1 = a1;
+        for (const Vec2f p : outline) {
+            const f32 d = p.x * axis.x + p.y * axis.y;
+            a0 = std::min(a0, d);
+            a1 = std::max(a1, d);
+        }
+        for (const Vec2f p : box) {
+            const f32 d = p.x * axis.x + p.y * axis.y;
+            b0 = std::min(b0, d);
+            b1 = std::max(b1, d);
+        }
+        return a1 <= b0 || b1 <= a0;
+    };
+    if (separated({1.0f, 0.0f}) || separated({0.0f, 1.0f})) {
+        return false;
+    }
+    for (std::size_t i = 0; i < outline.size(); ++i) {
+        const Vec2f a = outline[i];
+        const Vec2f b = outline[(i + 1) % outline.size()];
+        if (separated({a.y - b.y, b.x - a.x})) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A cell blocking a world rect: its box (a square map's) or its hexagon over it.
+bool cell_overlaps(const TileMap& map, Vec2i cell, Rectf rect) {
+    if (!map.grid.hex()) {
+        return rects_overlap(rect, map.tile_rect(cell.x, cell.y));
+    }
+    const std::vector<Vec2f> outline = map.tile_outline(cell);
+    return outline_overlaps(outline, rect);
+}
+
+// Commands made in the map's space, drawn `by` further on (its origin).
+RenderCommand moved_command(RenderCommand command, Vec2f by) {
+    command.rect.x += by.x;
+    command.rect.y += by.y;
+    command.key.y += by.y;
+    if (command.detail) {
+        auto detail = std::make_shared<RenderCommandDetail>(*command.detail);
+        detail->transform = Affine2::translation(by) * detail->transform;
+        command.detail = std::move(detail);
+    }
+    return command;
+}
+
 std::size_t chunk_index(i32 chunk_col, i32 chunk_row, i32 chunk_cols) {
     return static_cast<std::size_t>(chunk_row * chunk_cols + chunk_col);
 }
@@ -428,8 +546,15 @@ TileRect tile_rect_to_chunk_rect(TileRect rect, Vec2i chunk_size, i32 chunk_cols
     return {x0, y0, x1 - x0 + 1, y1 - y0 + 1};
 }
 
-TileRect visible_tile_rect(const TileMap& map, const RenderView& view) {
-    const Rectf visible = visible_world_rect(map, view);
+TileRect visible_tile_rect(const TileMap& map, const RenderView& view, Vec2f origin) {
+    Rectf visible = visible_world_rect(map, view);
+    if (view.culling_enabled) {
+        visible.x -= origin.x; // into the map's own space
+        visible.y -= origin.y;
+    }
+    if (map.grid.hex()) {
+        return cells_touching(map, visible);
+    }
     const i32 col0 = std::max(0, map.world_col(visible.x));
     const i32 row0 = std::max(0, map.world_row(visible.y));
     const i32 col1 = std::min(map.cols - 1, map.world_col(visible.x + visible.w + static_cast<f32>(map.tile_w - 1)));
@@ -497,6 +622,17 @@ void write_tile_definition(JsonWriter& out, const TileDefinition& definition, u1
     if (!definition.sprite_id.empty()) {
         out.field("sprite", std::string_view{definition.sprite_id});
     }
+    if (definition.frame >= 0) {
+        out.field("frame", definition.frame);
+    }
+    if (!definition.frames.empty()) {
+        out.key("frames").begin_array();
+        for (const i32 frame : definition.frames) {
+            out.value(frame);
+        }
+        out.end_array();
+        out.field("frame_seconds", static_cast<f64>(definition.frame_seconds));
+    }
     if (definition.render_offset_px.x != 0.0f || definition.render_offset_px.y != 0.0f) {
         out.key("render_offset_px");
         write_vec2(out, definition.render_offset_px);
@@ -558,6 +694,16 @@ void read_tile_definition(TileSet& tileset, const JsonValue& value) {
     definition.cost = static_cast<i32>(value.int_at("cost", definition.cost));
     definition.blocks_sight = value.bool_at("blocks_sight", definition.blocks_sight);
     definition.sprite_id = value.string_at("sprite", definition.sprite_id);
+    definition.frame = static_cast<i32>(std::clamp<i64>(value.int_at("frame", definition.frame), -1, std::numeric_limits<i32>::max()));
+    definition.frames.clear();
+    if (const JsonValue* frames = value.find("frames"); frames && frames->is_array()) {
+        for (const JsonValue& frame : frames->items()) {
+            if (frame.is_number() && frame.as_int() >= 0 && frame.as_int() <= std::numeric_limits<i32>::max()) {
+                definition.frames.push_back(static_cast<i32>(frame.as_int()));
+            }
+        }
+    }
+    definition.frame_seconds = static_cast<f32>(std::clamp(value.number_at("frame_seconds", definition.frame_seconds), 0.001, 3600.0));
     if (const JsonValue* render_offset = value.find("render_offset_px")) {
         definition.render_offset_px = vec2_from_json(*render_offset);
     }
@@ -670,7 +816,7 @@ TerrainVariant read_terrain_variant(const JsonValue& value) {
     variant.terrain = value.string_at("terrain");
     const i64 mask = value.int_at("mask", 0);
     const i64 tile_id = value.int_at("tile_id", 0);
-    variant.mask = static_cast<u8>(std::clamp<i64>(mask, 0, 15));
+    variant.mask = static_cast<u8>(std::clamp<i64>(mask, 0, 63));
     if (tile_id > 0 && tile_id <= std::numeric_limits<u16>::max()) {
         variant.tile_id = static_cast<u16>(tile_id);
     }
@@ -713,6 +859,85 @@ TilePattern read_pattern(const JsonValue& value) {
     return pattern;
 }
 
+// A tile written only when it says something (an id, a property, a look).
+bool says_something(const TileDefinition& definition) {
+    return !definition.id.empty() || definition.solid || definition.walkable.has_value() || definition.cost != 10 ||
+           definition.blocks_sight || !definition.terrain.empty() || !definition.tags.empty() || !definition.metadata.empty() ||
+           !definition.collision_polygon.empty() || !definition.sprite_id.empty() || definition.frame >= 0 || !definition.frames.empty();
+}
+
+// A tileset's members (a map's "tileset" object, or a .kintileset file's).
+void write_tileset_members(JsonWriter& json, const TileSet& tileset) {
+    if (!tileset.image.empty()) {
+        json.field("image", std::string_view{tileset.image});
+        json.key("frame_size").begin_object()
+            .field("w", tileset.sheet.tile_w)
+            .field("h", tileset.sheet.tile_h)
+            .end_object();
+        if (tileset.sheet.margin != 0) {
+            json.field("margin", tileset.sheet.margin);
+        }
+        if (tileset.sheet.spacing != 0) {
+            json.field("spacing", tileset.sheet.spacing);
+        }
+    }
+    if (tileset.grid.hex()) {
+        json.key("cells").begin_object()
+            .field("shape", "hex")
+            .field("orientation", tileset.grid.orientation == HexOrientation::FlatTop ? "flat" : "pointy")
+            .end_object();
+    }
+    json.key("tiles").begin_array();
+    for (std::size_t id = 1; id < tileset.size(); ++id) {
+        if (says_something(tileset.tiles[id])) {
+            write_tile_definition(json, tileset.tiles[id], static_cast<u16>(id));
+        }
+    }
+    json.end_array();
+    if (!tileset.terrain_variants.empty()) {
+        json.key("terrain_variants").begin_array();
+        for (const TerrainVariant& variant : tileset.terrain_variants) {
+            write_terrain_variant(json, variant);
+        }
+        json.end_array();
+    }
+}
+
+void read_tileset_members(TileSet& tileset, const JsonValue& value) {
+    tileset.image = value.string_at("image");
+    if (const JsonValue* frame = value.find("frame_size"); frame && frame->is_object()) {
+        tileset.sheet.tile_w = static_cast<i32>(std::max<i64>(0, frame->int_at("w", 0)));
+        tileset.sheet.tile_h = static_cast<i32>(std::max<i64>(0, frame->int_at("h", 0)));
+    }
+    tileset.sheet.margin = static_cast<i32>(std::max<i64>(0, value.int_at("margin", 0)));
+    tileset.sheet.spacing = static_cast<i32>(std::max<i64>(0, value.int_at("spacing", 0)));
+    if (const JsonValue* cells = value.find("cells"); cells && cells->is_object()) {
+        tileset.grid.shape = cells->string_at("shape") == "hex" ? TileShape::Hex : TileShape::Square;
+        tileset.grid.orientation = cells->string_at("orientation") == "flat" ? HexOrientation::FlatTop : HexOrientation::PointyTop;
+    }
+    if (const JsonValue* tiles = value.find("tiles"); tiles && tiles->is_array()) {
+        for (const JsonValue& tile : tiles->items()) {
+            read_tile_definition(tileset, tile);
+        }
+    }
+    if (const JsonValue* terrain_variants = value.find("terrain_variants"); terrain_variants && terrain_variants->is_array()) {
+        for (const JsonValue& variant : terrain_variants->items()) {
+            tileset.terrain_variants.push_back(read_terrain_variant(variant));
+        }
+    }
+}
+
+TileGrid read_grid(const JsonValue* value) {
+    TileGrid grid;
+    if (!value || !value->is_object()) {
+        return grid;
+    }
+    grid.shape = value->string_at("shape") == "hex" ? TileShape::Hex : TileShape::Square;
+    grid.orientation = value->string_at("orientation") == "flat" ? HexOrientation::FlatTop : HexOrientation::PointyTop;
+    grid.offset = value->string_at("offset") == "even" ? HexOffset::Even : HexOffset::Odd;
+    return grid;
+}
+
 TileMap load_json_tilemap(const JsonValue& root) {
     TileMap map;
     if (!root.is_object()) {
@@ -725,18 +950,13 @@ TileMap load_json_tilemap(const JsonValue& root) {
     map.resize(cols, rows);
     map.tile_w = static_cast<i32>(tile_size ? tile_size->int_at("w", map.tile_w) : root.int_at("tile_w", map.tile_w));
     map.tile_h = static_cast<i32>(tile_size ? tile_size->int_at("h", map.tile_h) : root.int_at("tile_h", map.tile_h));
+    map.grid = read_grid(root.find("grid"));
 
+    // Its own tileset, or the file it names.
     if (const JsonValue* tileset = root.find("tileset"); tileset && tileset->is_object()) {
-        if (const JsonValue* tiles = tileset->find("tiles"); tiles && tiles->is_array()) {
-            for (const JsonValue& tile : tiles->items()) {
-                read_tile_definition(map.tileset, tile);
-            }
-        }
-        if (const JsonValue* terrain_variants = tileset->find("terrain_variants"); terrain_variants && terrain_variants->is_array()) {
-            for (const JsonValue& variant : terrain_variants->items()) {
-                map.tileset.terrain_variants.push_back(read_terrain_variant(variant));
-            }
-        }
+        read_tileset_members(map.tileset, *tileset);
+    } else if (tileset && tileset->is_string()) {
+        map.tileset_source = tileset->as_string();
     }
 
     map.layers.clear();
@@ -892,6 +1112,18 @@ void TileSet::resize(std::size_t count) {
     tiles.resize(count);
 }
 
+bool TileSet::animated() const {
+    return std::ranges::any_of(tiles, [](const TileDefinition& definition) { return definition.animated(); });
+}
+
+i32 TileDefinition::frame_at(f64 seconds) const {
+    if (!animated()) {
+        return frame;
+    }
+    const f64 steps = std::floor(std::max(seconds, 0.0) / static_cast<f64>(frame_seconds));
+    return frames[static_cast<std::size_t>(std::fmod(steps, static_cast<f64>(frames.size())))];
+}
+
 std::size_t TileSet::size() const {
     return tiles.size();
 }
@@ -946,7 +1178,7 @@ u16 TileSet::ensure_tile(std::string_view id) {
 void TileSet::add_terrain_variant(std::string_view terrain, u8 mask, u16 tile_id, bool fallback) {
     terrain_variants.push_back({
         .terrain = std::string{terrain},
-        .mask = static_cast<u8>(mask & 0x0F),
+        .mask = static_cast<u8>(mask & 0x3F),
         .tile_id = tile_id,
         .fallback = fallback,
     });
@@ -954,7 +1186,7 @@ void TileSet::add_terrain_variant(std::string_view terrain, u8 mask, u16 tile_id
 
 u16 TileSet::terrain_tile(std::string_view terrain, u8 mask) const {
     for (const TerrainVariant& variant : terrain_variants) {
-        if (variant.terrain == terrain && variant.mask == (mask & 0x0F)) {
+        if (variant.terrain == terrain && variant.mask == (mask & 0x3F)) {
             return variant.tile_id;
         }
     }
@@ -975,6 +1207,47 @@ u16 TileSet::terrain_fallback_tile(std::string_view terrain) const {
         }
     }
     return first;
+}
+
+u16 TileSet::terrain_match(std::string_view terrain, u8 mask, bool* exact) const {
+    const TerrainVariant* nearest = nullptr;
+    i32 nearest_sides = -1;
+    for (const TerrainVariant& variant : terrain_variants) {
+        if (variant.terrain != terrain) {
+            continue;
+        }
+        if (variant.mask == mask) {
+            if (exact) {
+                *exact = true;
+            }
+            return variant.tile_id;
+        }
+        const i32 sides = std::popcount(static_cast<u32>(variant.mask));
+        if ((variant.mask & ~mask) == 0 && sides > nearest_sides) {
+            nearest = &variant;
+            nearest_sides = sides;
+        }
+    }
+    if (exact) {
+        *exact = false;
+    }
+    return nearest ? nearest->tile_id : terrain_fallback_tile(terrain);
+}
+
+std::vector<std::string> TileSet::terrains() const {
+    std::vector<std::string> result;
+    const auto add = [&](const std::string& terrain) {
+        if (!terrain.empty() && std::ranges::find(result, terrain) == result.end()) {
+            result.push_back(terrain);
+        }
+    };
+    for (const TileDefinition& definition : tiles) {
+        add(definition.terrain);
+    }
+    for (const TerrainVariant& variant : terrain_variants) {
+        add(variant.terrain);
+    }
+    return result;
 }
 
 void TileMap::resize(i32 c, i32 r, u16 fill) {
@@ -1240,6 +1513,98 @@ i32 TileMap::flood_fill(std::string_view layer_id, Vec2i start, u16 replacement_
     return changed;
 }
 
+u8 TileMap::terrain_mask(std::string_view layer_id, Vec2i cell, std::string_view terrain) const {
+    const auto same = [&](Vec2i other) {
+        const TileDefinition* definition = in_bounds(other.x, other.y) ? tile(get(layer_id, other.x, other.y)) : nullptr;
+        return definition && definition->terrain == terrain;
+    };
+    u8 mask = 0;
+    if (grid.hex()) {
+        const HexLayout layout = hex_layout();
+        const Hex hex = layout.from_offset(cell);
+        for (i32 direction = 0; direction < 6; ++direction) {
+            if (same(layout.to_offset(hex_neighbor(hex, direction)))) {
+                mask |= tile_terrain_hex_side(direction);
+            }
+        }
+        return mask;
+    }
+    if (same({cell.x, cell.y - 1})) {
+        mask |= TileTerrainNorth;
+    }
+    if (same({cell.x + 1, cell.y})) {
+        mask |= TileTerrainEast;
+    }
+    if (same({cell.x, cell.y + 1})) {
+        mask |= TileTerrainSouth;
+    }
+    if (same({cell.x - 1, cell.y})) {
+        mask |= TileTerrainWest;
+    }
+    return mask;
+}
+
+// Cells written, then they and those around them fitted to their terrains:
+// `painted` (in bounds) set to `tile` first. Cells changed in the end.
+i32 TileMap::connect_terrain(TileLayer& layer, std::span<const Vec2i> painted, u16 tile) {
+    std::vector<Vec2i> affected;
+    affected.reserve(painted.size() * 7);
+    for (Vec2i cell : painted) {
+        if (!in_bounds(cell.x, cell.y)) {
+            continue;
+        }
+        affected.push_back(cell);
+        for (Vec2i neighbor : neighbor_cells(cell)) {
+            affected.push_back(neighbor);
+        }
+    }
+    std::ranges::sort(affected, [](Vec2i a, Vec2i b) {
+        return a.y == b.y ? a.x < b.x : a.y < b.y;
+    });
+    affected.erase(std::ranges::unique(affected).begin(), affected.end());
+    std::vector<TileCell> before;
+    before.reserve(affected.size());
+    for (Vec2i cell : affected) {
+        before.push_back(this->cell(layer.id, cell));
+    }
+
+    for (Vec2i cell : painted) {
+        write_cell(layer, cols, rows, cell, TileCell{.tile_id = tile}, nullptr);
+    }
+    // Every cell fitted from the map as painted, before any is changed: a
+    // cell's sides are its neighbours' terrains, whatever their variants.
+    std::vector<std::pair<Vec2i, u16>> fitted;
+    for (Vec2i cell : affected) {
+        const TileDefinition* definition = this->tile(get(layer.id, cell.x, cell.y));
+        if (!definition || definition->terrain.empty() || tileset.terrain_fallback_tile(definition->terrain) == 0) {
+            continue;
+        }
+        const u8 mask = terrain_mask(layer.id, cell, definition->terrain);
+        bool exact = false;
+        const u16 variant = tileset.terrain_match(definition->terrain, mask, &exact);
+        if (!exact) {
+            terrain_diagnostics.push_back("missing terrain variant terrain='" + definition->terrain + "' mask=" + terrain_mask_text(mask));
+        }
+        fitted.emplace_back(cell, variant);
+    }
+    for (const auto& [cell, variant] : fitted) {
+        write_cell(layer, cols, rows, cell, TileCell{.tile_id = variant}, nullptr);
+    }
+
+    i32 changed = 0;
+    DirtyAccumulator dirty;
+    for (std::size_t i = 0; i < affected.size(); ++i) {
+        if (this->cell(layer.id, affected[i]) != before[i]) {
+            dirty.include(affected[i]);
+            ++changed;
+        }
+    }
+    if (dirty.dirty) {
+        mark_dirty(layer, dirty.rect);
+    }
+    return changed;
+}
+
 i32 TileMap::set_terrain_connect(std::string_view layer_id, std::span<const Vec2i> cells, std::string_view terrain) {
     TileLayer* tile_layer = layer(layer_id);
     if (!tile_layer || terrain.empty()) {
@@ -1250,65 +1615,12 @@ i32 TileMap::set_terrain_connect(std::string_view layer_id, std::span<const Vec2
         terrain_diagnostics.push_back("missing terrain fallback for '" + std::string{terrain} + "'");
         return 0;
     }
+    return connect_terrain(*tile_layer, cells, fallback);
+}
 
-    i32 changed = 0;
-    DirtyAccumulator dirty;
-    std::vector<Vec2i> affected;
-    affected.reserve(cells.size() * 5);
-    for (Vec2i cell : cells) {
-        if (!in_bounds(cell.x, cell.y)) {
-            continue;
-        }
-        if (write_cell(*tile_layer, cols, rows, cell, TileCell{.tile_id = fallback}, &dirty).accepted) {
-            ++changed;
-        }
-        affected.push_back(cell);
-        for (Vec2i neighbor : neighbor_cells(cell)) {
-            affected.push_back(neighbor);
-        }
-    }
-
-    std::ranges::sort(affected, [](Vec2i a, Vec2i b) {
-        return a.y == b.y ? a.x < b.x : a.y < b.y;
-    });
-    affected.erase(std::ranges::unique(affected).begin(), affected.end());
-
-    for (Vec2i cell : affected) {
-        const TileDefinition* definition = tile(get(layer_id, cell.x, cell.y));
-        if (!definition || definition->terrain != terrain) {
-            continue;
-        }
-        u8 mask = 0;
-        const auto same_terrain = [&](Vec2i other) {
-            const TileDefinition* other_definition = tile(get(layer_id, other.x, other.y));
-            return other_definition && other_definition->terrain == terrain;
-        };
-        if (in_bounds(cell.x, cell.y - 1) && same_terrain({cell.x, cell.y - 1})) {
-            mask |= TileTerrainNorth;
-        }
-        if (in_bounds(cell.x + 1, cell.y) && same_terrain({cell.x + 1, cell.y})) {
-            mask |= TileTerrainEast;
-        }
-        if (in_bounds(cell.x, cell.y + 1) && same_terrain({cell.x, cell.y + 1})) {
-            mask |= TileTerrainSouth;
-        }
-        if (in_bounds(cell.x - 1, cell.y) && same_terrain({cell.x - 1, cell.y})) {
-            mask |= TileTerrainWest;
-        }
-
-        u16 variant_tile = tileset.terrain_tile(terrain, mask);
-        if (variant_tile == 0) {
-            variant_tile = fallback;
-            terrain_diagnostics.push_back("missing terrain variant terrain='" + std::string{terrain} + "' mask=" + terrain_mask_text(mask));
-        }
-        if (write_cell(*tile_layer, cols, rows, cell, TileCell{.tile_id = variant_tile}, &dirty).accepted) {
-            ++changed;
-        }
-    }
-    if (dirty.dirty) {
-        mark_dirty(*tile_layer, dirty.rect);
-    }
-    return changed;
+i32 TileMap::clear_terrain_connect(std::string_view layer_id, std::span<const Vec2i> cells) {
+    TileLayer* tile_layer = layer(layer_id);
+    return tile_layer ? connect_terrain(*tile_layer, cells, 0) : 0;
 }
 
 void TileMap::clear_terrain_diagnostics() {
@@ -1362,6 +1674,17 @@ TileRect TileMap::used_rect(std::string_view layer_id) const {
 
 std::vector<Vec2i> TileMap::neighbor_cells(Vec2i cell) const {
     std::vector<Vec2i> result;
+    if (grid.hex()) {
+        const HexLayout layout = hex_layout();
+        const Hex hex = layout.from_offset(cell);
+        for (i32 direction = 0; direction < 6; ++direction) {
+            const Vec2i next = layout.to_offset(hex_neighbor(hex, direction));
+            if (in_bounds(next.x, next.y)) {
+                result.push_back(next);
+            }
+        }
+        return result;
+    }
     result.reserve(4);
     const Vec2i candidates[] = {
         {cell.x + 1, cell.y},
@@ -1526,16 +1849,10 @@ bool TileMap::blocks_rect(Rectf world_rect) const {
             if (world_rect.w <= 0.0f || world_rect.h <= 0.0f) {
                 return;
             }
-            const i32 col0 = std::max(0, world_col(world_rect.x));
-            const i32 row0 = std::max(0, world_row(world_rect.y));
-            const i32 col1 = std::min(cols - 1, world_col(world_rect.x + world_rect.w - 0.001f));
-            const i32 row1 = std::min(rows - 1, world_row(world_rect.y + world_rect.h - 0.001f));
-            if (col1 < col0 || row1 < row0) {
-                return;
-            }
-            for (i32 row = row0; row <= row1 && !blocked; ++row) {
-                for (i32 col = col0; col <= col1; ++col) {
-                    if (solid_in_layer(*this, tile_layer, col, row) && rects_overlap(world_rect, tile_rect(col, row))) {
+            const TileRect cells = cells_touching(*this, world_rect);
+            for (i32 row = cells.y; row < cells.y + cells.h && !blocked; ++row) {
+                for (i32 col = cells.x; col < cells.x + cells.w; ++col) {
+                    if (solid_in_layer(*this, tile_layer, col, row) && cell_overlaps(*this, {col, row}, world_rect)) {
                         blocked = true;
                         break;
                     }
@@ -1554,16 +1871,10 @@ bool TileMap::blocks_rect(std::string_view layer_id, Rectf world_rect) const {
     if (world_rect.w <= 0.0f || world_rect.h <= 0.0f) {
         return false;
     }
-    const i32 col0 = std::max(0, world_col(world_rect.x));
-    const i32 row0 = std::max(0, world_row(world_rect.y));
-    const i32 col1 = std::min(cols - 1, world_col(world_rect.x + world_rect.w - 0.001f));
-    const i32 row1 = std::min(rows - 1, world_row(world_rect.y + world_rect.h - 0.001f));
-    if (col1 < col0 || row1 < row0) {
-        return false;
-    }
-    for (i32 row = row0; row <= row1; ++row) {
-        for (i32 col = col0; col <= col1; ++col) {
-            if (solid_in_layer(*this, *tile_layer, col, row) && rects_overlap(world_rect, tile_rect(col, row))) {
+    const TileRect cells = cells_touching(*this, world_rect);
+    for (i32 row = cells.y; row < cells.y + cells.h; ++row) {
+        for (i32 col = cells.x; col < cells.x + cells.w; ++col) {
+            if (solid_in_layer(*this, *tile_layer, col, row) && cell_overlaps(*this, {col, row}, world_rect)) {
                 return true;
             }
         }
@@ -1572,6 +1883,21 @@ bool TileMap::blocks_rect(std::string_view layer_id, Rectf world_rect) const {
 }
 
 std::vector<Rectf> TileMap::collision_rects(std::string_view layer_id) const {
+    if (grid.hex()) {
+        // Hexagons merge into no rects: each solid cell's box (collision_polygons() has their hexagons).
+        std::vector<Rectf> boxes;
+        visit_layers(*this, layer_id, [&](const TileLayer& tile_layer) {
+            if (!tile_layer.participates_in_collision) {
+                return;
+            }
+            visit_layer_cells(tile_layer, cols, rows, [&](Vec2i cell, TileCell tile_cell) {
+                if (const TileDefinition* definition = tile(tile_cell.tile_id); definition && definition->solid) {
+                    boxes.push_back(tile_rect(cell.x, cell.y));
+                }
+            });
+        });
+        return boxes;
+    }
     // Each horizontal run of solid cells merges into the first earlier rect with
     // the same columns whose bottom edge is the run's top edge (across layers too,
     // when every layer is visited). Rects are indexed by (first column, width,
@@ -1642,17 +1968,176 @@ std::vector<std::vector<Vec2f>> TileMap::collision_polygons(std::string_view lay
                     polygon.push_back({origin.x + point.x, origin.y + point.y});
                 }
             } else {
-                polygon = {
-                    {origin.x, origin.y},
-                    {origin.x + static_cast<f32>(tile_w), origin.y},
-                    {origin.x + static_cast<f32>(tile_w), origin.y + static_cast<f32>(tile_h)},
-                    {origin.x, origin.y + static_cast<f32>(tile_h)},
-                };
+                polygon = tile_outline(cell); // its box, or its hexagon
             }
             polygons.push_back(std::move(polygon));
         });
     });
     return polygons;
+}
+
+TileCollisionShapes TileMap::collision_shapes(std::string_view layer_id) const {
+    TileCollisionShapes shapes;
+    if (cols <= 0 || rows <= 0) {
+        return shapes;
+    }
+    // The cells solid all over (in any layer), and those with polygons.
+    std::vector<u8> full(static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows), 0);
+    std::vector<std::pair<Vec2i, const TileDefinition*>> shaped;
+    visit_layers(*this, layer_id, [&](const TileLayer& tile_layer) {
+        if (!tile_layer.participates_in_collision) {
+            return;
+        }
+        visit_layer_cells(tile_layer, cols, rows, [&](Vec2i cell, TileCell tile_cell) {
+            const TileDefinition* definition = tile(tile_cell.tile_id);
+            if (!definition || !definition->solid) {
+                return;
+            }
+            if (definition->collision_polygon.empty()) {
+                full[cell_index(cell, cols)] = 1;
+            } else {
+                shaped.emplace_back(cell, definition);
+            }
+        });
+    });
+    for (const auto& [cell, definition] : shaped) {
+        if (full[cell_index(cell, cols)]) {
+            continue;
+        }
+        const Vec2f origin = map_to_world(cell);
+        std::vector<Vec2f> polygon;
+        polygon.reserve(definition->collision_polygon.size());
+        for (Vec2f point : definition->collision_polygon) {
+            polygon.push_back({origin.x + point.x, origin.y + point.y});
+        }
+        shapes.polygons.push_back(std::move(polygon));
+    }
+
+    // Each full cell's sides, clockwise; a side two cells share (each going
+    // its own way along it) is inside, and goes.
+    struct Corner {
+        i64 x = 0;
+        i64 y = 0;
+        bool operator==(const Corner&) const = default;
+    };
+    const auto corner = [](Vec2f point) {
+        return Corner{std::llround(point.x * 64.0), std::llround(point.y * 64.0)};
+    };
+    struct Side {
+        Corner from;
+        Corner to;
+        bool operator==(const Side&) const = default;
+    };
+    struct SideHash {
+        std::size_t operator()(const Side& side) const {
+            u64 hash = 1469598103934665603ull;
+            for (i64 value : {side.from.x, side.from.y, side.to.x, side.to.y}) {
+                hash = (hash ^ static_cast<u64>(value)) * 1099511628211ull;
+            }
+            return static_cast<std::size_t>(hash);
+        }
+    };
+    std::unordered_map<Side, std::pair<Vec2f, Vec2f>, SideHash> sides;
+    for (i32 row = 0; row < rows; ++row) {
+        for (i32 col = 0; col < cols; ++col) {
+            if (!full[cell_index({col, row}, cols)]) {
+                continue;
+            }
+            std::vector<Vec2f> outline = tile_outline({col, row});
+            f32 area = 0.0f;
+            for (std::size_t i = 0; i < outline.size(); ++i) {
+                const Vec2f a = outline[i];
+                const Vec2f b = outline[(i + 1) % outline.size()];
+                area += a.x * b.y - a.y * b.x;
+            }
+            if (area < 0.0f) {
+                std::ranges::reverse(outline); // clockwise on screen: y is down
+            }
+            for (std::size_t i = 0; i < outline.size(); ++i) {
+                const Vec2f a = outline[i];
+                const Vec2f b = outline[(i + 1) % outline.size()];
+                const Side side{corner(a), corner(b)};
+                if (side.from == side.to) {
+                    continue;
+                }
+                if (const auto shared = sides.find(Side{side.to, side.from}); shared != sides.end()) {
+                    sides.erase(shared);
+                } else {
+                    sides.emplace(side, std::pair{a, b});
+                }
+            }
+        }
+    }
+
+    // The sides left, joined into loops: from each, on to the side leaving its
+    // end that turns furthest right (where two cells touch only at a corner,
+    // each keeps its own loop).
+    struct Open {
+        Corner to;
+        Vec2f from_point;
+        Vec2f to_point;
+        bool used = false;
+    };
+    struct CornerHash {
+        std::size_t operator()(Corner c) const {
+            return std::hash<i64>{}(c.x * 73856093) ^ std::hash<i64>{}(c.y * 19349663);
+        }
+    };
+    std::unordered_map<Corner, std::vector<Open>, CornerHash> leaving;
+    std::vector<Corner> starts;
+    for (const auto& [side, points] : sides) {
+        leaving[side.from].push_back({side.to, points.first, points.second});
+    }
+    for (auto& [from, list] : leaving) {
+        starts.push_back(from);
+    }
+    // In a fixed order, so the same map gives the same loops.
+    std::ranges::sort(starts, [](Corner a, Corner b) { return a.y != b.y ? a.y < b.y : a.x < b.x; });
+    for (Corner start : starts) {
+        for (std::size_t first = 0; first < leaving[start].size(); ++first) {
+            if (leaving[start][first].used) {
+                continue;
+            }
+            std::vector<Vec2f> loop;
+            Open* side = &leaving[start][first];
+            const Open* begin = side;
+            while (side && !side->used) {
+                side->used = true;
+                loop.push_back(side->from_point);
+                const Vec2f in{side->to_point.x - side->from_point.x, side->to_point.y - side->from_point.y};
+                Open* next = nullptr;
+                f32 best = -10.0f;
+                for (Open& out : leaving[side->to]) {
+                    if (out.used && &out != begin) {
+                        continue;
+                    }
+                    const Vec2f along{out.to_point.x - out.from_point.x, out.to_point.y - out.from_point.y};
+                    const f32 turn = std::atan2(in.x * along.y - in.y * along.x, in.x * along.x + in.y * along.y);
+                    if (turn > best) {
+                        best = turn;
+                        next = &out;
+                    }
+                }
+                side = next;
+            }
+            // Straight on through a corner: one side.
+            std::vector<Vec2f> joined;
+            for (std::size_t i = 0; i < loop.size(); ++i) {
+                const Vec2f before = loop[(i + loop.size() - 1) % loop.size()];
+                const Vec2f at = loop[i];
+                const Vec2f after = loop[(i + 1) % loop.size()];
+                const f32 turn = (at.x - before.x) * (after.y - at.y) - (at.y - before.y) * (after.x - at.x);
+                const f32 scale = std::hypot(at.x - before.x, at.y - before.y) * std::hypot(after.x - at.x, after.y - at.y);
+                if (std::abs(turn) > 1e-4f * scale) {
+                    joined.push_back(at);
+                }
+            }
+            if (joined.size() >= 3) {
+                shapes.loops.push_back(std::move(joined));
+            }
+        }
+    }
+    return shapes;
 }
 
 TileMap::LayerRenderCache* TileMap::render_cache(std::string_view layer_id) const {
@@ -1738,17 +2223,23 @@ i32 TileMap::world_row(f32 wy) const {
 }
 
 Vec2i TileMap::world_to_map(Vec2f world_pos) const {
+    if (grid.hex()) {
+        const HexLayout layout = hex_layout();
+        return layout.to_offset(layout.from_pixel(world_pos));
+    }
     return {world_col(world_pos.x), world_row(world_pos.y)};
 }
 
 Vec2f TileMap::map_to_world(Vec2i cell) const {
-    return {
-        static_cast<f32>(cell.x * tile_w),
-        static_cast<f32>(cell.y * tile_h),
-    };
+    const Rectf box = tile_rect(cell.x, cell.y);
+    return {box.x, box.y};
 }
 
 Vec2f TileMap::tile_center(Vec2i cell) const {
+    if (grid.hex()) {
+        const HexLayout layout = hex_layout();
+        return layout.to_pixel(layout.from_offset(cell));
+    }
     return {
         (static_cast<f32>(cell.x) + 0.5f) * static_cast<f32>(tile_w),
         (static_cast<f32>(cell.y) + 0.5f) * static_cast<f32>(tile_h),
@@ -1756,16 +2247,58 @@ Vec2f TileMap::tile_center(Vec2i cell) const {
 }
 
 Vec2f TileMap::world_size() const {
-    return {static_cast<f32>(cols * tile_w), static_cast<f32>(rows * tile_h)};
+    const f32 w = static_cast<f32>(tile_w);
+    const f32 h = static_cast<f32>(tile_h);
+    if (!grid.hex() || cols <= 0 || rows <= 0) {
+        return {static_cast<f32>(cols) * w, static_cast<f32>(rows) * h};
+    }
+    // Rows (pointy) or columns (flat) overlap by a quarter, every other one half a cell on.
+    if (grid.orientation == HexOrientation::PointyTop) {
+        return {static_cast<f32>(cols) * w + (rows > 1 ? w * 0.5f : 0.0f), h + static_cast<f32>(rows - 1) * h * 0.75f};
+    }
+    return {w + static_cast<f32>(cols - 1) * w * 0.75f, static_cast<f32>(rows) * h + (cols > 1 ? h * 0.5f : 0.0f)};
 }
 
 Rectf TileMap::tile_rect(i32 col, i32 row) const {
-    return {
-        static_cast<f32>(col * tile_w),
-        static_cast<f32>(row * tile_h),
-        static_cast<f32>(tile_w),
-        static_cast<f32>(tile_h),
-    };
+    const f32 w = static_cast<f32>(tile_w);
+    const f32 h = static_cast<f32>(tile_h);
+    if (grid.hex()) {
+        const Vec2f center = tile_center({col, row});
+        return {center.x - w * 0.5f, center.y - h * 0.5f, w, h};
+    }
+    return {static_cast<f32>(col) * w, static_cast<f32>(row) * h, w, h};
+}
+
+std::vector<Vec2f> TileMap::tile_outline(Vec2i cell) const {
+    if (grid.hex()) {
+        const std::array<Vec2f, 6> corners = hex_layout().corners(hex_layout().from_offset(cell));
+        return {corners.begin(), corners.end()};
+    }
+    const Rectf box = tile_rect(cell.x, cell.y);
+    return {{box.x, box.y}, {box.x + box.w, box.y}, {box.x + box.w, box.y + box.h}, {box.x, box.y + box.h}};
+}
+
+HexLayout TileMap::hex_layout() const {
+    // Cells as big as their boxes: a pointy hexagon is sqrt(3) radii wide and 2
+    // high, a flat one 2 wide and sqrt(3) high. The first cell's box at (0, 0);
+    // with even rows (columns) shifted, the odd ones start half a cell before
+    // it: everything moved on by that.
+    const f32 w = static_cast<f32>(tile_w);
+    const f32 h = static_cast<f32>(tile_h);
+    constexpr f32 sqrt3 = std::numbers::sqrt3_v<f32>;
+    HexLayout layout{.orientation = grid.orientation, .size = {}, .origin = {w * 0.5f, h * 0.5f}, .offset = grid.offset};
+    if (grid.orientation == HexOrientation::PointyTop) {
+        layout.size = {w / sqrt3, h * 0.5f};
+        if (grid.offset == HexOffset::Even && rows > 1) {
+            layout.origin.x += w * 0.5f;
+        }
+    } else {
+        layout.size = {w * 0.5f, h / sqrt3};
+        if (grid.offset == HexOffset::Even && cols > 1) {
+            layout.origin.y += h * 0.5f;
+        }
+    }
+    return layout;
 }
 
 bool TileMap::in_bounds(i32 col, i32 row) const {
@@ -1782,7 +2315,7 @@ void TileMap::submit(RenderQueue& queue, const RenderView& view, TilemapRenderOp
         return;
     }
 
-    const TileRect visible_tiles = visible_tile_rect(*this, view);
+    const TileRect visible_tiles = visible_tile_rect(*this, view, options.origin);
     if (rect_empty(visible_tiles)) {
         return;
     }
@@ -1795,7 +2328,7 @@ void TileMap::submit(RenderQueue& queue, const RenderView& view, TilemapRenderOp
         const RenderCacheKey cache_key = make_render_cache_key(tile_layer, options);
         const bool can_cache = options.static_renderable && options.use_cache && !tile_layer.y_sort;
         if (!can_cache) {
-            submit_uncached_layer(queue, tile_layer, visible_tiles, cache_key);
+            submit_uncached_layer(queue, tile_layer, visible_tiles, cache_key, options.origin, options.time);
             continue;
         }
         submit_cached_layer(queue, tile_layer, visible_tiles, cache_key, options);
@@ -1809,6 +2342,7 @@ TileMap::RenderCacheKey TileMap::make_render_cache_key(const TileLayer& layer, T
         .draw_top_edge = options.draw_top_edge,
         .pass_mask = options.pass_mask ? options.pass_mask : pass_mask_for_layer(options.layer),
         .sprites = options.sprites,
+        .sheet = options.sheet,
     };
 }
 
@@ -1845,7 +2379,9 @@ void TileMap::reset_render_cache_chunks(LayerRenderCache& cache,
 }
 
 void TileMap::rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& layer, const RenderCacheKey& key) const {
+    const std::shared_ptr<const ShapeMesh> hex_mesh = grid.hex() ? hex_tile_mesh() : nullptr;
     chunk.commands.clear();
+    chunk.animated.clear();
     chunk.commands.reserve(static_cast<std::size_t>(std::max(0, chunk.bounds.w) * std::max(0, chunk.bounds.h)));
     for (i32 row = chunk.bounds.y; row < chunk.bounds.y + chunk.bounds.h; ++row) {
         for (i32 col = chunk.bounds.x; col < chunk.bounds.x + chunk.bounds.w; ++col) {
@@ -1858,13 +2394,20 @@ void TileMap::rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& lay
                                         key.draw_top_edge,
                                         key.pass_mask,
                                         key.sprites,
-                                        chunk.commands);
+                                        key.sheet,
+                                        hex_mesh,
+                                        chunk.commands,
+                                        0.0,
+                                        &chunk.animated);
         }
     }
     chunk.dirty = false;
 }
 
-void TileMap::submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key) const {
+void TileMap::submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key,
+                                    Vec2f origin, f64 time) const {
+    const std::shared_ptr<const ShapeMesh> hex_mesh = grid.hex() ? hex_tile_mesh() : nullptr;
+    const bool moved = origin.x != 0.0f || origin.y != 0.0f;
     std::vector<RenderCommand> commands;
     // About one command per visible cell; reserving skips the queue's regrowth.
     reserve_more(queue, static_cast<std::size_t>(std::max(0, visible_tiles.w) * std::max(0, visible_tiles.h)));
@@ -1879,9 +2422,12 @@ void TileMap::submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, 
                                         key.draw_top_edge,
                                         key.pass_mask,
                                         key.sprites,
-                                        commands);
+                                        key.sheet,
+                                        hex_mesh,
+                                        commands,
+                                        time);
             for (RenderCommand& command : commands) {
-                queue.submit(std::move(command));
+                queue.submit(moved ? moved_command(std::move(command), origin) : std::move(command));
             }
             commands.clear();
         }
@@ -1922,15 +2468,49 @@ void TileMap::submit_cached_layer(RenderQueue& queue,
             if (chunk.dirty) {
                 rebuild_render_chunk(chunk, layer, key);
             }
+            // Its animated tiles at the frame the time says (the rest as cached).
+            for (const auto& [command, tile_id] : chunk.animated) {
+                const TileDefinition* definition = this->tile(tile_id);
+                if (definition && key.sheet && command < chunk.commands.size()) {
+                    const i32 frame = definition->frame_at(options.time);
+                    if (frame >= 0 && frame < key.sheet->cols() * key.sheet->rows()) {
+                        chunk.commands[command].source = key.sheet->sprite(frame).source;
+                    }
+                }
+            }
             visible_commands += chunk.commands.size();
         }
     }
     reserve_more(queue, visible_commands);
+    // Kept in the map's space; drawn where its origin says.
+    const bool moved = options.origin.x != 0.0f || options.origin.y != 0.0f;
     for (i32 chunk_row = visible_chunk_row0; chunk_row <= visible_chunk_row1; ++chunk_row) {
         for (i32 chunk_col = visible_chunk_col0; chunk_col <= visible_chunk_col1; ++chunk_col) {
-            queue.submit(cache.chunks[chunk_index(chunk_col, chunk_row, chunk_cols)].commands);
+            const std::vector<RenderCommand>& commands = cache.chunks[chunk_index(chunk_col, chunk_row, chunk_cols)].commands;
+            if (!moved) {
+                queue.submit(commands);
+                continue;
+            }
+            for (const RenderCommand& command : commands) {
+                queue.submit(moved_command(command, options.origin));
+            }
         }
     }
+}
+
+std::shared_ptr<const ShapeMesh> TileMap::hex_tile_mesh() const {
+    const Vec2i size{tile_w, tile_h};
+    if (!_hex_mesh || _hex_mesh_size != size || _hex_mesh_orientation != grid.orientation) {
+        HexLayout layout = hex_layout();
+        layout.origin = {};
+        const std::array<Vec2f, 6> corners = layout.corners({});
+        Shape shape;
+        shape.fill(Path::polygon(corners), colors::white); // tinted by each tile's colour
+        _hex_mesh = std::make_shared<const ShapeMesh>(shape.mesh());
+        _hex_mesh_size = size;
+        _hex_mesh_orientation = grid.orientation;
+    }
+    return _hex_mesh;
 }
 
 void TileMap::render(Renderer2D& renderer, TilemapRenderOptions options) const {
@@ -1999,6 +2579,80 @@ TileMap load_tilemap(const std::filesystem::path& path) {
     return load_legacy_tilemap(text);
 }
 
+TileMap load_tilemap(const std::filesystem::path& path, const std::filesystem::path& content_root, std::string* error) {
+    if (error) {
+        error->clear();
+    }
+    const std::optional<std::string> read = read_content_text(path);
+    if (!read) {
+        if (error) {
+            *error = "there is no such file";
+        }
+        return {};
+    }
+    TileMap map;
+    if (looks_like_json(*read)) {
+        JsonParseResult parsed = parse_json(*read);
+        if (!parsed.ok()) {
+            if (error) {
+                *error = "it is not JSON: " + parsed.error;
+            }
+            return {};
+        }
+        map = load_json_tilemap(*parsed.value);
+    } else {
+        map = load_legacy_tilemap(*read);
+    }
+    if (!map.tileset_source.empty()) {
+        std::string why;
+        map.tileset = load_tileset(content_root / std::filesystem::path(map.tileset_source), &why);
+        if (!why.empty() && error) {
+            *error = map.tileset_source + ": " + why;
+        }
+    }
+    return map;
+}
+
+TileSet load_tileset(const std::filesystem::path& path, std::string* error) {
+    if (error) {
+        error->clear();
+    }
+    const auto fail = [&](std::string why) {
+        if (error) {
+            *error = std::move(why);
+        }
+        return TileSet{};
+    };
+    const std::optional<std::string> read = read_content_text(path);
+    if (!read) {
+        return fail("there is no such file");
+    }
+    const JsonParseResult parsed = parse_json(*read);
+    if (!parsed.ok()) {
+        return fail("it is not JSON: " + parsed.error);
+    }
+    if (!parsed.value->is_object() || parsed.value->string_at("format") != "kin.tileset") {
+        return fail("it is not a kin.tileset");
+    }
+    TileSet tileset;
+    read_tileset_members(tileset, *parsed.value);
+    return tileset;
+}
+
+bool save_tileset(const TileSet& tileset, const std::filesystem::path& path) {
+    std::ofstream out{path};
+    if (!out) {
+        return false;
+    }
+    JsonWriter json{out};
+    json.begin_object()
+        .field("format", "kin.tileset")
+        .field("version", 1);
+    write_tileset_members(json, tileset);
+    json.end_object();
+    return static_cast<bool>(out);
+}
+
 bool save_tilemap(const TileMap& map, const std::filesystem::path& path) {
     std::ofstream out{path};
     if (!out) {
@@ -2016,32 +2670,20 @@ bool save_tilemap(const TileMap& map, const std::filesystem::path& path) {
         .field("w", map.tile_w)
         .field("h", map.tile_h)
         .end_object();
-    json.key("tileset").begin_object().key("tiles").begin_array();
-    for (std::size_t id = 1; id < map.tileset.size(); ++id) {
-        const TileDefinition& definition = map.tileset.tiles[id];
-        if (definition.id.empty() &&
-            !definition.solid &&
-            !definition.walkable.has_value() &&
-            definition.cost == 10 &&
-            !definition.blocks_sight &&
-            definition.terrain.empty() &&
-            definition.tags.empty() &&
-            definition.metadata.empty() &&
-            definition.collision_polygon.empty() &&
-            definition.sprite_id.empty()) {
-            continue;
-        }
-        write_tile_definition(json, definition, static_cast<u16>(id));
+    if (map.grid.hex()) {
+        json.key("grid").begin_object()
+            .field("shape", "hex")
+            .field("orientation", map.grid.orientation == HexOrientation::FlatTop ? "flat" : "pointy")
+            .field("offset", map.grid.offset == HexOffset::Even ? "even" : "odd")
+            .end_object();
     }
-    json.end_array();
-    if (!map.tileset.terrain_variants.empty()) {
-        json.key("terrain_variants").begin_array();
-        for (const TerrainVariant& variant : map.tileset.terrain_variants) {
-            write_terrain_variant(json, variant);
-        }
-        json.end_array();
+    if (!map.tileset_source.empty()) {
+        json.field("tileset", std::string_view{map.tileset_source}); // its tiles are the file's
+    } else {
+        json.key("tileset").begin_object();
+        write_tileset_members(json, map.tileset);
+        json.end_object();
     }
-    json.end_object();
     json.key("layers").begin_array();
     for (const TileLayer& tile_layer : map.layers) {
         json.begin_object()

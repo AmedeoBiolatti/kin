@@ -1,0 +1,2138 @@
+{
+  "base": "96fdf417b634568d73e192b3a2d81b6f7f523cad",
+  "scope": "Opt-in private PCH for six widget implementation files; original engine archive and compiler settings retained",
+  "compiler": "Clang 21.1.8; libstdc++ 15",
+  "cmake": "4.2.3",
+  "ninja": "1.13.2",
+  "conditions": {
+    "configuration": "Release",
+    "optimization": "-O2",
+    "compiler_cache": false,
+    "lto": false,
+    "workers": 4,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "features": "native 2D with scripting, physics, audio, image and TTF enabled",
+    "linker": "GNU BFD 2.46; default linker",
+    "host": "Linux-7.0.0-42-generic-x86_64-with-glibc2.43"
+  },
+  "source_to_object_pilot": {
+    "affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "summary": {
+      "baseline": {
+        "widgets_collections": 1.7789699174973066,
+        "widgets_core": 2.5689614785005688,
+        "widgets_editor": 2.129514960492088,
+        "widgets_inputs": 1.3066027145032422,
+        "widgets_menus": 1.3826485335011967,
+        "widgets_text_edit": 1.3882633174944203
+      },
+      "widget": {
+        "widgets_collections": 0.9620962965054787,
+        "widgets_core": 1.7339112740010023,
+        "widgets_editor": 1.2891712455020752,
+        "widgets_inputs": 0.49073195199889597,
+        "widgets_menus": 0.5610563490045024,
+        "widgets_text_edit": 0.599641424996662
+      }
+    },
+    "results": [
+      {
+        "name": "baseline-prepare",
+        "kind": "prepare",
+        "wall_s": 1.8219905860023573,
+        "load_before": [
+          5.0166015625,
+          5.59130859375,
+          8.126953125
+        ],
+        "load_after": [
+          5.01513671875,
+          5.5810546875,
+          8.10986328125
+        ],
+        "user_s": 1.58,
+        "system_s": 0.13,
+        "rss_kib": 245480
+      },
+      {
+        "name": "widget-prepare",
+        "kind": "prepare",
+        "wall_s": 2.96125783098978,
+        "load_before": [
+          5.01513671875,
+          5.5810546875,
+          8.10986328125
+        ],
+        "load_after": [
+          5.01513671875,
+          5.5810546875,
+          8.10986328125
+        ],
+        "user_s": 2.67,
+        "system_s": 0.25,
+        "rss_kib": 363456
+      },
+      {
+        "name": "baseline-widgets_collections-r0",
+        "kind": "source",
+        "wall_s": 1.9303256220009644,
+        "load_before": [
+          5.01513671875,
+          5.5810546875,
+          8.10986328125
+        ],
+        "load_after": [
+          5.01513671875,
+          5.5810546875,
+          8.10986328125
+        ],
+        "user_s": 1.81,
+        "system_s": 0.07,
+        "rss_kib": 224236
+      },
+      {
+        "name": "baseline-widgets_core-r0",
+        "kind": "source",
+        "wall_s": 2.619428706995677,
+        "load_before": [
+          5.01513671875,
+          5.5810546875,
+          8.10986328125
+        ],
+        "load_after": [
+          5.013671875,
+          5.5712890625,
+          8.0927734375
+        ],
+        "user_s": 2.52,
+        "system_s": 0.06,
+        "rss_kib": 233168
+      },
+      {
+        "name": "baseline-widgets_editor-r0",
+        "kind": "source",
+        "wall_s": 2.165608794995933,
+        "load_before": [
+          5.013671875,
+          5.5712890625,
+          8.0927734375
+        ],
+        "load_after": [
+          5.013671875,
+          5.5712890625,
+          8.0927734375
+        ],
+        "user_s": 2.09,
+        "system_s": 0.05,
+        "rss_kib": 228432
+      },
+      {
+        "name": "baseline-widgets_inputs-r0",
+        "kind": "source",
+        "wall_s": 1.345099594007479,
+        "load_before": [
+          5.013671875,
+          5.5712890625,
+          8.0927734375
+        ],
+        "load_after": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "user_s": 1.26,
+        "system_s": 0.08,
+        "rss_kib": 218756
+      },
+      {
+        "name": "baseline-widgets_menus-r0",
+        "kind": "source",
+        "wall_s": 1.438610883007641,
+        "load_before": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "load_after": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "user_s": 1.36,
+        "system_s": 0.06,
+        "rss_kib": 219456
+      },
+      {
+        "name": "baseline-widgets_text_edit-r0",
+        "kind": "source",
+        "wall_s": 1.4518522860016674,
+        "load_before": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "load_after": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "user_s": 1.36,
+        "system_s": 0.07,
+        "rss_kib": 222164
+      },
+      {
+        "name": "widget-widgets_collections-r0",
+        "kind": "source",
+        "wall_s": 0.9633032620040467,
+        "load_before": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "load_after": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "user_s": 0.93,
+        "system_s": 0.02,
+        "rss_kib": 181988
+      },
+      {
+        "name": "widget-widgets_core-r0",
+        "kind": "source",
+        "wall_s": 1.7401617519935826,
+        "load_before": [
+          4.93212890625,
+          5.544921875,
+          8.0703125
+        ],
+        "load_after": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "user_s": 1.7,
+        "system_s": 0.02,
+        "rss_kib": 192276
+      },
+      {
+        "name": "widget-widgets_editor-r0",
+        "kind": "source",
+        "wall_s": 1.2612957880046451,
+        "load_before": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "load_after": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "user_s": 1.22,
+        "system_s": 0.02,
+        "rss_kib": 188496
+      },
+      {
+        "name": "widget-widgets_inputs-r0",
+        "kind": "source",
+        "wall_s": 0.4610396310017677,
+        "load_before": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "load_after": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "user_s": 0.43,
+        "system_s": 0.02,
+        "rss_kib": 172816
+      },
+      {
+        "name": "widget-widgets_menus-r0",
+        "kind": "source",
+        "wall_s": 0.5630855280032847,
+        "load_before": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "load_after": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "user_s": 0.53,
+        "system_s": 0.02,
+        "rss_kib": 175664
+      },
+      {
+        "name": "widget-widgets_text_edit-r0",
+        "kind": "source",
+        "wall_s": 0.6067720199935138,
+        "load_before": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "load_after": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "user_s": 0.57,
+        "system_s": 0.02,
+        "rss_kib": 178768
+      },
+      {
+        "name": "widget-widgets_text_edit-r1",
+        "kind": "source",
+        "wall_s": 0.6255026959988754,
+        "load_before": [
+          4.93798828125,
+          5.53564453125,
+          8.0537109375
+        ],
+        "load_after": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "user_s": 0.59,
+        "system_s": 0.02,
+        "rss_kib": 178648
+      },
+      {
+        "name": "widget-widgets_menus-r1",
+        "kind": "source",
+        "wall_s": 0.5524929819948738,
+        "load_before": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "load_after": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "user_s": 0.53,
+        "system_s": 0.01,
+        "rss_kib": 175784
+      },
+      {
+        "name": "widget-widgets_inputs-r1",
+        "kind": "source",
+        "wall_s": 0.4754638040030841,
+        "load_before": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "load_after": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "user_s": 0.44,
+        "system_s": 0.02,
+        "rss_kib": 172632
+      },
+      {
+        "name": "widget-widgets_editor-r1",
+        "kind": "source",
+        "wall_s": 1.2618441680097021,
+        "load_before": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "load_after": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "user_s": 1.22,
+        "system_s": 0.03,
+        "rss_kib": 188380
+      },
+      {
+        "name": "widget-widgets_core-r1",
+        "kind": "source",
+        "wall_s": 1.746541504006018,
+        "load_before": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "load_after": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "user_s": 1.71,
+        "system_s": 0.03,
+        "rss_kib": 193060
+      },
+      {
+        "name": "widget-widgets_collections-r1",
+        "kind": "source",
+        "wall_s": 0.9608893310069107,
+        "load_before": [
+          4.78271484375,
+          5.4931640625,
+          8.0263671875
+        ],
+        "load_after": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "user_s": 0.93,
+        "system_s": 0.01,
+        "rss_kib": 182340
+      },
+      {
+        "name": "baseline-widgets_text_edit-r1",
+        "kind": "source",
+        "wall_s": 1.3720448319945717,
+        "load_before": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "load_after": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "user_s": 1.3,
+        "system_s": 0.06,
+        "rss_kib": 221872
+      },
+      {
+        "name": "baseline-widgets_menus-r1",
+        "kind": "source",
+        "wall_s": 1.2685567870066734,
+        "load_before": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "load_after": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "user_s": 1.2,
+        "system_s": 0.05,
+        "rss_kib": 219468
+      },
+      {
+        "name": "baseline-widgets_inputs-r1",
+        "kind": "source",
+        "wall_s": 1.1983736620022682,
+        "load_before": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "load_after": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "user_s": 1.14,
+        "system_s": 0.04,
+        "rss_kib": 219164
+      },
+      {
+        "name": "baseline-widgets_editor-r1",
+        "kind": "source",
+        "wall_s": 2.093421125988243,
+        "load_before": [
+          4.6396484375,
+          5.45166015625,
+          7.9990234375
+        ],
+        "load_after": [
+          4.6689453125,
+          5.44384765625,
+          7.98291015625
+        ],
+        "user_s": 2.01,
+        "system_s": 0.07,
+        "rss_kib": 228440
+      },
+      {
+        "name": "baseline-widgets_core-r1",
+        "kind": "source",
+        "wall_s": 2.3055105459934566,
+        "load_before": [
+          4.6689453125,
+          5.44384765625,
+          7.98291015625
+        ],
+        "load_after": [
+          4.6689453125,
+          5.44384765625,
+          7.98291015625
+        ],
+        "user_s": 2.23,
+        "system_s": 0.05,
+        "rss_kib": 232984
+      },
+      {
+        "name": "baseline-widgets_collections-r1",
+        "kind": "source",
+        "wall_s": 1.6136248650000198,
+        "load_before": [
+          4.6689453125,
+          5.44384765625,
+          7.98291015625
+        ],
+        "load_after": [
+          4.53515625,
+          5.40283203125,
+          7.9560546875
+        ],
+        "user_s": 1.55,
+        "system_s": 0.05,
+        "rss_kib": 224340
+      },
+      {
+        "name": "baseline-widgets_collections-r2",
+        "kind": "source",
+        "wall_s": 1.908952544996282,
+        "load_before": [
+          4.53515625,
+          5.40283203125,
+          7.9560546875
+        ],
+        "load_after": [
+          4.53515625,
+          5.40283203125,
+          7.9560546875
+        ],
+        "user_s": 1.81,
+        "system_s": 0.08,
+        "rss_kib": 224152
+      },
+      {
+        "name": "baseline-widgets_core-r2",
+        "kind": "source",
+        "wall_s": 3.1439332839945564,
+        "load_before": [
+          4.53515625,
+          5.40283203125,
+          7.9560546875
+        ],
+        "load_after": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "user_s": 2.87,
+        "system_s": 0.18,
+        "rss_kib": 231748
+      },
+      {
+        "name": "baseline-widgets_editor-r2",
+        "kind": "source",
+        "wall_s": 2.1880480910040205,
+        "load_before": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "load_after": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "user_s": 2.09,
+        "system_s": 0.07,
+        "rss_kib": 227760
+      },
+      {
+        "name": "baseline-widgets_inputs-r2",
+        "kind": "source",
+        "wall_s": 1.323780192004051,
+        "load_before": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "load_after": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "user_s": 1.25,
+        "system_s": 0.06,
+        "rss_kib": 218572
+      },
+      {
+        "name": "baseline-widgets_menus-r2",
+        "kind": "source",
+        "wall_s": 1.3367612089932663,
+        "load_before": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "load_after": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "user_s": 1.27,
+        "system_s": 0.05,
+        "rss_kib": 218864
+      },
+      {
+        "name": "baseline-widgets_text_edit-r2",
+        "kind": "source",
+        "wall_s": 1.404481802994269,
+        "load_before": [
+          4.412109375,
+          5.36279296875,
+          7.92919921875
+        ],
+        "load_after": [
+          4.37890625,
+          5.33984375,
+          7.90771484375
+        ],
+        "user_s": 1.35,
+        "system_s": 0.04,
+        "rss_kib": 221564
+      },
+      {
+        "name": "widget-widgets_collections-r2",
+        "kind": "source",
+        "wall_s": 1.0909604930056958,
+        "load_before": [
+          4.37890625,
+          5.33984375,
+          7.90771484375
+        ],
+        "load_after": [
+          4.37890625,
+          5.33984375,
+          7.90771484375
+        ],
+        "user_s": 1.05,
+        "system_s": 0.03,
+        "rss_kib": 180720
+      },
+      {
+        "name": "widget-widgets_core-r2",
+        "kind": "source",
+        "wall_s": 1.71122417699371,
+        "load_before": [
+          4.37890625,
+          5.33984375,
+          7.90771484375
+        ],
+        "load_after": [
+          4.37890625,
+          5.33984375,
+          7.90771484375
+        ],
+        "user_s": 1.68,
+        "system_s": 0.02,
+        "rss_kib": 192384
+      },
+      {
+        "name": "widget-widgets_editor-r2",
+        "kind": "source",
+        "wall_s": 1.338583862001542,
+        "load_before": [
+          4.37890625,
+          5.33984375,
+          7.90771484375
+        ],
+        "load_after": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "user_s": 1.3,
+        "system_s": 0.02,
+        "rss_kib": 187544
+      },
+      {
+        "name": "widget-widgets_inputs-r2",
+        "kind": "source",
+        "wall_s": 0.5060000999947079,
+        "load_before": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "load_after": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "user_s": 0.48,
+        "system_s": 0.02,
+        "rss_kib": 171788
+      },
+      {
+        "name": "widget-widgets_menus-r2",
+        "kind": "source",
+        "wall_s": 0.5590271700057201,
+        "load_before": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "load_after": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "user_s": 0.52,
+        "system_s": 0.02,
+        "rss_kib": 174728
+      },
+      {
+        "name": "widget-widgets_text_edit-r2",
+        "kind": "source",
+        "wall_s": 0.568422668002313,
+        "load_before": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "load_after": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "user_s": 0.53,
+        "system_s": 0.02,
+        "rss_kib": 177676
+      },
+      {
+        "name": "widget-widgets_text_edit-r3",
+        "kind": "source",
+        "wall_s": 0.5925108299998101,
+        "load_before": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "load_after": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "user_s": 0.56,
+        "system_s": 0.02,
+        "rss_kib": 177320
+      },
+      {
+        "name": "widget-widgets_menus-r3",
+        "kind": "source",
+        "wall_s": 0.6004999880096875,
+        "load_before": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "load_after": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "user_s": 0.58,
+        "system_s": 0.01,
+        "rss_kib": 174780
+      },
+      {
+        "name": "widget-widgets_inputs-r3",
+        "kind": "source",
+        "wall_s": 0.5330585680057993,
+        "load_before": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "load_after": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "user_s": 0.5,
+        "system_s": 0.02,
+        "rss_kib": 171748
+      },
+      {
+        "name": "widget-widgets_editor-r3",
+        "kind": "source",
+        "wall_s": 1.3164983229944482,
+        "load_before": [
+          4.26806640625,
+          5.30078125,
+          7.88134765625
+        ],
+        "load_after": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "user_s": 1.27,
+        "system_s": 0.03,
+        "rss_kib": 187572
+      },
+      {
+        "name": "widget-widgets_core-r3",
+        "kind": "source",
+        "wall_s": 1.727660796008422,
+        "load_before": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "load_after": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "user_s": 1.68,
+        "system_s": 0.03,
+        "rss_kib": 192256
+      },
+      {
+        "name": "widget-widgets_collections-r3",
+        "kind": "source",
+        "wall_s": 0.9406476069998462,
+        "load_before": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "load_after": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "user_s": 0.9,
+        "system_s": 0.02,
+        "rss_kib": 181248
+      },
+      {
+        "name": "baseline-widgets_text_edit-r3",
+        "kind": "source",
+        "wall_s": 1.3668636369984597,
+        "load_before": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "load_after": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "user_s": 1.3,
+        "system_s": 0.05,
+        "rss_kib": 221520
+      },
+      {
+        "name": "baseline-widgets_menus-r3",
+        "kind": "source",
+        "wall_s": 1.428535858009127,
+        "load_before": [
+          4.16650390625,
+          5.26220703125,
+          7.85498046875
+        ],
+        "load_after": [
+          5.3544921875,
+          5.49072265625,
+          7.9150390625
+        ],
+        "user_s": 1.34,
+        "system_s": 0.07,
+        "rss_kib": 218760
+      },
+      {
+        "name": "baseline-widgets_inputs-r3",
+        "kind": "source",
+        "wall_s": 1.2894252370024333,
+        "load_before": [
+          5.3544921875,
+          5.49072265625,
+          7.9150390625
+        ],
+        "load_after": [
+          5.3544921875,
+          5.49072265625,
+          7.9150390625
+        ],
+        "user_s": 1.21,
+        "system_s": 0.06,
+        "rss_kib": 218232
+      },
+      {
+        "name": "baseline-widgets_editor-r3",
+        "kind": "source",
+        "wall_s": 1.9948246040003141,
+        "load_before": [
+          5.3544921875,
+          5.49072265625,
+          7.9150390625
+        ],
+        "load_after": [
+          5.3544921875,
+          5.49072265625,
+          7.9150390625
+        ],
+        "user_s": 1.92,
+        "system_s": 0.07,
+        "rss_kib": 227708
+      },
+      {
+        "name": "baseline-widgets_core-r3",
+        "kind": "source",
+        "wall_s": 2.5184942500054603,
+        "load_before": [
+          5.3544921875,
+          5.49072265625,
+          7.9150390625
+        ],
+        "load_after": [
+          5.24560546875,
+          5.4658203125,
+          7.8935546875
+        ],
+        "user_s": 2.44,
+        "system_s": 0.06,
+        "rss_kib": 232576
+      },
+      {
+        "name": "baseline-widgets_collections-r3",
+        "kind": "source",
+        "wall_s": 1.648987289998331,
+        "load_before": [
+          5.24560546875,
+          5.4658203125,
+          7.8935546875
+        ],
+        "load_after": [
+          5.24560546875,
+          5.4658203125,
+          7.8935546875
+        ],
+        "user_s": 1.58,
+        "system_s": 0.06,
+        "rss_kib": 223716
+      }
+    ]
+  },
+  "integrated": {
+    "affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "scope": {
+      "warm": "one real widget source edit through Hex executable link",
+      "cold": "six widget objects and private PCH if present; common engine PCH, other engine objects and dependencies already built",
+      "private": "private preamble comment edit through Hex link",
+      "public": "public widgets API header comment edit through Hex link; declarations unchanged"
+    },
+    "summary": {
+      "baseline": {
+        "widgets_editor": 3.9671808115017484,
+        "widgets_core": 4.507964125004946,
+        "widgets_inputs": 2.8308081654977286,
+        "noop": 0.07800105799833545,
+        "cold": 8.372849773499183,
+        "private": 7.663209803504287,
+        "public": 62.246855517994845
+      },
+      "widget": {
+        "widgets_editor": 2.8687457095002173,
+        "widgets_core": 3.689398902002722,
+        "widgets_inputs": 1.6220622999899206,
+        "noop": 0.08357637099834392,
+        "cold": 9.436532580504718,
+        "private": 9.377812855498632,
+        "public": 60.818046461005
+      }
+    },
+    "results": [
+      {
+        "name": "baseline-widgets_editor-r0",
+        "wall_s": 3.687419245005003,
+        "load_before": [
+          3.75537109375,
+          3.1748046875,
+          2.31201171875
+        ],
+        "load_after": [
+          3.61474609375,
+          3.1552734375,
+          2.31005859375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.3,
+        "system_s": 0.37,
+        "max_process_rss_kib": 226704
+      },
+      {
+        "name": "baseline-widgets_core-r0",
+        "wall_s": 4.404995755001437,
+        "load_before": [
+          3.61474609375,
+          3.1552734375,
+          2.31005859375
+        ],
+        "load_after": [
+          3.4853515625,
+          3.1357421875,
+          2.30810546875
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 4.01,
+        "system_s": 0.38,
+        "max_process_rss_kib": 231508
+      },
+      {
+        "name": "baseline-widgets_inputs-r0",
+        "wall_s": 2.5962946609943174,
+        "load_before": [
+          3.4853515625,
+          3.1357421875,
+          2.30810546875
+        ],
+        "load_after": [
+          3.4853515625,
+          3.1357421875,
+          2.30810546875
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 2.19,
+        "system_s": 0.39,
+        "max_process_rss_kib": 217152
+      },
+      {
+        "name": "baseline-noop-r0",
+        "wall_s": 0.07569191200309433,
+        "load_before": [
+          3.4853515625,
+          3.1357421875,
+          2.30810546875
+        ],
+        "load_after": [
+          3.4853515625,
+          3.1357421875,
+          2.30810546875
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.04,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20264
+      },
+      {
+        "name": "baseline-cold-r0",
+        "wall_s": 7.890992521002772,
+        "load_before": [
+          3.4853515625,
+          3.1357421875,
+          2.30810546875
+        ],
+        "load_after": [
+          3.71875,
+          3.19775390625,
+          2.33740234375
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 22.5,
+        "system_s": 1.07,
+        "max_process_rss_kib": 226732
+      },
+      {
+        "name": "baseline-private-r0",
+        "wall_s": 7.3021262060065055,
+        "load_before": [
+          3.71875,
+          3.19775390625,
+          2.33740234375
+        ],
+        "load_after": [
+          3.82177734375,
+          3.22802734375,
+          2.35205078125
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 22.76,
+        "system_s": 1.06,
+        "max_process_rss_kib": 226364
+      },
+      {
+        "name": "baseline-public-r0",
+        "wall_s": 62.68372565100435,
+        "load_before": [
+          5.9990234375,
+          3.70166015625,
+          2.51513671875
+        ],
+        "load_after": [
+          11.05419921875,
+          5.46337890625,
+          3.19580078125
+        ],
+        "compiles": 31,
+        "archives": 2,
+        "links": 1,
+        "user_s": 214.44,
+        "system_s": 6.79,
+        "max_process_rss_kib": 519952
+      },
+      {
+        "name": "widget-widgets_editor-r0",
+        "wall_s": 2.7357353959960165,
+        "load_before": [
+          10.0107421875,
+          6.53759765625,
+          3.7685546875
+        ],
+        "load_after": [
+          10.0107421875,
+          6.53759765625,
+          3.7685546875
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 2.37,
+        "system_s": 0.35,
+        "max_process_rss_kib": 188428
+      },
+      {
+        "name": "widget-widgets_core-r0",
+        "wall_s": 3.707354383004713,
+        "load_before": [
+          10.0107421875,
+          6.53759765625,
+          3.7685546875
+        ],
+        "load_after": [
+          10.009765625,
+          6.59521484375,
+          3.80224609375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.33,
+        "system_s": 0.37,
+        "max_process_rss_kib": 193252
+      },
+      {
+        "name": "widget-widgets_inputs-r0",
+        "wall_s": 1.5286880569910863,
+        "load_before": [
+          10.009765625,
+          6.59521484375,
+          3.80224609375
+        ],
+        "load_after": [
+          10.009765625,
+          6.59521484375,
+          3.80224609375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 1.19,
+        "system_s": 0.32,
+        "max_process_rss_kib": 172380
+      },
+      {
+        "name": "widget-noop-r0",
+        "wall_s": 0.08147897699382156,
+        "load_before": [
+          10.009765625,
+          6.59521484375,
+          3.80224609375
+        ],
+        "load_after": [
+          10.009765625,
+          6.59521484375,
+          3.80224609375
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.04,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20280
+      },
+      {
+        "name": "widget-cold-r0",
+        "wall_s": 9.069369040997117,
+        "load_before": [
+          10.009765625,
+          6.59521484375,
+          3.80224609375
+        ],
+        "load_after": [
+          9.64013671875,
+          6.62548828125,
+          3.8427734375
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 16.93,
+        "system_s": 0.94,
+        "max_process_rss_kib": 363892
+      },
+      {
+        "name": "widget-private-r0",
+        "wall_s": 8.772561656005564,
+        "load_before": [
+          9.64013671875,
+          6.62548828125,
+          3.8427734375
+        ],
+        "load_after": [
+          9.00634765625,
+          6.587890625,
+          3.86083984375
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 16.52,
+        "system_s": 0.99,
+        "max_process_rss_kib": 364540
+      },
+      {
+        "name": "widget-public-r0",
+        "wall_s": 60.818046461005,
+        "load_before": [
+          8.46337890625,
+          6.5517578125,
+          3.87890625
+        ],
+        "load_after": [
+          9.5732421875,
+          7.3798828125,
+          4.34423828125
+        ],
+        "compiles": 32,
+        "archives": 2,
+        "links": 1,
+        "user_s": 217.15,
+        "system_s": 5.88,
+        "max_process_rss_kib": 518688
+      },
+      {
+        "name": "widget-widgets_editor-r1",
+        "wall_s": 2.616739413992036,
+        "load_before": [
+          9.724609375,
+          7.81689453125,
+          4.68505859375
+        ],
+        "load_after": [
+          9.26611328125,
+          7.75341796875,
+          4.68115234375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 2.28,
+        "system_s": 0.33,
+        "max_process_rss_kib": 188568
+      },
+      {
+        "name": "widget-widgets_core-r1",
+        "wall_s": 3.4260457110067364,
+        "load_before": [
+          9.26611328125,
+          7.75341796875,
+          4.68115234375
+        ],
+        "load_after": [
+          9.26611328125,
+          7.75341796875,
+          4.68115234375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.09,
+        "system_s": 0.32,
+        "max_process_rss_kib": 193704
+      },
+      {
+        "name": "widget-widgets_inputs-r1",
+        "wall_s": 1.5012344360002317,
+        "load_before": [
+          9.26611328125,
+          7.75341796875,
+          4.68115234375
+        ],
+        "load_after": [
+          8.84423828125,
+          7.69091796875,
+          4.67724609375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 1.15,
+        "system_s": 0.34,
+        "max_process_rss_kib": 173172
+      },
+      {
+        "name": "widget-noop-r1",
+        "wall_s": 0.07771965599386021,
+        "load_before": [
+          8.84423828125,
+          7.69091796875,
+          4.67724609375
+        ],
+        "load_after": [
+          8.84423828125,
+          7.69091796875,
+          4.67724609375
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.03,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20268
+      },
+      {
+        "name": "widget-cold-r1",
+        "wall_s": 8.416077867994318,
+        "load_before": [
+          8.84423828125,
+          7.69091796875,
+          4.67724609375
+        ],
+        "load_after": [
+          8.6962890625,
+          7.67919921875,
+          4.68994140625
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 16.18,
+        "system_s": 0.86,
+        "max_process_rss_kib": 364424
+      },
+      {
+        "name": "widget-private-r1",
+        "wall_s": 8.51069831100176,
+        "load_before": [
+          8.6962890625,
+          7.67919921875,
+          4.68994140625
+        ],
+        "load_after": [
+          8.361328125,
+          7.6396484375,
+          4.7099609375
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 16.18,
+        "system_s": 0.81,
+        "max_process_rss_kib": 364072
+      },
+      {
+        "name": "widget-public-r1",
+        "wall_s": 58.748420111995074,
+        "load_before": [
+          7.6904296875,
+          7.51953125,
+          4.7021484375
+        ],
+        "load_after": [
+          9.29248046875,
+          7.92626953125,
+          5.0009765625
+        ],
+        "compiles": 32,
+        "archives": 2,
+        "links": 1,
+        "user_s": 201.7,
+        "system_s": 6.19,
+        "max_process_rss_kib": 518732
+      },
+      {
+        "name": "baseline-widgets_editor-r1",
+        "wall_s": 3.944857940005022,
+        "load_before": [
+          9.7685546875,
+          8.46044921875,
+          5.43505859375
+        ],
+        "load_after": [
+          9.54638671875,
+          8.43603515625,
+          5.44384765625
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.49,
+        "system_s": 0.44,
+        "max_process_rss_kib": 226976
+      },
+      {
+        "name": "baseline-widgets_core-r1",
+        "wall_s": 4.592183813001611,
+        "load_before": [
+          9.54638671875,
+          8.43603515625,
+          5.44384765625
+        ],
+        "load_after": [
+          9.18212890625,
+          8.37890625,
+          5.44140625
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 4.19,
+        "system_s": 0.39,
+        "max_process_rss_kib": 231348
+      },
+      {
+        "name": "baseline-widgets_inputs-r1",
+        "wall_s": 3.7898492110107327,
+        "load_before": [
+          9.18212890625,
+          8.37890625,
+          5.44140625
+        ],
+        "load_after": [
+          11.330078125,
+          8.837890625,
+          5.60595703125
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.11,
+        "system_s": 0.66,
+        "max_process_rss_kib": 217424
+      },
+      {
+        "name": "baseline-noop-r1",
+        "wall_s": 0.1699641160084866,
+        "load_before": [
+          11.330078125,
+          8.837890625,
+          5.60595703125
+        ],
+        "load_after": [
+          11.330078125,
+          8.837890625,
+          5.60595703125
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.07,
+        "system_s": 0.08,
+        "max_process_rss_kib": 20168
+      },
+      {
+        "name": "baseline-cold-r1",
+        "wall_s": 11.473300923986244,
+        "load_before": [
+          11.330078125,
+          8.837890625,
+          5.60595703125
+        ],
+        "load_after": [
+          13.43798828125,
+          9.396484375,
+          5.82373046875
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 36.18,
+        "system_s": 1.62,
+        "max_process_rss_kib": 226772
+      },
+      {
+        "name": "baseline-private-r1",
+        "wall_s": 8.024293401002069,
+        "load_before": [
+          13.43798828125,
+          9.396484375,
+          5.82373046875
+        ],
+        "load_after": [
+          12.92236328125,
+          9.3564453125,
+          5.830078125
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 23.32,
+        "system_s": 1.0,
+        "max_process_rss_kib": 226892
+      },
+      {
+        "name": "baseline-public-r1",
+        "wall_s": 59.31818440099596,
+        "load_before": [
+          12.01123046875,
+          9.2783203125,
+          5.8427734375
+        ],
+        "load_after": [
+          10.47265625,
+          9.38330078125,
+          6.09912109375
+        ],
+        "compiles": 31,
+        "archives": 2,
+        "links": 1,
+        "user_s": 208.85,
+        "system_s": 5.6,
+        "max_process_rss_kib": 519036
+      },
+      {
+        "name": "baseline-widgets_editor-r2",
+        "wall_s": 3.9895036829984747,
+        "load_before": [
+          8.5302734375,
+          9.0556640625,
+          6.2119140625
+        ],
+        "load_after": [
+          8.32763671875,
+          9.0048828125,
+          6.21044921875
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.59,
+        "system_s": 0.39,
+        "max_process_rss_kib": 226864
+      },
+      {
+        "name": "baseline-widgets_core-r2",
+        "wall_s": 4.739046620001318,
+        "load_before": [
+          8.32763671875,
+          9.0048828125,
+          6.21044921875
+        ],
+        "load_after": [
+          9.2626953125,
+          9.1875,
+          6.28466796875
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 4.29,
+        "system_s": 0.43,
+        "max_process_rss_kib": 231716
+      },
+      {
+        "name": "baseline-widgets_inputs-r2",
+        "wall_s": 3.036535302991979,
+        "load_before": [
+          9.2626953125,
+          9.1875,
+          6.28466796875
+        ],
+        "load_after": [
+          9.2626953125,
+          9.1875,
+          6.28466796875
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 2.62,
+        "system_s": 0.4,
+        "max_process_rss_kib": 216864
+      },
+      {
+        "name": "baseline-noop-r2",
+        "wall_s": 0.07813983899541199,
+        "load_before": [
+          9.2626953125,
+          9.1875,
+          6.28466796875
+        ],
+        "load_after": [
+          9.2626953125,
+          9.1875,
+          6.28466796875
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.04,
+        "system_s": 0.02,
+        "max_process_rss_kib": 20248
+      },
+      {
+        "name": "baseline-cold-r2",
+        "wall_s": 7.267214096005773,
+        "load_before": [
+          9.2626953125,
+          9.1875,
+          6.28466796875
+        ],
+        "load_after": [
+          8.9013671875,
+          9.1142578125,
+          6.2919921875
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 22.79,
+        "system_s": 1.0,
+        "max_process_rss_kib": 226940
+      },
+      {
+        "name": "baseline-private-r2",
+        "wall_s": 7.260497796989512,
+        "load_before": [
+          8.9013671875,
+          9.1142578125,
+          6.2919921875
+        ],
+        "load_after": [
+          8.7490234375,
+          9.0791015625,
+          6.2958984375
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 22.73,
+        "system_s": 1.06,
+        "max_process_rss_kib": 226628
+      },
+      {
+        "name": "baseline-public-r2",
+        "wall_s": 62.246855517994845,
+        "load_before": [
+          8.31982421875,
+          8.97705078125,
+          6.29248046875
+        ],
+        "load_after": [
+          11.2373046875,
+          9.697265625,
+          6.7099609375
+        ],
+        "compiles": 31,
+        "archives": 2,
+        "links": 1,
+        "user_s": 213.34,
+        "system_s": 6.51,
+        "max_process_rss_kib": 518212
+      },
+      {
+        "name": "widget-widgets_editor-r2",
+        "wall_s": 3.0017560230044182,
+        "load_before": [
+          10.7890625,
+          9.98828125,
+          7.06591796875
+        ],
+        "load_after": [
+          10.6455078125,
+          9.9716796875,
+          7.07666015625
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 2.63,
+        "system_s": 0.35,
+        "max_process_rss_kib": 188544
+      },
+      {
+        "name": "widget-widgets_core-r2",
+        "wall_s": 3.710536912010866,
+        "load_before": [
+          10.6455078125,
+          9.9716796875,
+          7.07666015625
+        ],
+        "load_after": [
+          10.6455078125,
+          9.9716796875,
+          7.07666015625
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.31,
+        "system_s": 0.39,
+        "max_process_rss_kib": 193652
+      },
+      {
+        "name": "widget-widgets_inputs-r2",
+        "wall_s": 1.8377337160054594,
+        "load_before": [
+          10.6455078125,
+          9.9716796875,
+          7.07666015625
+        ],
+        "load_after": [
+          10.43359375,
+          9.9384765625,
+          7.08203125
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 1.45,
+        "system_s": 0.37,
+        "max_process_rss_kib": 172976
+      },
+      {
+        "name": "widget-noop-r2",
+        "wall_s": 0.08567376500286628,
+        "load_before": [
+          10.43359375,
+          9.9384765625,
+          7.08203125
+        ],
+        "load_after": [
+          10.43359375,
+          9.9384765625,
+          7.08203125
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.05,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20324
+      },
+      {
+        "name": "widget-cold-r2",
+        "wall_s": 9.803696120012319,
+        "load_before": [
+          10.43359375,
+          9.9384765625,
+          7.08203125
+        ],
+        "load_after": [
+          9.9052734375,
+          9.84130859375,
+          7.0810546875
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 19.16,
+        "system_s": 1.04,
+        "max_process_rss_kib": 364176
+      },
+      {
+        "name": "widget-private-r2",
+        "wall_s": 9.9830640549917,
+        "load_before": [
+          9.9052734375,
+          9.84130859375,
+          7.0810546875
+        ],
+        "load_after": [
+          9.470703125,
+          9.748046875,
+          7.08056640625
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 19.21,
+        "system_s": 1.04,
+        "max_process_rss_kib": 364528
+      },
+      {
+        "name": "widget-public-r2",
+        "wall_s": 68.10622871101077,
+        "load_before": [
+          10.509765625,
+          9.96923828125,
+          7.18212890625
+        ],
+        "load_after": [
+          11.18115234375,
+          10.25390625,
+          7.4697265625
+        ],
+        "compiles": 32,
+        "archives": 2,
+        "links": 1,
+        "user_s": 241.74,
+        "system_s": 6.93,
+        "max_process_rss_kib": 522540
+      },
+      {
+        "name": "widget-widgets_editor-r3",
+        "wall_s": 3.1064398720045574,
+        "load_before": [
+          10.888671875,
+          10.47021484375,
+          7.76904296875
+        ],
+        "load_after": [
+          10.7373046875,
+          10.44580078125,
+          7.77587890625
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 2.66,
+        "system_s": 0.43,
+        "max_process_rss_kib": 185656
+      },
+      {
+        "name": "widget-widgets_core-r3",
+        "wall_s": 3.671443421000731,
+        "load_before": [
+          10.7373046875,
+          10.44580078125,
+          7.77587890625
+        ],
+        "load_after": [
+          10.7373046875,
+          10.44580078125,
+          7.77587890625
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.3,
+        "system_s": 0.35,
+        "max_process_rss_kib": 190628
+      },
+      {
+        "name": "widget-widgets_inputs-r3",
+        "wall_s": 1.7154365429887548,
+        "load_before": [
+          10.7373046875,
+          10.44580078125,
+          7.77587890625
+        ],
+        "load_after": [
+          10.35791015625,
+          10.37158203125,
+          7.76611328125
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 1.3,
+        "system_s": 0.4,
+        "max_process_rss_kib": 169192
+      },
+      {
+        "name": "widget-noop-r3",
+        "wall_s": 0.08683197500067763,
+        "load_before": [
+          10.35791015625,
+          10.37158203125,
+          7.76611328125
+        ],
+        "load_after": [
+          10.35791015625,
+          10.37158203125,
+          7.76611328125
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.05,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20168
+      },
+      {
+        "name": "widget-cold-r3",
+        "wall_s": 9.814106438992894,
+        "load_before": [
+          10.35791015625,
+          10.37158203125,
+          7.76611328125
+        ],
+        "load_after": [
+          9.84130859375,
+          10.26025390625,
+          7.75732421875
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 18.71,
+        "system_s": 1.02,
+        "max_process_rss_kib": 363880
+      },
+      {
+        "name": "widget-private-r3",
+        "wall_s": 10.042714727009297,
+        "load_before": [
+          9.84130859375,
+          10.26025390625,
+          7.75732421875
+        ],
+        "load_after": [
+          11.349609375,
+          10.56591796875,
+          7.8837890625
+        ],
+        "compiles": 7,
+        "archives": 1,
+        "links": 1,
+        "user_s": 19.57,
+        "system_s": 1.04,
+        "max_process_rss_kib": 364112
+      },
+      {
+        "name": "baseline-widgets_editor-r3",
+        "wall_s": 4.310362204996636,
+        "load_before": [
+          10.080078125,
+          10.32666015625,
+          7.87646484375
+        ],
+        "load_after": [
+          10.080078125,
+          10.32666015625,
+          7.87646484375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 3.9,
+        "system_s": 0.4,
+        "max_process_rss_kib": 226488
+      },
+      {
+        "name": "baseline-widgets_core-r3",
+        "wall_s": 4.423744437008281,
+        "load_before": [
+          10.080078125,
+          10.32666015625,
+          7.87646484375
+        ],
+        "load_after": [
+          9.6728515625,
+          10.23779296875,
+          7.86083984375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 4.02,
+        "system_s": 0.39,
+        "max_process_rss_kib": 231364
+      },
+      {
+        "name": "baseline-widgets_inputs-r3",
+        "wall_s": 2.6250810280034784,
+        "load_before": [
+          9.6728515625,
+          10.23779296875,
+          7.86083984375
+        ],
+        "load_after": [
+          9.21826171875,
+          10.1337890625,
+          7.83984375
+        ],
+        "compiles": 1,
+        "archives": 1,
+        "links": 1,
+        "user_s": 2.22,
+        "system_s": 0.39,
+        "max_process_rss_kib": 217392
+      },
+      {
+        "name": "baseline-noop-r3",
+        "wall_s": 0.07786227700125892,
+        "load_before": [
+          9.21826171875,
+          10.1337890625,
+          7.83984375
+        ],
+        "load_after": [
+          9.21826171875,
+          10.1337890625,
+          7.83984375
+        ],
+        "compiles": 0,
+        "archives": 0,
+        "links": 0,
+        "user_s": 0.04,
+        "system_s": 0.03,
+        "max_process_rss_kib": 20416
+      },
+      {
+        "name": "baseline-cold-r3",
+        "wall_s": 8.854707025995594,
+        "load_before": [
+          9.21826171875,
+          10.1337890625,
+          7.83984375
+        ],
+        "load_after": [
+          10.21630859375,
+          10.3251953125,
+          7.92724609375
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 24.01,
+        "system_s": 1.65,
+        "max_process_rss_kib": 226424
+      },
+      {
+        "name": "baseline-private-r3",
+        "wall_s": 9.69403107900871,
+        "load_before": [
+          10.21630859375,
+          10.3251953125,
+          7.92724609375
+        ],
+        "load_after": [
+          10.26318359375,
+          10.3310546875,
+          7.955078125
+        ],
+        "compiles": 6,
+        "archives": 1,
+        "links": 1,
+        "user_s": 26.83,
+        "system_s": 1.5,
+        "max_process_rss_kib": 226624
+      }
+    ]
+  },
+  "cold_engine_sanity": {
+    "scope": "one paired sanity run of cold kin_engine objects/PCH/archive and Hex link; foundation, scripting, audio, physics, shaders and external dependencies already built",
+    "affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "results": [
+      {
+        "case": "baseline",
+        "wall_s": 219.6024685399898,
+        "load_before": [
+          11.44091796875,
+          10.45849609375,
+          8.23193359375
+        ],
+        "load_after": [
+          11.87353515625,
+          11.28369140625,
+          9.0439453125
+        ],
+        "user_s": 827.17,
+        "system_s": 24.84,
+        "max_process_rss_kib": 422440
+      },
+      {
+        "case": "widget",
+        "wall_s": 226.66346424500807,
+        "load_before": [
+          11.48291015625,
+          11.21240234375,
+          9.03271484375
+        ],
+        "load_after": [
+          11.7412109375,
+          11.623046875,
+          9.68994140625
+        ],
+        "user_s": 851.4,
+        "system_s": 27.95,
+        "max_process_rss_kib": 423056
+      }
+    ]
+  },
+  "validation": {
+    "native_clang_pch_suite": {
+      "registered": 121,
+      "passed": 119,
+      "skipped": [
+        "kin-normal-lighting2d-gpu",
+        "kin-gpu-memory"
+      ],
+      "failed": 0
+    },
+    "gcc15": "real private PCH and all six widget objects built; compiler flag and scope contract passed",
+    "archive": "all six widget object members occur once in libkin_engine.a",
+    "hex_smokes": 8
+  },
+  "limitations": [
+    "One host and Clang toolchain for performance; background load and CPU frequency vary.",
+    "Pilot source-to-object timings exclude archive/executable linking.",
+    "Integrated rebuilds include engine archive and Hex executable linking.",
+    "Cold widget samples retain the common engine PCH and all non-widget objects and dependencies.",
+    "Header samples add comments, not API/ABI declaration changes.",
+    "Cold-engine sanity is one pair, not a repeated full clean project/dependency benchmark.",
+    "Maximum RSS is the largest child process, not aggregate concurrent memory.",
+    "An earlier incomplete sample batch failed from transient disk exhaustion and is excluded; inputs were restored and old generated scratch artifacts removed before the measured rerun.",
+    "Published reproducer adds input/output guards and restores the starting option; timed operations match the measured script."
+  ],
+  "reproducer_sha256": "1411eb5adc14a5178314e89563c8b515b28060e868affa9db19149c0fd05715f"
+}

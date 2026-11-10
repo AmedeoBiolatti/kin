@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 
@@ -205,6 +206,102 @@ void test_mouse_wheel_reaches_one_step() {
     assert((step_numbers == std::vector<int>{1, 2, 3, 1, 2, 3}));
 }
 
+void push_quit() {
+    SDL_Event event{};
+    event.type = SDL_EVENT_QUIT;
+    const bool pushed = SDL_PushEvent(&event);
+    assert(pushed);
+    (void)pushed;
+}
+
+// Asked to quit while the app holds closing: it goes on, told, until it quits
+// itself (or forgets the request); not held, it stops at once.
+void push_event(SDL_EventType type) {
+    SDL_Event event{};
+    event.type = type;
+    SDL_PushEvent(&event); // app events go to event watchers as they are pushed
+}
+
+// The system's app events (phones): given to the handler as they come; in the
+// background nothing steps or draws, and the time away is not played after.
+void test_app_events() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    std::vector<kin::AppEvent> seen;
+    app.on_app_event([&](kin::AppEvent event) { seen.push_back(event); });
+    int steps = 0;
+    int drawn = 0;
+    app.start_loop([&](float) { ++steps; }, [&](float) { ++drawn; });
+    assert(app.step_loop(1.0f / 60.0f) && steps == 1 && drawn == 1);
+
+    push_event(SDL_EVENT_WILL_ENTER_BACKGROUND);
+    push_event(SDL_EVENT_DID_ENTER_BACKGROUND);
+    assert(seen == std::vector{kin::AppEvent::Background} && app.in_background());
+    assert(app.step_loop(1.0f / 60.0f) && steps == 1 && drawn == 1); // away: nothing
+
+    push_event(SDL_EVENT_WILL_ENTER_FOREGROUND);
+    push_event(SDL_EVENT_DID_ENTER_FOREGROUND);
+    assert(seen.size() == 2 && seen[1] == kin::AppEvent::Foreground && !app.in_background());
+    // The next frame's time is the time away (5 s here): drawn, not played.
+    assert(app.step_loop(5.0f) && steps == 1 && drawn == 2);
+    assert(app.step_loop(1.0f / 60.0f) && steps == 2 && drawn == 3);
+
+    push_event(SDL_EVENT_LOW_MEMORY);
+    assert(seen.size() == 3 && seen[2] == kin::AppEvent::LowMemory && app.running());
+
+    // Ending the app is not asked about, even held.
+    app.hold_close(true);
+    push_event(SDL_EVENT_TERMINATING);
+    assert(seen.size() == 4 && seen[3] == kin::AppEvent::Terminating);
+    assert(!app.step_loop(1.0f / 60.0f) && !app.running());
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+}
+
+// The frame rate cap: as set, or the system's default for 0 (none on a
+// desktop; phone_max_fps on a phone, the build this runs in is not one).
+void test_max_fps_default() {
+    kin::App app{{.mode = kin::AppMode::Headless, .max_fps = 144.0f}};
+    assert(app.max_fps() == 144.0f);
+    app.set_max_fps(30.0f);
+    assert(app.max_fps() == 30.0f);
+    app.set_max_fps(0.0f);
+    assert(app.max_fps() == 0.0f);
+    app.set_max_fps(std::nanf(""));
+    assert(app.max_fps() == 0.0f);
+    static_assert(kin::phone_max_fps == 60.0f);
+}
+
+void test_close_held() {
+    {
+        kin::App app{{.mode = kin::AppMode::Headless}};
+        app.hold_close(true);
+        int frames = 0;
+        int asked_at = 0;
+        push_quit();
+        app.run([](float) {}, [&](float) {
+            ++frames;
+            if (app.close_asked() && asked_at == 0) {
+                asked_at = frames;
+                app.forget_close(); // stays: asked again below
+                push_quit();
+            } else if (app.close_asked()) {
+                app.quit();
+            }
+        });
+        assert(asked_at == 1 && frames == 2);
+    }
+    {
+        kin::App app{{.mode = kin::AppMode::Headless}};
+        int frames = 0;
+        push_quit();
+        app.run([](float) {}, [&](float) {
+            if (++frames > 5) {
+                app.quit();
+            }
+        });
+        assert(frames == 0); // stopped by the request, before a frame is drawn
+    }
+}
+
 void push_motion(float dx, float dy) {
     SDL_Event event{};
     event.type = SDL_EVENT_MOUSE_MOTION;
@@ -253,7 +350,325 @@ void test_mouse_motion_reaches_one_step() {
     assert(app.input().frame_mouse_motion() == V{} && app.input().mouse_motion() == (V{1.0f, 2.0f}));
 }
 
+void test_window_area_at() {
+    using kin::WindowArea;
+    // A 300x200 window: a 30 high title bar with a button in it, 4 point edges.
+    const kin::WindowChrome chrome{.drag = {{0, 0, 300, 30}}, .exclude = {{250, 0, 50, 30}}, .resize_border = 4};
+    const kin::Vec2f size{300, 200};
+    const auto at = [&](float x, float y, bool resizable = true) { return kin::window_area_at(chrome, {x, y}, size, resizable); };
+    assert(at(100, 15) == WindowArea::Drag);
+    assert(at(260, 15) == WindowArea::Client); // the button
+    assert(at(100, 100) == WindowArea::Client);
+    assert(at(100, 2) == WindowArea::ResizeTop);
+    assert(at(1, 1) == WindowArea::ResizeTopLeft);
+    assert(at(299, 1) == WindowArea::ResizeTopRight);
+    assert(at(1, 100) == WindowArea::ResizeLeft);
+    assert(at(299, 100) == WindowArea::ResizeRight);
+    assert(at(1, 199) == WindowArea::ResizeBottomLeft);
+    assert(at(150, 199) == WindowArea::ResizeBottom);
+    assert(at(299, 199) == WindowArea::ResizeBottomRight);
+    assert(at(100, 2, false) == WindowArea::Drag); // not resizable (or maximized): no edges
+    assert(at(260, 2, false) == WindowArea::Client);
+}
+
+// Actions bound to a controller's buttons and sticks' ways; axes from keys
+// and sticks, less a dead zone; all of it written and read back.
+void test_gamepad_bindings_and_axes() {
+    kin::InputMap map;
+    map.bind("jump", kin::Key::Space);
+    map.bind("jump", kin::PadControl::A);
+    map.bind("left", kin::PadControl::LeftStickLeft);
+    map.set_axis({.name = "move_x",
+                  .negative = {*kin::parse_binding_text("key:A")},
+                  .positive = {*kin::parse_binding_text("key:D"), *kin::parse_binding_text("pad:dpad_right")},
+                  .sticks = {{.axis = kin::PadAxis::LeftX}},
+                  .dead_zone = 0.2f});
+    map.set_axis({.name = "move_y", .sticks = {{.axis = kin::PadAxis::LeftY, .inverted = true}}});
+
+    kin::Input input;
+    input.set_map(map);
+    assert(input.axis("move_x") == 0.0f && input.axis("nothing") == 0.0f);
+    kin::GamepadState pad{.connected = true};
+    pad.set_button(kin::GamepadButton::A, true);
+    pad.left_x = -0.6f;
+    pad.left_y = 0.6f; // up
+    input.set_gamepad(pad);
+    assert(input.pressed("jump") && input.held("jump") && input.frame_pressed("jump") && input.held("left"));
+    // Past the dead zone (0.2): (0.6 - 0.2) / 0.8 = 0.5 of the way; down positive once inverted.
+    assert(std::abs(input.axis("move_x") + 0.5f) < 1e-4f && std::abs(input.axis("move_y") + 0.5f) < 1e-4f);
+    input.advance_step_edges();
+    assert(!input.pressed("jump") && input.held("jump"));
+    pad.set_button(kin::GamepadButton::A, false);
+    pad.left_x = 0.1f; // in the dead zone
+    input.set_gamepad(pad);
+    assert(input.released("jump") && !input.held("left") && input.axis("move_x") == 0.0f);
+    // A key held: all the way, pushed further than the stick.
+    input.set_action_held("jump", true); // Space; and D through an action bound to it
+    kin::InputMap with_right = map;
+    with_right.bind("right", kin::Key::D);
+    input.set_map(with_right);
+    input.set_action_held("right", true);
+    assert(input.axis("move_x") == 1.0f);
+    // No controller: its sticks read nothing.
+    input.set_action_held("right", false);
+    input.set_gamepad({});
+    assert(input.axis("move_x") == 0.0f && !input.held("left"));
+
+    const std::string text = kin::serialize_input_map(map);
+    assert(text.find("pad jump a\n") != std::string::npos && text.find("pad left left_stick_left\n") != std::string::npos);
+    assert(text.find("axis move_x - key:A\naxis move_x + key:D\naxis move_x + pad:dpad_right\naxis move_x stick left_x\n") != std::string::npos);
+    assert(text.find("axis move_y stick -left_y\n") != std::string::npos);
+    kin::InputMap read;
+    std::string error;
+    assert(kin::parse_input_map(text, read, error) && read == map);
+    assert(!kin::parse_input_map("axis move_x sideways key:A\n", read, error) && error.find("line 1") != std::string::npos);
+    assert(!kin::parse_input_map("pad jump z\n", read, error));
+    assert(kin::pad_control_name(kin::PadControl::RightTrigger) == "right_trigger");
+}
+
+// Local players: each reads their own controller (GamepadPlayers' slot), the
+// keyboard as set_players says, with their own map when two share it; anyone
+// reads every device; with no players set, player 0 has the keyboard and the
+// controller.
+void test_local_players() {
+    kin::InputMap map;
+    map.bind("jump", kin::Key::Space);
+    map.bind("jump", kin::PadControl::A);
+    map.set_axis({.name = "move_x",
+                  .negative = {*kin::parse_binding_text("key:A")},
+                  .positive = {*kin::parse_binding_text("key:D")},
+                  .sticks = {{.axis = kin::PadAxis::LeftX}}});
+    kin::Input input;
+    input.set_map(map);
+    kin::GamepadState first{.connected = true};
+    kin::GamepadState second{.connected = true};
+    input.set_gamepad(first); // what App gives: player 0's
+    input.set_player_gamepad(0, first);
+    input.set_player_gamepad(1, second);
+    assert(input.player_gamepad(1).connected && !input.player_gamepad(2).connected && !input.player_gamepad(-1).connected);
+
+    // Nobody set: player 0 has the keyboard and the controller; player 1 their own.
+    second.set_button(kin::GamepadButton::A, true);
+    input.set_player_gamepad(1, second);
+    assert(input.pressed("jump") && input.pressed(-1, "jump") && input.pressed(1, "jump") && !input.pressed(0, "jump"));
+    assert(input.pad_frame_pressed(kin::PadControl::A, 1) && input.pad_frame_pressed(kin::PadControl::A, -1) &&
+           !input.pad_frame_pressed(kin::PadControl::A, 0) && !input.pad_frame_pressed(kin::PadControl::A));
+    input.set_key_pressed(kin::Key::Space);
+    assert(input.pressed(0, "jump") && input.pressed(1, "jump") && !input.pressed(2, "jump"));
+    input.advance_step_edges();
+    assert(!input.pressed(1, "jump") && input.held(1, "jump"));
+    input.set_key_released(kin::Key::Space);
+    second.set_button(kin::GamepadButton::A, false);
+    input.set_player_gamepad(1, second);
+    assert(input.released(1, "jump") && input.frame_released(1, "jump") && !input.released(2, "jump"));
+    input.advance_step_edges();
+
+    // Sticks per player; anyone: the furthest pushed.
+    first.left_x = -1.0f;
+    input.set_gamepad(first);
+    input.set_player_gamepad(0, first);
+    second.left_x = 0.6f;
+    input.set_player_gamepad(1, second);
+    assert(input.axis(0, "move_x") == -1.0f && std::abs(input.axis(1, "move_x") - 0.5f) < 1e-4f && input.axis(2, "move_x") == 0.0f);
+    assert(input.axis("move_x") == -1.0f);
+    assert(kin::binding_held(input, *kin::parse_binding_text("pad:left_stick_left"), 0) &&
+           !kin::binding_held(input, *kin::parse_binding_text("pad:left_stick_left"), 1));
+    assert(std::abs(kin::axis_value(input, *map.axis("move_x"), 1) - 0.5f) < 1e-4f);
+
+    // Players set: the keyboard is player 1's now, and player 0 reads only their controller.
+    input.set_players({{}, {.keyboard = true}});
+    input.set_key_pressed(kin::Key::D);
+    assert(input.axis(1, "move_x") == 1.0f && input.axis(0, "move_x") == -1.0f);
+    input.set_key_pressed(kin::Key::Space);
+    assert(input.pressed(1, "jump") && !input.pressed(0, "jump"));
+    assert(kin::binding_pressed(input, *kin::parse_binding_text("key:Space"), 1) &&
+           !kin::binding_pressed(input, *kin::parse_binding_text("key:Space"), 0) &&
+           kin::binding_pressed(input, *kin::parse_binding_text("key:Space")));
+    input.set_key_released(kin::Key::D);
+    input.set_key_released(kin::Key::Space);
+    input.advance_step_edges();
+
+    // One keyboard, two players, each with their own map (WASD, the arrows).
+    kin::InputMap wasd;
+    wasd.set_axis({.name = "move_x", .negative = {*kin::parse_binding_text("key:A")}, .positive = {*kin::parse_binding_text("key:D")}});
+    wasd.bind("fire", kin::Key::F);
+    kin::InputMap arrows;
+    arrows.set_axis({.name = "move_x", .negative = {*kin::parse_binding_text("key:Left")}, .positive = {*kin::parse_binding_text("key:Right")}});
+    arrows.bind("fire", kin::Key::Enter);
+    kin::Input shared;
+    shared.set_players({{.keyboard = true, .map = wasd}, {.keyboard = true, .map = arrows}});
+    shared.set_key_pressed(kin::Key::Left);
+    shared.set_key_pressed(kin::Key::F);
+    assert(shared.axis(0, "move_x") == 0.0f && shared.axis(1, "move_x") == -1.0f);
+    assert(shared.pressed(0, "fire") && !shared.pressed(1, "fire"));
+    assert(shared.axis("move_x") == -1.0f && shared.pressed("fire")); // anyone, through their maps
+    shared.set_key_pressed(kin::Key::D);
+    assert(shared.axis(0, "move_x") == 1.0f && shared.axis(1, "move_x") == -1.0f);
+
+    // Nobody joined: the one controller is player 0's. Once player 1 has one of
+    // their own (and it is what App gives as the controller), it is not.
+    kin::Input lone;
+    lone.set_map(map);
+    kin::GamepadState pad{.connected = true};
+    pad.set_button(kin::GamepadButton::A, true);
+    lone.set_gamepad(pad);
+    assert(lone.held(0, "jump") && !lone.held(1, "jump"));
+    lone.set_player_gamepad(1, pad);
+    assert(!lone.held(0, "jump") && lone.held(1, "jump") && lone.held("jump"));
+}
+
+// Touch: fingers down and up, the first the pointer; gestures as bindings
+// (tap, double tap, long press, swipes, a two-finger tap); pinch and pan; a
+// claimed finger is neither; the input file's touch lines.
+void test_touch() {
+    kin::InputMap map;
+    map.bind("jump", kin::TouchControl::Tap);
+    map.bind("zoom", kin::TouchControl::DoubleTap);
+    map.bind("menu", kin::TouchControl::LongPress);
+    map.bind("next", kin::TouchControl::SwipeRight);
+    map.bind("back", kin::TouchControl::TwoFingerTap);
+    kin::Input input;
+    input.set_map(map);
+    const auto step = [&] {
+        input.advance_step_edges();
+        input.begin_frame();
+    };
+
+    // A tap: down and up, still and quick. The finger is the pointer meanwhile.
+    input.update_touch(10.0);
+    input.set_touch_down(1, {100, 100}, 3);
+    assert(input.touches().size() == 1 && input.touch(1) && input.touch(1)->down_at == 10.0);
+    // The pointer is there at once; its press lands at the next frame start.
+    assert(input.pointer_is_touch() && input.pointer_touch_active() && !input.mouse_held(kin::MouseButton::Left));
+    assert((input.mouse_pos() == kin::Vec2f{100, 100}) && input.mouse_window() == 3 && !input.pressed("jump"));
+    input.begin_frame();
+    assert(input.mouse_held(kin::MouseButton::Left) && input.mouse_pressed(kin::MouseButton::Left));
+    input.update_touch(10.1);
+    input.set_touch_moved(1, {104, 101});
+    input.set_touch_up(1);
+    assert(input.pressed("jump") && input.frame_pressed("jump") && input.touch_pressed(kin::TouchControl::Tap));
+    assert(!input.pressed("zoom") && input.mouse_released(kin::MouseButton::Left) && input.touches().empty());
+    assert(input.touches_ended().size() == 1 && (input.touches_ended()[0].pos == kin::Vec2f{104, 101}));
+    step();
+    assert(!input.pressed("jump") && input.held("jump") && input.touches_ended().empty()); // held a step
+    step();
+    assert(input.released("jump") && !input.held("jump"));
+    step();
+    assert(!input.released("jump"));
+
+    // Another tap soon after, near it: a double tap (and a tap).
+    input.update_touch(10.3);
+    input.set_touch_down(2, {110, 100});
+    input.set_touch_up(2);
+    assert(input.pressed("zoom") && input.pressed("jump"));
+    step();
+    // A third right after is a tap again, not another double tap.
+    input.set_touch_down(3, {110, 100});
+    input.set_touch_up(3);
+    assert(input.pressed("jump") && !input.pressed("zoom"));
+    step();
+
+    // Held still: a long press, once, and no tap when it lifts.
+    input.update_touch(20.0);
+    input.set_touch_down(4, {50, 50});
+    input.update_touch(20.4);
+    assert(!input.pressed("menu"));
+    input.update_touch(20.6);
+    assert(input.pressed("menu"));
+    step();
+    input.update_touch(21.5);
+    assert(!input.pressed("menu"));
+    input.set_touch_up(4);
+    assert(!input.pressed("jump"));
+    step();
+
+    // Quickly a long way right: a swipe, not a tap.
+    input.update_touch(30.0);
+    input.set_touch_down(5, {200, 200});
+    input.update_touch(30.15);
+    input.set_touch_moved(5, {320, 215});
+    input.set_touch_up(5);
+    assert(input.pressed("next") && !input.pressed("jump") && input.touch_pressed(kin::TouchControl::SwipeRight));
+    step();
+    // Slowly: not a swipe.
+    input.set_touch_down(6, {200, 200});
+    input.update_touch(31.0);
+    input.set_touch_moved(6, {320, 200});
+    input.set_touch_up(6);
+    assert(!input.pressed("next"));
+    step();
+
+    // Two fingers: no pointer press (a pinch, not a click), their pinch and pan.
+    input.update_touch(40.0);
+    input.set_touch_down(7, {100, 100});
+    input.begin_frame(); // the first one's press
+    assert(input.mouse_held(kin::MouseButton::Left));
+    input.set_touch_down(8, {200, 100});
+    assert(!input.mouse_held(kin::MouseButton::Left) && !input.mouse_pressed(kin::MouseButton::Left) &&
+           !input.mouse_released(kin::MouseButton::Left));
+    input.set_touch_moved(8, {300, 100});
+    assert(std::abs(input.touch_pinch() - 2.0f) < 1e-4f && std::abs(input.frame_touch_pinch() - 2.0f) < 1e-4f);
+    assert((input.touch_pan() == kin::Vec2f{50, 0}));
+    input.set_touch_up(7);
+    input.set_touch_up(8);
+    assert(!input.pressed("back") && !input.pressed("jump")); // they moved
+    step();
+    assert(input.touch_pinch() == 1.0f && (input.touch_pan() == kin::Vec2f{}));
+    // Down and up together, still: a two-finger tap.
+    input.update_touch(41.0);
+    input.set_touch_down(9, {100, 100});
+    input.set_touch_down(10, {140, 100});
+    input.update_touch(41.1);
+    input.set_touch_up(9);
+    input.set_touch_up(10);
+    assert(input.pressed("back") && !input.pressed("jump"));
+    step();
+
+    // Claimed by an on-screen control: let go without a click, no gesture.
+    input.update_touch(50.0);
+    input.set_touch_down(11, {10, 10});
+    input.claim_touch(11);
+    input.begin_frame();
+    assert(input.touch(11)->claimed && !input.mouse_held(kin::MouseButton::Left) && !input.mouse_pressed(kin::MouseButton::Left));
+    input.set_touch_up(11);
+    assert(!input.pressed("jump") && !input.mouse_released(kin::MouseButton::Left));
+    step();
+    // A finger down while a claimed one is held is the pointer.
+    input.set_touch_down(12, {10, 10});
+    input.claim_touch(12);
+    input.set_touch_down(13, {60, 60});
+    input.begin_frame();
+    assert(input.mouse_held(kin::MouseButton::Left) && (input.mouse_pos() == kin::Vec2f{60, 60}));
+    input.set_touch_up(13);
+    input.set_touch_up(12);
+    step();
+
+    // A tap within one frame: pressed at the next frame start, let go the one after.
+    input.set_touch_down(14, {70, 70});
+    input.set_touch_up(14);
+    assert(!input.mouse_held(kin::MouseButton::Left) && input.pointer_touch_active());
+    input.begin_frame();
+    assert(input.mouse_held(kin::MouseButton::Left) && input.mouse_frame_pressed(kin::MouseButton::Left));
+    input.begin_frame();
+    assert(!input.mouse_held(kin::MouseButton::Left) && input.mouse_frame_released(kin::MouseButton::Left) &&
+           !input.pointer_touch_active());
+    step();
+
+    // Written and read.
+    const std::string text = kin::serialize_input_map(map);
+    assert(text.find("touch jump tap\n") != std::string::npos && text.find("touch back two_finger_tap\n") != std::string::npos);
+    kin::InputMap read;
+    std::string error;
+    assert(kin::parse_input_map(text, read, error) && read == map);
+    assert(!kin::parse_input_map("touch jump wave\n", read, error) && error.find("line 1") != std::string::npos);
+    assert(kin::binding_text(*kin::parse_binding_text("touch:swipe_left")) == "touch:swipe_left");
+    assert(kin::binding_name({.device = kin::InputBindingDevice::Touch, .code = 2}) == "long_press");
+}
+
 int main() {
+    test_gamepad_bindings_and_axes();
+    test_touch();
+    test_local_players();
     // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
     // resets hints between them, so retain the headless driver in the process
     // environment even when GPU CI exports X11 for the separate 3D tests.
@@ -261,8 +676,12 @@ int main() {
     assert(driver_set == 0);
     test_logging();
     test_frame_time_snapper();
+    test_window_area_at();
     // Its own App, before the one below: each App inits and quits SDL.
     test_mouse_wheel_reaches_one_step();
+    test_close_held();
+    test_max_fps_default();
+    test_app_events();
     test_mouse_motion_reaches_one_step();
 
     kin::App app{{.mode = kin::AppMode::Headless}};
@@ -288,6 +707,8 @@ int main() {
     assert(second.id() != 0);
     assert(first.id() != second.id());
     assert(first.borderless());
+    first.set_chrome({.drag = {{0, 0, 320, 30}}, .exclude = {}, .resize_border = 4});
+    first.set_chrome({.drag = {}, .exclude = {}, .resize_border = 0}); // replaced, hit test kept
     assert(!second.borderless());
     assert((first.pixel_size() == kin::Vec2i{320, 180}));
     assert(first.display_scale() > 0);

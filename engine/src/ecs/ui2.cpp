@@ -36,25 +36,28 @@ void mark_ui2_entity_dirty(flecs::entity entity) {
     bump_ui2_root_version(ui2_root_entity_for(entity));
 }
 
-template <typename T>
-void register_ui2_dirty_observers(flecs::world& world, const char* name, bool observe_set = false) {
+void register_ui2_dirty_observers(flecs::world& world, flecs::entity_t component,
+                                  const char* name, bool observe_set = false) {
     const std::string base = std::string{"ui2_dirty_"} + name;
-    world.observer<T>((base + "_add").c_str())
+    // Dirty tracking needs the entity, not the component's value. Share the
+    // observer builder and callback across widget types while retaining the
+    // same query term, events and observer names.
+    const auto mark_dirty = [](flecs::entity entity) {
+        mark_ui2_entity_dirty(entity);
+    };
+    world.observer((base + "_add").c_str())
+        .with(component)
         .event(flecs::OnAdd)
-        .each([](flecs::entity entity, T&) {
-            mark_ui2_entity_dirty(entity);
-        });
-    world.observer<T>((base + "_remove").c_str())
+        .each(mark_dirty);
+    world.observer((base + "_remove").c_str())
+        .with(component)
         .event(flecs::OnRemove)
-        .each([](flecs::entity entity, T&) {
-            mark_ui2_entity_dirty(entity);
-        });
+        .each(mark_dirty);
     if (observe_set) {
-        world.observer<T>((base + "_set").c_str())
+        world.observer((base + "_set").c_str())
+            .with(component)
             .event(flecs::OnSet)
-            .each([](flecs::entity entity, T&) {
-                mark_ui2_entity_dirty(entity);
-            });
+            .each(mark_dirty);
     }
 }
 
@@ -244,22 +247,56 @@ KIN_UI2_RECORD_TRAIT(PropertyGrid, PropertyGrid, property_grid, "Ui2PropertyGrid
 
 #undef KIN_UI2_RECORD_TRAIT
 
-template <typename T>
+using MakeUi2WidgetQuery = flecs::query<> (*)(flecs::world&, bool);
+using AssignUi2WidgetRecord = void (*)(Ui2WorldRecord&, void*);
+
 void append_ui2_widget_records(flecs::world& world,
                                std::vector<Ui2WorldRecord>& records,
-                               Ui2WorldRenderOptions options) {
-    world.each([&](flecs::entity entity, T& widget) {
+                               Ui2WorldRenderOptions options,
+                               const void* query_key,
+                               MakeUi2WidgetQuery make_query,
+                               Ui2WorldRecordKind kind,
+                               AssignUi2WidgetRecord assign) {
+    // Keep one query per widget/world, but share its cache holder and iteration
+    // adapter. The typed factory retains Flecs's original term/access settings.
+    const bool cached = owner_of(world) != nullptr;
+    auto query = kin::kept_query<>(world, query_key, [make_query, cached](flecs::world& w) {
+        return make_query(w, cached);
+    });
+    query.each([&](flecs::iter& it, std::size_t row) {
+        const flecs::entity entity = it.entity(row);
         if (!include_ui2_entity(entity, options)) {
             return;
         }
         Ui2WorldRecord record{
-            .kind = Ui2RecordTraits<T>::kind,
+            .kind = kind,
             .entity_id = static_cast<EcsId>(entity.id()),
             .order = ui2_order(entity),
         };
-        Ui2RecordTraits<T>::assign(record, widget);
+        // Shared inherited fields have one value; sparse fields are resolved
+        // by field_at rather than assuming a contiguous component array.
+        assign(record, it.field_at(0, it.is_self(0) ? row : 0));
         records.push_back(record);
     });
+}
+
+template <typename T>
+void append_ui2_widget_records(flecs::world& world,
+                               std::vector<Ui2WorldRecord>& records,
+                               Ui2WorldRenderOptions options) {
+    static const char query_key = 0;
+    append_ui2_widget_records(world, records, options, &query_key,
+        +[](flecs::world& w, bool cached) -> flecs::query<> {
+            auto builder = w.query_builder<T&>();
+            if (cached) {
+                builder.cached();
+            }
+            return builder.build();
+        },
+        Ui2RecordTraits<T>::kind,
+        +[](Ui2WorldRecord& record, void* value) {
+            Ui2RecordTraits<T>::assign(record, *static_cast<T*>(value));
+        });
 }
 
 template <typename Fn>
@@ -306,7 +343,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     // the stored prompt/items — resolve the binding into the component before layout
     // so the allocated bounds include the chip run() will draw. Change-detected so an
     // idle tree (stable keybinds) does not re-solve every frame.
-    world.each([&](flecs::entity entity, ui2::PromptLabel& widget) {
+    kin::each(world, [&](flecs::entity entity, ui2::PromptLabel& widget) {
         if (widget.action.empty()) {
             return;
         }
@@ -316,7 +353,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
             ui2_mark_dirty(entity);
         }
     });
-    world.each([&](flecs::entity entity, ui2::PromptRow& widget) {
+    kin::each(world, [&](flecs::entity entity, ui2::PromptRow& widget) {
         bool changed = false;
         for (ui2::PromptRowItem& item : widget.items) {
             if (item.action.empty()) {
@@ -334,7 +371,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     });
 
     bool layout_dirty = false;
-    world.each([&](flecs::entity root_entity, const Ui2Root& root) {
+    kin::each(world, [&](flecs::entity root_entity, const Ui2Root& root) {
         const Ui2LayoutCache* cache = root_entity.get<Ui2LayoutCache>();
         if (!cache || cache->root_bounds != root.bounds || cache->solved_version != cache->tree_version ||
             cache->solved_direction != ui2::ui_direction()) {
@@ -349,7 +386,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     layouts.reserve(32);
     std::unordered_map<EcsId, std::vector<std::size_t>> children_by_parent;
 
-    world.each([&](flecs::entity entity, Ui2Layout& layout) {
+    kin::each(world, [&](flecs::entity entity, Ui2Layout& layout) {
         layouts.push_back({entity, &layout});
     });
 
@@ -377,7 +414,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
         });
     }
 
-    world.each([&](flecs::entity root_entity, Ui2Root& root) {
+    kin::each(world, [&](flecs::entity root_entity, Ui2Root& root) {
         Ui2LayoutCache& cache = root_entity.ensure<Ui2LayoutCache>();
         const bool root_bounds_changed = cache.root_bounds != root.bounds;
         if (!root_bounds_changed && cache.solved_version == cache.tree_version &&
@@ -1052,7 +1089,7 @@ std::size_t apply_ui2_text(EcsWorld& world) {
 std::size_t apply_ui2_text(flecs::world& world) {
     std::vector<flecs::entity> changed;
     std::vector<MessageArg> args;
-    world.each([&](flecs::entity entity, Ui2Text& text) {
+    kin::each(world, [&](flecs::entity entity, Ui2Text& text) {
         if (apply_ui2_text_to(entity, text, args)) {
             changed.push_back(entity);
         }
@@ -1081,11 +1118,11 @@ void register_ui2_components(flecs::world& world) {
     world.component<Ui2SyncIndex>("Ui2SyncIndex");
     world.component<Ui2Text>("Ui2Text");
 
-    register_ui2_dirty_observers<Ui2Root>(world, "root", true);
-    register_ui2_dirty_observers<Ui2Layout>(world, "layout", true);
-    register_ui2_dirty_observers<Ui2ScrollContainer>(world, "scroll_container", true);
+    register_ui2_dirty_observers(world, world.id<Ui2Root>(), "root", true);
+    register_ui2_dirty_observers(world, world.id<Ui2Layout>(), "layout", true);
+    register_ui2_dirty_observers(world, world.id<Ui2ScrollContainer>(), "scroll_container", true);
     for_each_ui2_widget_type([&]<typename T>() {
-        register_ui2_dirty_observers<T>(world, Ui2RecordTraits<T>::observer_name);
+        register_ui2_dirty_observers(world, world.id<T>(), Ui2RecordTraits<T>::observer_name);
     });
 }
 
@@ -1102,7 +1139,7 @@ void update_ui2_world(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     // Container surfaces participate in the same
     // ordered draw stream as widgets, mirroring the immediate front-end. Only entities
     // that actually paint something are emitted, so transparent containers cost nothing.
-    world.each([&](flecs::entity entity, Ui2Layout& layout) {
+    kin::each(world, [&](flecs::entity entity, Ui2Layout& layout) {
         if (!include_ui2_entity(entity, options)) {
             return;
         }
@@ -1161,7 +1198,7 @@ void update_ui2_world(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
         }
     }
 
-    world.each([&](flecs::entity entity, Ui2ScrollContainer& scroll) {
+    kin::each(world, [&](flecs::entity entity, Ui2ScrollContainer& scroll) {
         if (!include_ui2_entity(entity, options) || !scroll.show_scrollbar || scroll.scrollbar_thickness <= 0.0f) {
             return;
         }

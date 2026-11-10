@@ -14,8 +14,10 @@
 #include <kin/render3d/scene3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/render_target.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -31,6 +33,11 @@ struct RendererCapabilities3D {
     // colour and with HDR (16-bit float) colour.
     u32 max_samples = 1;
     u32 max_samples_hdr = 1;
+    // The most Scene3D::anisotropy can be (1: no anisotropic filtering).
+    u32 max_anisotropy = 1;
+    // Whether Scene3D::texture_lod_bias moves the mip level here: the device's samplers take a bias (Vulkan's and
+    // Direct3D 12's; not Metal's, and WebGL2 has none).
+    bool texture_lod_bias = false;
     // Whether Scene3D::ambient_occlusion, ::contact_shadows and ::taa can work
     // here (the formats and compute they need); where not, they are off and a
     // line in the log says so the first time one is asked for.
@@ -42,10 +49,17 @@ struct RendererCapabilities3D {
     bool gpu_driven_clusters = false;
     // Whether Lod3D::occlusion can work: the GPU cut, plus a sampled depth format and R32F storage textures.
     bool occlusion_culling = false;
+    // Whether Scene3D::global_illumination can work: compute that writes 3D textures (half floats, 8-bit and four
+    // half-float texels) and reads the meshes' buffers.
+    bool global_illumination = false;
     // Whether spot lights, the shadows of lights that are not the sun and the fill light's shadow can work (the light
     // shaders and a depth format that can be sampled; P3b); where not, they are off and a line in the log says so the
     // first time one is asked for.
     bool local_shadows = false;
+    // The most point and spot lights a frame can draw (Lights3D::points and ::spots: the strongest and nearest of those
+    // that reach the view): the light grid's 256 of each where the light shaders are made (local_shadows), else 16.
+    u32 max_point_lights = 16;
+    u32 max_spot_lights = 16;
     // Whether particles and weather can be drawn (P3c: the billboard shaders could be made), and whether soft particles
     // can (the depth-reading variant and the pre-pass's targets); where not, they are not drawn and a line in the log
     // says so once.
@@ -55,9 +69,43 @@ struct RendererCapabilities3D {
     // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not
     // drawn.
     bool skinning = false;
+    // Whether ViewOptions3D::auto_exposure can work (its compute shaders and the output's variants could be made).
+    bool auto_exposure = false;
+    // Whether Scene3D::decals can be drawn (the decal shaders, and the pre-pass whose depth and normals they read).
+    bool decals = false;
+    // Whether Renderer3D::set_morph_weights can change a mesh made with morph targets.
+    bool morph_targets = false;
     // The device is a software rasteriser (Mesa's llvmpipe/lavapipe, SwiftShader, Direct3D's WARP): every picture is
     // right, no timing means anything. Tests compare milliseconds only where this is false.
     bool software = false;
+    // Standalone opaque/cutout geometry into caller-owned D32F + RG16F targets.
+    bool geometry_pass = false;
+    bool visibility_pass = false; // standalone target-ID mask, without stock lighting/history
+    bool shared_preparation = false;
+    bool material_inputs = false;
+    bool surface_pass = false, sun_shadow_pass = false, local_shadow_pass = false;
+    bool bloom_pass = false, output_pass = false;
+    bool surface_stages = false, surface_particles = false, surface_soft_particles = false;
+};
+
+// Exposure that follows how bright the picture is (eye adaptation): walk from a dark corridor into the sun and the view
+// is first too bright, then settles. Each render meters the view's HDR picture on the GPU (a histogram of its log
+// luminance; the darkest `low` and the brightest past `high` shares left out), finds the exposure that brings the
+// rest's average to `key`, and moves toward it. The result multiplies ViewOptions3D::exposure, which stays as a manual
+// factor on top. Only for views that tonemap (hdr or bloom, out to an 8-bit 2D pipeline);
+// RendererCapabilities3D::auto_exposure says whether the device can. The time between renders is Scene3D::time's step
+// when it moves forward (by at most a second), else the wall clock's; View3D::reset_history() starts at the target.
+struct AutoExposure3D {
+    bool enabled = false;
+    f32 key = 0.18f;             // the linear brightness the average is brought to (mid-grey)
+    f32 min_ev = -4.0f;          // the exposure stays within 2^min_ev ..
+    f32 max_ev = 6.0f;           // .. 2^max_ev (stops)
+    f32 compensation_ev = 0.0f;  // added to what the metering asks for (stops; + is brighter)
+    f32 speed_up = 1.0f;         // how fast the exposure rises (after going into the dark), per second
+    f32 speed_down = 3.0f;       // and falls (after going into the light)
+    f32 low = 0.1f, high = 0.9f; // the shares of the sorted pixels the average is of
+    f32 centre_weight = 0.0f;    // 0: every pixel alike; 1: the middle of the view counts most
+    bool operator==(const AutoExposure3D&) const = default;
 };
 
 struct ViewOptions3D {
@@ -73,6 +121,7 @@ struct ViewOptions3D {
     // On with bloom.
     bool hdr = false;
     f32 exposure = 1.0f;
+    AutoExposure3D auto_exposure{};
     // A glow round what is brighter than `bloom_threshold` (linear), this
     // strong (0: none). Emissive materials past 1 glow.
     f32 bloom = 0.0f;
@@ -80,6 +129,93 @@ struct ViewOptions3D {
     // What is under each pixel kept too (Renderer3D::pick): one more pass
     // over the scene's opaque meshes.
     bool pick = false;
+    // Without `hdr`: the light kept as x / (1 + x) (Reinhard's, each channel) in the picture, so that what is past
+    // white (a sun glint, a lamp) survives an 8-bit picture, for a reader that takes it back (x / (1 - x)): kin's
+    // planar views' pictures (a mirror's, a portal's), which the view seeing them tonemaps (and blooms) as its own.
+    bool compress = false;
+};
+
+// Single-sample data attachments. Depth is reverse Z (0 background/far, 1 near),
+// with the scene camera's exact, unjittered projection. Normals are world-space
+// unit vectors encoded octahedrally in signed RG16F [-1,1]; depth distinguishes
+// background from a valid normal. No material normal maps or custom displacement.
+struct GeometryTargets3D {
+    Texture depth;   // TextureFormat::Depth32Float
+    Texture normals; // TextureFormat::Rg16Float; same extent and device as depth
+};
+
+// A binary, linear target-ID mask (RGB 1 for the nearest target, 0 otherwise).
+// Opaque/masked world meshes occlude; blended meshes, overlays and particles do not.
+// IDs are MeshInstance3D::id; give the target a distinct ID. UINT32_MAX is reserved.
+struct VisibilityTargets3D {
+    Texture depth; // D32F, single-sample
+    Texture mask;  // RGBA16F, same extent/device; both must be render attachments
+};
+struct VisibilityOptions3D {
+    u32 target_id = 1;
+    std::optional<u32> ignored_id; // e.g. the observer's own body; ignored fragments write no depth
+};
+
+// A directional depth map and its projection metadata. The texture is mutable:
+// keep matching projection/depth versions, or use distinct persistent targets.
+struct SunShadow3D {
+    Texture depth; // sampled D32F 2D array, 1..max_shadow_cascades layers
+    ShadowCascades3D projection;
+};
+enum class LocalShadowKind3D { Spot, Point };
+// Explicit selection, independent of the stock shadow-slot allocator. A point
+// occupies six consecutive layers (+x,-x,+y,-y,+z,-z); a spot occupies one.
+struct LocalShadowRequest3D {
+    LocalShadowKind3D kind = LocalShadowKind3D::Spot;
+    u32 light = 0; // index in the source scene's spots/points
+    u32 first_layer = 0;
+    u32 resolution = 0; // 0: full array side; otherwise a viewport at its top left
+};
+struct LocalShadowMap3D {
+    LocalShadowRequest3D source;
+    std::array<LocalShadowView3D, cube_faces> projection{};
+    f32 bias = 1, normal_offset = 1.5f, softness = 1, fade_distance = 10;
+};
+// Mutable bindings, like SunShadow3D. Keep map/projection/light-index versions
+// aligned, and use distinct persistent targets for historical snapshots.
+struct LocalShadows3D {
+    Texture depth; // sampled square D32F array, up to max_local_shadow_layers
+    std::vector<LocalShadowMap3D> maps;
+};
+struct SurfaceTargets3D {
+    RenderTarget colour; // current Renderer2D working colour format
+    Texture depth;       // sampled D32F 2D, same extent; stores reverse-Z depth
+    // Alternative to colour: explicit linear, premultiplied RGBA16F attachment.
+    // Set exactly one colour target. Independent of the 2D working format.
+    Texture linear_colour;
+};
+struct BloomTargets3D {
+    Texture result, scratch; // distinct sampled RGBA16F render attachments, matching extents
+};
+struct BloomOptions3D {
+    f32 threshold = 1; // linear luminance, before exposure
+};
+struct OutputOptions3D {
+    Texture bloom; // optional linear RGBA16F input; required with positive strength
+    f32 bloom_strength = 0, exposure = 1;
+    // ACES and exposure for 8-bit output. HDR working output remains linear,
+    // unexposed, for the 2D frame's own output stage. False: encode only.
+    bool tone_map_sdr = true;
+    bool dither = false; // stable pixel noise when encoding to a gamma 8-bit target
+};
+enum class SurfaceStage3D { All, Opaque, Transparent };
+struct SurfaceOptions3D {
+    Color background = colors::transparent;
+    const SunShadow3D* sun_shadow = nullptr;       // null: no sun shadow; never generates maps implicitly
+    const LocalShadows3D* local_shadows = nullptr; // null: unshadowed point/spot lights
+    SurfaceStage3D stage = SurfaceStage3D::All;    // All/Opaque clear; Transparent loads colour/depth
+    bool particles = false; // world sprites/weather, merged with transparent meshes; not valid for Opaque
+    // Transparent only: optional distinct source copied to colour before blending.
+    // Use separate logical resource versions in compiled graphs; omit for an in-place load.
+    Texture colour_input;
+    // Separate sampled D32F world depth, same size/camera, unjittered, without overlay depth splitting.
+    // Required when enabled particles request soft intersections; cannot be the active depth attachment.
+    Texture soft_depth;
 };
 
 // What a pixel of a view shows (Renderer3D::pick): the mesh copy nearest the
@@ -108,6 +244,26 @@ struct ClusterDraw3D {
     u32 first_instance = 0; // the copy's slot in the instance buffer
 };
 
+// The GI scene a render built (Scene3D::global_illumination; Renderer3D::read_gi_scene), for tests and tools:
+// `size` voxels of `cell` units, voxel (0, 0, 0)'s low corner at `origin`; the arrays a value a voxel, x fastest, then
+// y, then z.
+struct GiScene3D {
+    Vec3f origin{};
+    f32 cell = 0.0f;
+    std::array<u32, 3> size{};
+    // From the voxel's centre to the nearest centre of a voxel a surface is in, in voxels (0 in one; large where the
+    // scene has no surface at all).
+    std::vector<f32> distance;
+    // The surface's colour (linear, 8 bits a channel, red in the lowest byte); alpha 255 where a surface is in the
+    // voxel, 0 elsewhere (and then the rest is 0 too).
+    std::vector<u32> albedo;
+    // Its normal (the face of the triangle that owns the voxel, on the side its vertices' normals are), each component
+    // as (n + 1) / 2 in a byte; alpha 255 for a double-sided material, 128 for a single-sided one.
+    std::vector<u32> normal;
+    // Its emission (linear RGB, three floats a voxel).
+    std::vector<f32> emission;
+};
+
 // A view's targets on the backend.
 class IViewBackend3D {
 public:
@@ -119,6 +275,21 @@ public:
     // Forgets the temporal anti-aliasing's history, so the next frame starts
     // afresh (a camera cut, a scene change).
     virtual void reset_history() {}
+    // The part of the picture renders fill, from its top-left corner (View3D::set_render_size): the whole unless the
+    // backend renders parts and was asked to.
+    virtual Vec2i render_size() const { return size(); }
+    virtual bool set_render_size(Vec2i) { return false; }
+};
+
+// Backend-owned frame preparation. Source lifetime/edits and frame boundaries
+// invalidate it. valid() must be safe after source/renderer destruction.
+class IPreparedSceneBackend3D {
+public:
+    virtual ~IPreparedSceneBackend3D() = default;
+    virtual bool valid() const = 0;
+};
+struct PrepareOptions3D {
+    u64 max_cpu_bytes = 32ull * 1024 * 1024; // payload admission limit per handle
 };
 
 class IRendererBackend3D {
@@ -133,21 +304,107 @@ public:
     // MeshClusters3D::leaf_indices), which the hierarchy does not hold, and `chain` is null.
     virtual std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
                                                         std::shared_ptr<const MeshClusters3D> clusters) = 0;
+    // New vertices for a mesh made with morph targets (`data.morph_targets` not empty when it was made: the backend
+    // then keeps its vertices where they can be rewritten), as many as it was made with; seen from the next render on.
+    virtual bool update_mesh_vertices(IMeshBackend3D&, std::span<const MeshVertex3D>) { return false; }
+    // The same blended where the backend can (on the GPU, from the targets it kept when the mesh was made); false: the
+    // renderer blends on the CPU and calls update_mesh_vertices.
+    virtual bool set_morph_weights(IMeshBackend3D&, std::span<const f32>) { return false; }
+    // Another mesh like `mesh` (made with morph targets), sharing what it can, showing the mesh at weights 0; null: the
+    // renderer makes it again from its data.
+    virtual std::shared_ptr<IMeshBackend3D> copy_mesh(const IMeshBackend3D&) { return {}; }
     // An equirectangular picture of `size` pixels, three floats (linear RGB)
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).
     virtual std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
+    // Reflection probes' pictures (render3d/reflection_probes3d.hpp): none where unsupported.
+    virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32) { return {}; }
+    // `lighting`: ReflectionCaptureOptions3D::global_illumination's view (null: none).
+    virtual bool capture_reflection(IReflectionCaptureBackend3D&, Scene3D&, Vec3f, const ReflectionCaptureOptions3D&,
+                                    IViewBackend3D* /*lighting*/, RenderDebugStats3D&) {
+        return false;
+    }
+    // Whether a view's global illumination has light (its probes traced at least once): what a capture borrows.
+    virtual bool global_illumination_lit(IViewBackend3D&) const { return false; }
+    // A capture's panorama read back (linear RGB floats, rows top to bottom), and one made from such a picture (2:1).
+    virtual bool read_reflection_capture(IReflectionCaptureBackend3D&, std::vector<f32>&, Vec2i&) { return false; }
+    // Read-backs for tools (write_scene_snapshot): a mesh's level 0 as it was made (vertices, indices, skin), and a
+    // render attachment's texels (RGBA16F: four halves each). They wait for the GPU.
+    virtual bool read_mesh(const IMeshBackend3D&, u32 /*vertex_count*/, MeshData3D&) { return false; }
+    virtual bool read_texture(const Texture&, std::vector<u8>&, Vec2i&) { return false; }
+    virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i, std::span<const f32>) {
+        return {};
+    }
     // Null when the SPIR-V can't be made into a fragment shader.
     virtual std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) = 0;
+    // A surface shader from its variants' SPIR-V (SurfaceVariant3D order); null where surface shaders aren't
+    // supported or a variant is refused.
+    virtual std::shared_ptr<ISurfaceShaderBackend3D>
+    create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d>) {
+        return {};
+    }
+    // A mipmapped RGBA8 2D array of `layers` (RGBA8, one size, tightly packed): Material3D::graph_maps. None where
+    // surface shaders aren't supported.
+    virtual Texture create_map_array(Vec2i, std::span<const u8* const>) { return {}; }
+    virtual Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
+                                                              std::span<const DataBuffer>) {
+        return {std::nullopt, {"material inputs unavailable"}};
+    }
     virtual std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) = 0;
     virtual bool resize_view(IViewBackend3D& view, Vec2i size) = 0;
+    // Whether a render of `scene` into `view` can fill only part of it (IViewBackend3D::set_render_size); `lit_by`: a
+    // render lit by that view's global illumination (render_lit_by).
+    virtual bool renders_part(const IViewBackend3D&, const Scene3D&, const IViewBackend3D* /*lit_by*/) const {
+        return false;
+    }
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
     virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;
+    // The same, its global illumination `lit_by`'s (its probes as they stand) instead of the view's own; none while
+    // that has no light (Renderer3D::render(view, scene, lit_by)).
+    virtual bool render_lit_by(IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D& /*lit_by*/,
+                               RenderDebugStats3D& stats) {
+        return render(view, scene, stats);
+    }
+    virtual bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) { return false; }
+    virtual std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
+                                                             RenderDebugStats3D&) {
+        return {};
+    }
+    virtual bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) { return false; }
+    virtual bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) {
+        return false;
+    }
+    virtual bool render_visibility(const VisibilityTargets3D&, IPreparedSceneBackend3D&, const VisibilityOptions3D&,
+                                   RenderDebugStats3D&) {
+        return false;
+    }
+    virtual Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,
+                                                    RenderDebugStats3D&) {
+        return {std::nullopt, {"sun shadow operation unavailable"}};
+    }
+    virtual Result3D<LocalShadows3D> render_local_shadows(const Texture&, IPreparedSceneBackend3D&,
+                                                          std::span<const LocalShadowRequest3D>, Vec2i,
+                                                          RenderDebugStats3D&) {
+        return {std::nullopt, {"local shadow operation unavailable"}};
+    }
+    virtual bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
+                                RenderDebugStats3D&) {
+        return false;
+    }
+    virtual bool render_bloom(const BloomTargets3D&, const Texture&, const BloomOptions3D&, RenderDebugStats3D&) {
+        return false;
+    }
+    virtual bool render_output(const RenderTarget&, const Texture&, const OutputOptions3D&, RenderDebugStats3D&) {
+        return false;
+    }
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) = 0;
+    // ViewOptions3D::auto_exposure's latest adapted exposure that has come back from the GPU, without waiting.
+    virtual std::optional<f32> read_exposure(IViewBackend3D&) { return std::nullopt; }
     // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False
-    // where there is nothing to make.
+    // when it could not, which Renderer3D::warm_up reports as failure (the default: a backend that has none); a
+    // backend with nothing to make ahead says true.
     virtual bool warm_up(IViewBackend3D& view, const Scene3D& scene) {
         static_cast<void>(view);
         static_cast<void>(scene);
@@ -158,6 +415,9 @@ public:
     virtual bool read_cluster_picks(IViewBackend3D&, std::vector<ClusterPick3D>&) { return false; }
     // The indirect draws of the last render's GPU cut, a (view, copy) each; waits for the GPU.
     virtual bool read_cluster_draws(IViewBackend3D&, std::vector<ClusterDraw3D>&) { return false; }
+    // The GI scene the view holds (built by the last render with Scene3D::global_illumination), for tests and tools;
+    // waits for the GPU. False when it has none.
+    virtual bool read_gi_scene(IViewBackend3D&, GiScene3D&) { return false; }
 };
 
 } // namespace kin

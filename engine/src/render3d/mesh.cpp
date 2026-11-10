@@ -125,7 +125,92 @@ Status3D MeshData3D::validate() const {
             }
         }
     }
+    if (morph_targets.size() > max_morph_targets) {
+        return fail(std::to_string(morph_targets.size()) + " morph targets, more than " +
+                    std::to_string(max_morph_targets));
+    }
+    if (!morph_weights.empty() && morph_weights.size() != morph_targets.size()) {
+        return fail(std::to_string(morph_weights.size()) + " morph weights for " +
+                    std::to_string(morph_targets.size()) + " targets");
+    }
+    for (const f32 w : morph_weights) {
+        if (!std::isfinite(w)) {
+            return fail("a morph weight is not finite");
+        }
+    }
+    for (std::size_t t = 0; t < morph_targets.size(); ++t) {
+        const MorphTarget3D& target = morph_targets[t];
+        const std::string which = "morph target " + std::to_string(t) + " ('" + target.name + "')";
+        if (target.positions.size() != vertices.size()) {
+            return fail(which + " has " + std::to_string(target.positions.size()) + " positions for " +
+                        std::to_string(vertices.size()) + " vertices");
+        }
+        if (!target.normals.empty() && target.normals.size() != vertices.size()) {
+            return fail(which + " has " + std::to_string(target.normals.size()) + " normals for " +
+                        std::to_string(vertices.size()) + " vertices");
+        }
+        if (!std::ranges::all_of(target.positions, finite) || !std::ranges::all_of(target.normals, finite)) {
+            return fail(which + " has an offset that is not finite");
+        }
+    }
     return {};
+}
+
+void blend_morph_targets(const MeshData3D& data, std::span<const f32> weights, std::vector<MeshVertex3D>& out) {
+    out.assign(data.vertices.begin(), data.vertices.end());
+    bool normals = false;
+    const std::size_t n = std::min(weights.size(), data.morph_targets.size());
+    for (std::size_t t = 0; t < n; ++t) {
+        const f32 w = weights[t];
+        if (w == 0.0f) {
+            continue;
+        }
+        const MorphTarget3D& target = data.morph_targets[t];
+        const std::size_t count = std::min(out.size(), target.positions.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            out[i].position += target.positions[i] * w;
+        }
+        if (target.normals.size() >= out.size()) {
+            normals = true;
+            for (std::size_t i = 0; i < out.size(); ++i) {
+                out[i].normal += target.normals[i] * w;
+            }
+        }
+    }
+    if (normals) {
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            const f32 l = length(out[i].normal);
+            out[i].normal = l > 1e-12f ? out[i].normal * (1.0f / l) : data.vertices[i].normal;
+        }
+    }
+}
+
+Bounds3D morph_bounds(const MeshData3D& data) {
+    Bounds3D b = data.bounds();
+    // Each target can move a vertex at most its largest offset (per axis) either way, at a weight within [-1, 1].
+    Vec3f reach{};
+    for (const MorphTarget3D& target : data.morph_targets) {
+        Vec3f most{};
+        for (const Vec3f& d : target.positions) {
+            most = {std::max(most.x, std::abs(d.x)), std::max(most.y, std::abs(d.y)), std::max(most.z, std::abs(d.z))};
+        }
+        reach += most;
+    }
+    b.min -= reach;
+    b.max += reach;
+    return b;
+}
+
+i32 Mesh3D::find_morph_target(std::string_view name) const {
+    if (_morphs) {
+        const auto& targets = _morphs->source->morph_targets;
+        for (std::size_t t = 0; t < targets.size(); ++t) {
+            if (targets[t].name == name) {
+                return static_cast<i32>(t);
+            }
+        }
+    }
+    return -1;
 }
 
 u32 MeshData3D::skin_joint_count() const {
@@ -199,6 +284,39 @@ void MeshData3D::append(const MeshData3D& other, const Mat4f& transform) {
     const Mat4f normals = normal_matrix(transform);
     // A mirroring transform turns the triangles over: keep them counter-clockwise.
     const bool mirrored = transform.determinant() < 0.0f;
+    // Morph targets meet by name: a target only one side has moves the other side's vertices by nothing. Offsets turn
+    // with the shape (and normal offsets with its normals, before the normalisation the blend does).
+    if (!morph_targets.empty() || !other.morph_targets.empty()) {
+        const std::size_t before = vertices.size(), added = other.vertices.size();
+        if (morph_weights.empty())
+            morph_weights.assign(morph_targets.size(), 0.0f);
+        for (std::size_t t = 0; t < other.morph_targets.size(); ++t) {
+            const MorphTarget3D& theirs = other.morph_targets[t];
+            const auto mine = std::ranges::find(morph_targets, theirs.name, &MorphTarget3D::name);
+            if (mine == morph_targets.end()) {
+                morph_targets.push_back({theirs.name, std::vector<Vec3f>(before), {}});
+                morph_weights.push_back(t < other.morph_weights.size() ? other.morph_weights[t] : 0.0f);
+            }
+        }
+        for (MorphTarget3D& target : morph_targets) {
+            const auto theirs = std::ranges::find(other.morph_targets, target.name, &MorphTarget3D::name);
+            const bool has = theirs != other.morph_targets.end();
+            const bool with_normals = !target.normals.empty() || (has && !theirs->normals.empty());
+            if (with_normals)
+                target.normals.resize(before);
+            target.positions.reserve(before + added);
+            for (std::size_t i = 0; i < added; ++i) {
+                target.positions.push_back(has ? transform.apply_vector(theirs->positions[i]) : Vec3f{});
+                if (with_normals) {
+                    // In the units of the turned normal before it is made unit again (as the vertex's is).
+                    const f32 scale = length(normals.apply_vector(other.vertices[i].normal));
+                    target.normals.push_back(has && !theirs->normals.empty() && scale > 1e-20f
+                                                 ? normals.apply_vector(theirs->normals[i]) * (1.0f / scale)
+                                                 : Vec3f{});
+                }
+            }
+        }
+    }
     for (MeshVertex3D v : other.vertices) {
         v.position = transform.apply(v.position);
         v.normal = normalize(normals.apply_vector(v.normal));

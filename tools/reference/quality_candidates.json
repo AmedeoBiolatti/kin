@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "status": "calibration candidates, not engine presets",
+  "candidates": {
+    "baseline": [],
+    "filtering4": ["--anisotropy", "4", "--texture-lod-bias", "0"],
+    "specular025": ["--anisotropy", "4", "--specular-aa", "0.25"],
+    "taa_unsharpened": ["--anisotropy", "4", "--specular-aa", "0.25", "--taa", "--taa-sharpness", "0"],
+    "taa_sharpened": ["--anisotropy", "4", "--specular-aa", "0.25", "--taa", "--taa-sharpness", "0.12"]
+  }
+}

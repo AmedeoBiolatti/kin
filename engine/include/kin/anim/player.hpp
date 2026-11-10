@@ -100,6 +100,15 @@ struct PlayerLayer {
     f32 age = 0.0f;
     PropertyMask mask;
     bool done = false;
+    // Fading out (a state left with a blend): seconds it takes to go.
+    f32 fade_out = 0.0f;
+    // A blend space played in place of `animation`: its animations (in its
+    // order), a cursor each, kept in step; their weights as last moved on.
+    std::shared_ptr<const AnimationBlendSpace> blend;
+    std::string blend_name;
+    std::vector<std::shared_ptr<const Animation>> blend_animations;
+    std::vector<NodeCursor> blend_cursors;
+    std::vector<f32> blend_weights;
 };
 
 struct PushOptions {
@@ -118,8 +127,13 @@ struct AnimationPlayer {
     AnimationParams params;
     std::string state;
     std::vector<PlayerLayer> layers;
+    // Bases left with a blend, fading out under the one that replaced them.
+    std::vector<PlayerLayer> fading;
     std::unordered_map<std::string, EcsId, TransparentStringHash, std::equal_to<>> target_cache;
     bool playing = true;
+    // Each field it sets marked as set (flecs's OnSet, as EcsEntity::modified), for a world that watches its
+    // components for changes: a 3D one's drawing (WorldRenderState3D) does. Off: written in place, unannounced.
+    bool announce = false;
 };
 
 struct AnimationLayerSnapshot {

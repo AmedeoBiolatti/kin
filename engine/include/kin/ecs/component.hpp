@@ -9,6 +9,7 @@
 
 #include <flecs.h>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -44,6 +45,8 @@ enum class ComponentFieldKind {
     AssetRef,
     Vec3f,
     Quatf,
+    // Points (a polygon's corners, a line's): in the scene file [[x, y], ...].
+    Points,
 };
 
 struct ComponentEntityRef {
@@ -73,7 +76,8 @@ using ComponentFieldValue = std::variant<bool,
                                          ComponentEntityRef,
                                          ComponentAssetRef,
                                          Vec3f,
-                                         Quatf>;
+                                         Quatf,
+                                         std::vector<Vec2f>>;
 
 ComponentFieldKind component_field_kind_from_value(const ComponentFieldValue& value);
 
@@ -84,6 +88,19 @@ struct ComponentFieldDescriptor {
     std::string category;
     std::string description;
     std::string units;
+    // An asset reference's kind of asset, as asset_type_name() names it
+    // ("Image"), or kinds, separated by commas: what tools offer for it. Empty: any.
+    std::string asset_type;
+    // A field naming an entry of the asset another field of the component
+    // names (a sprite of a sprite catalog, a cue of an audio catalog): that
+    // field's name; or, the asset another component of the entity names,
+    // "Component.field" ("SpriteRenderer.asset"). Tools offer the asset's
+    // entries (those of the kind the field's name says, when it holds more
+    // than one: an "animation" field, a catalog's animations).
+    std::string entry_of;
+    // The values a string field takes, when it takes only some ("static",
+    // "dynamic", "kinematic"): what tools offer for it. Empty: any.
+    std::vector<std::string> choices;
     bool readonly = false;
     bool hidden = false;
     std::optional<f64> min_value;
@@ -191,11 +208,12 @@ template <> struct ComponentFieldKindOf<Vec3f> { static constexpr ComponentField
 template <> struct ComponentFieldKindOf<Quatf> { static constexpr ComponentFieldKind value = ComponentFieldKind::Quatf; };
 template <> struct ComponentFieldKindOf<ComponentAssetRef> { static constexpr ComponentFieldKind value = ComponentFieldKind::AssetRef; };
 template <> struct ComponentFieldKindOf<ComponentEntityRef> { static constexpr ComponentFieldKind value = ComponentFieldKind::EntityRef; };
+template <> struct ComponentFieldKindOf<std::vector<Vec2f>> { static constexpr ComponentFieldKind value = ComponentFieldKind::Points; };
 
-// Field types a native component member can be reflected as. These are exactly
-// the types ComponentFieldKindOf is specialized for above, except entity refs:
-// those still use the data-component path for authored-id remapping. Asset refs
-// are path/ID values and work as native members too. Keeping this list in sync with
+// Field types a native component member can be reflected as: exactly the
+// types ComponentFieldKindOf is specialized for above. Asset refs are path/ID
+// values; an entity ref is kept whole by the component (its authored id with
+// its id), so scene and prefab loading resolve it as a data component's. Keeping this list in sync with
 // ComponentFieldKindOf ensures an unsupported native field fails on the
 // static_assert in NativeComponentBuilder::field() with a clear message rather
 // than an opaque "ComponentFieldKindOf has no member 'value'" error.
@@ -214,7 +232,9 @@ inline constexpr bool supported_component_field_v =
     std::is_same_v<T, Color> ||
     std::is_same_v<T, Vec3f> ||
     std::is_same_v<T, Quatf> ||
-    std::is_same_v<T, ComponentAssetRef>;
+    std::is_same_v<T, std::vector<Vec2f>> ||
+    std::is_same_v<T, ComponentAssetRef> ||
+    std::is_same_v<T, ComponentEntityRef>;
 
 inline bool field_value_matches_kind(const ComponentFieldValue& value, ComponentFieldKind kind) {
     switch (kind) {
@@ -240,6 +260,10 @@ inline bool field_value_matches_kind(const ComponentFieldValue& value, Component
         if (!q || !std::isfinite(q->x) || !std::isfinite(q->y) || !std::isfinite(q->z) || !std::isfinite(q->w)) return false;
         const double n = double(q->x)*q->x + double(q->y)*q->y + double(q->z)*q->z + double(q->w)*q->w;
         return std::abs(n - 1.0) <= .001;
+    }
+    case ComponentFieldKind::Points: {
+        const auto* points = std::get_if<std::vector<Vec2f>>(&value);
+        return points && std::ranges::all_of(*points, [](Vec2f p) { return std::isfinite(p.x) && std::isfinite(p.y); });
     }
     }
     return false;
@@ -273,9 +297,19 @@ struct ComponentRecord {
     // suppression is worth registering: data components have no observer, so a
     // suppression for them would never be consumed and would leak.
     bool observed = false;
+    std::function<void(EcsComponentRegistry&)> copy_schema;
 };
 
 } // namespace detail
+
+// A field of a native component, read and written on the component's own
+// data: for code that walks components itself (animation tracks).
+struct ComponentFieldAccess {
+    ComponentId component = 0;
+    ComponentFieldKind kind = ComponentFieldKind::Bool;
+    std::function<ComponentFieldValue(const void*)> read;
+    std::function<bool(void*, const ComponentFieldValue&)> write;
+};
 
 class EcsComponentRegistry {
 public:
@@ -310,8 +344,18 @@ public:
             .id = static_cast<ComponentId>(component.id()),
             .name = std::move(name),
             .kind = ComponentKind::Native,
+            .fields = {},
         };
         record->type = typeid(T);
+        record->copy_schema = [source =
+                                   std::weak_ptr<detail::ComponentRecord>{record}](EcsComponentRegistry& destination) {
+            if (const auto original = source.lock()) {
+                destination.native<T>(original->descriptor.name);
+                auto* copied = destination.find_record(original->descriptor.name);
+                copied->descriptor.fields = original->descriptor.fields;
+                copied->fields = original->fields;
+            }
+        };
         record->has = [](EcsEntity entity) {
             return entity.get<T>() != nullptr;
         };
@@ -356,6 +400,10 @@ public:
     const ComponentDescriptor* find(ComponentId id) const;
     const ComponentDescriptor* find(std::string_view name) const;
     std::vector<ComponentDescriptor> descriptors() const;
+    // How many descriptors() has, without making them.
+    std::size_t descriptor_count() const { return _records.size(); }
+    void copy_schema_to(EcsComponentRegistry& destination) const;
+    bool has_field_patch_handler() const { return static_cast<bool>(_field_patch_handler); }
 
     bool has(EcsEntity entity, ComponentId id) const;
     bool has(EcsEntity entity, std::string_view name) const;
@@ -373,6 +421,15 @@ public:
 
     bool patch_field(EcsEntity entity, ComponentId id, std::string_view field, const ComponentFieldValue& value);
     bool patch_field(EcsEntity entity, std::string_view component, std::string_view field, const ComponentFieldValue& value);
+    // A native component's field, to read and write on its data; none for a
+    // data component's, or one not described.
+    std::optional<ComponentFieldAccess> field_access(std::string_view component, std::string_view field) const;
+    // A data component's field values on `entity`, in its descriptor's order,
+    // read and written in place (a value written must keep its field's kind):
+    // for code that reaches many each frame (scripts). A prefab instance gets
+    // its own copy of its prefab's values first. Null when the entity has no
+    // such component, or `id` is not a data component's.
+    std::vector<ComponentFieldValue>* data_values(EcsEntity entity, ComponentId id);
     // Optional owner policy for live field edits (e.g. transactional asset and
     // physics updates). Installed only after scene construction. The handler
     // performs the edit and returns an error on failure; nullopt leaves normal
@@ -439,8 +496,20 @@ public:
 
     template <typename Field>
     NativeComponentBuilder& field(std::string name, Field T::* member) {
-        return property<Field>(std::move(name), [member](const T& component) { return component.*member; },
-                               [member](T& component, const Field& value) { component.*member = value; return true; });
+        return define_property<Field>(
+            std::move(name), [member](const T& component) { return component.*member; },
+            [member](T& component, const Field& value) { component.*member = value; return true; }, true);
+    }
+
+    // A member of a member (a body's def's damping), by its own name.
+    template <typename Outer, typename Field>
+    NativeComponentBuilder& field(std::string name, Outer T::* outer, Field Outer::* member) {
+        return define_property<Field>(
+            std::move(name), [outer, member](const T& component) { return (component.*outer).*member; },
+            [outer, member](T& component, const Field& value) {
+                (component.*outer).*member = value;
+                return true;
+            }, true);
     }
 
     // A reflected authored property can adapt nested members or enum names
@@ -449,6 +518,51 @@ public:
     template <typename Field>
     NativeComponentBuilder& property(std::string name, std::function<Field(const T&)> read,
                                      std::function<bool(T&, const Field&)> write) {
+        const bool functions_valid = read && write;
+        return define_property<Field>(std::move(name), std::move(read), std::move(write), functions_valid);
+    }
+
+    NativeComponentBuilder& label(std::string value) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.label = std::move(value); });
+    }
+    NativeComponentBuilder& category(std::string value) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.category = std::move(value); });
+    }
+    NativeComponentBuilder& description(std::string value) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.description = std::move(value); });
+    }
+    NativeComponentBuilder& units(std::string value) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.units = std::move(value); });
+    }
+    NativeComponentBuilder& asset_type(std::string value) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.asset_type = std::move(value); });
+    }
+    NativeComponentBuilder& entry_of(std::string field_name) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.entry_of = std::move(field_name); });
+    }
+    NativeComponentBuilder& choices(std::vector<std::string> values) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.choices = std::move(values); });
+    }
+    NativeComponentBuilder& readonly(bool value = true) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.readonly = value; });
+    }
+    NativeComponentBuilder& hidden(bool value = true) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.hidden = value; });
+    }
+    NativeComponentBuilder& range(f64 min, f64 max) {
+        return update_last_field([&](ComponentFieldDescriptor& field) {
+            field.min_value = min;
+            field.max_value = max;
+        });
+    }
+
+    explicit operator bool() const { return _record != nullptr; }
+
+private:
+    // Keep member accessors typed until the registry's erased callback boundary.
+    // A direct field needs no intermediate std::function allocation/adapter.
+    template <typename Field, typename Read, typename Write>
+    NativeComponentBuilder& define_property(std::string name, Read read, Write write, bool functions_valid) {
         using FieldType = std::remove_cv_t<Field>;
         static_assert(detail::supported_component_field_v<FieldType>, "unsupported ECS component field type");
         if (!_record) {
@@ -458,7 +572,7 @@ public:
             _registry._last_error = "component field name is required";
             return *this;
         }
-        if (!read || !write) {
+        if (!functions_valid) {
             _registry._last_error = "component property requires a reader and writer";
             return *this;
         }
@@ -491,34 +605,6 @@ public:
         return *this;
     }
 
-    NativeComponentBuilder& label(std::string value) {
-        return update_last_field([&](ComponentFieldDescriptor& field) { field.label = std::move(value); });
-    }
-    NativeComponentBuilder& category(std::string value) {
-        return update_last_field([&](ComponentFieldDescriptor& field) { field.category = std::move(value); });
-    }
-    NativeComponentBuilder& description(std::string value) {
-        return update_last_field([&](ComponentFieldDescriptor& field) { field.description = std::move(value); });
-    }
-    NativeComponentBuilder& units(std::string value) {
-        return update_last_field([&](ComponentFieldDescriptor& field) { field.units = std::move(value); });
-    }
-    NativeComponentBuilder& readonly(bool value = true) {
-        return update_last_field([&](ComponentFieldDescriptor& field) { field.readonly = value; });
-    }
-    NativeComponentBuilder& hidden(bool value = true) {
-        return update_last_field([&](ComponentFieldDescriptor& field) { field.hidden = value; });
-    }
-    NativeComponentBuilder& range(f64 min, f64 max) {
-        return update_last_field([&](ComponentFieldDescriptor& field) {
-            field.min_value = min;
-            field.max_value = max;
-        });
-    }
-
-    explicit operator bool() const { return _record != nullptr; }
-
-private:
     template <typename Func>
     NativeComponentBuilder& update_last_field(Func&& func) {
         if (!_record || _record->descriptor.fields.empty() || _record->fields.empty()) {
@@ -547,6 +633,9 @@ public:
     DataComponentBuilder& category(std::string value);
     DataComponentBuilder& description(std::string value);
     DataComponentBuilder& units(std::string value);
+    DataComponentBuilder& asset_type(std::string value);
+    DataComponentBuilder& entry_of(std::string field_name);
+    DataComponentBuilder& choices(std::vector<std::string> values);
     DataComponentBuilder& readonly(bool value = true);
     DataComponentBuilder& hidden(bool value = true);
     DataComponentBuilder& range(f64 min, f64 max);

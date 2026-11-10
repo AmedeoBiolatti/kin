@@ -789,6 +789,43 @@ void test_levels_bake() {
     assert(!build_mesh_levels(soup, options).extra_vertices.empty());
 }
 
+// A flat soup has two UV islands and colour/alpha discontinuities at their shared positions. A position-only remap
+// used to replace one island's corners with the other one's. Keep level zero and preserve the seam at every level.
+void test_flat_lod_seams() {
+    MeshData3D soup;
+    constexpr int side = 16;
+    for (int y = 0; y < side; ++y)
+        for (int x = 0; x < side * 2; ++x) {
+            const bool right = x >= side;
+            const auto vertex = [&](int dx, int dy) {
+                const Vec3f p{f32(x + dx) / side - 1, f32(y + dy) / side, 0};
+                return MeshVertex3D{p,
+                                    {0, 0, 1},
+                                    {p.x + (right ? 4 : 0), p.y},
+                                    right ? Color::rgba(0, 255, 0, 80) : Color::rgb(255, 0, 0)};
+            };
+            for (const auto v : {vertex(0, 0), vertex(1, 0), vertex(0, 1), vertex(1, 0), vertex(1, 1), vertex(0, 1)})
+                soup.vertices.push_back(v);
+        }
+    const auto chain = build_mesh_levels(soup, {.levels = 4});
+    assert(chain.count() > 1 && chain.levels[0].indices.empty() && chain.levels[0].triangles == soup.triangle_count());
+    const auto vertex = [&](u32 index) -> const MeshVertex3D& {
+        return index < soup.vertices.size() ? soup.vertices[index] : chain.extra_vertices[index - soup.vertices.size()];
+    };
+    for (std::size_t level = 1; level < chain.count(); ++level)
+        for (std::size_t i = 0; i < chain.levels[level].indices.size(); i += 3) {
+            const auto& a = vertex(chain.levels[level].indices[i]);
+            const auto& b = vertex(chain.levels[level].indices[i + 1]);
+            const auto& c = vertex(chain.levels[level].indices[i + 2]);
+            assert(a.color == b.color && a.color == c.color);
+            const bool right = a.color.g != 0;
+            for (const auto* v : {&a, &b, &c}) {
+                assert(v->uv.x == v->position.x + (right ? 4 : 0));
+                assert(right ? v->position.x >= 0 : v->position.x <= 0);
+            }
+        }
+}
+
 // A key changes with what the build reads, and only with that.
 void test_bake_keys() {
     const MeshData3D mesh = icosphere(4, false);
@@ -971,6 +1008,7 @@ int main() {
     test_cluster_bake();
     std::cout << "levels bake\n";
     test_levels_bake();
+    test_flat_lod_seams();
     std::cout << "bake keys\n";
     test_bake_keys();
     std::cout << "bake cache\n";

@@ -7,12 +7,27 @@
 #include <kin/assets/content.hpp>
 #include <kin/ecs/scene3d.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/render3d/material_graph3d.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 #include <kin/scene/scene_session3d.hpp>
 #include <stdexcept>
 
 namespace {
 using namespace kin;
+// An environment variable set, or removed (null), on POSIX and Windows.
+void set_env(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value ? value : ""); // an empty value removes it
+#else
+    if (value)
+        setenv(name, value, 1);
+    else
+        unsetenv(name);
+#endif
+}
+
 void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
@@ -133,11 +148,24 @@ void material_gpu(Renderer2D& renderer) {
     {
         kin::EcsWorld manual;
         WorldRenderState3D state{manual};
-        manual.entity("plain").set(Transform3D{}).set(ModelRenderer3D{.model = model});
+        state.mutation_mode(SceneMutationMode3D::Tracked);
+        auto prop = manual.entity("plain").set(Transform3D{}).set(ModelRenderer3D{.model = model});
         Scene3D collected;
         state.propagate_transforms();
         state.collect(collected);
         check(collected.draws().size() == model->parts.size(), "material-free C++ world collection regressed");
+        prop.set(ModelMaterials3D{.asset = {"colors.kinmaterials"}, .variant = "green"});
+        check(resolve_materials3d_assets(manual, assets), "tracked material bind failed");
+        collected.clear();
+        state.collect(collected);
+        check(collected.draws()[0].material.color == Color::rgb(0, 255, 0), "tracked material binding was stale");
+        prop.get_mut<ModelMaterials3D>()->asset = {};
+        check(resolve_materials3d_assets(manual, assets), "tracked material clear failed");
+        state.reset_work_stats();
+        collected.clear();
+        state.collect(collected);
+        check(state.work_stats().collection_fallbacks == 1 && collected.draws()[0].material == model->parts[0].material,
+              "native material resolver did not invalidate tracked extraction");
     }
     auto red = left.get<ModelMaterials3D>()->binding, green = right.get<ModelMaterials3D>()->binding;
     check(model == right.get<ModelRenderer3D>()->model && assets.stats().model_loads == 1,
@@ -227,7 +255,97 @@ void material_gpu(Renderer2D& renderer) {
               "disabled shader cache duplicated one binding's shader");
     }
 #endif
-    // Authored maps reuse imported glTF textures only when role AND sampling match.
+    // A material graph as a material file's surface: its parameters' values (merged across layers) in shader_params,
+    // its texture in its slot; compiled now (glslc), or cooked (<graph>.spv) when glslc is not there; invalidated
+    // when its source or its cooked file changes.
+    if (shader_compiler_available()) {
+        write(scratch.path / "glow.kingraph", R"({"schema": "kin.material-graph/1", "name": "glow",
+            "parameters": [{"name": "tint", "type": "color", "default": [1, 1, 1, 1]},
+                           {"name": "albedo", "type": "texture", "slot": "base"}],
+            "nodes": [{"id": "map", "type": "texture", "texture": "albedo"},
+                      {"id": "color", "type": "multiply", "inputs": {"a": "map.rgb", "b": "tint.rgb"}}],
+            "outputs": {"base_color": "color", "roughness": 1}})");
+        write(scratch.path / "graph.kinmaterials", R"({"schema":"kin.materials3d/1","material":{
+            "graph": "glow.kingraph", "params": {"tint": [0, 1, 0, 1], "albedo": "shared pixel.png"}},
+            "variants": {"red": {"material": {"params": {"tint": [1, 0, 0]}}},
+                         "off": {"material": {"graph": null}}}})");
+        auto green = assets.load_materials("graph.kinmaterials", model, {}).value_or({});
+        error = kin::diagnostics3d_text(assets.diagnostics());
+        check(green && green->materials[0].surface && green->materials[0].shader_params[0] == 0 &&
+                  green->materials[0].shader_params[1] == 1 && green->materials[0].texture,
+              "graph material did not bind");
+        const auto red = assets.load_materials("graph.kinmaterials", model, "red").value_or({});
+        check(red && red->materials[0].shader_params[0] == 1 && red->materials[0].shader_params[1] == 0 &&
+                  red->materials[0].shader_params[3] == 1 && red->materials[0].surface == green->materials[0].surface,
+              "a variant's param did not merge over the base's (or the graph was compiled twice)");
+        const auto off = assets.load_materials("graph.kinmaterials", model, "off").value_or({});
+        check(off && !off->materials[0].surface, "graph: null did not clear the surface");
+        for (const char* bad :
+             {R"({"schema":"kin.materials3d/1","material":{"params":{"tint":[1,0,0,1]}}})",
+              R"({"schema":"kin.materials3d/1","material":{"graph":"glow.kingraph","params":{"nope":1}}})",
+              R"({"schema":"kin.materials3d/1","material":{"graph":"glow.kingraph","params":{"albedo":1}}})",
+              R"({"schema":"kin.materials3d/1","material":{"graph":"missing.kingraph"}})"}) {
+            write(scratch.path / "badgraph.kinmaterials", bad);
+            assets.invalidate("badgraph.kinmaterials");
+            check(!assets.load_materials("badgraph.kinmaterials", model, {}).value_or({}) &&
+                      !assets.diagnostics().empty(),
+                  "a bad graph material was accepted");
+        }
+        // Drawn: the graph's green on the model.
+        {
+            auto view = r3d.create_view({64, 64}).value_or({});
+            Scene3D probe;
+            probe.camera = Camera3D::look_at({0, 0, 3}, {0, 0, 0});
+            probe.lights.ambient = {1, 1, 1};
+            (void)probe.draw(*model, Mat4f::identity(), colors::white, 0, green->materials);
+            check(r3d.render(view, probe), "graph material render failed");
+            auto target = renderer.create_render_target({64, 64});
+            auto bind = renderer.scoped_render_target(target);
+            renderer.clear();
+            renderer.draw_texture(view.texture(), {0, 0, 64, 64});
+            std::vector<u8> rgba;
+            Vec2i size;
+            check(renderer.read_rgba({0, 0, 64, 64}, rgba, size), "graph material readback failed");
+            const auto i = (32 * 64 + 32) * 4;
+            check(rgba[i + 1] > rgba[i] + 20 && rgba[i + 1] > rgba[i + 2] + 20, "the graph's tint did not draw");
+        }
+        // Edited: invalidating the source rebinds a new surface.
+        const auto before = green->materials[0].surface;
+        write(scratch.path / "glow.kingraph",
+              read(scratch.path / "glow.kingraph")
+                  .replace(read(scratch.path / "glow.kingraph").find("\"roughness\": 1"), 14, "\"roughness\": 0.5"));
+        assets.invalidate("glow.kingraph");
+        auto edited = assets.load_materials("graph.kinmaterials", model, {}).value_or({});
+        check(edited && edited->materials[0].surface && edited->materials[0].surface != before,
+              "editing the graph did not rebind it");
+        // Cooked: what a game without glslc loads; a newer source is not shadowed by an older cooked file.
+        std::string why;
+        const auto cooked = cook_material_graph3d(read(scratch.path / "glow.kingraph"), &why);
+        check(cooked.has_value(), "the graph did not cook");
+        const auto bytes = pack_cooked_material_graph3d(*cooked);
+        write(scratch.path / "glow.kingraph.spv", std::string(bytes.begin(), bytes.end()));
+        const char* glslc = std::getenv("KIN_GLSLC");
+        const std::string kept = glslc ? glslc : "";
+        set_env("KIN_GLSLC", "/nonexistent/glslc");
+        {
+            Assets3D shipped{r3d, scratch.path};
+            const auto loaded = shipped.load_materials("graph.kinmaterials", model, {}).value_or({});
+            error = kin::diagnostics3d_text(shipped.diagnostics());
+            check(loaded && loaded->materials[0].surface && loaded->materials[0].shader_params[1] == 1,
+                  "the cooked graph did not load without glslc");
+            std::filesystem::remove(scratch.path / "glow.kingraph");
+            Assets3D source_less{r3d, scratch.path};
+            check(source_less.load_material_graph("glow.kingraph").value_or({}).surface,
+                  "the cooked graph did not load without its source");
+            write(scratch.path / "glow.kingraph", read(scratch.path / "graph.kinmaterials")); // newer, not a graph
+            Assets3D stale{r3d, scratch.path};
+            check(!stale.load_material_graph("glow.kingraph").value_or({}).surface &&
+                      kin::diagnostics3d_text(stale.diagnostics()).find("not cooked") != std::string::npos,
+                  "an older cooked graph shadowed its newer source");
+        }
+        set_env("KIN_GLSLC", kept.empty() ? nullptr : kept.c_str());
+    }
+    // Sampling belongs to each map: images share by colour/data role, including a legacy nearest material override.
     write(scratch.path / "maps.kinmaterials", R"({"schema":"kin.materials3d/1","material":{
         "texture":{"asset":"shared pixel.png","filter":"nearest"},
         "normal":{"asset":"shared pixel.png","filter":"nearest"},
@@ -238,10 +356,13 @@ void material_gpu(Renderer2D& renderer) {
               maps->materials[0].normal == model->parts[0].material.normal &&
               maps->materials[0].normal == maps->materials[0].occlusion &&
               maps->materials[0].texture != maps->materials[0].normal,
-          "texture sharing lost role/filter semantics");
+          "texture sharing lost colour/data role semantics");
     auto filtered = assets.load_texture("shared pixel.png", false, true).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
-    check(filtered && filtered != maps->materials[0].texture, "different filters incorrectly shared");
+    check(filtered && filtered == maps->materials[0].texture &&
+              maps->materials[0].texture_samplers[0]->min == TextureFilter3D::Nearest &&
+              maps->materials[0].texture_samplers[0]->mip == MipFilter3D::None,
+          "independent nearest sampling duplicated an image or lost its filter");
 
     auto parts = assets.load_model("parts.glb").value_or({}).shared();
     write(scratch.path / "parts.kinmaterials", R"({"schema":"kin.materials3d/1","material":{"roughness":0.9},
@@ -367,6 +488,9 @@ void material_gpu(Renderer2D& renderer) {
     Scratch packed;
     const auto archive = packed.path / "art.kinpak";
     write(scratch.path / "colors.kinmaterials", materials);
+    // The graph as a game ships it: cooked beside it in its pack (its source left out, as the cooked file is enough).
+    const bool cooked_graph = std::filesystem::exists(scratch.path / "glow.kingraph.spv");
+    std::filesystem::remove(scratch.path / "glow.kingraph");
     check(write_content_pack(scratch.path, archive).ok, "material pack write failed");
     const auto mount = packed.path / "virtual";
     mount_content_pack(mount, ContentPack::open(archive));
@@ -374,6 +498,16 @@ void material_gpu(Renderer2D& renderer) {
         Assets3D packed_assets{r3d, mount};
         SceneSession3D packed_session{r3d, packed_assets, options};
         check(packed_session.load("test.kinscene"), "packed material references failed");
+        if (cooked_graph) {
+            const char* glslc = std::getenv("KIN_GLSLC");
+            const std::string kept = glslc ? glslc : "";
+            set_env("KIN_GLSLC", "/nonexistent/glslc");
+            const auto shipped = packed_assets.load_materials("graph.kinmaterials", model, {}).value_or({});
+            error = kin::diagnostics3d_text(packed_assets.diagnostics());
+            set_env("KIN_GLSLC", kept.empty() ? nullptr : kept.c_str());
+            check(shipped && shipped->materials[0].surface && shipped->materials[0].shader_params[1] == 1,
+                  "the cooked graph in a pack did not load without glslc");
+        }
 #ifdef KIN_TEST_MATERIAL_SHADER
         const auto packed_shader = packed_assets.load_materials("shader.kinmaterials", model, {}).value_or({});
         error = kin::diagnostics3d_text(packed_assets.diagnostics());

@@ -1,7 +1,8 @@
 # Third-Party Notices
 
 Kin's own source is under the [MIT License](../LICENSE). The repository contains no
-third-party code: CMake downloads the dependencies below at configure time (see
+third-party code but one table of data (see [Embedded data](#embedded-data)): CMake downloads the dependencies
+below at configure time (see
 [cmake/dependencies.cmake](../cmake/dependencies.cmake)) and links them statically
 into the engine.
 
@@ -20,6 +21,7 @@ fonts and additional libraries through its `LICENSE_FILES` argument.
 | [SDL_image](https://github.com/libsdl-org/SDL_image) | 3.4.4 | zlib | Sam Lantinga |
 | [SDL_ttf](https://github.com/libsdl-org/SDL_ttf) | 3.2.2 | zlib | Sam Lantinga |
 | [flecs](https://github.com/SanderMertens/flecs) | 4.0.5 | MIT | Sander Mertens |
+| [AccessKit C](https://github.com/AccessKit/accesskit-c/tree/0.23.2) (optional `KIN_ENABLE_ACCESSIBILITY`) | 0.23.2 (`99023c87eca49531a8e1efc4657e35779257a463`) | MIT or Apache-2.0, with BSD Chromium-derived definitions | AccessKit contributors |
 | [Box2D](https://github.com/erincatto/box2d) | 2.4.1 | MIT | Erin Catto |
 | [Lua](https://www.lua.org) | 5.4.6 | MIT | Lua.org, PUC-Rio |
 | [sol2](https://github.com/ThePhD/sol2) | 3.3.1 | MIT | Rapptz, ThePhD, and contributors |
@@ -30,7 +32,53 @@ fonts and additional libraries through its `LICENSE_FILES` argument.
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `KIN_EXPERIMENTAL_3D`; simplifier, meshlet builder, cluster partitioner, index and vertex-cache tools) | 0.25 | MIT | Arseny Kapoulkine |
 | [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (with `KIN_EXPERIMENTAL_3D`; the rigid body engine behind `kin/physics3d`) | 5.5.0 | MIT | Jorrit Rouwe |
 
+Native GPU builds use a marked, generated variant of SDL's Vulkan translation unit
+to include compute shader reads in sampler barriers. The original source and zlib
+notice are retained; shared/fetched sources are not edited. The guarded patch
+is in [kin_sdl_gpu.cmake](../cmake/kin_sdl_gpu.cmake). The optional direct-API SDL
+variant separately changes its private copy's `SDL_DYNAMIC_API` default; see
+[kin_sdl_direct.cmake](../cmake/kin_sdl_direct.cmake).
+
+## Embedded data
+
+With `KIN_EXPERIMENTAL_3D`, the GI's area lights reflect through the linearly transformed cosines tables of Heitz,
+Dupuy, Hill and Neubelt ("Real-Time Polygonal-Light Shading with Linearly Transformed Cosines", 2016), as
+[three.js](https://github.com/mrdoob/three.js) r160 ships them (`examples/jsm/lights/RectAreaLightUniformsLib.js`):
+[gpu_area_lights_ltc.cpp](../engine/src/renderer/gpu/gpu_area_lights_ltc.cpp), written by
+[tools/gen_area_light_ltc.py](../tools/gen_area_light_ltc.py), compiled into the engine. MIT license, Copyright ©
+2010-2023 three.js authors (also at the top of that file):
+
+```text
+The MIT License
+
+Copyright © 2010-2023 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## Libraries bundled by SDL_image and SDL_ttf
+
+AccessKit is an externally supplied library. Its license texts are retained in
+[`docs/licenses/accesskit`](licenses/accesskit) and included by the desktop package
+helper when enabled. When building your own AccessKit static distribution, also
+retain the notices for its Rust dependencies. Kin does not fetch or build Rust
+dependencies during ordinary configuration.
 
 Kin builds SDL_image and SDL_ttf with their vendored libraries enabled, so these
 are compiled in as well:

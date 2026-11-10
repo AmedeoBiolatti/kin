@@ -4,14 +4,15 @@
 #include <kin/core/types.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/input.hpp>
-#include <kin/platform/window.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string_view>
 
 namespace kin {
 
+class Window;
 struct FrameContext;
 
 struct WindowedAppConfig {
@@ -31,7 +32,7 @@ struct WindowedAppConfig {
     i32 max_steps = 8;
     bool vsync = false;
     bool yield_when_unpaced = true;
-    // Most frames a second (0: no cap; see AppConfig::max_fps).
+    // Most frames a second (0: the system's default: no cap, 60 on a phone; see AppConfig::max_fps).
     f32 max_fps = 0.0f;
     // Frame times this near whole fixed steps count as whole (see AppConfig).
     f32 snap_tolerance = 0.001f;
@@ -42,10 +43,21 @@ struct WindowedAppConfig {
     bool hidden = false;
     bool borderless = false;
     bool high_pixel_density = false;
+    // Draw only when something changes (see AppConfig::wait_for_events).
+    bool wait_for_events = false;
+    // While waiting, wake at least this often anyway (0: never; an app with
+    // nothing that changes unseen, such as a file watcher, needs no waking).
+    f32 max_idle_wait = 0.5f;
     std::optional<InputMap> input_map;
+    // A PNG (read through the content layer) for the window's icon; none: the system's.
+    std::filesystem::path icon;
     // Called after the loop exits while the renderer and its device are still
     // alive. Scene runtimes use this to release scene-owned GPU/SDL resources.
     std::function<void(FrameContext&)> shutdown;
+    // Called as the system sends the app an AppEvent (App::on_app_event): to
+    // the background, back, short of memory, ending. Scene runtimes give it to
+    // their scenes (Scene::on_app_background and the rest).
+    std::function<void(FrameContext&, AppEvent)> app_event;
 };
 
 struct FrameContext {

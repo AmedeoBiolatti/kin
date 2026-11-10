@@ -39,16 +39,52 @@ float kin_fog_opacity(KinFog f, float tau) {
     return min(1.0 - exp(-tau), f.limits.y);
 }
 
-// `c` (the fog's fixed colour or the sky's along `dir`) brightened toward the sun by its in-scattering (the
-// Henyey-Greenstein lobe, scaled so that an even one is 1).
-vec3 kin_fog_sun(KinFog f, vec3 c, vec3 dir, vec3 sun_dir, vec3 sun_light) {
-    if (f.limits.z > 0.0) {
-        float g = f.limits.w;
-        float mu = dot(dir, sun_dir);
-        c += sun_light * (f.limits.z * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
+// The sun's in-scattering toward `dir` (the Henyey-Greenstein lobe, scaled so that an even one is 1): what the fog adds
+// to its colour where the sun reaches it.
+vec3 kin_fog_sun_light(KinFog f, vec3 dir, vec3 sun_dir, vec3 sun_light) {
+    if (f.limits.z <= 0.0) {
+        return vec3(0.0);
     }
-    return c;
+    float g = f.limits.w;
+    float mu = dot(dir, sun_dir);
+    return sun_light * (f.limits.z * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
 }
+
+// `c` (the fog's fixed colour or the sky's along `dir`) brightened toward the sun by its in-scattering.
+vec3 kin_fog_sun(KinFog f, vec3 c, vec3 dir, vec3 sun_dir, vec3 sun_light) {
+    return c + kin_fog_sun_light(f, dir, sun_dir, sun_light);
+}
+
+#ifndef GL_ES
+// The share of the fog's air the sun reaches (fog_sun.comp, Fog3D::sun_shadows) for the pixel at `frag` (window
+// coordinates) whose surface is `dist` along its ray (0: the sky), from the half-size `share` (read with a linear
+// sampler): where the four texels round it hold rays to about this distance (most pixels), their bilinear mean; else
+// the four weighed by how near their distances are to this one's (a texel across an edge holds another surface's ray).
+// (SPIR-V's: WebGL2 has no sunlit share.)
+float kin_fog_share(sampler2D share, vec2 frag, float dist) {
+    vec2 uv = frag * 0.5 / vec2(textureSize(share, 0));
+    vec4 z = textureGather(share, uv, 2);
+    if (dist > 0.0 ? all(lessThan(abs(z - dist), vec4(0.05 * dist))) : all(lessThanEqual(z, vec4(0.0)))) {
+        return textureLod(share, uv, 0.0).x;
+    }
+    ivec2 size = textureSize(share, 0);
+    vec2 at = frag * 0.5 - 0.5;
+    ivec2 base = ivec2(floor(at));
+    vec2 f = at - vec2(base);
+    float sum = 0.0, weight = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 o = ivec2(i & 1, i >> 1);
+        vec4 t = texelFetch(share, clamp(base + o, ivec2(0), size - 1), 0);
+        float bilinear = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y) + 1e-3;
+        // The sky against the sky; a surface against the surfaces nearest its distance.
+        float apart = dist <= 0.0 ? (t.z <= 0.0 ? 0.0 : 1.0) : (t.z <= 0.0 ? 1.0 : abs(t.z - dist) / dist);
+        float w = bilinear / (1e-3 + apart * apart);
+        sum += t.x * w;
+        weight += w;
+    }
+    return weight > 0.0 ? sum / weight : 1.0;
+}
+#endif
 
 // The fog's colour along `dir`: the fixed one or the sky's, and the sun's in-scattering. The sky's is integrated here (the
 // particles' fog, made per vertex); the meshes' read it from the fog table (kin_material.inc.glsl, kin_fog_sky) and the sky

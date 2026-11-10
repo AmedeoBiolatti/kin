@@ -17,8 +17,11 @@
 #include <kin/render3d/environment3d.hpp>
 #include <kin/render3d/mesh3d.hpp>
 #include <kin/render3d/particles3d.hpp>
+#include <kin/render3d/reflection_probes3d.hpp>
 #include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/data_buffer.hpp>
+#include <kin/renderer/render_target.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
 #include <optional>
@@ -34,7 +37,7 @@ class ModelBatch3D;
 enum class Blend3D : u8 {
     Opaque,   // replaces it, hides what is further
     Alpha,    // over it by its alpha (drawn after the opaque, furthest first)
-    Additive, // adds light to it: sparks, glows, flashes (in any order)
+    Additive, // adds light: ordered with alpha foregrounds (additive layers commute only with each other)
     // Opaque where the base colour's alpha reaches Material3D::alpha_cutoff,
     // not drawn where it falls short: leaves, fences, grates. Drawn with the
     // opaque, and casts the cut-out shadow.
@@ -48,10 +51,32 @@ enum class Wrap3D : u8 {
     Mirror, // tiles, every other copy flipped
 };
 
+// Linear RGB emission is independent of the surface, vertex colours and instance tint. BaseRelative keeps the
+// original native material behaviour (a share of the base colour, or the emissive texture when present).
+enum class EmissionMode3D : u8 { BaseRelative, Independent };
+
+enum class TextureFilter3D : u8 { Nearest, Linear };
+enum class MipFilter3D : u8 { None, Nearest, Linear };
+struct TextureSampler3D {
+    Wrap3D wrap_u = Wrap3D::Repeat, wrap_v = Wrap3D::Repeat;
+    TextureFilter3D min = TextureFilter3D::Linear, mag = TextureFilter3D::Linear;
+    MipFilter3D mip = MipFilter3D::Linear;
+    friend bool operator==(const TextureSampler3D&, const TextureSampler3D&) = default;
+};
+enum class MaterialMap3D : u8 { BaseColor, MetallicRoughness, Normal, Occlusion, Emissive, Count };
+
+// The legacy texture-level filter, used only when a material map has no explicit sampler.
+inline TextureSampler3D legacy_sampler3d(ScaleMode mode, Wrap3D u, Wrap3D v) {
+    return {u, v, mode == ScaleMode::Nearest ? TextureFilter3D::Nearest : TextureFilter3D::Linear,
+            mode == ScaleMode::Nearest ? TextureFilter3D::Nearest : TextureFilter3D::Linear,
+            mode == ScaleMode::Mipmapped ? MipFilter3D::Linear : MipFilter3D::None};
+}
+
 // The backend's copy of a material shader (Renderer3D::create_material_shader).
 class IMaterialShaderBackend3D {
 public:
     virtual ~IMaterialShaderBackend3D() = default;
+    virtual bool valid() const { return true; }
 };
 
 // A fragment shader of a material's own, made by Renderer3D::create_material_shader
@@ -61,7 +86,7 @@ public:
     MaterialShader3D() = default;
     explicit MaterialShader3D(std::shared_ptr<IMaterialShaderBackend3D> backend) : _backend(std::move(backend)) {}
 
-    bool valid() const { return _backend != nullptr; }
+    bool valid() const { return _backend && _backend->valid(); }
     explicit operator bool() const { return valid(); }
     const std::shared_ptr<IMaterialShaderBackend3D>& backend() const { return _backend; }
 
@@ -71,10 +96,146 @@ private:
     std::shared_ptr<IMaterialShaderBackend3D> _backend;
 };
 
+// A surface shader's variants (docs/material_graph_plan.md): the function that sets what kin shades, compiled into
+// each of kin's own mesh fragment shaders, in this order. The defines each is compiled with, after #version, are
+// surface_variant_defines's (and surface_shader_source(surface, variant)'s wrapper). After the eight every surface has:
+// the merged draws' four (mesh_material.frag's: without them a surface's draws are not merged with others of the same
+// mesh) and the cut-outs' five (shadow_mask.frag ... visibility_mask.frag's, for a surface that defines
+// kin_surface_alpha: without them its cut-outs in those passes follow the base map's alpha), all optional.
+enum class SurfaceVariant3D : u8 {
+    Plain,
+    Fog,
+    Lights,
+    LightsFog,
+    Velocity,
+    VelocityFog,
+    VelocityLights,
+    VelocityLightsFog,
+    Material,
+    MaterialFog,
+    MaterialLights,
+    MaterialLightsFog,
+    ShadowMask,
+    PickMask,
+    PrepassMask,
+    PrepassVelocityMask,
+    VisibilityMask,
+    // A surface's vertex variants, for one with an offset (World Position Offset: kin_surface_offset), all optional:
+    // mesh.vert, mesh_velocity.vert, mesh_indexed.vert, prepass.vert, prepass_indexed.vert, prepass_velocity.vert,
+    // shadow.vert and shadow_mask.vert's (kin_surface_vertex.inc.glsl before each). Without them the surface's vertices
+    // are not moved.
+    VertexMesh,
+    VertexMeshVelocity,
+    VertexMeshIndexed,
+    VertexPrepass,
+    VertexPrepassIndexed,
+    VertexPrepassVelocity,
+    VertexShadow,
+    VertexShadowMask,
+    Count
+};
+inline constexpr u32 surface_required_variants3d = 8, surface_mask_variant3d = u32(SurfaceVariant3D::ShadowMask),
+                     surface_vertex_variant3d = u32(SurfaceVariant3D::VertexMesh);
+inline constexpr u32 surface_variant_count3d = u32(SurfaceVariant3D::Count);
+
+// The backend's copy of a surface shader (Renderer3D::create_surface_shader).
+class ISurfaceShaderBackend3D {
+public:
+    virtual ~ISurfaceShaderBackend3D() = default;
+    virtual bool valid() const { return true; }
+};
+
+// What a surface does that kin can't read in its SPIR-V, for the GI scene, which sees a surface material through a
+// stand-in: the surface drawn once over its UV square, with a white vertex colour (docs/rendering_3d.md, Global
+// illumination). A material graph's are its compiler's (CompiledMaterialGraph3D::traits); a surface of your own has
+// these defaults (as kin's stock surface: what its material's fields emit, its colour times the vertex colour) unless
+// it is made with others.
+// What the GI scene takes in of a surface material (SurfaceTraits3D::gi): a stand-in drawn from the surface (its
+// colour and emission over a square); the material without the surface (its colour and emission fields, not its maps,
+// as kin's stock material makes them); nothing (it neither shades nor lights the GI: see-through water).
+enum class SurfaceGi3D : u8 { StandIn, Fields, None };
+
+struct SurfaceTraits3D {
+    // It makes its own emission: the GI scene takes in the stand-in's, whatever the material's emission fields say.
+    // Off, a surface material glows there only where those fields emit (Material3D::emits_light).
+    bool emission = false;
+    // Its base colour reads the vertex colour (the mesh's, times the material's colour and the copy's tint; kin's
+    // stock surface does), and its alpha: the GI scene multiplies the stand-in's by the copy's. Off, it doesn't.
+    bool vertex_color = true;
+    bool vertex_alpha = true;
+    // What the GI scene takes in of it (SurfaceGi3D): a stand-in; its material's fields alone, for a surface whose look
+    // is a picture of the view or changes every frame (kin's planar surfaces: a mirror's, a portal's), which a stand-in
+    // would neither hold nor keep up with (each frame's parameters a new one; its maps may be pictures of the view); or
+    // none, for one the GI should see through (water: else a dark lid over the pool, and the light round it wrong).
+    SurfaceGi3D gi = SurfaceGi3D::StandIn;
+
+    friend bool operator==(const SurfaceTraits3D&, const SurfaceTraits3D&) = default;
+};
+
+// What a material's surface is, in place of its maps' (Material3D::surface): a function `void kin_surface(inout
+// KinSurface s)` that changes the surface kin's material makes (kin_stock_surface: colour, alpha, normal, metallic,
+// roughness, occlusion, emission) before kin lights, fogs and shadows it, in every variant kin draws (the fog's, the
+// lights', the global illumination's, the velocity's). Made by Renderer3D::create_surface_shader or
+// compile_surface_shader; cheap to copy (copies share it). `traits` (SurfaceTraits3D) are a copy's own:
+// SurfaceShader3D{shader.backend(), traits} is the same shader with others.
+class SurfaceShader3D {
+public:
+    SurfaceShader3D() = default;
+    explicit SurfaceShader3D(std::shared_ptr<ISurfaceShaderBackend3D> backend, SurfaceTraits3D traits = {})
+        : _backend(std::move(backend)), _traits(traits) {}
+
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    const std::shared_ptr<ISurfaceShaderBackend3D>& backend() const { return _backend; }
+    const SurfaceTraits3D& traits() const { return _traits; }
+
+    friend bool operator==(const SurfaceShader3D& a, const SurfaceShader3D& b) {
+        return a._backend == b._backend && a._traits == b._traits;
+    }
+
+private:
+    std::shared_ptr<ISurfaceShaderBackend3D> _backend;
+    SurfaceTraits3D _traits{};
+};
+
+inline constexpr u32 max_material_input_textures3d = 4, max_material_input_buffers3d = 8;
+class IMaterialInputsBackend3D {
+public:
+    virtual ~IMaterialInputsBackend3D() = default;
+    virtual bool valid() const = 0;
+    virtual std::span<const Texture> textures() const = 0;
+    virtual std::span<const DataBuffer> buffers() const = 0;
+};
+// Immutable shader-specific resource bindings. Handles own allocations, while
+// their GPU contents remain mutable. Recreate bindings after graph reallocation
+// or shader replacement; declare matching graph reads in consuming passes.
+class MaterialInputs3D {
+public:
+    MaterialInputs3D() = default;
+    explicit MaterialInputs3D(std::shared_ptr<const IMaterialInputsBackend3D> backend) : _backend(std::move(backend)) {}
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    std::span<const Texture> textures() const { return _backend ? _backend->textures() : std::span<const Texture>{}; }
+    std::span<const DataBuffer> buffers() const {
+        return _backend ? _backend->buffers() : std::span<const DataBuffer>{};
+    }
+    const std::shared_ptr<const IMaterialInputsBackend3D>& backend() const { return _backend; }
+    friend bool operator==(const MaterialInputs3D&, const MaterialInputs3D&) = default;
+
+private:
+    std::shared_ptr<const IMaterialInputsBackend3D> _backend;
+};
+
+// Material3D::shader_params' floats: a custom `shader` reads the first 16 (four vec4s), a `surface` all of them
+// (kin_surface_param(0..15): a material graph's parameters).
+inline constexpr u32 surface_param_count3d = 64;
+// The most layers of a material's graph maps (Material3D::graph_maps).
+inline constexpr u32 max_graph_map_layers3d = 16;
+
 struct Material3D {
     Color color = colors::white; // times the mesh's vertex colours and each instance's tint
-    // Light of its own, as a share of its colour: glows in the dark, and
-    // past white feeds bloom in an HDR view.
+    // Emission strength. BaseRelative (legacy default): a share of the base colour or emissive map.
+    // Independent: emission_color times the map (white when absent). Past white feeds bloom in HDR.
     f32 emissive = 0.0f;
     bool unlit = false;        // its colour as it is, no light or shade
     bool double_sided = false; // its back faces drawn too (else culled)
@@ -83,6 +244,9 @@ struct Material3D {
     // is off, and take it unless `receives_shadow` is.
     bool casts_shadow = true;
     bool receives_shadow = true;
+    // Whether Scene3D's decals land on it (opaque meshes; true): off, it is drawn after the decals, over them, so a
+    // character walking through a scorch mark's box is not painted with it.
+    bool receives_decals = true;
     // Only its triangles' edges, a pixel wide, in its colour (no light),
     // drawn just in front of the faces they edge: a model's wireframe drawn
     // over it, or lines (triangles a, b, b) on the ground. Needs line fill
@@ -115,22 +279,58 @@ struct Material3D {
     // Blend3D::Mask: below this alpha (the base colour's, times the mesh's,
     // the material's and the copy's) a pixel is not drawn.
     f32 alpha_cutoff = 0.5f;
-    // How all of its textures run past 0..1 along u and v (glTF's default,
-    // and what models set, is Repeat).
+    // Legacy wrap defaults for maps without a texture_samplers override. Imported maps carry their own samplers.
     Wrap3D wrap_u = Wrap3D::Clamp;
     Wrap3D wrap_v = Wrap3D::Clamp;
     // A fragment shader of its own in place of kin's (docs/rendering_3d.md,
     // Custom shaders), which may light itself as kin's does or not. It reads
-    // `shader_params` (four vec4s) and all the material's fields above. The
+    // `shader_params`' first 16 floats (four vec4s) and all the material's fields above. The
     // shadow and pick passes treat the material as they would without it.
     MaterialShader3D shader{};
-    std::array<f32, 16> shader_params{};
+    std::array<f32, surface_param_count3d> shader_params{};
+    MaterialInputs3D inputs{}; // optional extra sampled textures/read-only buffers for shader
+
+    LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
+    EmissionMode3D emission_mode = EmissionMode3D::BaseRelative;
+    // Independent of the image. Omitted entries inherit wrap_u/v and the Texture's legacy scale mode.
+    std::array<std::optional<TextureSampler3D>, u32(MaterialMap3D::Count)> texture_samplers{};
+    // A surface of its own (SurfaceShader3D: docs/rendering_3d.md, Surface shaders): a function that changes what
+    // the fields and maps above make before kin shades it, as kin shades its own (lit or `unlit`, fogged, its
+    // lights, global illumination and velocity). It reads `shader_params` (kin_surface_param(0..15)) and the maps
+    // above. A `shader` takes its place. The shadow, pick and pre-passes still cut a Blend3D::Mask out by the base
+    // colour's alpha, not the surface's.
+    SurfaceShader3D surface{};
+    // A surface's maps past the five above (a material graph's, past its five slots): a 2D array, a map a layer
+    // (Renderer3D::create_map_array), read repeated, filtered and mipmapped. None: a white layer.
+    Texture graph_maps{};
+    // Where every map is read: the mesh's UV times `uv_scale`, plus `uv_offset` (tiling, as Godot's uv1_scale and
+    // Unity's tiling and offset). A transform the model's glTF gives (KHR_texture_transform) is in its UVs already.
+    Vec2f uv_scale{1.0f, 1.0f};
+    Vec2f uv_offset{0.0f, 0.0f};
+    bool uv_identity() const { return uv_scale.x == 1 && uv_scale.y == 1 && uv_offset.x == 0 && uv_offset.y == 0; }
+
+    void set_emission(LinearRgb color, f32 strength = 1.0f) {
+        emission_color = color;
+        emissive = strength;
+        emission_mode = EmissionMode3D::Independent;
+    }
+    bool emits_light() const {
+        return emissive > 0 && (emission_mode == EmissionMode3D::BaseRelative || emission_color.r > 0 ||
+                                emission_color.g > 0 || emission_color.b > 0);
+    }
 
     friend bool operator==(const Material3D&, const Material3D&) = default;
 };
 
 // One copy of a mesh in a draw_instanced() call. A transform that mirrors
 // (a negative scale) turns its faces inside out: draw it double-sided.
+// How a draw's copies meet the clip plane of the camera that draws them (Camera3D::clip_plane).
+enum class DrawClip3D : u8 {
+    camera,      // cut by it (the default)
+    whole,       // never cut: what is half-way through a portal, at the exit (PlanarViews3D)
+    whole_if_cut // never cut, and drawn only by cameras that have a clip plane: the same, at the entry
+};
+
 struct MeshInstance3D {
     Mat4f transform{};
     Color tint = colors::white;
@@ -165,6 +365,8 @@ struct PointLightSource3D {
     // the light spreads over a body that big (a flash, a fireball, a bulb).
     // At least 0.01.
     f32 size = 0.01f;
+    // Times its light in the fog's air (Fog3D::volumetric): 0 lights no fog, more a thicker glow.
+    f32 volumetric = 1.0f;
     // A shadow (P3b): drawn into a cube of six faces, at most Lights3D::max_shadowed_points a frame, chosen by
     // importance.
     bool shadow_enabled = false;
@@ -193,6 +395,7 @@ struct SpotLightSource3D {
     f32 size = 0.01f;
     f32 inner_angle = 20.0f; // degrees from the axis (at least 0)
     f32 outer_angle = 30.0f; // degrees; below 90, above `inner_angle` (clamped to 0.1 degrees beyond it)
+    f32 volumetric = 1.0f;   // times its light in the fog's air (Fog3D::volumetric): 0 lights no fog
     // A perspective shadow map over the cone, at most Lights3D::max_shadowed_spots a frame (the most important ones).
     bool shadow_enabled = false;
     u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
@@ -275,12 +478,16 @@ struct Lights3D {
     // Spot lights (P3b): at most 16 a frame, chosen as the points are (the cone's bounding sphere reaches the view, the
     // strongest and nearest first). Cleared with the draws.
     std::vector<SpotLightSource3D> spots;
+    // Reflection probes (kin/render3d/reflection_probes3d.hpp): glossy surfaces inside a probe's box reflect its
+    // picture, parallax-corrected, in place of the environment. At most max_reflection_probes3d a render (those that
+    // reach the view, by priority, then the nearest). Cleared with the draws.
+    std::vector<ReflectionProbeSource3D> reflection_probes;
     // Shadows of lights that are not the sun (P3b), all opt-in (a light's `shadow.enabled`; `fill_shadow.enabled`) and
     // off, the picture and the cost are what they were. Of the lights that ask, the most important this many a frame
     // have a map (importance: intensity x reach x the share of the view it covers, with a hysteresis in favour of the
-    // lights that had one, so the choice does not flip between frames): up to 8 spots, up to 2 point lights (six
+    // lights that had one, so the choice does not flip between frames): up to 8 spots, up to 8 point lights (six
     // faces each). Their maps share one array of depth textures of `local_shadow_resolution` (a light may ask for
-    // less).
+    // less: its maps are rounded up to a power of two and packed, so sixteen 256-texel faces share a 1024 layer).
     u32 max_shadowed_spots = 4;
     u32 max_shadowed_points = 2;
     u32 local_shadow_resolution = 1024;
@@ -308,8 +515,10 @@ struct AmbientOcclusion3D {
     bool enabled = false;
     f32 radius = 0.5f;    // how far from a surface something can still shut light off (units)
     f32 intensity = 1.0f; // the darkening's power: 1 is the plain answer, more is stronger
-    // Computed at half the view's size, blurred and read up: about a third of
-    // the cost, a little blurrier at edges.
+    // Compute and blur at half the view's size, then reconstruct using the
+    // full-size depth and normals (one extra dispatch and an R8 target).
+    // Faster with less fine detail; falls back to linear upscaling when the
+    // optional reconstruction shader is unavailable.
     bool half_resolution = false;
 };
 
@@ -347,10 +556,33 @@ struct ContactShadows3D {
 // A camera cut should call View3D::reset_history(). Moving meshes are matched
 // from one frame to the next by draw order or MeshInstance3D::id: see
 // docs/rendering_3d.md for how, and what it cannot do.
+// Screen-space reflections (docs/rendering_3d.md, "Screen-space reflections"): each pixel's mirror reflection traced
+// against the depth pre-pass (half size), its colour read from the previous frame's picture. A glossy surface reflects
+// what is on screen where the trace finds it, in place of the reflection probes' or the environment's, fading out
+// toward the screen's edges, where the trace misses, and as it roughens (to `max_roughness`); a mirror's or portal's
+// picture still wins. The stock lit shaders only; off on WebGL2. The pre-pass runs for it.
+struct ScreenSpaceReflections3D {
+    bool enabled = false;
+    f32 max_roughness = 0.8f; // blurred more as surfaces roughen; none past this (the probes' or the environment's)
+    f32 thickness = 0.3f;     // how deep (world units) what the pre-pass sees is taken to be, behind its front
+    f32 max_distance = 40.0f; // how far (world units) a ray goes
+    u32 steps = 48;           // marching steps a ray (8 to 128), then a refinement
+    f32 intensity = 1.0f;
+};
+
 struct TemporalAA3D {
     bool enabled = false;
-    f32 blend = 0.9f;     // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
-    f32 sharpness = 0.0f; // a small local-contrast boost on the result, 0 (off) to 1; costs one more dispatch
+    f32 blend = 0.9f; // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
+    // The same where the picture holds still (moving under half a pixel a frame), never below blend (and none with a
+    // blend of 0). A still pixel reads its history exactly, so it can keep more: detail finer than a pixel (print,
+    // a railing's bars), which one frame's samples miss in some of the jitter's places, stays steady instead of
+    // shimmering with the jitter's period. Its clip is wider too (by the spread of the colours round it). After a
+    // reset (a cut, the first frame) a still pixel takes the mean of the frames the history holds until that weighs
+    // as much. At blend or below, still pixels are treated as moving ones.
+    f32 still_blend = 0.96f;
+    // A local-contrast boost on the result, 0 (off) to 1, within surfaces: not at a silhouette or a crease (where the
+    // depth bends), whose anti-aliased pixels it would push back into steps. Costs one more dispatch.
+    f32 sharpness = 0.0f;
     f32 jitter_scale =
         1.0f; // the jitter's reach: 1 is a pixel; 0 turns the jitter off (no anti-aliasing, for looking at the rest)
     u32 jitter_samples = 8; // frames before the jitter sequence repeats (1 to 16)
@@ -387,8 +619,9 @@ struct Lod3D {
     // Quality multiplier: 2 holds the error to half of error_pixels, 0.5 allows twice.
     f32 bias = 1.0f;
     // The most triangles the GPU's gathered index buffer holds, all passes and copies together (12 bytes a triangle of
-    // video memory). Clusters that do not fit are not drawn (the picture degrades, nothing is written out of bounds),
-    // counted in debug_stats().cluster_overflow when debug.stats_readback is on.
+    // video memory). A draw unable to reserve its complete finest cut uses its full level-zero mesh in all passes,
+    // counted in debug_stats().cluster_budget_fallbacks without readback. Conservative: an actual coarser cut may
+    // have fit; coverage takes precedence over the detail/performance target. Zero selects full meshes.
     u32 max_cluster_triangles = 4'000'000;
     // Clusters hidden behind others are not drawn (G3d). Needs `enabled` and Scene3D::debug.gpu_culling (else ignored,
     // with a line in the log) and a device with the GPU cut and ambient occlusion's formats
@@ -396,6 +629,94 @@ struct Lod3D {
     // default: it adds a first draw of last frame's visible clusters and a depth pyramid, which pay only where much of
     // the scene is hidden.
     Occlusion3D occlusion{};
+};
+
+// The GI scene's limits: levels, voxels a window's side and in all; probes a level (GiProbes3D::spacing grows to keep
+// within them).
+constexpr u32 max_gi_levels = 4;
+constexpr u32 max_gi_side = 256;
+constexpr u32 max_gi_voxels = 1u << 22;
+constexpr u32 max_gi_probes = 1u << 16;
+
+// Global illumination's first strategy (G5b): probes on a grid over the area, every `spacing` voxels, each casting
+// `rays` rays through the GI scene and keeping what it sees (DDGI). A surface takes its diffuse light from the eight
+// probes round it, those that can see it, in place of the sky's or the environment's: the sky's light where the
+// probes see the sky, the light of every surface they see (lit by the sun and the lamps through rays walked toward
+// them, and by the probes themselves: the bounces add up over frames), none through walls.
+struct GiProbes3D {
+    bool enabled = true;
+    // Voxels between neighbouring probes (2, 4 or 8; others are taken as the nearest): the light's finest detail is
+    // about this. More where a level would have more than max_gi_probes.
+    u32 spacing = 4;
+    u32 rays = 128; // rays a probe casts at each update (16 to 256)
+    // Probes updated each render: those new to their window first, then the others in turn, the levels sharing them
+    // 4 : 2 : 1 from the nearest (0: as many as a million rays allow).
+    u32 per_render = 2048;
+    // How much of a probe's last answer an update keeps (0 to 0.99): more is steadier, slower. A young probe keeps
+    // less: the mean of its updates so far, until that weighs as much.
+    f32 hysteresis = 0.97f;
+    f32 intensity = 1.0f; // their light's strength
+};
+
+// Global illumination (docs/rendering_3d.md, "Global illumination"; docs/3d_plan.md, G5): light that reaches a surface
+// off other surfaces, and the sky's light kept out of where walls hide it. Its layers: the GI scene, the scene in
+// voxels, each holding its distance to the nearest surface, and each voxel a surface touches that surface's colour,
+// normal and emission (G5a); the lit scene, the light leaving each of those voxels; and `probes`, the first strategy,
+// which light the picture (G5b). The GI scene is in `levels` windows of `side` x `height` x `side` voxels round the
+// camera, the first's voxels `cell` wide and each next level's twice the last's (G5c); where one window holds the whole
+// `area`, it stays over it, and there are no more. It takes in every opaque and cut-out copy that reaches into `area`
+// (skinned copies in their pose; a cut-out where its texture is opaque enough), not the overlay, blended, additive,
+// wireframe or unlit ones. Only what changes is made again: the blocks of 8 x 8 x 8 voxels a copy that moved, changed
+// or came or went leaves or enters, and those a window gains as the camera moves. RenderDebugOptions3D::gi_view shows
+// it and Renderer3D::read_gi_scene reads it back. Off by default; off, the picture and the cost are as without it.
+// Needs compute (RendererCapabilities3D::global_illumination); else off, with a line in the log the first time it is
+// asked for.
+// How the GI's emissive surfaces light the scene (GlobalIllumination3D::emitters). Exact: each is an area light, its
+// light integrated where the camera sees, shadowed exactly (and, more coarsely, on the GI scene's voxels, for the
+// bounces), with its reflections. Probes: they light only through the probes, as everything the probes gather does:
+// cheaper, softer, without contact shadows or reflections of them.
+enum class GiEmitters3D : u8 { Exact, Probes };
+
+struct GlobalIllumination3D {
+    bool enabled = false;
+    // The box it takes in (the level). Empty: nothing, and the feature is off.
+    Bounds3D area{};
+    f32 cell = 0.15f; // the first level's voxel side (units): the finest detail it has
+    u32 levels = 3;   // 1 to max_gi_levels
+    // A window's voxels along x and z and along y: multiples of 8 from 32 to max_gi_side (others are rounded up),
+    // side x height x side at most max_gi_voxels.
+    u32 side = 128;
+    u32 height = 64;
+    // Skinned copies (animated characters) in the GI scene: a pose that keeps changing makes the blocks round it again
+    // every few renders. Off, it holds only what does not bend (as Godot's SDFGI holds static geometry only): the
+    // characters are lit by it, but neither shade nor light it.
+    bool skinned = true;
+    GiProbes3D probes{};
+    GiEmitters3D emitters = GiEmitters3D::Exact;
+    // The emitters as area lights (emitters Exact): shadowed by the copies' triangles (a bounding volume hierarchy made
+    // on the CPU when the GI scene's copies change), on the half-size picture gi_resolve lights. Only emitters the GI
+    // numbers, without emissive or base-colour maps; at most `max_emitters` triangles or parallelograms (whole GI
+    // emitters, in the GI's numbering; those past it stay with the probes); skinned copies neither emit nor shade here
+    // (the probes still carry their light). A scene without such emitters costs what it does with Probes. The
+    // reflections share one visibility (the diffuse light's) among the emitters. The light on the view fades out with
+    // the probes' toward their windows' edges.
+    struct AreaLights {
+        u32 max_emitters = 64;
+        // A GI emitter whose largest piece is less than this across (metres; 0: half the first level's voxel) stays
+        // with the probes: a candle's flame, an eye, a firefly, which the voxels hold about as well, and whose
+        // shadows would be finer than them, cost an area light's walk on every texel for little.
+        f32 min_size = 0.0f;
+        // The occluders' triangles: beyond this many (all copies' together), each mesh but the emitters' shades with a
+        // coarser shape of its own (simplified to a half, a quarter... of its triangles: the fewest halvings that fit).
+        // The cost grows with the triangles between a surface and an emitter.
+        u32 max_triangles = 131072;
+        // The share of the view's texels found each render: 1 every texel; 2 half (a checkerboard, alternating); 4 a
+        // quarter (one of each 2 x 2, in turn). The others are taken from where their surface was in the render before
+        // (those whose surface was not seen there are found too). Fewer cost less and lag more where the light or the
+        // shadows move: up to interleave - 1 renders on those texels. Needs the temporal anti-aliasing (its normals of
+        // the render before); without it every texel is found.
+        u32 interleave = 4;
+    } area_lights{};
 };
 
 // A persistent, fixed-size collection. Cheap copies share its CPU records; Scene3D keeps a
@@ -448,6 +769,36 @@ private:
     std::shared_ptr<Data> _data;
 };
 
+// A decal (Scene3D::draw_decal; docs/rendering_3d.md, Decals): a picture projected onto the opaque surfaces inside a
+// box (scorch marks, paint, dirt, footprints, posters), lit with them. The box is the unit cube [-0.5, 0.5]^3 placed by
+// `transform`: the picture lies on its X/Z sides (u along +X, v along +Z, the picture's top at -Z) and is projected
+// along -Y, from its top face down through its depth. Drawn after the opaque meshes and before the blended ones, in
+// order of their `order`, then by picture (one instanced draw for the decals sharing one); reads the pre-pass's depth
+// and normals (RendererCapabilities3D::decals; the pre-pass runs whenever
+// a scene has decals). Lands on what the pre-pass draws: opaque and cut-out meshes with stock or surface shaders, not
+// custom-shader, blended or unlit ones, nor the overlay.
+struct Decal3D {
+    Mat4f transform{};
+    Texture texture;             // colour (sRGB, as mesh textures) and coverage (alpha); white without
+    Texture normal;              // optional tangent-space normal map (green up), bending the surface's normal
+    Color color = colors::white; // times the texture, alpha too
+    f32 roughness = 0.6f, metallic = 0.0f;
+    f32 normal_strength = 1.0f; // how much the normal map bends
+    f32 emission = 0.0f;        // the decal's colour as light of its own, this strong (glowing paint, embers)
+    // Surfaces turned away from the way the decal is projected from fade: fully drawn where the cosine between their
+    // normal and the box's +Y is above `normal_fade`, fading to nothing at 0 (0: no fade; never onto a surface facing
+    // away).
+    f32 normal_fade = 0.3f;
+    // The share of the box's half depth over which the decal fades out toward its top and bottom faces (0: hard).
+    f32 depth_fade = 0.25f;
+    Wrap3D wrap = Wrap3D::Clamp;
+    // Drawing order: lower first, so a higher one lies over a lower one where they overlap. Decals of the same order
+    // are drawn together by picture (texture, normal map, wrap), in the order each picture first appears, so that the
+    // decals sharing a picture are one draw: give overlapping decals of different pictures different orders when one
+    // must lie over the other.
+    i32 order = 0;
+};
+
 class Scene3D {
 public:
     Scene3D() = default;
@@ -463,7 +814,39 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    ScreenSpaceReflections3D ssr{};
+    // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
+    // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
+    f32 time = 0.0f;
+    // Anisotropic filtering of the materials' mipmapped textures: where a surface is seen at a slant (a street, a
+    // floor, a wall along the view), its texture is read with up to this many samples along the slant, from the mip
+    // that fits the slant's short side, instead of with one from the mip that fits its long side (which blurs it into
+    // the distance). 1 (the default) is off: trilinear, the picture and the cost as without it; 2 to 16, clamped to
+    // RendererCapabilities3D::max_anisotropy. Nearest and unmipmapped textures are read as before. Every pass reads a
+    // material's textures alike (the cut-outs' in shadows, the pre-pass and picking; particles), so that a cut-out's
+    // edge is the same in all of them; the overlay is drawn with the scene's.
+    u32 anisotropy = 1;
+    // The mip level the materials' mipmapped textures are read from, moved by this many levels (-2 to 2): negative is
+    // finer and sharper, positive blurrier. With temporal anti-aliasing, which averages the shimmer of a finer level,
+    // a negative one gives back the sharpness its resolve takes from textures without sharpening the picture (whose
+    // boost steepens anti-aliased edges back into steps): Godot moves it -0.5 with its TAA. 0 (the default) is the
+    // picture as without it. Read as `anisotropy` is, in every pass. Where RendererCapabilities3D::texture_lod_bias.
+    f32 texture_lod_bias = 0.0f;
+    // Specular anti-aliasing (Tokuyoshi and Kaplanyan's, Godot's "roughness limiter"): where a surface's normal turns
+    // within a pixel (a normal map's bevels, a curved edge, small things far away), a highlight can be thinner than the
+    // pixel and very bright: some samples hit it and the next miss it, so it glints and crawls as the view moves, and
+    // temporal anti-aliasing gathers the glints into bright lines. The roughness is raised there by how much the
+    // normal turns across the pixel (this times its change, at most 0.18 of alpha more), spreading the highlight over
+    // the pixel. 0 (the default) is off: the picture as without it; Godot's is 0.25. The scene's, for the overlay too.
+    f32 specular_aa = 0.0f;
+    // The light a rough specular surface reflects more than once among its microfacets, which single scattering
+    // leaves out (Fdez-Aguera's fit: a rough white metal returns all of the light, as a furnace test wants), put back.
+    // On by default; off, a rough metal is darker (a white one at roughness 0.8 returns some 45% less of the sun's
+    // light, kin's test: test_gpu_specular_multiscatter), as engines that leave it out
+    // (Unreal's legacy shading without energy conservation, Substrate off) draw it.
+    bool specular_multiscatter = true;
     Lod3D lod{};
+    GlobalIllumination3D global_illumination{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:
     // off, the picture and the cost are as without the features.
@@ -480,9 +863,11 @@ public:
     // What is drawn over the scene, in front of everything in it, seen by its
     // own camera and lit by this scene's lights: a first-person gun or hands,
     // which then never sink into a wall. Made on first use; its own overlay
-    // is never drawn.
+    // is never drawn. `show_overlay` false leaves it out of the renders until it is true again (a mirror's picture of a
+    // first-person scene: PlanarViews3D), keeping it.
     Scene3D& overlay();
-    const Scene3D* overlay_if_any() const { return _overlay.get(); }
+    const Scene3D* overlay_if_any() const { return show_overlay ? _overlay.get() : nullptr; }
+    bool show_overlay = true;
 
     // `mesh` placed by `transform`. Draws of the same mesh and material one
     // after another are drawn as one (instanced). history_id follows MeshInstance3D:
@@ -528,13 +913,20 @@ public:
                           Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     // Both poses of a model with skins and animated nodes: its skinned parts by `joint_matrices` (of skeletons[0]), the
     // parts that hang from an animated node by `node_matrices` (of skeletons[node_skeleton], as draw(model, transform,
-    // node_matrices) takes them). Empty node matrices: the call above.
+    // node_matrices) takes them). Empty node matrices: the call above. `meshes`, when not empty, are drawn in place of
+    // the parts' meshes (indexed as model.parts; an empty Mesh3D keeps the part's): an entity's own copies of the parts
+    // with morph targets (Renderer3D::copy_mesh), shaped by weights of its own.
     Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                           Color tint, u32 id, std::span<const Material3D> materials,
-                          std::span<const Mat4f> node_matrices, u64 history_id = 0);
+                          std::span<const Mat4f> node_matrices, u64 history_id = 0,
+                          std::span<const Mesh3D> meshes = {});
     // Many copies of `mesh`, in one draw.
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
                             const Material3D& material = {});
+    // The same, met by the cameras' clip planes as `clip` says (Draw::clip): one draw only with draws that say the
+    // same.
+    Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances, const Material3D& material,
+                            DrawClip3D clip);
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
     // Retain a handle; batch records need not be copied into instances(). The batch's groups
     // are read at render time, including bounds refreshed by update().
@@ -560,11 +952,25 @@ public:
     Status3D draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites, u64 history_id = 0);
     // The system's live particles with its desc's look.
     Status3D draw_particles(const ParticleSystem3D& system, u64 history_id = 0);
+    // A decal (Decal3D), drawn by its `order`, then grouped by picture; clear() takes them away. The overlay's are not
+    // drawn.
+    Status3D draw_decal(const Decal3D& decal);
+    std::span<const Decal3D> decals() const { return _decals; }
     void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLightSource3D& light) { lights.spots.push_back(light); }
-    // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
+    // Takes the draws, point and spot lights, reflection probes and particles away, the overlay's too (cameras, the
     // sun and the ambient light and the weather stay), keeping their room.
     void clear();
+    // The copies of draws()[draw] drawn with `material` from the next render on, their mesh and placing as they are (a
+    // mirror's surface drawn as a stand-in in another mirror's picture, then as itself). Failed for a draw out of
+    // range.
+    Status3D set_draw_material(std::size_t draw, const Material3D& material);
+    // Copy `copy` (0 to its count) of draws()[draw] drawn again, at `transform`: its mesh, material, tint and pick id,
+    // a skinned copy's pose (the same joint matrices), a batch's copy as a plain one; met by clip planes as `clip` says
+    // (a draw of its own unless the one before says the same) and with `history_id` for its temporal history (0: by
+    // order). What is half-way through a portal, at the exit too (PlanarViews3D). Failed out of range.
+    Status3D draw_again(std::size_t draw, u32 copy, const Mat4f& transform, DrawClip3D clip = DrawClip3D::camera,
+                        u64 history_id = 0);
 
     struct Draw {
         Mesh3D mesh;
@@ -577,6 +983,7 @@ public:
         u32 skin_first = 0;
         u32 group_first = 0, group_count = 0; // into instance_groups(); ungrouped gaps use per-copy culling
         InstanceBatch3D batch{};              // if set, first/count refer to batch.instances(), not instances()
+        DrawClip3D clip = DrawClip3D::camera; // draw_instanced(..., clip)
     };
     using InstanceGroup = InstanceGroup3D;
     // A batch of particles (draw_particles): its look and sprites [first, first + count) of particle_sprites().
@@ -593,7 +1000,22 @@ public:
     // A move gives its destination a fresh identity and invalidates the source revision.
     u64 draw_identity() const { return _draw_stamp.identity; }
     u64 draw_revision() const { return _draw_stamp.revision; }
+    u64 pose_revision() const { return _draw_stamp.pose; }
+    // Weak identity token: becomes zero on destruction or move, even if a reader
+    // holds it locked. Prepared submissions never keep a source scene alive.
+    std::weak_ptr<const u64> draw_lifetime() const {
+        if (!_draw_stamp.lifetime)
+            _draw_stamp.lifetime = std::make_shared<u64>(_draw_stamp.identity);
+        return _draw_stamp.lifetime;
+    }
     std::span<const MeshInstance3D> instances() const { return _instances; }
+    // A public add_instances() span may be edited without notification. Renderers
+    // must read those records each render; clear() ends this exposure.
+    bool instances_exposed() const { return _instances_exposed; }
+    // After editing a previously returned add_instances() span, invalidate any
+    // prepared submission. Fill new spans before prepare(); ordinary rendering
+    // continues to read their current values without this notification.
+    void modified_instances() { touch_draws(); }
     std::span<const InstanceGroup> instance_groups() const { return _instance_groups; }
     // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned
     // draw).
@@ -617,7 +1039,8 @@ private:
                         Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                 Color tint, u32 id, std::span<const Material3D> materials,
-                                std::span<const Mat4f> node_matrices, u64 history_id = 0);
+                                std::span<const Mat4f> node_matrices, u64 history_id = 0,
+                                std::span<const Mesh3D> meshes = {});
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                 Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
@@ -642,7 +1065,7 @@ private:
     std::span<MeshInstance3D> add_instances_operation(const Mesh3D& mesh, std::size_t count,
                                                       const Material3D& material = {});
     std::span<MeshInstance3D> add_instances(const Mesh3D& mesh, std::size_t count, const Material3D& material,
-                                            bool skinned, u32 skin_first);
+                                            bool skinned, u32 skin_first, DrawClip3D clip = DrawClip3D::camera);
     // One skinned copy whose matrices start at `first_joint` of _joints (already there).
     void add_skinned_copy(const Mesh3D& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material,
                           Color tint, u32 id, u64 history_id = 0);
@@ -650,9 +1073,16 @@ private:
 
     struct DrawStamp {
         DrawStamp();
+        ~DrawStamp() { invalidate(); }
+        void invalidate() {
+            if (lifetime)
+                *lifetime = 0;
+            lifetime.reset();
+        }
         DrawStamp(DrawStamp&& other) noexcept;
         DrawStamp& operator=(DrawStamp&& other) noexcept;
-        u64 identity = 0, revision = 0;
+        u64 identity = 0, revision = 0, pose = 0;
+        mutable std::shared_ptr<u64> lifetime;
     } _draw_stamp;
     void touch_draws() { ++_draw_stamp.revision; }
     std::vector<Draw> _draws;
@@ -662,6 +1092,8 @@ private:
     std::vector<u32> _skin_offsets;
     std::vector<ParticleDraw> _particle_draws;
     std::vector<ParticleSprite3D> _particle_sprites;
+    std::vector<Decal3D> _decals;
+    bool _instances_exposed = false;
     Diagnostics3D _errors;
     bool fail_submission(std::string_view reason) {
         if (_errors.empty())

@@ -1,0 +1,22 @@
+#pragma once
+#include <SDL3/SDL.h>
+#include <kin/renderer/gpu_memory_stats.hpp>
+
+namespace kin::gpu {
+void register_memory_device(SDL_GPUDevice* device);
+void unregister_memory_device(SDL_GPUDevice* device);
+// After invalidating the shared device token and finishing uploads: release allocations held past the renderer.
+void release_device_allocations(SDL_GPUDevice* device);
+GpuMemoryStats gpu_memory_stats(SDL_GPUDevice* device);
+u64 texture_payload_bytes(const SDL_GPUTextureCreateInfo& info);
+void pooled_texture(SDL_GPUDevice* device, SDL_GPUTexture* texture, bool pooled);
+SDL_GPUTexture* tracked_create_texture(SDL_GPUDevice*, const SDL_GPUTextureCreateInfo*);
+SDL_GPUBuffer* tracked_create_buffer(SDL_GPUDevice*, const SDL_GPUBufferCreateInfo*);
+SDL_GPUTransferBuffer* tracked_create_transfer(SDL_GPUDevice*, const SDL_GPUTransferBufferCreateInfo*);
+// Shader modules participate in device teardown, without contributing to descriptor-payload statistics.
+SDL_GPUShader* tracked_create_shader(SDL_GPUDevice*, const SDL_GPUShaderCreateInfo*);
+void tracked_release_texture(SDL_GPUDevice*, SDL_GPUTexture*);
+void tracked_release_buffer(SDL_GPUDevice*, SDL_GPUBuffer*);
+void tracked_release_transfer(SDL_GPUDevice*, SDL_GPUTransferBuffer*);
+void tracked_release_shader(SDL_GPUDevice*, SDL_GPUShader*);
+} // namespace kin::gpu

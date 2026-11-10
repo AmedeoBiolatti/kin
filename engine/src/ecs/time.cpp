@@ -30,7 +30,7 @@ void update_timers(EcsWorld& world, f32 dt) {
 
 void update_timers(flecs::world& world, f32 dt) {
     const f32 step = clamped_dt(dt);
-    world.each([step](Timer& timer) {
+    kin::each(world, [step](Timer& timer) {
         if (timer.finished && !timer.repeating) {
             return;
         }
@@ -61,7 +61,7 @@ void update_lifetimes(flecs::world& world, f32 dt) {
     const f32 step = clamped_dt(dt);
     std::vector<flecs::entity> expired;
 
-    world.each([step, &expired](flecs::entity entity, Lifetime& lifetime) {
+    kin::each(world, [step, &expired](flecs::entity entity, Lifetime& lifetime) {
         lifetime.remaining -= step;
         if (lifetime.remaining <= 0.0f) {
             expired.push_back(entity);

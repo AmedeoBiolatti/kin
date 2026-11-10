@@ -2,18 +2,22 @@
 
 #include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
-#include <kin/platform/window.hpp>
 #include <kin/renderer/clip.hpp>
 #include <kin/renderer/mask.hpp>
 #include <kin/renderer/material.hpp>
-#include <kin/renderer/backend.hpp>
+#include <kin/renderer/backend_types.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/color_grading.hpp>
+#include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/draw_trace.hpp>
 #include <kin/renderer/gradient.hpp>
+#include <kin/renderer/post_process.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/shape.hpp>
 #include <kin/renderer/sprite.hpp>
+#include <kin/renderer/sprite_instance.hpp>
 #include <kin/renderer/texture.hpp>
 
 #include <functional>
@@ -27,6 +31,12 @@
 #include <vector>
 
 namespace kin {
+
+class Window;
+class IRenderer2DBackend;
+class IRendererBackend3D;
+class JobSystem;
+struct CompressedImage;
 
 // Selects the backend included by KIN_RENDERER. `auto` tries SDL_GPU when
 // allow_gpu is true, then falls back to SDL_Renderer. KIN_RENDER_BACKEND=sdl/gpu
@@ -187,7 +197,7 @@ public:
     std::string_view backend_name() const;
     RendererBackendCapabilities capabilities() const;
     // The backend's 3D part (kin/render3d/renderer3d.hpp), null without one.
-    IRendererBackend3D* renderer_3d() { return _backend->renderer_3d(); }
+    IRendererBackend3D* renderer_3d();
     RendererBackendStats backend_stats() const;
     void reset_backend_stats();
     // GPU time per frame in backend_stats().last_gpu_frame_ms (SDL_GPU only; off
@@ -220,6 +230,9 @@ public:
         f32 opacity = 1.0f;
         f32 resolution = 1.0f; // of the current target's pixels, each way
         BlendMode blend = BlendMode::Alpha;
+        // Laid over as this colour output shows it (draw_color_output), in
+        // place of `opacity` and `blend`: an editor's view of a graded game.
+        std::optional<ColorOutput> grade{};
     };
     [[nodiscard]] LayerGuard begin_layer(LayerOptions options);
     [[nodiscard]] LayerGuard begin_layer() { return begin_layer(LayerOptions{}); }
@@ -240,12 +253,18 @@ public:
     // (capabilities().color_output); elsewhere kept but not applied.
     void set_color_output(ColorOutput output);
     const ColorOutput& color_output() const { return _color_output; }
+    // `scene` (a picture of one: a render target's texture) drawn into `dest`
+    // as `output` would show it on the display: exposed and tonemapped when
+    // `linear` (the picture holds linear light), graded, dithered. For an
+    // editor's view of a game graded otherwise than itself. False (nothing
+    // drawn) where the backend can't (capabilities().color_output).
+    bool draw_color_output(const Texture& scene, Rectf source, Rectf dest, const ColorOutput& output, bool linear);
 
     // Overdraw view (SDL_GPU; the debug overlay's toggle): instead of itself,
     // every draw adds one layer where it covers, and the screen shows the counts
     // as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or more.
     // Only the screen's own draws show (a render target's composite counts once).
-    void set_overdraw_view(bool enabled) { _backend->set_overdraw_view(enabled); }
+    void set_overdraw_view(bool enabled);
     bool texture_batching_enabled() const;
 
     void clear(Color color = colors::black);
@@ -256,14 +275,35 @@ public:
     // backend cannot read back pixels.
     bool save_png(const std::string& path);
     bool read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& out_size);
+    // read_rgba without waiting for the GPU: what is drawn so far is submitted, and take_read_rgba gives the pixels
+    // once the GPU has drawn it, a frame or two later (a backend that can only wait reads them here, with read_rgba).
+    // Returns the read's ticket.
+    u64 request_read_rgba(Rectf logical_region);
+    // false returns 0 instead of using a synchronous fallback (including on read setup failure).
+    u64 request_read_rgba(Rectf logical_region, bool allow_wait_fallback);
+    // The pixels of `ticket`'s read once they have arrived (true: the ticket is spent; `out` empty when the read
+    // failed), false until then. `wait`: waits for them (taken a fixed number of frames after the request, a
+    // deterministic run gets them at the same frame whatever the GPU's speed; two or three frames on, they are there).
+    bool take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait = false);
 
     void set_logical_size(i32 width, i32 height);
     void set_logical_size(Vec2i size);
     void set_integer_logical_size(i32 width, i32 height);
     void set_integer_logical_size(Vec2i size);
+    // Native presentation at a uniform scale, for UI on a high-density display: the
+    // frame is the window's own pixels, a coordinate unit is `scale` of them (1.5 on
+    // a display at 150%), and nothing is resampled on the way to the screen. Draw
+    // text with fonts oversampled by the same scale and it lands on whole pixels.
+    // Replaces a logical size, as set_logical_size replaces it. False when this
+    // backend can't (then use a logical size); 0 turns it off.
+    bool set_content_scale(f32 scale);
+    f32 content_scale() const; // 0 when off
     Vec2i output_size() const;
     Vec2f window_to_logical(Vec2f window_px) const;
     Vec2f logical_to_window(Vec2f logical) const;
+    // A window rectangle in drawing coordinates: where to lay UI out inside
+    // Window::safe_area() (`ui.begin_layout(r.window_rect_to_logical(window.safe_area()))`).
+    Rectf window_rect_to_logical(Rectf window_rect) const;
 
     Texture create_texture_from_rgba(const u8* pixels, i32 width, i32 height);
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size);
@@ -305,6 +345,10 @@ public:
     // Many quads from one texture, in order: the same pixels as a draw_texture()
     // per sprite, but backends with instancing (SDL_GPU) submit them as one batch.
     void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites);
+    // Indexed triangles, UVs normalized to the whole texture. Current transform,
+    // clip and blend apply. False for invalid data or an unsupported backend.
+    bool draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                std::span<const u32> indices);
     // Lets the backend spread large batches over these workers (null: none);
     // returns the job system it replaces. The caller keeps it alive while set.
     JobSystem* set_job_system(JobSystem* jobs);
@@ -364,8 +408,8 @@ public:
     // (the engine's own) or as their shader is created, instead of at their
     // first draw: up to ~20 ms each on a cold driver cache. run_scene_app keeps
     // it in the game's user data (windowed runs).
-    std::string pipeline_record() const { return _backend->pipeline_record(); }
-    void prewarm_pipelines(std::string_view record) { _backend->prewarm_pipelines(record); }
+    std::string pipeline_record() const;
+    void prewarm_pipelines(std::string_view record);
     // Replaces a shader with a new version, keeping its handle (hot reload: see
     // kin/renderer/shader_compiler.hpp). Draws already queued use the old one.
     bool reload_shader(ShaderHandle shader, const ShaderDesc& desc);
@@ -411,6 +455,16 @@ public:
     // bindings fall short of what the shader declares (logged).
     ComputeShaderHandle create_compute_shader(ShaderBlob spirv);
     Texture create_storage_texture(Vec2i size, TextureFormat format = TextureFormat::Rgba8);
+    // Single-sample linear data target, also sampled by shaders. Supports RG16F,
+    // RGBA16F and D32F where capabilities().render_attachments is true. Cleared
+    // and written by an operation such as Renderer3D::render_geometry; never a
+    // 2D colour target. array_layers > 0 requests an explicit 2D array (including
+    // one layer); check render_attachment_arrays. Retained handles own the allocation.
+    Texture create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers = 0);
+    // Exact GPU copy of base-level texels across every layer, without blending or
+    // colour conversion. Same extent/format/array shape/device, distinct handles;
+    // no compressed formats or mipmapped destinations. Unsupported backends fail.
+    bool copy_texture(const Texture& source, const Texture& destination);
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings);
 
     // Storage buffers for shaders (capabilities().data_buffers; elsewhere an
@@ -533,6 +587,16 @@ public:
 
 private:
     JobSystem* _jobs = nullptr;
+    // request_read_rgba's reads on a backend that can only wait: read at once, kept until taken. Their tickets have the
+    // top bit set, apart from the backend's own.
+    static constexpr u64 waited_read = u64{1} << 63;
+    struct WaitedRead {
+        u64 ticket = 0;
+        std::vector<u8> pixels;
+        Vec2i size{};
+    };
+    std::vector<WaitedRead> _waited_reads;
+    u64 _next_waited_read = 1;
     friend class ViewportGuard;
     friend class PooledTarget;
 
@@ -579,6 +643,9 @@ private:
     ColorOutput _color_output;
     Texture _lut_texture;    // _color_output.lut's, uploaded
     Texture _lut_to_texture; // and lut_to's
+    // draw_color_output()'s LUT, and the one it was made from.
+    Texture _preview_lut_texture;
+    std::shared_ptr<const ColorLut> _preview_lut;
     // The shapes drawn as they are called: reused buffers, and how finely to
     // tessellate under the current transform.
     ShapeMesh _shape_scratch;

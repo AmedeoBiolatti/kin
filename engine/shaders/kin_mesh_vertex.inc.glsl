@@ -26,12 +26,13 @@ layout(location = 3) in vec4 aColor; // sRGB
 // pushes the longer block to a pipeline with the plain mesh.vert (a custom shader's) is read right by both.
 // Each copy's matrix of the frame before is in a buffer of its own, indexed as the instances are; its [0][3]
 // (a zero in any placing) is 1 for a copy with no past: new, or matched to nothing believable.
-layout(std430, set = 0, binding = 1) readonly buffer Previous {
+layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer Previous {
     mat4 previous[];
 };
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
     uvec4 first;          // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
     mat4 current;         // without the jitter, this frame's camera
     mat4 prior;           // and the last frame's
 }
@@ -44,15 +45,23 @@ layout(location = 8) out vec3 vOldInCurrent;
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first; // x: this draw's first instance
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 }
 draw;
 #endif
+
+// The same position as the pre-pass's and the main pass's, to the bit (the main pass starts from the pre-pass's depth).
+invariant gl_Position;
 
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vWorld;
 layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none)
+layout(location = 10) flat out vec3 vObject; // the copy's origin in the world (a surface's kin_object_position())
+#ifdef KIN_DRAW_MATERIALS
+layout(location = 9) flat out uint vMaterial;
+#endif
 
 #include "kin_srgb.inc.glsl"
 
@@ -63,21 +72,33 @@ void main() {
     // arguments carry the copy's slot as the first instance with first.x 0: that
     // relies on the instance index including it, which Vulkan and Metal do and
     // Direct3D 12 does not, so the renderer keeps the cut on the CPU there.
-#ifdef KIN_VELOCITY
     const uint at = instance_at(draw.first.x + uint(gl_InstanceIndex));
     Instance instance = instances[at];
-#else
-    Instance instance = instances[instance_at(draw.first.x + uint(gl_InstanceIndex))];
+#ifdef KIN_DRAW_MATERIALS
+    vMaterial = at;
 #endif
 #ifdef KIN_SKIN
     // The vertex posed by its joints, in the model's space; the copy's transform places that.
     const mat4 skin = skin_matrix(instance_at(draw.first.x + uint(gl_InstanceIndex)));
-    const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
+    vec4 world = instance.model * (skin * vec4(aPos, 1.0));
 #else
-    const vec4 world = instance.model * vec4(aPos, 1.0);
+    vec4 world = instance.model * vec4(aPos, 1.0);
+#endif
+#ifdef KIN_SURFACE_VERTEX
+    // A surface's World Position Offset (kin_surface_vertex.inc.glsl), at this frame's time.
+    world.xyz = kin_vertex_offset(world.xyz, mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal,
+                                  aUV, instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.x,
+                                  instance.model);
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
+    gl_ClipDistance[0] = kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
+    if (draw.first.w == 1u) {
+        // A bake (RenderDebugOptions3D::unwrap): over the UV square, shaded where it is; the surface's own UVs ride in
+        // the colour, 16 bits each over 0 to 1 (the material's uv_scale and uv_offset span them: write_scene_snapshot).
+        gl_Position = vec4(aUV.x * 2.0 - 1.0, 1.0 - aUV.y * 2.0, 0.5, 1.0);
+        gl_ClipDistance[0] = 1.0;
+    }
 #ifdef KIN_SKIN
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * normalize(mat3(skin) * aNormal);
 #else
@@ -85,7 +106,13 @@ void main() {
 #endif
     vColor = instance.color * vec4(decode(aColor.rgb), aColor.a);
     vUV = aUV;
+    if (draw.first.w == 1u) {
+        const vec4 bytes = floor(aColor * 255.0 + 0.5);
+        vUV = vec2(bytes.x + bytes.y * 256.0, bytes.z + bytes.w * 256.0) / 65535.0;
+        vColor = instance.color;
+    }
     vId = floatBitsToUint(instance.normal0.w);
+    vObject = instance.model[3].xyz;
 #ifdef KIN_VELOCITY
 #ifdef KIN_SKIN
     // The copy's model matrix of the frame before times its pose of the frame before (the same expressions as
@@ -104,7 +131,11 @@ void main() {
     vFresh = before[0][3];
     before[0][3] = 0.0;
     vCurrent = (draw.current * world).xyw;
-    const vec4 previous_world = before * vec4(aPos, 1.0);
+    vec4 previous_world = before * vec4(aPos, 1.0);
+#ifdef KIN_SURFACE_VERTEX
+    previous_world.xyz = kin_vertex_offset(previous_world.xyz, mat3(before) * aNormal, aUV,
+                                           instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.y, before);
+#endif
     vPrevious = (draw.prior * previous_world).xyw;
     vOldInCurrent = (draw.current * previous_world).xyw;
 #endif

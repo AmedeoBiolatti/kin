@@ -1,0 +1,7 @@
+# Tested environment; orchestration itself uses only Python's standard library.
+numpy==2.5.2
+Pillow==12.3.0
+cvvdp==0.5.7
+flip-evaluator==1.7
+OpenEXR==3.5.2
+torch==2.11.0

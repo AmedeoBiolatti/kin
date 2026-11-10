@@ -53,7 +53,12 @@ PATTERNS = (
     "examples/camp_walk/*.*pp",
     "examples/projectile_range/*.*pp",
     "examples/lua_range/*.*pp",
+    "examples/planar_views/*.*pp",
     "tools/asset_preview/*.*pp",
+    "tools/outline3d/*.*pp",
+    "tools/surface3d/*.*pp",
+    "tools/slowlight3d/*.*pp",
+    "tools/vision3d/*.*pp",
     "tools/reference/kin_reference.cpp",
 )
 

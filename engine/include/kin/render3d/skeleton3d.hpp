@@ -117,8 +117,8 @@ std::vector<SkinBound3D> compute_skin_bounds(const MeshData3D& mesh, u32 joints)
 // largest stretch is used. False when no joint is used (nothing to bound). Never smaller than the vertices.
 bool skin_sphere(std::span<const SkinBound3D> bounds, std::span<const Mat4f> matrices, Vec3f& center, f32& radius);
 
-// The largest factor a matrix's linear part stretches a vector by, or a bound a little above it (cheap: no
-// eigenvalues).
+// Conservative stretch of a matrix's linear part, including shear and mirrors (no eigenvalue solve). Rounded
+// outward; zero for a zero linear part, infinity for nonfinite entries or an unrepresentable float bound.
 f32 stretch_bound(const Mat4f& m);
 
 // --- skinning on the CPU --------------------------------------------------------------------------------------------

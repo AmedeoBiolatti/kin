@@ -1,0 +1,12 @@
+{
+ "bistro_laptop": {
+  "name": "The 16-inch laptop panel the port is timed on (3408 x 2130), assumed 500 cd/m^2 peak, contrast 1000:1, seen from 60 cm under office light (250 lux)",
+  "resolution": [3408, 2130],
+  "viewing_distance_meters": 0.6,
+  "diagonal_size_inches": 16,
+  "max_luminance": 500,
+  "contrast": 1000,
+  "E_ambient": 250,
+  "source": "assumed: tools/eval"
+ }
+}

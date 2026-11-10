@@ -4,7 +4,7 @@ on:
   workflow_call:
   push:
     # ci/** branches run CI on push, so workflow changes can be tried before a PR.
-    branches: [main, 'ci/**', 'exp/3d-*']
+    branches: [main, 'ci/**', 'exp/3d-*', 'exp/rendering-*']
   pull_request:
   workflow_dispatch:
 
@@ -40,6 +40,36 @@ jobs:
               });
               run = data.length === 0;
             }
+            // Documentation alone cannot change a build or a test. The jobs
+            // below are skipped, which counts as passing for required checks
+            // (a workflow-level paths filter would leave them pending).
+            // docs/third_party_notices.md is the exception: packages ship it.
+            const isDocumentation = path =>
+              (path.startsWith('docs/') && path !== 'docs/third_party_notices.md') || /^[^/]+\.md$/.test(path);
+            if (run) {
+              try {
+                let paths = null;
+                if (context.eventName === 'pull_request') {
+                  const files = await github.paginate(github.rest.pulls.listFiles, {
+                    ...context.repo, pull_number: context.payload.pull_request.number, per_page: 100
+                  });
+                  paths = files.flatMap(file => [file.filename, file.previous_filename].filter(Boolean));
+                } else if (context.eventName === 'push' && !/^0+$/.test(context.payload.before)) {
+                  const {data} = await github.rest.repos.compareCommitsWithBasehead({
+                    ...context.repo, basehead: `${context.payload.before}...${context.payload.after}`, per_page: 100
+                  });
+                  // The comparison lists at most 300 files; a change that large is not documentation.
+                  if (data.files.length < 300)
+                    paths = data.files.flatMap(file => [file.filename, file.previous_filename].filter(Boolean));
+                }
+                if (paths && paths.length > 0 && paths.every(isDocumentation)) {
+                  core.info(`Only documentation changed (${paths.length} files): skipping the builds.`);
+                  run = false;
+                }
+              } catch (error) {
+                core.warning(`Could not list the changed files, running everything: ${error.message}`);
+              }
+            }
             core.setOutput('run', String(run));
   format-3d:
     needs: select-run
@@ -61,8 +91,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Linux dependencies
-        run: .github/scripts/install-linux-deps.sh glslc
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: glslc
+      - uses: ./.github/actions/ccache
+        with:
+          key: Linux 2D-only build
+      - name: Install 2D import dependencies
+        run: python3 -m pip install -r tools/requirements-imports.txt
       - name: Configure
         env:
           CC: gcc-13
@@ -72,12 +108,57 @@ jobs:
         run: cmake --build --preset 2d
       - name: Test
         run: ctest --preset 2d --timeout 300
+      - name: Upload failed gameplay traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-2d
+          path: |
+            build-2d/examples/2d_workflow/automation
+            build-2d/examples/2d_workflow/development
+          if-no-files-found: ignore
+
+  # The experimental Box2D 3 backend (KIN_PHYSICS_BOX2D_V3): kin's 2D physics
+  # tests on it, and its results the same on one Box2D thread as on four.
+  physics-box2d-v3:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
+    name: Linux 2D physics on Box2D 3
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: glslc
+      - uses: ./.github/actions/ccache
+        with:
+          key: Linux 2D physics on Box2D 3
+      - name: Configure
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_PHYSICS_BOX2D_V3=ON
+          -DKIN_BUILD_EXAMPLES=OFF -DKIN_EXPERIMENTAL_3D=OFF
+      - name: Build
+        run: >-
+          cmake --build build --target kin_physics_tests kin_physics_component_tests kin_physics_shapes_tests
+          kin_ecs_physics_tests kin_ecs_physics_shapes_tests kin_physics_character_tests kin_physics2d_bench
+      - name: Test
+        run: ctest --test-dir build -L '^component:PHYSICS$' --output-on-failure --timeout 300
+      - name: Same results on 1 and 4 Box2D threads
+        run: |
+          one=$(KIN_PHYSICS_WORKERS=1 build/bin/kin_physics2d_bench 300 300 3000 | tee /dev/stderr | grep 'positions hash')
+          four=$(KIN_PHYSICS_WORKERS=4 build/bin/kin_physics2d_bench 300 300 3000 | tee /dev/stderr | grep 'positions hash')
+          test "$one" = "$four"
 
   build:
     needs: select-run
     if: needs.select-run.outputs.run == 'true'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      CCACHE_SLOPPINESS: ${{ contains(matrix.options, 'KIN_ENABLE_PCH=ON') && 'pch_defines,time_macros' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -91,11 +172,14 @@ jobs:
             os: ubuntu-24.04
             cc: clang-18
             cxx: clang++-18
-            options: -DKIN_EXPERIMENTAL_3D=ON
+            options: >-
+              -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON
+              -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
           - name: Windows MSVC
             os: windows-2022
-            options: -DKIN_EXPERIMENTAL_3D=ON
+            options: -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON
           - name: Linux minimal shipping
+            profile: config
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
@@ -103,11 +187,16 @@ jobs:
             options: >-
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_BENCHMARKS=OFF
               -DKIN_ENABLE_SCRIPTING=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
-              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEVELOPMENT=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
               -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON -DKIN_PACKAGE_DEBUG_SYMBOLS=ON
+              -DKIN_BUILD_GAME_ECS_GRAPH_DEMO=OFF -DKIN_BUILD_GAME_ECS_PARALLEL_BENCH=OFF
+              -DKIN_BUILD_GAME_ECS_SYSTEMS_DEMO=OFF -DKIN_BUILD_GAME_ISOMETRIC_DEMO=OFF
+              -DKIN_BUILD_GAME_LIGHTING_DEMO=OFF -DKIN_BUILD_GAME_SHAPES_DEMO=OFF
+              -DKIN_BUILD_GAME_TEXT_EDIT_DEMO=OFF
           - name: Linux SDL software shipping baseline
+            profile: config
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
@@ -120,7 +209,7 @@ jobs:
               -DKIN_LINUX_VIDEO=x11-wayland
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_BENCHMARKS=OFF
               -DKIN_ENABLE_SCRIPTING=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
-              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEVELOPMENT=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_IMAGE_IO=OFF -DKIN_ENABLE_TTF=OFF
               -DKIN_ENABLE_RUNTIME_ASSETS=OFF -DKIN_ENABLE_RUNTIME_PROFILING=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
@@ -131,15 +220,17 @@ jobs:
               -DKIN_BUILD_GAME_LIGHTING_DEMO=OFF -DKIN_BUILD_GAME_SHAPES_DEMO=OFF
               -DKIN_BUILD_GAME_TEXT_EDIT_DEMO=OFF
           - name: Windows scripting with direct SDL
+            profile: config
             os: windows-2022
             options: >-
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
               -DKIN_ENABLE_SDL_DYNAMIC_API=OFF
               -DKIN_ENABLE_SDL_GAMEPAD=OFF -DKIN_ENABLE_SDL_DESKTOP_SERVICES=OFF
-              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEVELOPMENT=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
           - name: Linux compact CPU export
+            profile: config
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
@@ -147,6 +238,7 @@ jobs:
             preset: hex-small-compact
             options: -DKIN_LINUX_VIDEO=x11-wayland
           - name: Windows compact CPU export
+            profile: config
             os: windows-2022
             config: MinSizeRel
             preset: hex-small-compact
@@ -154,16 +246,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
+      - uses: ./.github/actions/linux-deps
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-deps.sh glslc
+        with:
+          packages: glslc
+      - name: Install 2D import dependencies
+        if: ${{ !contains(matrix.options, 'KIN_BUILD_EXAMPLES=OFF') }}
+        run: python -m pip install -r tools/requirements-imports.txt
+
+      - uses: ./.github/actions/ccache
+        with:
+          key: ${{ matrix.name }}
+
+      # Puts cl on PATH. Windows builds with Ninja, as Linux does, so that ccache
+      # can cache its compiles (it cannot with the Visual Studio generator).
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
 
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
-        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ${{ matrix.options }}
+        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DKIN_TEST_PROFILE=${{ matrix.profile || 'all' }} ${{ matrix.options }}
 
       - name: Install glslc (Windows)
         if: runner.os == 'Windows'
@@ -177,17 +282,28 @@ jobs:
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         env:
+          CC: cl
+          CXX: cl
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $glslc = (Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/glslc.exe').Replace('\', '/')
           & $glslc --version
-          cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G "Visual Studio 17 2022" -A x64 ${{ matrix.options }} "-DKIN_GLSLC=$glslc"
+          cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DKIN_TEST_PROFILE=${{ matrix.profile || 'all' }} ${{ matrix.options }} "-DKIN_GLSLC=$glslc"
 
       - name: Build
         run: cmake --build build --config ${{ matrix.config || 'Release' }} --parallel 4
 
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.config || 'Release' }} --output-on-failure -j 4 --timeout 300
+      - name: Upload failed gameplay traces
+        if: ${{ failure() && !contains(matrix.options, 'KIN_BUILD_EXAMPLES=OFF') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-${{ matrix.name }}
+          path: |
+            build/examples/2d_workflow/automation
+            build/examples/2d_workflow/development
+          if-no-files-found: ignore
 
       - name: Package recommended SDL software export
         if: matrix.preset == 'hex-shipping'
@@ -239,8 +355,8 @@ jobs:
       # SPIR-V is the same on every machine, and glslc does not run in the runtime.
       - name: Compile the shaders
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends glslc
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 -o Acquire::http::Timeout=30 glslc
           cmake -DOUTPUT_DIR="$PWD/spirv" -P cmake/kin_spirv.cmake
 
       # The runtime's CMake is older than kin needs.
@@ -312,7 +428,11 @@ jobs:
           & $glslc --version
           cmake --preset ship-vs "-DKIN_GLSLC=$glslc"
 
+      # The Visual Studio generator compiles one project's sources one at a time;
+      # /MP (the CL variable's options go to every cl.exe) spreads them over the cores.
       - name: Package
+        env:
+          CL: /MP
         run: cmake --build --preset ship-vs --target signal_siege_package --parallel 4
 
       - name: Run the package from elsewhere
@@ -326,8 +446,10 @@ jobs:
           if-no-files-found: error
 
   # The SDL_GPU backend's tests skip without a GPU, so the jobs above never run
-  # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
-  # virtual X display, and requires them to run.
+  # them. These give them Mesa's software Vulkan driver (lavapipe) and a
+  # virtual X display, and require them to run. The big kin-render3d suite
+  # (7 of the 10 minutes of tests on a runner) has a job of its own, so the
+  # others run beside it instead of before it.
   gpu:
     needs: select-run
     if: needs.select-run.outputs.run == 'true'
@@ -336,15 +458,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux GPU (lavapipe)
+          - name: Linux GPU (lavapipe, Release)
+            artifact: gpu-tests-Release
             build_type: Release
             examples: 'ON'
             tests: '.'
+            skip: '^kin-render3d-shard-'
+            graphs: true
+          # The three shards of kin-render3d (tests/CMakeLists.txt); a shard
+          # needs only its test executable built.
+          - name: Linux GPU (lavapipe, render3d 1 of 3)
+            artifact: gpu-tests-render3d-1
+            cache: Linux GPU (lavapipe, render3d)
+            build_type: Release
+            examples: 'OFF'
+            target: kin_render3d_tests
+            tests: '^kin-render3d-shard-0$'
+          - name: Linux GPU (lavapipe, render3d 2 of 3)
+            artifact: gpu-tests-render3d-2
+            cache: Linux GPU (lavapipe, render3d)
+            build_type: Release
+            examples: 'OFF'
+            target: kin_render3d_tests
+            tests: '^kin-render3d-shard-1$'
+          - name: Linux GPU (lavapipe, render3d 3 of 3)
+            artifact: gpu-tests-render3d-3
+            cache: Linux GPU (lavapipe, render3d)
+            build_type: Release
+            examples: 'OFF'
+            target: kin_render3d_tests
+            tests: '^kin-render3d-shard-2$'
           - name: Linux GPU (lavapipe, Debug)
+            artifact: gpu-tests-Debug
             build_type: Debug
             examples: 'OFF'
-            tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|scene-session3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton)$'
+            tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|scene-session3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton|gpu-memory|render3d-.+|(vision3d|outline3d|surface3d|ascii3d|slowlight3d)-graph)$'
+            # render3d-.+ above also matches the shards of the big render3d suite,
+            # which run in the Release jobs only.
+            skip: 'render3d-shard'
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
       SDL_VIDEO_DRIVER: x11
       VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
@@ -352,26 +505,143 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        # glslc compiles the GPU backend's shaders; without them it cannot start.
-        run: .github/scripts/install-linux-deps.sh mesa-vulkan-drivers glslc xvfb
+      # glslc compiles the GPU backend's shaders; without them it cannot start.
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: mesa-vulkan-drivers vulkan-validationlayers glslc xvfb
+      - name: Install 2D import dependencies
+        if: matrix.examples == 'ON'
+        run: python3 -m pip install -r tools/requirements-imports.txt
+
+      # The shards compile the same units, so they share one cache.
+      - uses: ./.github/actions/ccache
+        with:
+          key: ${{ matrix.cache || matrix.name }}
 
       - name: Configure
         env:
           CC: gcc-13
           CXX: g++-13
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=${{ matrix.examples }} -DKIN_BUILD_GAMES=OFF
+        # The Debug tests with full -g filled the runner's disk while linking
+        # (No space left on device); -g1 keeps backtraces and asserts, at a
+        # third of the size. Asserts stay on in Debug whatever the debug info.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=${{ matrix.examples }} -DKIN_BUILD_GAMES=OFF ${{ matrix.build_type == 'Debug' && '-DCMAKE_C_FLAGS_DEBUG=-g1 -DCMAKE_CXX_FLAGS_DEBUG=-g1' || '' }}
 
       - name: Build
-        run: cmake --build build --parallel 4
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cmake --build build --parallel 4 ${TARGET:+--target "$TARGET"}
+
+      - name: Every render3d shard has a job
+        if: matrix.graphs
+        run: test "$(ctest --test-dir build -N -R '^kin-render3d-shard-' | grep -c 'Test *#')" -eq 3
 
       - name: Test
         # Release runs every suite with a GPU and the examples enabled, so
         # new GPU workflows cannot silently fall outside a hand-maintained list.
         # Renderer and particle-shadow suites set longer TIMEOUT properties
         # in tests/CMakeLists.txt, which take precedence over this default.
-        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' --output-on-failure --timeout 300
+        env:
+          SKIP: ${{ matrix.skip }}
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' ${SKIP:+-E "$SKIP"} --output-on-failure --timeout 300 --no-tests=error --output-junit "$PWD/build/ctest.xml"
+      - name: Upload failed gameplay traces
+        if: ${{ failure() && matrix.examples == 'ON' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-${{ matrix.artifact }}
+          path: |
+            build/examples/2d_workflow/automation
+            build/examples/2d_workflow/development
+          if-no-files-found: ignore
+
+      - name: Rendering graphs with Vulkan core validation
+        if: matrix.graphs
+        run: xvfb-run -a -s "-screen 0 1280x800x24" python3 .github/scripts/rendering-gpu-check.py --build build --mode core --output out/rendering-core
+
+      - name: Rendering graphs with Vulkan synchronization validation
+        if: matrix.graphs
+        run: xvfb-run -a -s "-screen 0 1280x800x24" python3 .github/scripts/rendering-gpu-check.py --build build --mode sync --output out/rendering-sync
 
       - name: Debug rope presentation on the GPU
         if: matrix.build_type == 'Debug'
         run: xvfb-run -a -s "-screen 0 1280x800x24" build/bin/kin_render3d_tests test_gpu_rope_tube
+
+      - name: Upload GPU test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            build/ctest.xml
+            build/Testing/Temporary/LastTest.log
+            out/rendering-*/
+          if-no-files-found: warn
+
+  # The ruleset requires a check named "Linux GPU (lavapipe)". The Release GPU
+  # jobs above split that work, so this job takes the name and passes when all
+  # four of them pass. (The Debug job is not part of it, as before.)
+  gpu-required:
+    name: Linux GPU (lavapipe)
+    needs: [select-run, gpu]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    steps:
+      - name: The Release GPU jobs passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED: ${{ needs.select-run.outputs.run }}
+        run: |
+          if [ "$SELECTED" != true ]; then
+            echo "CI was not selected for this change."
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --paginate \
+            --jq '.jobs[] | select(.name | test("^Linux GPU \\(lavapipe, (Release|render3d [0-9] of 3)\\)$")) | "\(.name): \(.conclusion)"' | tee jobs.txt
+          test "$(wc -l < jobs.txt)" -eq 4
+          ! grep -v ': success$' jobs.txt
+
+  rendering-sanitizers:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
+    name: Rendering ASAN and UBSAN (lavapipe)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CC: clang-18
+      CXX: clang++-18
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: mesa-vulkan-drivers glslc xvfb
+      - uses: ./.github/actions/ccache
+        with:
+          key: Rendering ASAN and UBSAN
+      - name: Configure rendering-only sanitizer build
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS_DEBUG="-O1 -g1"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PHYSICS3D=OFF
+          -DKIN_ENABLE_SCENE3D_RUNTIME=OFF -DKIN_ENABLE_SCRIPTING=OFF
+          -DKIN_ENABLE_AUDIO=OFF -DKIN_ENABLE_TTF=OFF
+          -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF -DKIN_BUILD_BENCHMARKS=OFF
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Require the rendering integration tests
+        run: xvfb-run -a -s "-screen 0 1280x800x24" python3 .github/scripts/rendering-gpu-check.py --build build --config Debug --output out/rendering-sanitizers
+      - name: Upload sanitizer test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendering-sanitizers
+          path: |
+            out/rendering-sanitizers/
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: warn

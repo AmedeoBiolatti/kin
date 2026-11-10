@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <kin/assets/bake_cache.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
@@ -74,6 +75,12 @@ Mesh3D Renderer3D::create_mesh_operation(const MeshData3D& data, const MeshOptio
 Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptions3D& requested) {
     _errors.clear();
     MeshOptions3D options = requested;
+    if (data.morphed() && (options.clusters || options.levels > 1)) {
+        // Morph targets move the vertices: levels and clusters are built from one shape and would not follow.
+        KIN_LOG_WARN("render", "3D: a mesh with morph targets cannot have levels of detail or clusters: made without");
+        options.clusters = false;
+        options.levels = 1;
+    }
     if (data.skinned() && (options.clusters || options.levels > 1)) {
         // A skinned mesh moves with its joints: levels and clusters are built from the mesh at rest and would not
         // follow.
@@ -156,6 +163,14 @@ Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptio
             }
         }
     }
+    // A mesh with morph targets: made at weights 0 (the backend keeps the vertices where they can be rewritten, and the
+    // targets where it can blend them itself), then set to its first weights; the mesh keeps the data on the CPU.
+    if (data.morphed()) {
+        std::vector<f32> weights = data.morph_weights;
+        weights.resize(data.morph_targets.size(), 0.0f);
+        return upload_morph_mesh(std::make_shared<const MeshData3D>(data), weights);
+    }
+    std::shared_ptr<MeshMorphs3D> morphs;
     std::shared_ptr<IMeshBackend3D> backend =
         _backend->create_mesh(clusters ? welded : data, chain.count() > 1 ? &chain : nullptr, clusters);
     welded = {};
@@ -175,8 +190,104 @@ Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptio
     if (clusters) {
         cluster_info = std::make_shared<const MeshClusterInfo3D>(clusters->info());
     }
-    return Mesh3D{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds(),
-                  std::move(levels),  std::move(cluster_info),    data.skin_joint_count()};
+    return Mesh3D{std::move(backend),        static_cast<u32>(vertices),
+                  static_cast<u32>(indices), morphs ? morph_bounds(data) : data.bounds(),
+                  std::move(levels),         std::move(cluster_info),
+                  data.skin_joint_count(),   std::move(morphs)};
+}
+
+std::optional<f32> Renderer3D::exposure(const View3D& view) {
+    return _backend && view.backend() ? _backend->read_exposure(*view.backend()) : std::nullopt;
+}
+
+Mesh3D Renderer3D::upload_morph_mesh(std::shared_ptr<const MeshData3D> source, std::span<const f32> weights) {
+    std::shared_ptr<IMeshBackend3D> backend = _backend->create_mesh(*source, nullptr, nullptr);
+    if (!backend) {
+        fail3d(_errors, "Renderer3D::create_mesh", "device refused mesh buffers");
+        return {};
+    }
+    auto morphs = std::make_shared<MeshMorphs3D>();
+    morphs->weights.assign(source->morph_targets.size(), 0.0f);
+    const MeshData3D& data = *source;
+    morphs->source = std::move(source);
+    Mesh3D mesh{std::move(backend),
+                static_cast<u32>(data.vertices.size()),
+                static_cast<u32>(data.indices.empty() ? data.vertices.size() : data.indices.size()),
+                morph_bounds(data),
+                {},
+                {},
+                data.skin_joint_count(),
+                std::move(morphs)};
+    if (!apply_morph_weights(mesh, weights)) {
+        fail3d(_errors, "Renderer3D::create_mesh", "the device refused the mesh's first morph weights");
+        return {};
+    }
+    return mesh;
+}
+
+bool Renderer3D::apply_morph_weights(const Mesh3D& mesh, std::span<const f32> weights) {
+    MeshMorphs3D* morphs = mesh.morphs().get();
+    if (std::ranges::equal(weights, morphs->weights))
+        return true;
+    // On the GPU where the backend can, else blended here and uploaded.
+    if (!_backend->set_morph_weights(*mesh.backend(), weights)) {
+        blend_morph_targets(*morphs->source, weights, morphs->scratch);
+        if (!_backend->update_mesh_vertices(*mesh.backend(), morphs->scratch))
+            return false;
+    }
+    morphs->weights.assign(weights.begin(), weights.end());
+    return true;
+}
+
+Status3D Renderer3D::set_morph_weights(const Mesh3D& mesh, std::span<const f32> weights) {
+    _errors.clear();
+    const auto fail = [&](const char* reason) {
+        fail3d(_errors, "Renderer3D::set_morph_weights", reason);
+        return status3d(false, _errors);
+    };
+    MeshMorphs3D* morphs = mesh.morphs().get();
+    if (!mesh.valid() || !morphs)
+        return fail("the mesh was not made with morph targets");
+    if (weights.size() != morphs->source->morph_targets.size())
+        return fail("one weight for each morph target is needed");
+    for (const f32 w : weights)
+        if (!std::isfinite(w) || w < -1.0f || w > 1.0f)
+            return fail("morph weights must be within [-1, 1]");
+    if (std::ranges::equal(weights, morphs->weights))
+        return status3d(true, _errors);
+    if (!_backend || !_backend->capabilities().morph_targets)
+        return fail("morph targets are not available on this backend");
+    if (!apply_morph_weights(mesh, weights))
+        return fail("the device refused the mesh's new vertices");
+    return status3d(true, _errors);
+}
+
+Result3D<Mesh3D> Renderer3D::copy_mesh(const Mesh3D& mesh) {
+    _errors.clear();
+    if (!mesh.valid() || !mesh.morphs()) {
+        fail3d(_errors, "Renderer3D::copy_mesh", "only a mesh made with morph targets can be copied");
+        return result3d(Mesh3D{}, _errors);
+    }
+    if (!_backend) {
+        fail3d(_errors, "Renderer3D::copy_mesh", "3D is not available");
+        return result3d(Mesh3D{}, _errors);
+    }
+    const MeshMorphs3D& from = *mesh.morphs();
+    // A copy of the backend's own (sharing what it can) at weights 0, else made again from the shared data.
+    if (std::shared_ptr<IMeshBackend3D> backend = _backend->copy_mesh(*mesh.backend())) {
+        auto morphs = std::make_shared<MeshMorphs3D>();
+        morphs->source = from.source;
+        morphs->weights.assign(from.weights.size(), 0.0f);
+        Mesh3D copy{std::move(backend),      mesh.vertex_count(), mesh.index_count(), mesh.bounds(), {}, {},
+                    mesh.skin_joint_count(), std::move(morphs)};
+        if (!apply_morph_weights(copy, from.weights)) {
+            fail3d(_errors, "Renderer3D::copy_mesh", "the device refused the copy's morph weights");
+            return result3d(Mesh3D{}, _errors);
+        }
+        return result3d(std::move(copy), _errors);
+    }
+    Mesh3D copy = upload_morph_mesh(from.source, from.weights);
+    return result3d(std::move(copy), _errors);
 }
 
 Result3D<View3D> Renderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
@@ -187,6 +298,16 @@ Result3D<View3D> Renderer3D::create_view(Vec2i size, const ViewOptions3D& option
 View3D Renderer3D::create_view_operation(Vec2i size, const ViewOptions3D& options) {
     _errors.clear();
     size = at_least_one(size);
+    const AutoExposure3D& a = options.auto_exposure;
+    if (a.enabled && !(std::isfinite(a.key) && a.key > 0 && std::isfinite(a.min_ev) && std::isfinite(a.max_ev) &&
+                       a.min_ev <= a.max_ev && std::isfinite(a.compensation_ev) && std::isfinite(a.speed_up) &&
+                       a.speed_up >= 0 && std::isfinite(a.speed_down) && a.speed_down >= 0 && a.low >= 0 &&
+                       a.low <= a.high && a.high <= 1 && a.centre_weight >= 0 && a.centre_weight <= 1)) {
+        fail3d(_errors, "Renderer3D::create_view",
+               "auto exposure needs a positive key, min_ev <= max_ev, nonnegative speeds, 0 <= low <= high <= 1 and "
+               "a centre weight in [0, 1]");
+        return {};
+    }
     if (_backend) {
         View3D result{_backend->create_view(size, options)};
         if (!result)
@@ -199,6 +320,14 @@ View3D Renderer3D::create_view_operation(Vec2i size, const ViewOptions3D& option
         return {};
     }
     return View3D{std::make_shared<FallbackView>(std::move(target), options)};
+}
+
+bool Renderer3D::can_render_part(const View3D& view, const Scene3D& scene) const {
+    return _backend && view.backend() && _backend->renders_part(*view.backend(), scene, nullptr);
+}
+bool Renderer3D::can_render_part(const View3D& view, const Scene3D& scene, const View3D& lit_by) const {
+    return _backend && view.backend() && lit_by.backend() &&
+           _backend->renders_part(*view.backend(), scene, lit_by.backend());
 }
 
 Status3D Renderer3D::resize(View3D& view, Vec2i size) {
@@ -226,6 +355,30 @@ bool Renderer3D::resize_operation(View3D& view, Vec2i size) {
     if (_backend && _backend->resize_view(*view.backend(), size))
         return true;
     return fail3d(_errors, "Renderer3D::resize", "device refused view resize");
+}
+
+Texture Renderer3D::create_map_array(Vec2i size, std::span<const u8* const> layers) {
+    if (!_backend || size.x <= 0 || size.y <= 0 || layers.empty())
+        return {};
+    return _backend->create_map_array(size, layers);
+}
+
+Result3D<MaterialInputs3D> Renderer3D::create_material_inputs(const MaterialShader3D& shader,
+                                                              std::span<const Texture> textures,
+                                                              std::span<const DataBuffer> buffers) {
+    _errors.clear();
+    if (!_backend || !_backend->capabilities().material_inputs) {
+        fail3d(_errors, "Renderer3D::create_material_inputs", "material inputs unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!shader || textures.size() > max_material_input_textures3d || buffers.size() > max_material_input_buffers3d) {
+        fail3d(_errors, "Renderer3D::create_material_inputs", "invalid shader or excessive input count");
+        return {std::nullopt, _errors};
+    }
+    auto result = _backend->create_material_inputs(shader, textures, buffers);
+    if (!result)
+        _errors = result.diagnostics;
+    return result;
 }
 
 Result3D<PickResult3D> Renderer3D::pick(View3D& view, Vec2i pixel) {
@@ -278,6 +431,20 @@ bool Renderer3D::read_cluster_draws_operation(View3D& view, std::vector<ClusterD
     return _backend->read_cluster_draws(*view.backend(), out);
 }
 
+Result3D<bool> Renderer3D::read_gi_scene(View3D& view, GiScene3D& out) {
+    auto value = read_gi_scene_operation(view, out);
+    return result3d(std::move(value), _errors);
+}
+
+bool Renderer3D::read_gi_scene_operation(View3D& view, GiScene3D& out) {
+    _errors.clear();
+    out = {};
+    if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
+        return fail3d(_errors, "Renderer3D::read_gi_scene", "operation requires a valid 3D view");
+    }
+    return _backend->read_gi_scene(*view.backend(), out);
+}
+
 Status3D Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
     auto value = warm_up_operation(view, scene);
     return status3d(std::move(value), _errors);
@@ -304,11 +471,238 @@ bool Renderer3D::warm_up_operation(View3D& view, const Scene3D& scene) {
 }
 
 Status3D Renderer3D::render(View3D& view, const Scene3D& scene) {
-    auto value = render_operation(view, scene);
+    auto value = render_operation(view, scene, nullptr);
+    return status3d(std::move(value), _errors);
+}
+Status3D Renderer3D::render(View3D& view, const Scene3D& scene, const View3D& lit_by) {
+    auto value = render_operation(view, scene, &lit_by);
     return status3d(std::move(value), _errors);
 }
 
-bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
+Status3D Renderer3D::render_geometry(const GeometryTargets3D& targets, const Scene3D& scene) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* message) {
+        fail3d(_errors, "Renderer3D::render_geometry", message);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().geometry_pass)
+        return fail("standalone geometry passes are unavailable on this backend");
+    if (!targets.depth || !targets.normals || targets.depth.format() != TextureFormat::Depth32Float ||
+        targets.normals.format() != TextureFormat::Rg16Float || targets.depth.size() != targets.normals.size() ||
+        targets.depth.size().x <= 0 || targets.depth.size().y <= 0)
+        return fail("requires matching D32F depth and RG16F normal render attachments");
+    if (!scene.diagnostics().empty()) {
+        _errors = scene.diagnostics();
+        return status3d(false, _errors);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool drawn = _backend->render_geometry(targets, scene, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!drawn)
+        return fail("geometry inputs are incompatible with this renderer, or GPU recording failed");
+    return status3d(true, _errors);
+}
+
+Result3D<PreparedScene3D> Renderer3D::prepare(const Scene3D& scene, const PrepareOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().shared_preparation) {
+        fail3d(_errors, "Renderer3D::prepare", "shared preparation is unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!scene.diagnostics().empty()) {
+        _errors = scene.diagnostics();
+        return {std::nullopt, _errors};
+    }
+    if (const auto* overlay = scene.overlay_if_any(); overlay && !overlay->diagnostics().empty()) {
+        _errors = overlay->diagnostics();
+        return {std::nullopt, _errors};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto prepared = _backend->prepare(scene, options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!prepared) {
+        fail3d(_errors, "Renderer3D::prepare", "incompatible scene inputs or preparation CPU budget exceeded");
+        return {std::nullopt, _errors};
+    }
+    return result3d(PreparedScene3D{std::move(prepared)});
+}
+Status3D Renderer3D::render_prepared(View3D& view, const PreparedScene3D& prepared) {
+    _errors.clear();
+    _stats = {};
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend && view && prepared.backend() &&
+                    _backend->render_prepared(*view.backend(), *prepared.backend(), _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        fail3d(_errors, "Renderer3D::render",
+               "invalid, edited, expired or foreign prepared submission, or GPU recording failed");
+    return status3d(ok, _errors);
+}
+Status3D Renderer3D::render_geometry_prepared(const GeometryTargets3D& targets, const PreparedScene3D& prepared) {
+    _errors.clear();
+    _stats = {};
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend && prepared.backend() && targets.depth && targets.normals &&
+                    targets.depth.format() == TextureFormat::Depth32Float &&
+                    targets.normals.format() == TextureFormat::Rg16Float &&
+                    targets.depth.size() == targets.normals.size() &&
+                    _backend->render_geometry_prepared(targets, *prepared.backend(), _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        fail3d(_errors, "Renderer3D::render_geometry",
+               "invalid, edited, expired or foreign prepared submission/targets, or GPU recording failed");
+    return status3d(ok, _errors);
+}
+
+Status3D Renderer3D::render_visibility(const VisibilityTargets3D& targets, const PreparedScene3D& prepared,
+                                       const VisibilityOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* message) {
+        fail3d(_errors, "Renderer3D::render_visibility", message);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().visibility_pass)
+        return fail("standalone visibility passes are unavailable on this backend");
+    if (options.target_id == ~0u ||
+        (options.ignored_id && (*options.ignored_id == ~0u || *options.ignored_id == options.target_id)))
+        return fail("target and ignored IDs must be distinct and cannot be UINT32_MAX");
+    if (!targets.depth || !targets.mask || targets.depth.format() != TextureFormat::Depth32Float ||
+        targets.mask.format() != TextureFormat::Rgba16Float || targets.depth.size() != targets.mask.size() ||
+        targets.depth.size().x <= 0 || targets.depth.size().y <= 0)
+        return fail("requires matching D32F depth and RGBA16F mask render attachments");
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = prepared.backend() && _backend->render_visibility(targets, *prepared.backend(), options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        return fail("invalid, edited, expired or foreign prepared submission/targets, or GPU recording failed");
+    return status3d(true, _errors);
+}
+
+Result3D<SunShadow3D> Renderer3D::render_sun_shadow(const Texture& depth, const PreparedScene3D& prepared,
+                                                    Vec2i receiver) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().sun_shadow_pass) {
+        fail3d(_errors, "Renderer3D::render_sun_shadow", "sun shadow operation unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!prepared.backend() || !depth || depth.format() != TextureFormat::Depth32Float || depth.array_layers() < 1 ||
+        depth.array_layers() > max_shadow_cascades || depth.size().x != depth.size().y || receiver.x <= 0 ||
+        receiver.y <= 0) {
+        fail3d(_errors, "Renderer3D::render_sun_shadow",
+               "requires prepared data, a square D32F array (1..4 layers) and positive receiver extent");
+        return {std::nullopt, _errors};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto result = _backend->render_sun_shadow(depth, *prepared.backend(), receiver, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!result)
+        _errors = result.diagnostics;
+    return result;
+}
+Result3D<LocalShadows3D> Renderer3D::render_local_shadows(const Texture& depth, const PreparedScene3D& prepared,
+                                                          std::span<const LocalShadowRequest3D> requests,
+                                                          Vec2i receiver) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().local_shadow_pass) {
+        fail3d(_errors, "Renderer3D::render_local_shadows", "local shadow operation unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!prepared.backend() || !depth || depth.format() != TextureFormat::Depth32Float || !depth.array_layers() ||
+        depth.array_layers() > max_local_shadow_layers || depth.size().x != depth.size().y || receiver.x <= 0 ||
+        receiver.y <= 0 || requests.size() > max_spot_shadow_maps + max_point_shadow_maps) {
+        fail3d(_errors, "Renderer3D::render_local_shadows",
+               "requires prepared data, a square D32F array, bounded requests and positive receiver extent");
+        return {std::nullopt, _errors};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto result = _backend->render_local_shadows(depth, *prepared.backend(), requests, receiver, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!result)
+        _errors = result.diagnostics;
+    return result;
+}
+
+Status3D Renderer3D::render_surface(const SurfaceTargets3D& targets, const PreparedScene3D& prepared,
+                                    const SurfaceOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().surface_pass) {
+        fail3d(_errors, "Renderer3D::render_surface", "surface operation unavailable on this backend");
+        return status3d(false, _errors);
+    }
+    if (options.stage != SurfaceStage3D::All && options.stage != SurfaceStage3D::Opaque &&
+        options.stage != SurfaceStage3D::Transparent) {
+        fail3d(_errors, "Renderer3D::render_surface", "invalid surface stage");
+        return status3d(false, _errors);
+    }
+    if ((options.stage != SurfaceStage3D::All && !_backend->capabilities().surface_stages) ||
+        (options.particles && !_backend->capabilities().surface_particles) ||
+        (options.soft_depth && !_backend->capabilities().surface_soft_particles)) {
+        fail3d(_errors, "Renderer3D::render_surface", "requested surface stage/particle feature unavailable");
+        return status3d(false, _errors);
+    }
+    if ((options.particles && options.stage == SurfaceStage3D::Opaque) || (options.soft_depth && !options.particles) ||
+        (options.colour_input && options.stage != SurfaceStage3D::Transparent)) {
+        fail3d(_errors, "Renderer3D::render_surface",
+               "particles require All/Transparent; colour_input requires Transparent; soft_depth requires particles");
+        return status3d(false, _errors);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const auto& colour = targets.linear_colour ? targets.linear_colour : targets.colour.texture();
+    const bool ok = prepared.backend() && bool(targets.colour) != bool(targets.linear_colour) && colour &&
+                    (!targets.linear_colour || targets.linear_colour.format() == TextureFormat::Rgba16Float) &&
+                    targets.depth && targets.depth.format() == TextureFormat::Depth32Float &&
+                    !targets.depth.array_layers() && colour.size() == targets.depth.size() &&
+                    _backend->render_surface(targets, *prepared.backend(), options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        fail3d(
+            _errors, "Renderer3D::render_surface",
+            "incompatible/expired inputs, missing separate depth for soft particles, or GPU surface recording failed");
+    return status3d(ok, _errors);
+}
+
+Status3D Renderer3D::render_bloom(const BloomTargets3D& targets, const Texture& source, const BloomOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* reason) {
+        fail3d(_errors, "Renderer3D::render_bloom", reason);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().bloom_pass)
+        return fail("bloom operation unavailable on this backend");
+    if (!std::isfinite(options.threshold) || options.threshold < 0)
+        return fail("threshold must be finite and nonnegative");
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend->render_bloom(targets, source, options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return ok ? status3d(true, _errors) : fail("incompatible bloom inputs/attachments or GPU recording failed");
+}
+
+Status3D Renderer3D::render_output(const RenderTarget& target, const Texture& source, const OutputOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* reason) {
+        fail3d(_errors, "Renderer3D::render_output", reason);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().output_pass)
+        return fail("output operation unavailable on this backend");
+    if (!std::isfinite(options.exposure) || options.exposure < 0 || !std::isfinite(options.bloom_strength) ||
+        options.bloom_strength < 0 || (options.bloom_strength > 0 && !options.bloom))
+        return fail("requires finite nonnegative exposure/bloom strength and bloom for positive strength");
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend->render_output(target, source, options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return ok ? status3d(true, _errors) : fail("incompatible output inputs/target or GPU recording failed");
+}
+
+bool Renderer3D::render_operation(View3D& view, const Scene3D& scene, const View3D* lit_by) {
     _errors.clear();
     _stats = {};
     if (!view.valid()) {
@@ -335,7 +729,9 @@ bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
         _renderer->pop_render_target();
         drawn = true;
     } else if (_backend) {
-        drawn = _backend->render(*view.backend(), scene, _stats);
+        drawn = lit_by && lit_by->backend()
+                    ? _backend->render_lit_by(*view.backend(), scene, *lit_by->backend(), _stats)
+                    : _backend->render(*view.backend(), scene, _stats);
     }
     _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
     if (!drawn)

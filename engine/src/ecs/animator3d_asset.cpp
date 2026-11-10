@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cmath>
 #include <kin/anim/anim_format.hpp>
+#include <kin/anim/binding.hpp>
 #include <kin/assets/content.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/scene3d.hpp>
 #include <stdexcept>
 #include <unordered_set>
@@ -291,7 +293,7 @@ static std::vector<std::string> resolve_animator3d_assets_impl(EcsWorld& world,
                                                                std::span<const EcsId> selected) {
     std::vector<EcsEntity> entities;
     if (selected.empty())
-        world.raw().each([&](flecs::entity entity, const AnimatorAsset3D&) { entities.emplace_back(entity); });
+        world.each([&](flecs::entity entity, const AnimatorAsset3D&) { entities.emplace_back(entity); });
     else
         for (auto id : selected)
             if (auto e = world.entity_by_id(id); e && e.has<AnimatorAsset3D>())
@@ -354,6 +356,92 @@ Status3D resolve_animator3d_assets(EcsWorld& world, const std::filesystem::path&
     auto diagnostics = resolve_animator3d_assets_impl(world, content_root, selected);
     const bool accepted = diagnostics.empty();
     return status3d(accepted, std::move(diagnostics));
+}
+
+namespace {
+
+// A world's animation files as its Animators were given them (by path: the text read, and what it made), and the
+// fields their tracks can set: kept on the world, as Animators point at them.
+struct AnimatorFiles3D {
+    struct File {
+        std::string text;
+        std::shared_ptr<AnimationAssetLibrary> library;
+    };
+    std::unordered_map<std::string, File> files;
+    std::shared_ptr<PropertyRegistry> properties;
+    std::size_t described = 0; // the world's described components, when they were made
+};
+
+} // namespace
+
+Status3D resolve_animators3d(EcsWorld& world, const std::filesystem::path& content_root,
+                             std::span<const EcsId> selected) {
+    std::vector<EcsEntity> entities;
+    if (selected.empty())
+        world.each([&](flecs::entity entity, const Animator&) { entities.emplace_back(entity); });
+    else
+        for (auto id : selected)
+            if (auto e = world.entity_by_id(id); e && e.has<Animator>())
+                entities.push_back(e);
+    std::vector<std::string> errors;
+    if (entities.empty())
+        return status3d(true, std::move(errors));
+    std::ranges::sort(entities, {}, &EcsEntity::id);
+    flecs::world& raw = world.raw();
+    if (!raw.has<AnimatorFiles3D>())
+        raw.set<AnimatorFiles3D>({});
+    auto& kept = *raw.get_mut<AnimatorFiles3D>();
+    const std::size_t described = world.components().descriptor_count();
+    if (!kept.properties || kept.described != described) {
+        kept.properties = std::make_shared<PropertyRegistry>();
+        register_described_properties(*kept.properties, world);
+        kept.described = described;
+    }
+    // Made outside the walk below: set on an entity, an Animator moves to another table.
+    const std::shared_ptr<PropertyRegistry> properties = kept.properties;
+    std::unordered_map<std::string, std::shared_ptr<AnimationAssetLibrary>> read; // this time, by path
+    for (auto entity : entities) {
+        const std::string asset = entity.get<Animator>()->asset.id;
+        std::shared_ptr<AnimationAssetLibrary> library;
+        if (!asset.empty()) {
+            const auto path = (content_root / asset).lexically_normal();
+            const std::string key = path.generic_string();
+            if (const auto found = read.find(key); found != read.end()) {
+                library = found->second;
+            } else {
+                try {
+                    const std::optional<std::string> text = read_content_text(path);
+                    if (!text)
+                        throw std::runtime_error("can't be read");
+                    auto& file = kept.files[key];
+                    if (!file.library || file.text != *text) {
+                        AnimationRegistryFragment fragment;
+                        std::string error;
+                        if (!parse_animation_registry_fragment(*text, fragment, error))
+                            throw std::runtime_error(error);
+                        fragment.source_path = path;
+                        auto made = std::make_shared<AnimationAssetLibrary>();
+                        made->merge(fragment);
+                        file = {*text, std::move(made)};
+                    }
+                    library = file.library;
+                } catch (const std::exception& error) {
+                    errors.push_back("Animator entity '" + entity.name() + "' (" + std::to_string(entity.id()) +
+                                     ") asset '" + asset + "': " + error.what());
+                    const auto found = kept.files.find(key);
+                    library = found != kept.files.end() ? found->second.library : nullptr;
+                }
+                read[key] = library;
+            }
+        }
+        const Animator& now = *entity.get<Animator>();
+        if (now.library == library && now.properties == properties.get())
+            continue;
+        Animator& animator = *entity.get_mut<Animator>(); // one from a prefab gets its own copy first
+        animator.library = std::move(library);
+        animator.properties = properties.get();
+    }
+    return status3d(errors.empty(), std::move(errors));
 }
 
 } // namespace kin

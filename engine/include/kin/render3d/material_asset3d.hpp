@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <filesystem>
 #include <kin/render3d/errors3d.hpp>
 #include <kin/render3d/scene3d.hpp>
@@ -11,6 +12,16 @@ class Assets3D;
 struct MaterialTexture3D {
     std::filesystem::path asset; // empty explicitly clears the imported map
     bool nearest = false;        // otherwise mipmapped
+    std::optional<TextureSampler3D> sampler;
+    bool reset_sampler = true; // a replacement map uses legacy sampling unless sampler:"inherit" is explicit
+};
+
+// A material graph parameter's value in a .kinmaterials file: 1 to 4 numbers, or a texture (bound to the parameter's
+// map slot).
+struct MaterialGraphValue3D {
+    std::array<f32, 4> value{};
+    u32 count = 0; // numbers given (0: a texture)
+    std::optional<MaterialTexture3D> texture;
 };
 
 // Omitted fields preserve the imported material. Color uses the standard
@@ -20,10 +31,17 @@ struct MaterialPatch3D {
     std::optional<std::filesystem::path> shader; // SPIR-V; empty clears it
     std::optional<std::array<f32, 16>> shader_params;
     std::optional<f32> metallic, roughness, emissive, normal_scale, occlusion_strength, alpha_cutoff;
-    std::optional<bool> unlit, double_sided, casts_shadow, receives_shadow, wireframe;
+    std::optional<bool> unlit, double_sided, casts_shadow, receives_shadow, receives_decals, wireframe;
     std::optional<Blend3D> blend;
     std::optional<Wrap3D> wrap_u, wrap_v;
+    std::optional<LinearRgb> emission_color;
+    std::optional<Vec2f> uv_scale, uv_offset; // Material3D's: every map's tiling
+    std::optional<EmissionMode3D> emission_mode;
     std::optional<MaterialTexture3D> texture, metallic_roughness, normal, occlusion, emissive_texture;
+    // A material graph (kin.material-graph/1: Assets3D::load_material_graph) as the surface (empty clears it), and its
+    // parameters' values by name (merged one by one across layers): Material3D::shader_params and its texture slots.
+    std::optional<std::filesystem::path> graph;
+    std::map<std::string, MaterialGraphValue3D> params;
 };
 struct MaterialPartPatch3D {
     // Exactly one selector: an index or a unique imported part name.
@@ -44,6 +62,9 @@ struct MaterialsAsset3D {
 // CPU-only; 1 MiB per source, 128 variants, 256 part rules per layer.
 Result3D<MaterialsAsset3D> parse_materials3d_asset(std::string_view text, const std::filesystem::path& source = {});
 Result3D<MaterialsAsset3D> load_materials3d_asset(const std::filesystem::path& source);
+// The asset as a kin.materials3d/1 file's text, which parse_materials3d_asset reads back as it is (its fields, in the
+// parser's names; omitted ones stay omitted).
+std::string write_materials3d_asset(const MaterialsAsset3D& asset);
 
 // Only materials/textures are owned; meshes and models are never copied or
 // pinned. Binding identity prevents stale overrides after a model replacement.

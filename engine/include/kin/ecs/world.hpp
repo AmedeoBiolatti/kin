@@ -5,9 +5,12 @@
 #include <flecs.h>
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <typeindex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -80,7 +83,9 @@ public:
 
     template <typename T>
     EcsEntity& set(T&& value) {
-        _entity.set<T>(std::forward<T>(value));
+        // T is a reference for an lvalue: given to flecs, its set(T&&) and set(const T&)
+        // become one signature, which MSVC emits twice (LNK1179 duplicate COMDAT).
+        _entity.set<std::remove_cvref_t<T>>(std::forward<T>(value));
         return *this;
     }
 
@@ -252,6 +257,15 @@ public:
     EcsEventRegistry(const EcsEventRegistry&) = delete;
     EcsEventRegistry& operator=(const EcsEventRegistry&) = delete;
 
+    // Whether the log records. Off by default: watching every add, set and
+    // remove of a registered component makes each about three times as slow
+    // (tests/ecs_bench.cpp), and only tools read the log.
+    // A tool or a test turns it on and it records from then on (the scene
+    // server does when first asked for a world's events). Off, it removes its
+    // flecs observers and records nothing; what it holds stays.
+    void record(bool on);
+    bool recording() const { return _recording; }
+
     const std::vector<EcsEvent>& snapshot() const { return _events; }
     std::vector<EcsEvent> since(u64 sequence) const;
     const EcsDirtyState& dirty_state() const { return _dirty; }
@@ -295,18 +309,29 @@ private:
         ComponentId component_id = 0;
     };
 
+    // A registered component, whose observers record() installs.
+    struct Observed {
+        ComponentId component_id = 0;
+        std::string component_name;
+        void (*install)(EcsEventRegistry&, const Observed&) = nullptr;
+    };
+
+    template <typename T>
+    void install_observers(const Observed& observed);
     bool consume_observer_suppression(EcsEventKind kind, EcsId entity, ComponentId component_id);
     void apply_dirty_flags(const EcsEvent& event);
     void trim_events();
 
     EcsWorld* _world = nullptr;
     std::vector<EcsEvent> _events;
+    std::vector<Observed> _observed;
     std::vector<flecs::observer> _component_observers;
     std::vector<ObserverSuppression> _observer_suppressions;
     EcsDirtyState _dirty;
     u64 _next_sequence = 1;
     u64 _frame = 0;
     std::size_t _max_events = 16384;
+    bool _recording = false;
 };
 
 struct EcsEntityHandle {
@@ -524,13 +549,37 @@ public:
         return EcsEntity{_world.entity(id)};
     }
 
-    void each(auto&& func) {
-        _world.each(std::forward<decltype(func)>(func));
+    // Each entity with the components `func` takes (as flecs::world::each:
+    // `[](flecs::entity e, const Sprite& s)` or without the entity), through a
+    // query made the first time and kept with the world. flecs's own
+    // world.raw().each(func) builds and compiles a query each call: in a
+    // per-frame walk that costs more than the walk.
+    template <typename Func>
+    void each(Func&& func) {
+        each_with(flecs::arg_list_t<std::decay_t<Func>>{}, std::forward<Func>(func));
     }
 
     template <typename... Components>
     EcsQuery<Components...> query() {
         return EcsQuery<Components...>{_world.query<Components...>()};
+    }
+
+    // A query `make` builds (from a query_builder: terms each() cannot say,
+    // such as without<T>(); end it .cached().build() for a walk each frame)
+    // made once and kept, one per `key`: the address of a static at the call site.
+    //
+    //     static const char key = 0;
+    //     world.kept_query<TilemapCollider>(&key, [](flecs::world& w) {
+    //         return w.query_builder<TilemapCollider>().without<TilemapComponent>().build();
+    //     }).each(...);
+    template <typename... Components, typename Make>
+    flecs::query<Components...> kept_query(const void* key, Make&& make) {
+        const std::scoped_lock lock(_kept_queries_mutex);
+        std::unique_ptr<KeptQuery>& slot = _keyed_queries[key];
+        if (!slot) {
+            slot = std::make_unique<KeptQueryOf<Components...>>(make(_world));
+        }
+        return static_cast<KeptQueryOf<Components...>*>(slot.get())->query;
     }
 
     template <typename... Components>
@@ -575,7 +624,41 @@ public:
     const flecs::world& raw() const { return _world; }
 
 private:
+    // The queries each() keeps, one per set of components: made once, gone
+    // before the world (declared after it).
+    struct KeptQuery {
+        virtual ~KeptQuery() = default;
+    };
+    template <typename... Components>
+    struct KeptQueryOf final : KeptQuery {
+        explicit KeptQueryOf(flecs::query<Components...> made) : query(std::move(made)) {}
+        flecs::query<Components...> query;
+    };
+    template <typename... Components>
+    flecs::query<Components...>& kept_query() {
+        const std::scoped_lock lock(_kept_queries_mutex); // systems may walk the world from several threads
+        std::unique_ptr<KeptQuery>& slot = _kept_queries[std::type_index(typeid(KeptQueryOf<Components...>))];
+        if (!slot) {
+            // Cached: flecs keeps the tables it matches as they are made, so a
+            // walk visits those, not every table of the world.
+            slot = std::make_unique<KeptQueryOf<Components...>>(_world.query_builder<Components...>().cached().build());
+        }
+        return static_cast<KeptQueryOf<Components...>*>(slot.get())->query;
+    }
+    template <typename First, typename... Rest, typename Func>
+    void each_with(flecs::_::arg_list<First, Rest...>, Func&& func) {
+        if constexpr (std::is_same_v<std::decay_t<First>, flecs::entity>) {
+            kept_query<Rest...>().each(std::forward<Func>(func));
+        } else {
+            kept_query<First, Rest...>().each(std::forward<Func>(func));
+        }
+    }
+
     flecs::world _world;
+    std::unordered_map<std::type_index, std::unique_ptr<KeptQuery>> _kept_queries;
+    std::unordered_map<const void*, std::unique_ptr<KeptQuery>> _keyed_queries;
+    void own_world(); // makes the flecs world say it is this one's (owner_of)
+    std::mutex _kept_queries_mutex;
     // Owns dynamic query matchers before `_world` is destroyed. Query plans
     // keep weak references so a plan can safely outlive its source world.
     mutable std::vector<std::shared_ptr<flecs::query<>>> _compiled_queries;
@@ -586,8 +669,45 @@ private:
     std::unique_ptr<EcsSystemRegistry> _systems;
 };
 
+// The EcsWorld whose flecs world this is; null for a stage (a thread's view
+// of it) or a flecs world kin did not make.
+EcsWorld* owner_of(const flecs::world& world);
+
+// EcsWorld::each and EcsWorld::kept_query for code holding the flecs world:
+// through the owner's kept queries, else as flecs does it (a query each call).
+template <typename Func>
+void each(flecs::world& world, Func&& func) {
+    if (EcsWorld* owner = owner_of(world)) {
+        owner->each(std::forward<Func>(func));
+    } else {
+        world.each(std::forward<Func>(func));
+    }
+}
+
+template <typename... Components, typename Make>
+flecs::query<Components...> kept_query(flecs::world& world, const void* key, Make&& make) {
+    if (EcsWorld* owner = owner_of(world)) {
+        return owner->template kept_query<Components...>(key, std::forward<Make>(make));
+    }
+    return make(world);
+}
+
 template <typename T>
 void EcsEventRegistry::observe_component(ComponentId component_id, std::string component_name) {
+    _observed.push_back({.component_id = component_id,
+                         .component_name = std::move(component_name),
+                         .install = [](EcsEventRegistry& events, const Observed& observed) {
+                             events.install_observers<T>(observed);
+                         }});
+    if (_recording) {
+        install_observers<T>(_observed.back());
+    }
+}
+
+template <typename T>
+void EcsEventRegistry::install_observers(const Observed& observed) {
+    const ComponentId component_id = observed.component_id;
+    const std::string& component_name = observed.component_name;
     const std::string base_name = "kin::ecs::events::" + component_name;
     _component_observers.push_back(_world->raw()
                                        .observer<T>((base_name + "::on_add").c_str())

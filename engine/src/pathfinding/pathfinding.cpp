@@ -193,6 +193,17 @@ std::vector<Vec2i> find_path(const GridNav& nav, Vec2i start, Vec2i goal, GridPa
 }
 
 std::vector<Vec2i> find_path(const TileMap& map, Vec2i start, Vec2i goal, GridPathOptions options) {
+    if (map.grid.hex()) {
+        // Across its hexagons' six sides (diagonal options have no meaning there).
+        const HexGridNav hex{
+            .cols = map.cols,
+            .rows = map.rows,
+            .layout = map.hex_layout(),
+            .blocked = [&map](i32 col, i32 row) { return !map.walkable(col, row); },
+            .cost = [&map](i32 col, i32 row) { return map.movement_cost(col, row); },
+        };
+        return find_path(hex, start, goal);
+    }
     GridNav nav{
         .cols = map.cols,
         .rows = map.rows,
@@ -207,14 +218,11 @@ std::vector<Vec2i> find_path(const TileMap& map, Vec2i start, Vec2i goal, GridPa
 }
 
 Vec2i world_to_tile(const TileMap& map, Vec2f world_pos) {
-    return {map.world_col(world_pos.x), map.world_row(world_pos.y)};
+    return map.world_to_map(world_pos);
 }
 
 Vec2f tile_center(const TileMap& map, Vec2i tile) {
-    return {
-        (static_cast<f32>(tile.x) + 0.5f) * static_cast<f32>(map.tile_w),
-        (static_cast<f32>(tile.y) + 0.5f) * static_cast<f32>(map.tile_h),
-    };
+    return map.tile_center(tile);
 }
 
 } // namespace kin

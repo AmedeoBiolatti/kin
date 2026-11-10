@@ -9,16 +9,6 @@
 #include <sstream>
 #include <system_error>
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
-
 namespace kin {
 namespace {
 
@@ -64,47 +54,10 @@ std::string read_text_file(const std::filesystem::path& path, bool& ok) {
 }
 
 SaveResult atomic_write_text(const std::filesystem::path& path, const std::string& text) {
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-        return error_result(SaveErrorCode::IoError,
-                            "failed to create save directory: " + ec.message(),
-                            path);
+    std::string error;
+    if (!write_user_file(path, text, &error)) {
+        return error_result(SaveErrorCode::IoError, "failed to write save file: " + error, path);
     }
-
-    const std::filesystem::path temp = path.string() + ".tmp";
-    {
-        std::ofstream out{temp, std::ios::binary | std::ios::trunc};
-        if (!out) {
-            return error_result(SaveErrorCode::IoError, "failed to open temp save file", temp);
-        }
-        out << text;
-        out.flush();
-        if (!out) {
-            std::filesystem::remove(temp, ec);
-            return error_result(SaveErrorCode::IoError, "failed to write temp save file", temp);
-        }
-    }
-
-#if defined(_WIN32)
-    if (!MoveFileExW(temp.native().c_str(),
-                     path.native().c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const DWORD failure = GetLastError();
-        std::filesystem::remove(temp, ec);
-        return error_result(SaveErrorCode::IoError,
-                            "failed to replace save file: Windows error " + std::to_string(failure),
-                            path);
-    }
-#else
-    std::filesystem::rename(temp, path, ec);
-    if (ec) {
-        std::filesystem::remove(temp, ec);
-        return error_result(SaveErrorCode::IoError,
-                            "failed to replace save file: " + ec.message(),
-                            path);
-    }
-#endif
     return ok_result(path);
 }
 
@@ -185,7 +138,7 @@ bool valid_save_id(std::string_view id) {
 SaveStore::SaveStore(SaveStoreConfig config)
     : _game_id(std::move(config.game_id)),
       _game_version(std::move(config.game_version)),
-      _root(config.root_override.empty() ? user_data_dir("kin") / _game_id : std::move(config.root_override)),
+      _root(config.root_override.empty() ? game_data_dir(_game_id) : std::move(config.root_override)),
       _valid_game_id(valid_save_id(_game_id)),
       _compact(config.compact) {
 }
@@ -374,6 +327,7 @@ SaveResult SaveStore::delete_slot(std::string_view slot_id) {
     if (ec) {
         return error_result(SaveErrorCode::IoError, "failed to delete save slot: " + ec.message(), path);
     }
+    user_data_written();
     return ok_result(path);
 }
 

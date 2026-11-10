@@ -1,7 +1,11 @@
 #include <kin/tilemap/tilemap.hpp>
+#include <kin/pathfinding/pathfinding.hpp>
+#include <kin/renderer/backend.hpp>
+#include <kin/renderer/shape.hpp>
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -725,11 +729,112 @@ void test_terrain_connect_updates_cells_and_neighbors() {
     map.clear_dirty();
     assert(map.set_terrain_connect("ground", branch, "road") >= 1);
     assert(map.get(2, 0) == 7);
-    assert(map.get(2, 1) == 1);
+    // North, east and west: no variant of its own; the nearest joining no
+    // other side, east and west (said in the diagnostics), as it was.
+    assert(map.get(2, 1) == 2);
     assert(!map.terrain_diagnostics.empty());
     assert(map.layer_dirty("ground"));
     assert(map.dirty_regions("ground").size() == 1);
-    assert((map.dirty_regions("ground").back() == kin::TileRect{2, 0, 1, 2}));
+    assert((map.dirty_regions("ground").back() == kin::TileRect{2, 0, 1, 1}));
+}
+
+// Terrain taken away again, and painted over another: the cells around fitted
+// to what is left, each to its own terrain; the nearest variant never joins a
+// side that has no neighbour.
+void test_terrain_erase_nearest_and_other_terrains() {
+    kin::TileMap map = make_terrain_map();
+    const std::array<kin::Vec2i, 3> road{{{0, 1}, {1, 1}, {2, 1}}};
+    map.set_terrain_connect("ground", road, "road");
+    assert(map.get(0, 1) == 4 && map.get(1, 1) == 2 && map.get(2, 1) == 5);
+
+    const std::array<kin::Vec2i, 1> middle{{{1, 1}}};
+    map.clear_dirty();
+    assert(map.clear_terrain_connect("ground", middle) == 3);
+    assert(map.get(1, 1) == 0 && map.get(0, 1) == 1 && map.get(2, 1) == 1);
+    assert((map.dirty_regions("ground").back() == kin::TileRect{0, 1, 3, 1}));
+
+    // Grass (its own fallback only) painted where the road was: the road's
+    // ends fitted again, around it.
+    map.tileset.resize(9);
+    map.tileset.tiles[8] = {.id = "grass", .terrain = "grass"};
+    map.tileset.add_terrain_variant("grass", 0, 8, true);
+    map.set_terrain_connect("ground", road, "road");
+    map.clear_terrain_diagnostics();
+    assert(map.set_terrain_connect("ground", middle, "grass") == 3);
+    assert(map.get(1, 1) == 8 && map.get(0, 1) == 1 && map.get(2, 1) == 1);
+    assert(map.terrain_diagnostics.empty()); // each joins nothing: their own variants (mask 0)
+    assert(map.terrain_mask("ground", {0, 1}, "road") == 0 && map.terrain_mask("ground", {0, 1}, "grass") == kin::TileTerrainEast);
+
+    // A side with no neighbour is never joined: with only an east-and-west
+    // variant (and the fallback), a cell joined east only is the fallback.
+    kin::TileSet tiles;
+    tiles.resize(3);
+    tiles.tiles[1] = {.id = "wall", .terrain = "wall"};
+    tiles.tiles[2] = {.id = "wall-ew", .terrain = "wall"};
+    tiles.add_terrain_variant("wall", 0, 1, true);
+    tiles.add_terrain_variant("wall", kin::TileTerrainEast | kin::TileTerrainWest, 2);
+    bool exact = true;
+    assert(tiles.terrain_match("wall", kin::TileTerrainEast, &exact) == 1 && !exact);
+    assert(tiles.terrain_match("wall", kin::TileTerrainEast | kin::TileTerrainWest | kin::TileTerrainNorth, &exact) == 2 && !exact);
+    assert(tiles.terrain_match("wall", kin::TileTerrainEast | kin::TileTerrainWest, &exact) == 2 && exact);
+    assert(tiles.terrain_match("sand", 0) == 0);
+    assert((tiles.terrains() == std::vector<std::string>{"wall"}));
+}
+
+// Terrain on hexagons: a cell joins its neighbours across its six sides, side
+// d toward neighbour direction d; the masks (up to 63) and the tileset's cells
+// kept in its file.
+void test_hex_terrain_six_sides() {
+    for (const kin::HexOrientation orientation : {kin::HexOrientation::PointyTop, kin::HexOrientation::FlatTop}) {
+        kin::TileMap map;
+        map.resize(5, 5);
+        map.tile_w = 32;
+        map.tile_h = 32;
+        map.grid = {.shape = kin::TileShape::Hex, .orientation = orientation, .offset = kin::HexOffset::Odd};
+        map.tileset.resize(9);
+        map.tileset.tiles[1] = {.id = "water", .terrain = "water"};
+        map.tileset.add_terrain_variant("water", 0, 1, true);
+        for (kin::i32 side = 0; side < 6; ++side) { // tiles 2..7: one side each
+            map.tileset.tiles[2 + side] = {.id = "water-" + std::to_string(side), .terrain = "water"};
+            map.tileset.add_terrain_variant("water", kin::tile_terrain_hex_side(side), static_cast<kin::u16>(2 + side));
+        }
+        map.tileset.tiles[8] = {.id = "water-all", .terrain = "water"};
+        map.tileset.add_terrain_variant("water", kin::tile_terrain_sides(true), 8);
+
+        const kin::HexLayout layout = map.hex_layout();
+        const kin::Vec2i center{2, 2};
+        const kin::Hex hex = layout.from_offset(center);
+        for (kin::i32 side = 0; side < 6; ++side) {
+            kin::TileMap one = map;
+            const kin::Vec2i next = layout.to_offset(kin::hex_neighbor(hex, side));
+            const std::array<kin::Vec2i, 2> pair{{center, next}};
+            assert(one.set_terrain_connect("ground", pair, "water") == 2);
+            assert(one.terrain_diagnostics.empty());
+            assert(one.get(center.x, center.y) == 2 + side);
+            assert(one.get(next.x, next.y) == 2 + (side + 3) % 6);
+        }
+
+        std::vector<kin::Vec2i> flower{center};
+        for (const kin::Vec2i next : map.neighbor_cells(center)) {
+            flower.push_back(next);
+        }
+        assert(flower.size() == 7);
+        map.set_terrain_connect("ground", flower, "water");
+        assert(map.get(center.x, center.y) == 8);
+        assert(map.terrain_mask("ground", center, "water") == 0x3F);
+    }
+
+    kin::TileSet tiles;
+    tiles.grid = {.shape = kin::TileShape::Hex, .orientation = kin::HexOrientation::FlatTop};
+    tiles.resize(2);
+    tiles.tiles[1] = {.id = "water", .terrain = "water"};
+    tiles.add_terrain_variant("water", 0x2A, 1);
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "kin-hex-terrain.kintileset";
+    assert(kin::save_tileset(tiles, path));
+    const kin::TileSet read = kin::load_tileset(path);
+    std::filesystem::remove(path);
+    assert(read.grid.hex() && read.grid.orientation == kin::HexOrientation::FlatTop);
+    assert(read.terrain_tile("water", 0x2A) == 1);
 }
 
 void test_terrain_missing_fallback_and_roundtrip() {
@@ -1049,9 +1154,226 @@ void test_sprite_backed_tiles_submit_sprite_commands() {
     assert(saw_sprite);
 }
 
+bool near(kin::Vec2f a, kin::Vec2f b) {
+    return std::abs(a.x - b.x) < 0.01f && std::abs(a.y - b.y) < 0.01f;
+}
+
+// Hexagons, pointy-top (in rows) and flat-top (in columns), odd and even
+// offsets: every cell's box from (0, 0), found again from its centre; six
+// neighbours inside; the map around them all.
+void test_hex_grid_geometry() {
+    kin::TileMap pointy;
+    pointy.resize(4, 3);
+    pointy.tile_w = 32;
+    pointy.tile_h = 28;
+    pointy.grid = {.shape = kin::TileShape::Hex, .orientation = kin::HexOrientation::PointyTop, .offset = kin::HexOffset::Odd};
+    assert(near(pointy.tile_center({0, 0}), {16.0f, 14.0f}));
+    assert(near(pointy.tile_center({1, 0}), {48.0f, 14.0f}));
+    assert(near(pointy.tile_center({0, 1}), {32.0f, 35.0f})); // an odd row: half a hex right, three quarters down
+    assert(near(pointy.map_to_world({0, 1}), {16.0f, 21.0f}));
+    assert(near(pointy.world_size(), {4.0f * 32.0f + 16.0f, 28.0f + 2.0f * 21.0f}));
+    for (int row = 0; row < pointy.rows; ++row) {
+        for (int col = 0; col < pointy.cols; ++col) {
+            assert((pointy.world_to_map(pointy.tile_center({col, row})) == kin::Vec2i{col, row}));
+            const std::vector<kin::Vec2f> outline = pointy.tile_outline({col, row});
+            assert(outline.size() == 6);
+        }
+    }
+    // A box's corner is outside its hexagon: in the cell before it (or none).
+    assert((pointy.world_to_map({33.0f, 1.0f}) != kin::Vec2i{1, 0}));
+    assert(pointy.neighbor_cells({1, 1}).size() == 6);
+    assert(pointy.neighbor_cells({0, 0}).size() == 2);
+
+    kin::TileMap even = pointy;
+    even.grid.offset = kin::HexOffset::Even;
+    assert(near(even.tile_center({0, 0}), {32.0f, 14.0f})); // the odd rows start at 0
+    assert(near(even.tile_center({0, 1}), {16.0f, 35.0f}));
+    assert(near(even.world_size(), pointy.world_size()));
+
+    kin::TileMap flat;
+    flat.resize(3, 2);
+    flat.tile_w = 32;
+    flat.tile_h = 28;
+    flat.grid = {.shape = kin::TileShape::Hex, .orientation = kin::HexOrientation::FlatTop, .offset = kin::HexOffset::Odd};
+    assert(near(flat.tile_center({1, 0}), {40.0f, 28.0f})); // an odd column: three quarters right, half down
+    assert(near(flat.world_size(), {32.0f + 2.0f * 24.0f, 2.0f * 28.0f + 14.0f}));
+    for (int row = 0; row < flat.rows; ++row) {
+        for (int col = 0; col < flat.cols; ++col) {
+            assert((flat.world_to_map(flat.tile_center({col, row})) == kin::Vec2i{col, row}));
+        }
+    }
+}
+
+// What a hex map does with its cells: blocks by its hexagons, fills across
+// their six sides, finds paths through them; a terrain without variants is refused.
+void test_hex_grid_cells() {
+    kin::TileMap map;
+    map.resize(5, 5);
+    map.tile_w = 32;
+    map.tile_h = 32;
+    map.grid.shape = kin::TileShape::Hex;
+    map.tileset.tile(map.tileset.ensure_tile("rock"))->solid = true;
+    const kin::u16 rock = map.tile_id("rock");
+    map.set(2, 2, rock);
+    const kin::Vec2f center = map.tile_center({2, 2});
+    assert(map.blocks_point(center));
+    assert(map.blocks_rect({center.x - 2.0f, center.y - 2.0f, 4.0f, 4.0f}));
+    const kin::Rectf box = map.tile_rect(2, 2);
+    assert(!map.blocks_rect({box.x, box.y, 2.0f, 2.0f})); // its box's corner, outside the hexagon
+    const std::vector<std::vector<kin::Vec2f>> polygons = map.collision_polygons();
+    assert(polygons.size() == 1 && polygons[0].size() == 6);
+    assert(map.collision_rects().size() == 1);
+
+    // Around the rock: a path over the hexes, two steps a side.
+    const std::vector<kin::Vec2i> path = kin::find_path(map, {1, 2}, {3, 2});
+    assert(!path.empty() && path.front() == (kin::Vec2i{1, 2}) && path.back() == (kin::Vec2i{3, 2}));
+    assert(std::ranges::find(path, kin::Vec2i{2, 2}) == path.end() && path.size() == 4);
+    assert((kin::world_to_tile(map, center) == kin::Vec2i{2, 2}));
+
+    kin::TileMap open = map;
+    open.set(2, 2, 0);
+    assert(open.flood_fill({0, 0}, rock) == 25);
+
+    const std::vector<kin::Vec2i> cells{{1, 1}};
+    assert(map.set_terrain_connect("ground", cells, "grass") == 0 && !map.terrain_diagnostics.empty()); // no variants
+}
+
+// A tileset in a file of its own, cut from an image: a map names it, is saved
+// naming it, and is read with its tiles from the content root.
+void test_tileset_files_and_hex_roundtrip() {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / "kin-tileset-files";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "tilesets");
+    std::filesystem::create_directories(root / "maps");
+    kin::TileSet tiles;
+    tiles.image = "images/terrain.png";
+    tiles.sheet = {.tile_w = 32, .tile_h = 28, .spacing = 2, .margin = 1};
+    const kin::u16 grass = tiles.ensure_tile("grass");
+    tiles.tile(grass)->frame = 3;
+    const kin::u16 water = tiles.ensure_tile("water");
+    tiles.tile(water)->frame = 0;
+    tiles.tile(water)->walkable = false;
+    assert(kin::save_tileset(tiles, root / "tilesets" / "terrain.kintileset"));
+
+    std::string error;
+    const kin::TileSet read = kin::load_tileset(root / "tilesets" / "terrain.kintileset", &error);
+    assert(error.empty() && read.image == "images/terrain.png" && read.sheet.tile_w == 32 && read.sheet.tile_h == 28);
+    assert(read.sheet.spacing == 2 && read.sheet.margin == 1);
+    assert(read.tile_id("grass") == grass && read.tile(grass)->frame == 3 && read.tile(water)->frame == 0);
+    assert(!read.tile(water)->is_walkable());
+    assert(kin::load_tileset(root / "missing.kintileset", &error).empty() && error == "there is no such file");
+
+    kin::TileMap map;
+    map.resize(3, 2);
+    map.tile_w = 32;
+    map.tile_h = 28;
+    map.grid = {.shape = kin::TileShape::Hex, .orientation = kin::HexOrientation::FlatTop, .offset = kin::HexOffset::Even};
+    map.tileset_source = "tilesets/terrain.kintileset";
+    map.tileset = read;
+    map.set(1, 1, grass);
+    assert(kin::save_tilemap(map, root / "maps" / "level.kintilemap"));
+    std::string text;
+    {
+        std::ifstream in(root / "maps" / "level.kintilemap"); // closed again: Windows removes no open file
+        text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    assert(text.find("\"tileset\": \"tilesets/terrain.kintileset\"") != std::string::npos);
+    assert(text.find("\"grass\"") == std::string::npos); // its tiles are the tileset's
+
+    // Without the content root: its cells and grid, no tiles.
+    const kin::TileMap bare = kin::load_tilemap(root / "maps" / "level.kintilemap");
+    assert(bare.grid == map.grid && bare.tileset_source == map.tileset_source && bare.get(1, 1) == grass && bare.tileset.empty());
+    // With it: the tileset's tiles too.
+    const kin::TileMap full = kin::load_tilemap(root / "maps" / "level.kintilemap", root, &error);
+    assert(error.empty() && full.tile_id("grass") == grass && full.tileset.image == "images/terrain.png");
+    std::filesystem::remove(root / "tilesets" / "terrain.kintileset");
+    const kin::TileMap orphan = kin::load_tilemap(root / "maps" / "level.kintilemap", root, &error);
+    assert(orphan.get(1, 1) == grass && error.starts_with("tilesets/terrain.kintileset: "));
+    std::filesystem::remove_all(root);
+}
+
+// Tiles drawn from their frames of the tileset's image (a sprite of a sheet),
+// a hex map's coloured ones as hexagons, the whole map at an origin.
+void test_frames_hexagons_and_origin_drawn() {
+    kin::TileMap map;
+    map.resize(2, 2);
+    map.tile_w = 16;
+    map.tile_h = 16;
+    const kin::u16 framed = map.tileset.ensure_tile("framed");
+    map.tileset.tile(framed)->frame = 1;
+    const kin::u16 plain = map.tileset.ensure_tile("plain");
+    map.set(0, 0, framed);
+    map.set(1, 0, plain);
+    const kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{32, 16})};
+    const kin::SpriteSheet sheet{texture, {.tile_w = 16, .tile_h = 16, .spacing = 0, .margin = 0}};
+    for (const bool cached : {true, false}) {
+        kin::RenderQueue queue{kin::RenderSortMode::Submission};
+        map.submit(queue, {.draw_top_edge = false, .use_cache = cached, .sheet = &sheet, .origin = {100.0f, 50.0f}});
+        assert(queue.size() == 2);
+        const kin::RenderCommand& sprite = queue.commands()[0];
+        assert(sprite.type == kin::RenderCommandType::Sprite && sprite.source.x == 16.0f);
+        assert(sprite.rect.x == 100.0f && sprite.rect.y == 50.0f);
+        assert(queue.commands()[1].type == kin::RenderCommandType::FillRect && queue.commands()[1].rect.x == 116.0f);
+    }
+    // The cache keeps the map's own space: drawn again elsewhere, it moves.
+    kin::RenderQueue again{kin::RenderSortMode::Submission};
+    map.submit(again, {.draw_top_edge = false, .sheet = &sheet});
+    assert(again.commands()[0].rect.x == 0.0f);
+
+    map.grid.shape = kin::TileShape::Hex;
+    map.invalidate_render_cache();
+    kin::RenderQueue hexes{kin::RenderSortMode::Submission};
+    map.submit(hexes, {.sheet = &sheet, .origin = {10.0f, 0.0f}});
+    assert(hexes.size() == 2 && hexes.commands()[1].type == kin::RenderCommandType::Shape);
+    const kin::RenderCommand& hexagon = hexes.commands()[1];
+    assert(hexagon.detail && hexagon.detail->shape && hexagon.color == map.tileset.tile(plain)->color);
+    const kin::Vec2f center = map.tile_center({1, 0});
+    assert(near(hexagon.detail->transform.apply({0.0f, 0.0f}), {center.x + 10.0f, center.y}));
+}
+
+// Animated tiles: their frames in turn, frame_seconds each, as the map's
+// time goes on (cached chunks too); written to the tileset and read back; a
+// map with one is drawn each frame (update_tilemaps plays it).
+void test_animated_tiles() {
+    kin::TileMap map;
+    map.resize(2, 1);
+    map.tile_w = 16;
+    map.tile_h = 16;
+    const kin::u16 water = map.tileset.ensure_tile("water");
+    kin::TileDefinition& definition = *map.tileset.tile(water);
+    definition.frame = 0;
+    definition.frames = {0, 1, 2};
+    definition.frame_seconds = 0.25f;
+    assert(definition.animated() && map.tileset.animated());
+    assert(definition.frame_at(0.0) == 0 && definition.frame_at(0.3) == 1 && definition.frame_at(0.6) == 2 && definition.frame_at(0.8) == 0);
+    map.set(0, 0, water);
+    const kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{48, 16})};
+    const kin::SpriteSheet sheet{texture, {.tile_w = 16, .tile_h = 16, .spacing = 0, .margin = 0}};
+    for (const bool cached : {true, false}) {
+        for (const auto& [time, x] : {std::pair{0.0, 0.0f}, std::pair{0.3, 16.0f}, std::pair{0.55, 32.0f}, std::pair{0.8, 0.0f}}) {
+            kin::RenderQueue queue{kin::RenderSortMode::Submission};
+            map.submit(queue, {.draw_top_edge = false, .use_cache = cached, .sheet = &sheet, .time = time});
+            assert(queue.size() == 1 && queue.commands()[0].source.x == x);
+        }
+    }
+    // Written with its frames, and read back.
+    kin::TileSet plain;
+    plain.ensure_tile("stone");
+    assert(!plain.animated());
+    const std::filesystem::path file = std::filesystem::temp_directory_path() / "kin_animated_tiles.kintileset";
+    assert(kin::save_tileset(map.tileset, file));
+    std::string error;
+    const kin::TileSet read = kin::load_tileset(file, &error);
+    assert(error.empty());
+    const kin::TileDefinition* again = read.tile(read.tile_id("water"));
+    assert(again && (again->frames == std::vector<kin::i32>{0, 1, 2}) && std::abs(again->frame_seconds - 0.25f) < 1e-6f);
+    std::filesystem::remove(file);
+}
+
 } // namespace
 
 int main() {
+    test_animated_tiles();
     test_basic_grid_and_solidity();
     test_layers_and_roundtrip();
     test_layer_identity_is_unique_by_id();
@@ -1070,6 +1392,8 @@ int main() {
     test_collision_polygon_roundtrip();
     test_terrain_connect_updates_cells_and_neighbors();
     test_terrain_missing_fallback_and_roundtrip();
+    test_terrain_erase_nearest_and_other_terrains();
+    test_hex_terrain_six_sides();
     test_asset_metadata_and_loader();
     test_render_queue_submission_and_culling();
     test_render_cache_matches_uncached_submission();
@@ -1080,5 +1404,9 @@ int main() {
     test_render_cache_mutation_apis_and_bypasses();
     test_render_cache_clear_and_resize_safety();
     test_sprite_backed_tiles_submit_sprite_commands();
+    test_hex_grid_geometry();
+    test_hex_grid_cells();
+    test_tileset_files_and_hex_roundtrip();
+    test_frames_hexagons_and_origin_drawn();
     return 0;
 }

@@ -4,12 +4,71 @@
 snapshot path have been removed, so new and existing UI code should include
 `kin/ui2/*` headers and use the `kin::ui2` namespace explicitly.
 
+## Accessibility
+
+`kin/ui2/accessibility.hpp` connects UI semantics to AccessKit C 0.23.2: AT-SPI on
+Linux/Unix, UI Automation on Windows and the macOS accessibility APIs. Native
+support is optional; ordinary builds require neither AccessKit nor Rust:
+
+```sh
+cmake -S . -B build -DKIN_ENABLE_ACCESSIBILITY=ON \
+  -DKIN_ACCESSKIT_INCLUDE_DIR=/path/to/accesskit-c/include \
+  -DKIN_ACCESSKIT_LIBRARY=/path/to/libaccesskit.a
+```
+
+Use the upstream 0.23.2 desktop static library or build that tag with
+`cargo build --release --locked`. The library must match the target platform and
+runtime. Kin adds desktop system libraries and packages the retained AccessKit
+license texts. The platform half (the window's AccessKit adapter) lives in
+`engine/src/platform/accesskit_adapter.cpp`, built only with this option; ui2's
+bridge builds the tree from the UI's semantics.
+
+Create one bridge per window after its renderer, and destroy it first:
+
+```cpp
+kin::ui2::Accessibility accessibility{window, renderer, "My game"};
+// Each frame:
+ui.begin(input, renderer, dt);
+ui.semantic_label(volume_id, "Music volume"); // before or after the widget
+// ...build UI...
+ui.end();
+accessibility.update(ui);
+// On an event:
+accessibility.announce("Settings saved"); // second argument true: assertive
+```
+
+Labels, values, bounds, hierarchy, focus, toggled state and disabled/modal state
+come from UI semantics. Give icon buttons/fields explicit semantic_label names
+every frame. Sliders/number inputs expose numeric ranges/steps and accept
+increment/decrement/set-value. Text inputs accept replacement text; buttons,
+toggles and menu items accept activation. Custom controls should describe their
+semantics and implement Context's matching action helpers.
+
+Native callbacks queue actions across threads without accessing UI state. The
+main thread revalidates targets and applies one action to the next UI frame
+(`Context::queue_action(Id, ...)`, numbers passed whole). Removed/disabled/
+modal-blocked targets cannot activate. snapshot/request_action also work with
+native support disabled. Mobile adapters and rich-text caret/selection
+accessibility are not implemented.
+
+set_reduced_motion(true) makes surface transitions immediate; share that setting
+with your game's tween policy. OS preference detection is not automatic.
+Semantic automation additionally accepts `increment`, `decrement`, `set_number`
+(`text` holds the number), alongside click/focus/set_text.
+
 ## Entry Points
 
 - `kin/ui2/context.hpp` for immediate-mode UI context, drawing, clipping, input,
   and interaction state.
-- `kin/ui2/widgets.hpp` for controls, lists, tables, editor widgets, text inputs,
-  scroll views, overlays, and game HUD widgets.
+- `kin/ui2/widgets.hpp` for controls, lists, tables, text inputs, scroll views
+  and overlays. It brings `kin/ui2/editor.hpp` (docks, splitters, breadcrumbs,
+  an asset browser, a log console, property inspectors and grids, node graphs)
+  and `kin/ui2/hud.hpp` (input prompts, dialogue, nameplates, a target reticle,
+  resource rows, bars and meters, inventory slots, floating text); each of those
+  can be included alone.
+- `kin/ui2/charts.hpp` for plots, sparklines and heat maps (spectrograms), and
+  `kin/ui2/scale.hpp` for linear and log scales and the round values to mark on
+  them.
 - `kin/ui2/theme.hpp` for themes and palette presets; `kin/ui2/theme_file.hpp` for
   themes in `.kintheme` data files.
 - `kin/ui2/geometry.hpp` for layout geometry helpers.
@@ -43,6 +102,418 @@ auto font = kin::ui2::bitmap_font();
 auto size = kin::ui2::measure_text(*font, "START", 2.0f);
 kin::ui2::draw_text_centered(renderer, *font, "START", center, 2.0f, color);
 ```
+
+## Composition (experimental)
+
+Inside `begin_layout()`/`end_layout()`, a box is an open container: a layout
+node with a surface, a hit region and any children, so rows, tabs and panes are
+built from boxes and labels instead of picked from the widget list.
+
+```cpp
+ui.begin_layout(screen);
+{
+    auto files = ui.scroll(make_id("files"), vbox().fill());
+    ui.list(make_id("rows"), int(entries.size()), 22.0f, [&](int i) { // only visible rows are built
+        auto row = ui.box(make_id(make_id("row"), i),
+                          hbox().fill().gap(6).items(UiAlign::Center)
+                              .hover_bg(hover).selected_bg(accent).selected_if(i == selected));
+        ui.label(entries[i].name, {.width = grow()});
+        if (row.hovered) ui.label("x");
+        if (row.clicked) selected = i;
+    });
+}
+ui.end_layout();
+```
+
+- `box()` returns a scope (it ends the box when it goes) carrying `hot`,
+  `clicked`, `double_clicked`, `secondary_clicked` (right button), ... and
+  `hovered`, which unlike `hot` stays true over the box's children; the box's
+  `surface.hovered` follows it. Boxes are hit-tested where they were drawn last
+  frame, like `hot`, so their results are there while their children are
+  declared. `bounds` is that rect, to anchor a popup or a drag.
+- `clip` clips the children to the box; `clip_rounded` to its rounded corners
+  (a path clip: two layers and a render pass each, so only where corners show).
+- `scroll()` clips and scrolls its children, vertically and with
+  `ScrollBoxOptions::horizontal` sideways too (they keep their width; the wheel
+  sideways or Shift+wheel). The wheel moves the innermost scroll box under the
+  pointer that can move that way, and the scrollbars' thumbs are dragged before
+  the content is placed, so both move it in the same frame.
+  `scroll_offset(id)` and `set_scroll_offset(id, offset)` read and set it.
+- `list(id, count, row_height, row)` calls `row(i)` only for the rows visible in
+  the enclosing scroll box, plus a few either side; `scroll_to_row(list, i)`
+  brings a row into view this frame, built or not, and `scroll_into_view(id)`
+  a box (or a widget, by the box around it). With
+  `ScrollBoxOptions::stick_to_end` a scroll box at its end stays there as its
+  content grows (a log); scrolled up, it stays put. PageUp, PageDown, Home and
+  End scroll the box the focus is in, else the one under the pointer.
+- `begin_split()` / `split_next()` / `end_split()` make two clipped panes and a
+  handle that drags the ratio, kept by id.
+- `label()`, `image()`, `spacer()` and `add(widget)` add leaves the layout
+  keeps; `widget(w)` still writes a widget's results back.
+
+### Styles in one line
+
+`BoxStyle` and `LayoutStyle` chain: start from `hbox()` (children side by
+side) or `vbox()` and add what differs. `w()`/`h()` take a `SizeAxis` or pixels,
+`fill()` grows both ways, `pad()`/`margins()` take one, two (x, y) or four
+values, `gap()`, `justify()` (along) and `items()` (across) align, and `center()`
+does both. For the look, `bg()` fills every state that has no fill of its own,
+whichever comes first, `hover_bg()`, `pressed_bg()` and `selected_bg()` give one,
+and `rounded()`, `border()` and `focus_border()` the rest. `passive()`,
+`clipped()`, `selected_if()`, `disabled_if()`, `tab_stop()`, `key_scope()` and
+`cursor_shape()` set the flags. Designated initializers still work.
+
+### State a component keeps
+
+`ui.state<T>(id)` is a `T` kept for `id`, made the first time it is asked for
+(`ui.state<T>(id, make)` makes it with `make()`). A function that builds part of
+the UI can keep its own state with it, so the caller passes only what it shows:
+
+```cpp
+void section(Context& ui, Id id, std::string_view title, auto&& body) {
+    struct Section { bool open = true; };
+    Section& state = ui.state<Section>(id);
+    if (ui.box(make_id(id, "header"), hbox().w(grow()).h(22).hover_bg(hover)).clicked) state.open = !state.open;
+    if (state.open) body();
+}
+```
+
+It goes once a whole frame passes without it being asked for, as what used it is
+gone; `keep_state(id)` keeps it anyway (a panel that is hidden for a while)
+until `drop_state(id)`.
+
+### Pointer shapes and drawing less
+
+`BoxStyle::cursor` sets the pointer's shape over a box and its children; text
+fields show the I-beam and splitters the resize arrows. `cursor()` is the
+frame's choice. Something still moving, such as a hover transition or a
+blinking caret, asks for another frame (`wants_redraw()`).
+
+A tool can draw only when something changes: set `wait_for_events` in its
+`GameWindowInfo` (or `AppConfig`), and the loop sleeps until input or a window
+event comes (drawing two frames more, as hover resolves a frame late), a
+`request_redraw()` falls due, or `max_idle_wait` passes (half a second by
+default; `WindowedAppConfig::max_idle_wait = 0` for an app with nothing that
+changes unseen, such as a file watcher). Call
+`ui.apply(ctx.app, ctx.window)` after `end()` each frame: it hands over the text
+input, the pointer shape and the redraw requests. Each frame drawn runs one
+fixed step, so game time stops while the window idles. The first frames after
+the loop starts and after the app comes back to the screen are drawn without
+waiting, so the window is never blank until touched.
+
+### Menus and popovers
+
+A box with `floating()` leaves its parent's flow and hangs next to it instead:
+`Below` (a dropdown), `Above`, `Right` (a submenu), `Left`, or at a `Point` (a
+context menu at the pointer), moved by an offset. It is sized against the
+layout's root, not its parent, and kept inside the root: on the other side when
+it fits better there, then moved along. It draws above everything else and
+outside its ancestors' clips, and it and its contents are hit before what is
+under them. Build it where it belongs, while it is open:
+
+```cpp
+auto title = ui.box(id, ui::hbox().pad(8, 2).hover_bg(hover).selected_if(open));
+ui.label("File", text);
+if (open) {
+    auto menu = ui.box(ui::make_id(id, "menu"), ui::vbox().w(280).pad(4).bg(panel).floating(ui::UiFloat::Below));
+    // rows; a row's submenu is a box floating(ui::UiFloat::Right) built inside the row
+    if (menu.pressed_outside) { open = false; }
+}
+```
+
+`pressed_outside` is true when a mouse button went down this frame away from the
+box (as it was last frame): what closes a popup.
+
+`popup(id, style, place)` does the rest: open (`open_popup(id)`, or
+`open_popup_at(id, point)` for a context menu), it is a box under
+`PopupPlace::anchor` (or at its point), closed by a press outside it and its
+`opener`, or by Esc while it is the one on top (`popup_on_top(id)`):
+
+```cpp
+auto button = ui.box(ui::make_id("add"), ui::hbox().pad(8, 2).hover_bg(hover));
+ui.label("Add", text);
+if (button.clicked) ui.open_popup(ui::make_id("add_menu"));
+if (auto menu = ui.popup(ui::make_id("add_menu"), ui::vbox().w(200).pad(4).bg(panel),
+                         {.anchor = button.bounds, .opener = ui::make_id("add")})) {
+    // rows
+}
+```
+
+A box's `tooltip(text)` shows after the pointer rests on it (`TooltipOptions`:
+the delay, and a shorter one while another tooltip was just up;
+`set_tooltip_style()` for the look). `draggable(type, text, value)` makes a
+press that moves a drag carrying `drag_payload()`, its text by the pointer;
+a box that `accepts_drop(type)` is `drop_hovered` under it and `dropped` when
+it is let go there. Tooltips and the drag's text are drawn after the layout,
+over everything; `overlay(draw)` adds an app's own.
+
+`kin/ui2/composed.hpp` has widgets made this way, in the theme's colours or a
+`ComposedLook`: `menu_bar()` (a window's menus: Alt and a title's letter, the
+arrows, submenus, their keys shown), `pick_list()` (a searchable list under a
+button) and `breadcrumbs()`.
+
+### Values typed in
+
+`value_field(id, shown, options, valid)` is a text field for a value kept
+elsewhere: it shows `shown` until clicked or tabbed into, then what is typed;
+Enter, Tab or a press elsewhere commits it (`committed`, once), Esc goes back
+to `shown`. What `valid` turns down is outlined and not committed. `live`
+commits as it is typed, and Esc commits the value from before the typing. `number_field(id, value, {.min, .max, .whole})` does
+this for numbers, and `edit_value(id)` starts typing in one (a rename from a
+menu). `NumberInput` and `PropertyInspector` rows behave the same way.
+Enter and Esc always commit and cancel a one-line field, whatever the input map
+binds to `accept` and `quit`. `select_all` starts the typing with what the field
+shows selected, so what is typed replaces it wherever a click or a finger put
+the caret; `number_field` does so. `keyboard` is the keyboard a phone shows for
+it (`TextInputKind::Text`, `Number` or `Decimal`); `number_field` and
+`NumberInput` show the number pad when their range has no negatives, and a
+number is read with a decimal comma as well as a point.
+
+```cpp
+if (auto name = ui.value_field(ui::make_id("name"), entity.name, {.placeholder = "Name"},
+                               [](std::string_view text) { return !text.empty(); }).committed) {
+    rename(entity, *name);
+}
+if (const auto speed = ui.number_field(ui::make_id("speed"), mover.speed, {.min = 0})) {
+    mover.speed = static_cast<f32>(*speed);
+}
+```
+
+### Widgets drawn by hand
+
+A widget of your own is a struct with `bounds`, a `measure()` and a `run()`
+that `ui.widget()` finds (by argument-dependent lookup), as the built-in ones
+are. Its run draws with the Context: rectangles and text, and anti-aliased
+shapes (`line(a, b, color, width)`, `polyline`, `fill_polygon`, `fill_circle`,
+`outline_circle`, `arc`, `fill_pie`, `fill_path`, `stroke_path`, and `shape()`
+for a `ShapeMesh` made once). They are mirrored, clipped, checked against the
+draw scope and recorded as everything else the Context draws.
+
+`drag_value(id, bounds, value, options)` is the behaviour of a dial, a fader or
+a number scrubbed: a drag up (or right) changes `value` across `options.scale`
+over `travel` units, finely with Shift, past the ends and straight back; the
+wheel nudges it; focused, the arrows step it; a double click sets `reset`.
+The widget draws itself round it:
+
+```cpp
+struct Dial {
+    ui::Id id{};
+    kin::Rectf bounds{};
+    double* value = nullptr;
+    ui::DragValueOptions options{.scale = {.min = -24.0, .max = 12.0}, .reset = 0.0};
+};
+kin::Vec2f measure(const Dial&) { return {64.0f, 64.0f}; }
+void run(ui::Context& ctx, Dial& dial) {
+    ctx.drag_value(dial.id, dial.bounds, *dial.value, dial.options);
+    const kin::Vec2f center{dial.bounds.x + 32.0f, dial.bounds.y + 32.0f};
+    const float along = static_cast<float>(dial.options.scale.fraction(*dial.value));
+    ctx.arc(center, 26.0f, 135.0f, 405.0f, ctx.theme().palette.surface_alt, {.width = 4.0f, .cap = kin::LineCap::Round});
+    ctx.arc(center, 26.0f, 135.0f, 135.0f + 270.0f * along, ctx.theme().palette.accent, {.width = 4.0f, .cap = kin::LineCap::Round});
+}
+```
+
+A widget that reads the wheel itself calls `take_wheel(id)` each frame, so the
+scroll box it sits in does not scroll while the pointer is on it.
+`double_click(id)`, called with each click of a region, says whether it was
+the second of a double click.
+
+### Text that runs out of room
+
+A label given `TextOverflow::Ellipsis` is as wide as its text while its line has
+room and narrower, its text cut with "…", when it has not:
+
+```cpp
+ui.label(file_name, text, {}, ui::TextOverflow::Ellipsis);
+```
+
+It shrinks (`LayoutStyle::shrink`, CSS's flex-shrink): when a line is too long
+for its parent, the children that shrink give up the excess in proportion to
+their size, none below its `min`. A box may shrink too, a tab say, and the label
+in it is then cut to the tab.
+
+Text in runs of their own colour, such as code coloured by its syntax, is
+`AdvancedText` with `TextRun`s; a run starts where its text would in the whole
+line:
+
+```cpp
+ui::AdvancedText line;
+line.content.runs = {keyword_run, name_run};
+line.layout_options.wrap = false;
+ui.add(std::move(line));
+```
+
+### Icons
+
+`ui.svg(document, size, tint)` draws an SVG icon. The document is its text,
+embedded in the program or read from a file; it is drawn into a texture once per
+document, size and options, and kept as long as the Context. With `.mask` only
+its shape counts, in the tint: one-colour glyphs. `.oversample` is texels per
+layout unit; left 0, it is the renderer's content scale, so icons are as sharp
+as the text on a display with more pixels than the layout has units.
+`rasterize_svg()` (`kin/assets/image.hpp`) draws one into an `Image`. A build
+without image files (`KIN_ENABLE_IMAGE_IO` off) cannot rasterize SVG: its icons,
+the composed menus' checks and chevrons too, are drawn as nothing.
+
+### A window's own title bar
+
+A borderless window (`GameWindowInfo::borderless`) has no system title bar, so
+the app draws one. A box with `drags_window()` moves the window when pressed,
+except over the interactive boxes inside it (the menu titles, the buttons), and
+a double click maximizes it where the system does that. `ui.apply()` hands these
+areas to the window each frame, with edges to resize it by. The buttons call
+`Window::minimize()`, `toggle_maximized()` and `request_close()`.
+
+### Keyboard
+
+Boxes with `focusable` join the focus order (by `tab_index`, then as built),
+and so do `TextInput`s and `TextEdit`s that leave on Tab. Once any box is
+focusable, or focus is already in the order, Tab and Shift+Tab move along it
+(at `end()`) and the box focused is scrolled into view; Enter or Space clicks the
+focused box. A text field hands Tab on itself, and stops editing when Tab takes
+focus elsewhere; Enter or Esc leave it. A box with `focus_trap()` (a dialog)
+keeps Tab and the focus inside it while it is built. The focus ring shows for
+focus the keys gave, not a click's. Widgets that move a selection with the
+arrows (`ListView`, `TreeView`, `IconGrid`, `TabBar`, `MenuBar`, `NodeGraph`)
+take the keys only while focused; `keys_without_focus` lets one have them while
+nothing else is focused too, as `MenuList` and `DialogueView` do.
+
+Key bindings fire from where focus is. A box's `key_context` names a scope;
+a binding with that context applies while focus is inside the box, and the
+innermost context wins over outer ones and over global bindings (no context):
+
+```cpp
+ui.bind({.action = "save", .key = Key::S, .modifiers = KeyModifiers::Ctrl, .context = "editor"});
+ui.bind({.action = "down", .key = Key::Down, .context = "explorer"});
+// each frame, after ui.begin():
+if (ui.action_triggered("save")) save();
+```
+
+Modifiers must match exactly. Bindings without Ctrl or Alt are skipped while a
+text field has the keys, so typing is not taken for commands.
+
+`games/studio_demo` is an editor-style window built this way, and
+`games/nextcode_look` rebuilds next_code's window (menus, icons, title bar).
+
+### Touch
+
+A finger is the pointer ([touch](input.md#touch)): a tap clicks, a finger held
+on a slider drags it. Nothing is hovered and no tooltip shows while no finger is
+down. A finger dragged more than 8 units across a scroll box scrolls it, as a
+phone's lists do: the innermost box under it that can scroll that way, even
+when the finger went down on a button or a chart, and the press is then no
+click. Let go with a flick, it glides on, slowing down, until it stops or meets
+an end; a finger landing on it stops it. `ScrollBoxOptions::touch_drag = false`
+turns this off for one box. A mouse drag over a box's content does what it did. `prompt_for_action` names touch bindings ("Tap", "Swipe Right"), and
+`PromptBindingMode::Device` names them while the pointer is a finger.
+
+On-screen controls (`kin/ui2/touch_controls.hpp`) are a stick and buttons drawn
+over the game for a phone. Each follows a finger of its own, so a player can move
+and press at the same time. A finger that lands on one is taken from the pointer
+(`Input::claim_touch`), so it clicks nothing underneath. They hold the game's
+actions and axes by name, whatever the input map binds
+(`Input::set_screen_action`, `set_screen_axis`), so `pressed("jump")` and
+`axis("move_x")` read them in the next `update()`:
+
+```cpp
+ui2::TouchStick stick{.id = ui2::make_id("move"), .bounds = {0, 0, 640, 720}};   // move_x, move_y
+ui2::TouchButton jump{.id = ui2::make_id("jump"), .bounds = {1120, 560, 110, 110}, .action = "jump", .label = "Jump"};
+// each frame, between ui.begin() and ui.end(); keep the structs from frame to frame
+ui2::run(ui, stick);
+ui2::run(ui, jump);
+```
+
+- **The stick** gives -1 to 1 each way, x to the right and y downward, as
+  `axis move_y stick -left_y` reads a controller. `floating` (the default)
+  centres it where the finger lands anywhere in `bounds`, which may be half the
+  screen. Otherwise its middle is the middle of `bounds`. `radius` is how far
+  its knob travels, and `dead_zone` is a fraction of the radius.
+- **A button** holds its action while its finger stays on it (a little past its
+  edge still counts). `held` and `pressed` say so for the frame.
+- **When they show:** `TouchControlsShown::Touch` (the default) shows them while a
+  finger is the pointer, and always on a phone. `Always` shows them on a desktop
+  as well, where the mouse works them. A control that is not run for a frame lets
+  go of what it held.
+- **In a screen file:** the `touch_stick` and `touch_button` elements
+  ([below](#screens-from-data)).
+
+### Controllers
+
+Call `app.open_gamepads()` to poll a controller. ui2 navigation is enabled by
+default: D-pad/left-stick directions move focus spatially between enabled,
+visible controls; A/Cross accepts and B/Circle backs out. Widgets with directional
+editing or selection consume their directions before focus navigation runs.
+Buttons, toggles, sliders and focusable boxes work with acceptance; menu lists
+use their usual selection/activation paths. A slider uses Left/Right to change
+its value. Existing modal and focus-trap boundaries constrain navigation.
+
+Pass dt to `ui.begin(input, renderer, dt)` for held-direction repeat. Configure
+dead zone and repeat timing with `set_controller_navigation({.dead_zone = 0.5f,
+.repeat_delay = 0.4f, .repeat_interval = 0.1f})`, or disable it with
+`{.enabled = false}`. `back_requested()` lets custom screens handle cancellation.
+`controller_active()` says whether the controller was the last to navigate
+(pointer presses and keyboard Tab/Enter switch it back), for button prompts;
+`kin::gamepad_button_label(family, button)` names a button for a controller family.
+Accept and back read the controller's presses this rendered frame
+(`Input::pad_frame_pressed`), as keys do; held directions repeat.
+
+The input map's `menu_up`, `menu_down`, `menu_left` and `menu_right` move the
+focus the same way, on whatever they are bound to (WASD, the arrows), and
+`accept` and `quit` accept and back out. Moving that way turns
+`controller_active()` off again; `{.actions = false}` leaves them to the
+widgets that read them. A widget that takes a direction (a slider's right,
+a list's down) uses it up, so the focus does not move that way as well. In a
+game for several players at one screen, `{.player = 1}` lets only that
+player's controller (`Input::player_gamepad`) and actions navigate.
+
+`prompt_for_action` names a controller binding as the controller labels it
+("Cross" on a PlayStation pad, "RT" or "R2"); `PromptOptions::family` picks
+the labels instead. `PromptBindingMode::Device` names the controller's binding
+while the controller navigates (`controller_active()`), else a key's.
+
+## Charts
+
+`kin/ui2/charts.hpp` plots numbers the app keeps: a widget holds spans of them
+and draws them as they are each frame.
+
+```cpp
+std::array<ui::Series, 2> series{{
+    {.name = "update", .y = update_ms},
+    {.name = "render", .y = render_ms},
+}};
+ui::Plot plot{.id = ui::make_id("times"), .series = series, .y = {.unit = "ms"}};
+ui.widget(plot, ui::LayoutStyle{}.w(ui::grow()).h(200));
+```
+
+- `Plot`: series as lines, areas, bars (grouped at each x) or points, with x at
+  `x0 + i * dx` or given. Axes fit the data (y rounded out to round values)
+  unless given a `Scale`, linear or log. The wheel zooms x around the pointer, a
+  drag pans, a double click shows all of it (`zoom`); the readout lists every
+  series at the sample nearest the pointer, or a bar's value on the bar. Lines
+  of more samples than pixels are drawn as each pixel column's lowest and
+  highest. Results: `area`, `view_x` and `view_y` (where the data is, for the
+  app's own marks), `pointer_x` and `hovered`.
+- `Sparkline`: recent values as a small line, no axes.
+- `HeatmapImage` and `Heatmap`: a grid of values as colours (`ColorMap`: Magma,
+  Viridis, Gray), kept in a texture updated where it changed. `push_column()`
+  scrolls it from the right, a column a frame for a spectrogram:
+
+```cpp
+ui::HeatmapImage spectrum{{360, 128}, ui::ColorMap::Magma, {.min = -90.0, .max = 0.0}};
+ui::Heatmap view{.id = ui::make_id("spectrum"), .image = &spectrum,
+                 .x = {.scale = {.min = -6.0, .max = 0.0}, .unit = "s"},
+                 .y = {.scale = {.min = 0.0, .max = 22050.0}, .unit = "Hz"}, .unit = "dB"};
+spectrum.push_column(levels_db); // each frame, before the widget draws
+ui.widget(view, ui::LayoutStyle{}.fill());
+```
+
+Their look follows a data-visualisation method: series take `chart_color(i)`,
+eight colours in an order checked for colour-blind readers (stepped for dark
+and light surfaces; past eight, one grey: fold the rest into "other"); lines
+2 wide with round joins; an area a faint wash of its colour; bars at most 24
+wide with a rounded end and a gap between them; hairline grids; text in the
+theme's text colours, never a series'; a legend for two or more named series.
+`scale.hpp`'s `ticks()` and `tick_label()` give the values axes mark ("0 10k
+20k", "100 Hz 1 kHz 10 kHz"). `games/charts_demo` shows them all.
 
 ## Text That Scales
 
@@ -213,6 +684,101 @@ const kin::Color water = look.color("water"); // the game's own colours
 - `[skin]` frames are GPU textures: let the `ThemeFile` (and themes copied from
   it) go before the renderer does.
 
+A theme can also use the game's own art and fonts:
+
+```ini
+[theme]
+font = fonts/game.ttf        # the text's font (a .ttf/.otf of the content)
+bold_font = fonts/game-bold.ttf
+font_size = 18
+
+[skin]
+button = image ui/button.png 12              # an image cut 12 px in from each edge
+button_hovered = image ui/button.png 12 0 48 96 48   # [x y w h]: part of it
+```
+
+`ThemeFile::build(renderer, content, problems, oversample, image)` reads them
+(its images through `image` when given, an `Assets2D`'s say), and applies the
+skin. Fonts are drawn `oversample` times as fine (the renderer's content scale).
+What can't be read is listed in `problems`, and that part keeps what it had.
+`theme_token_names()`, `theme_surface_names()`, `theme_skin_slot_names()` and
+the like list what a file can name, for tools.
+
+## Screens From Data
+
+A UI screen (a HUD, a menu, a title screen) can be a `.kinui` file
+(`kin/ui2/screen.hpp`): a tree of elements in the look of a `.kintheme`.
+
+```json
+{"schema": "kin.ui/1", "theme": "ui/game.kintheme", "size": {"x": 1280, "y": 720},
+ "root": {"kind": "box", "width": "grow", "height": "grow", "children": [
+   {"id": "score", "kind": "label", "text": "Score: 0", "style": "title", "anchor": "top_left", "offset": {"x": 24, "y": 16}},
+   {"id": "menu", "kind": "panel", "anchor": "center", "padding": 20, "gap": 10, "children": [
+     {"id": "play", "kind": "button", "text": "Play", "width": 200},
+     {"id": "volume", "kind": "slider", "value": 0.8, "width": 200}]}]}}
+```
+
+- **Containers:** a `box` holds elements in a column (or a `row`), with
+  `padding`, a `gap`, and alignment along it (`justify`) and across it
+  (`items`). It stands on a theme `surface` when it names one. A `panel` is a
+  box on the panel surface.
+- **Leaves:** `label`, `button`, `image` (a path in the content, with a
+  `tint`), `progress` (0..1), `toggle`, `slider` (`min`, `max`, `step`),
+  `text_input` (with a `hint`) and `spacer`.
+- **Dialogue:** a `dialogue` element shows the dialogue the game runs, while
+  one runs. See [dialogue](dialogue.md).
+- **On-screen controls** ([touch](#touch)): a `touch_stick` pushes `axis_x` and
+  `axis_y` (`move_x` and `move_y` unless named). `radius` is how far its knob
+  goes (64 points unless given), and with `fixed` its middle is the element's
+  middle rather than where the finger lands. A `touch_button` holds `action`
+  while a finger is on it, and `text` is its label. `clicked(id)` sees a press.
+  They show while touch is in use. Give them anchors so they sit over the game:
+
+  ```json
+  {"id": "move", "kind": "touch_stick", "width": "45%", "height": "grow", "anchor": "bottom_left"},
+  {"id": "talk", "kind": "touch_button", "action": "talk", "text": "Talk", "width": 120, "height": 120,
+   "anchor": "bottom_right", "offset": {"x": -36, "y": -36}}
+  ```
+- **Sizes:** `width` and `height` are `"fit"`, `"grow"` (or `"grow 2"`),
+  points, or `"50%"`.
+- **Anchors:** an element with an `anchor` (`top_left` ... `bottom_right`, or
+  `center`) is placed over its parent at that point, moved by `offset`, out of
+  the flow of its siblings.
+- **Text:** text takes a theme text style (`title`, `small`, `muted`,
+  `emphasis` or `danger`). A `key` takes the language's text (`kin::tr`).
+
+`parse_screen` and `serialize_screen` read and write the files.
+`ui2::UiScreen` draws one with the composition API, inside a context's
+`begin()`/`end()`:
+
+```cpp
+kin::ui2::UiScreen hud{document};
+hud.set_text("score", "Score: " + std::to_string(score)); // kept until set again
+hud.draw(ui, {0, 0, width, height}, {.texture = load_image});
+if (hud.clicked("play")) start();
+const f32 volume = hud.value("volume");
+hud.clear_events();
+```
+
+- **Results:** `clicked`, `changed`, `value`, `checked` and `text` read what
+  the player did at the last draw.
+- **Changes:** `set_text`, `set_value`, `set_checked`, `set_visible`,
+  `set_image` and `set_enabled` change elements by id.
+- **For editors:** `placed()` gives where each element was laid out.
+
+In a scene, an entity with a `UiScreenComponent` (`asset`, `visible`, `order`)
+shows a screen, through `kin::SceneScreens` (`kin/ecs/ui_screens.hpp`):
+
+- **Drawing:** it reads the screens and their themes (fonts and art too),
+  reads them again when they change, and draws those shown in order over the
+  world.
+- **Access by id:** the game reaches any shown screen's elements by id:
+  `screens.clicked("pause")`, `screens.set_text("score", ...)`.
+- **Lua:** entity scripts reach them through `ui`
+  (`EntityScripts::set_screens`).
+
+Kin Studio edits both screens and themes.
+
 ## Menu Scenes
 
 Games that need a simple navigable menu should use `kin::ui2::MenuScene`. It keeps
@@ -266,7 +832,65 @@ scrolling, and copy selection are independent of a game's configured logical siz
 
 ## Automation
 
-There is no `ui.snapshot` server method. For automation, expose assertable scene
-state through `Scene::write_report`, inspect ECS scenes through `world.snapshot`,
-and drive UI with `input.mouse`, `input.action`, and `input.text`.
+Return your ui2 context from `Scene::ui_context()` to expose `ui.snapshot` and
+`ui.action`. `MenuScene` already does this. A snapshot reports stable string IDs,
+parent IDs, author keys, role, label, value, clipped logical bounds and
+enabled/visible/blocked/focus/checked flags. String IDs preserve all 64 bits in
+JavaScript clients. Snapshots describe the most recent UI frame; an initially
+empty render-driven context is rendered once to populate its layout.
 
+```json
+{"id":1,"method":"ui.snapshot"}
+{"id":2,"method":"ui.action","params":{"id":"Play","action":"click"}}
+{"id":3,"method":"sim.tick","params":{"count":1}}
+```
+
+The `id` selector matches an exact label, decimal numeric ID, or author key.
+Ambiguous selectors and hidden, disabled, or blocked targets are refused.
+`ui.semantic_key(control.id, "play_button")` assigns an author key for that frame;
+`.kinui` buttons, toggles, sliders and text inputs use their element IDs as keys.
+Actions are `click`, `focus`, and `set_text` (with a `text` string for `TextInput`
+or editable `TextEdit`). `TextEdit` keeps its undo history and byte limit.
+Sliders/number inputs also accept `increment`, `decrement` and `set_number`
+(the finite numeric value is in `text`); snapshots include their numeric range/step.
+One action may be queued per tick; it is rechecked against the next frame and
+expires after that step. Taking a screenshot does not consume it. `--inspect`
+allows snapshots of the last drawn frame and refuses semantic input, as it does
+physical input injection; inspecting never renders an extra UI frame.
+
+Buttons, icon buttons, toggles, sliders, text inputs/edits, number inputs and menu
+rows provide semantics. Labels with IDs report text. Layout boxes report groups
+and focusable controls. Other/custom controls can opt in before `region()`:
+
+```cpp
+ui.describe(id, "button", "Inventory", bounds, enabled, true);
+ui.semantic_key(id, "inventory");
+ui.register_focusable(id);
+auto interaction = ui.region(id, bounds);
+bool activated = interaction.clicked || ui.keyboard_activated(interaction); // Enter/Space/accept
+ui.semantic_state(id, value_text, checked); // after input: what it shows now
+```
+
+Roles the built-in controls use, which AccessKit maps: `button`, `toggle`,
+`slider`, `spinbutton`, `text_input`, `text_edit`, `text_view`, `text`, `menu`,
+`menu_item`, `group` and `region` (any other is a group). Every role takes
+click and focus; set_text needs `text_input`/`text_edit`, the numeric actions
+`slider`/`spinbutton` (`semantic_role_accepts`). Elements keep their slots from
+frame to frame, so describing a control costs no allocation once its strings
+have grown; `focused` is as `end()` left the focus.
+`queue_action(selector, action, text, error)` supports in-process automation, and
+`queue_action(id, action, text, number, error)` an adapter that holds ids;
+`write_snapshot` serializes the same tree. Keep assertable game state in
+`Scene::write_report` and inspect ECS scenes through `world.snapshot` alongside it.
+
+## Known gaps
+
+- **Wrapped text in a layout box** (`WrappedText` added with `ui.add`) breaks
+  its lines at the width it is given (`bounds.w`, 240 when none), not at the
+  width the box gives it: layout has no height-for-width pass. Give it the
+  width it will have (the box's, less its padding).
+- **A text field asks to be at least 160 units wide** when its width is its
+  content's (`fit()`); give it a width or let it grow to fit a narrow one.
+- **A field's text cannot be centred**; it starts at the field's left.
+- **The touch glide is ui2's own**, not the system's: no overscroll bounce or
+  edge glow, and its slowing down is a fixed curve.

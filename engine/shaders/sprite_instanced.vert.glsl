@@ -25,6 +25,8 @@ layout(location = 0) out struct {
     vec4 Color;
     vec2 UV;
 } Out;
+// A material may declare shader_geometry's custom input even when used on ordinary sprites.
+layout(location = 2) out vec4 vCustom;
 
 // Two triangles, in the order the CPU quad path emits them.
 const vec2 corners[6] = vec2[6](vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
@@ -38,6 +40,7 @@ void main() {
         pos = aTurn.xy + vec2(d.x * aTurn.z - d.y * aTurn.w, d.x * aTurn.w + d.y * aTurn.z);
     }
     Out.Color = decode_color(aColor);
+    vCustom = vec4(0.0);
     Out.UV = vec2(c.x == 0.0 ? aUV.x : aUV.z, c.y == 0.0 ? aUV.y : aUV.w);
     gl_Position = vec4(pos * ubo.uScale + ubo.uTranslate, 0.0, 1.0);
     gl_Position.y *= -1.0;

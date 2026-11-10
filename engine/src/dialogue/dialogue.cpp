@@ -6,6 +6,9 @@
 #include <kin/l10n/localization.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -272,6 +275,15 @@ const DialogueSpeaker* DialoguePlayer::speaker(std::string_view id) const {
 void DialoguePlayer::start(const DialogueDocument& document, std::string_view start_node) {
     _document = &document;
     _state = {};
+    _state.current_node = start_node.empty() ? document.start_node : std::string{start_node};
+    resolve_presentable();
+}
+
+void DialoguePlayer::start(const DialogueDocument& document, std::string_view start_node,
+                           const std::unordered_map<std::string, DialogueVariable>& variables) {
+    _document = &document;
+    _state = {};
+    _state.variables = variables;
     _state.current_node = start_node.empty() ? document.start_node : std::string{start_node};
     resolve_presentable();
 }
@@ -554,13 +566,31 @@ DialogueLoadResult parse_dialogue(std::string_view json) {
     DialogueDocument document;
     document.id = root.string_at("id");
     document.start_node = root.string_at("start_node");
+    if (const JsonValue* entries = root.find("entries"); entries && entries->is_array()) {
+        for (const JsonValue& entry : entries->items()) {
+            if (entry.is_string() && !entry.as_string().empty()) document.entries.push_back(entry.as_string());
+        }
+    }
     if (const JsonValue* speakers = root.find("speakers"); speakers && speakers->is_array()) {
         for (const JsonValue& item : speakers->items()) {
-            document.speakers.push_back({
+            DialogueSpeaker speaker{
                 .id = item.string_at("id"),
                 .name = item.string_at("name"),
                 .portrait = item.string_at("portrait"),
-            });
+            };
+            const std::string color = item.string_at("color");
+            if (color.size() == 6 || color.size() == 8) {
+                unsigned rgba[4]{0, 0, 0, 255};
+                bool read = true;
+                for (std::size_t i = 0; i < color.size() / 2 && read; ++i) {
+                    read = std::sscanf(color.substr(i * 2, 2).c_str(), "%2x", &rgba[i]) == 1;
+                }
+                if (read) {
+                    speaker.name_color = Color::rgba(static_cast<u8>(rgba[0]), static_cast<u8>(rgba[1]), static_cast<u8>(rgba[2]),
+                                                     static_cast<u8>(rgba[3]));
+                }
+            }
+            document.speakers.push_back(std::move(speaker));
         }
     }
     if (const JsonValue* nodes = root.find("nodes"); nodes && nodes->is_array()) {
@@ -571,12 +601,20 @@ DialogueLoadResult parse_dialogue(std::string_view json) {
             node.target = item.string_at("target");
             node.event_id = item.string_at("event");
             node.effects = parse_effects(item.find("effects"));
+            if (const JsonValue* place = item.find("place"); place && place->is_object()) {
+                node.place = Vec2f{static_cast<f32>(place->number_at("x")), static_cast<f32>(place->number_at("y"))};
+            }
             if (const JsonValue* line = item.find("line")) {
                 node.line.speaker_id = line->string_at("speaker");
                 node.line.text_markup = line->string_at("text");
                 node.line.voice_cue = line->string_at("voice");
                 node.line.portrait = line->string_at("portrait");
                 node.line.next = line->string_at("next");
+                if (const JsonValue* tags = line->find("tags"); tags && tags->is_array()) {
+                    for (const JsonValue& tag : tags->items()) {
+                        node.line.tags.push_back(tag.as_string());
+                    }
+                }
             }
             if (const JsonValue* choices = item.find("choices"); choices && choices->is_array()) {
                 for (const JsonValue& raw_choice : choices->items()) {
@@ -610,14 +648,28 @@ std::string dialogue_to_json(const DialogueDocument& document) {
     JsonWriter json(out);
     json.begin_object()
         .field("id", document.id)
-        .field("start_node", document.start_node)
-        .key("speakers").begin_array();
+        .field("start_node", document.start_node);
+    if (!document.entries.empty()) {
+        json.key("entries").begin_array();
+        for (const std::string& entry : document.entries) json.value(entry);
+        json.end_array();
+    }
+    json.key("speakers").begin_array();
     for (const DialogueSpeaker& speaker : document.speakers) {
         json.begin_object()
             .field("id", speaker.id)
             .field("name", speaker.name)
-            .field("portrait", speaker.portrait)
-            .end_object();
+            .field("portrait", speaker.portrait);
+        if (speaker.name_color != colors::white) {
+            char text[16];
+            std::snprintf(text, sizeof(text), "%02x%02x%02x", speaker.name_color.r, speaker.name_color.g, speaker.name_color.b);
+            json.field("color", std::string(text) + (speaker.name_color.a == 255 ? std::string() : [&] {
+                char alpha[4];
+                std::snprintf(alpha, sizeof(alpha), "%02x", speaker.name_color.a);
+                return std::string(alpha);
+            }()));
+        }
+        json.end_object();
     }
     json.end_array().key("nodes").begin_array();
     for (const DialogueNode& node : document.nodes) {
@@ -627,14 +679,22 @@ std::string dialogue_to_json(const DialogueDocument& document) {
         if (!node.target.empty()) json.field("target", node.target);
         if (!node.event_id.empty()) json.field("event", node.event_id);
         if (!node.effects.empty()) json.key("effects"), write_effects(json, node.effects);
+        if (node.place) {
+            json.key("place").begin_object().field("x", static_cast<f64>(std::round(node.place->x))).field("y", static_cast<f64>(std::round(node.place->y))).end_object();
+        }
         if (node.kind == DialogueNodeKind::Line) {
             json.key("line").begin_object()
                 .field("speaker", node.line.speaker_id)
                 .field("text", node.line.text_markup)
                 .field("voice", node.line.voice_cue)
                 .field("portrait", node.line.portrait)
-                .field("next", node.line.next)
-                .end_object();
+                .field("next", node.line.next);
+            if (!node.line.tags.empty()) {
+                json.key("tags").begin_array();
+                for (const std::string& tag : node.line.tags) json.value(tag);
+                json.end_array();
+            }
+            json.end_object();
         }
         if (!node.choices.empty()) {
             json.key("choices").begin_array();
@@ -654,6 +714,116 @@ std::string dialogue_to_json(const DialogueDocument& document) {
     }
     json.end_array().end_object();
     return out.str();
+}
+
+std::vector<std::string> dialogue_targets(const DialogueNode& node) {
+    std::vector<std::string> out;
+    switch (node.kind) {
+    case DialogueNodeKind::Line:
+        if (!node.line.next.empty()) out.push_back(node.line.next);
+        break;
+    case DialogueNodeKind::Choice:
+        for (const DialogueChoice& choice : node.choices) {
+            if (!choice.target.empty()) out.push_back(choice.target);
+        }
+        break;
+    case DialogueNodeKind::Jump:
+    case DialogueNodeKind::Event:
+        if (!node.target.empty()) out.push_back(node.target);
+        break;
+    case DialogueNodeKind::End:
+        break;
+    }
+    for (const DialogueEffect& effect : node.effects) {
+        if (effect.kind == DialogueEffectKind::Jump && !effect.key.empty()) out.push_back(effect.key);
+    }
+    return out;
+}
+
+std::vector<std::string> dialogue_problems(const DialogueDocument& document) {
+    std::vector<std::string> out;
+    const auto has_node = [&](std::string_view id) {
+        return std::ranges::any_of(document.nodes, [&](const DialogueNode& n) { return n.id == id; });
+    };
+    std::vector<std::string> seen;
+    for (const DialogueNode& node : document.nodes) {
+        if (node.id.empty()) {
+            out.push_back("a node has no id");
+        } else if (contains_string(seen, node.id)) {
+            out.push_back("node '" + node.id + "' is given twice");
+        }
+        seen.push_back(node.id);
+    }
+    if (document.nodes.empty()) {
+        out.push_back("it has no nodes");
+        return out;
+    }
+    if (!has_node(document.start_node)) {
+        out.push_back("its start, '" + document.start_node + "', is no node");
+    }
+    for (const std::string& entry : document.entries) {
+        if (!has_node(entry)) out.push_back("its start '" + entry + "' is no node");
+    }
+    for (const DialogueNode& node : document.nodes) {
+        if (node.kind == DialogueNodeKind::Jump && node.target.empty()) {
+            out.push_back("jump '" + node.id + "' goes nowhere");
+        }
+        for (const std::string& target : dialogue_targets(node)) {
+            if (!has_node(target)) {
+                out.push_back("node '" + node.id + "' goes to '" + target + "', which is no node");
+            }
+        }
+        if (node.kind == DialogueNodeKind::Choice) {
+            if (node.choices.empty()) {
+                out.push_back("choice '" + node.id + "' has no choices");
+            }
+            for (const DialogueChoice& choice : node.choices) {
+                if (choice.target.empty()) {
+                    out.push_back("a choice of '" + node.id + "' (" + (choice.text_markup.empty() ? choice.id : choice.text_markup) +
+                                  ") goes nowhere");
+                }
+            }
+        }
+        if (node.kind == DialogueNodeKind::Line && !node.line.speaker_id.empty() &&
+            std::ranges::none_of(document.speakers, [&](const DialogueSpeaker& s) { return s.id == node.line.speaker_id; })) {
+            out.push_back("line '" + node.id + "' is said by '" + node.line.speaker_id + "', who is no speaker");
+        }
+    }
+    // What the starts reach.
+    std::vector<std::string> reached;
+    std::vector<std::string> next{document.start_node};
+    next.insert(next.end(), document.entries.begin(), document.entries.end());
+    while (!next.empty()) {
+        const std::string id = next.back();
+        next.pop_back();
+        if (contains_string(reached, id)) continue;
+        reached.push_back(id);
+        for (const DialogueNode& node : document.nodes) {
+            if (node.id == id) {
+                for (std::string& target : dialogue_targets(node)) next.push_back(std::move(target));
+            }
+        }
+    }
+    for (const DialogueNode& node : document.nodes) {
+        if (!node.id.empty() && !contains_string(reached, node.id)) {
+            out.push_back("node '" + node.id + "' is never reached from a start");
+        }
+    }
+    return out;
+}
+
+std::string dialogue_variable_text(const DialogueVariable& value) {
+    return string_value(value);
+}
+
+DialogueVariable dialogue_variable_from_text(std::string_view text) {
+    if (text == "true") return {.value = true};
+    if (text == "false") return {.value = false};
+    char* end = nullptr;
+    const std::string copy(text);
+    const double number = std::strtod(copy.c_str(), &end);
+    if (!copy.empty() && end == copy.c_str() + copy.size()) return {.value = number};
+    return {.value = copy};
 }
 
 bool save_dialogue(const DialogueDocument& document, const std::filesystem::path& path, std::string* error) {

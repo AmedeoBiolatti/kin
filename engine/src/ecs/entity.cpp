@@ -44,6 +44,10 @@ EcsEntityRegistry::EcsEntityRegistry(EcsWorld& world)
 EcsEntityRegistry::~EcsEntityRegistry() = default;
 
 EcsEntity EcsEntityRegistry::create(const EntityCreateDescriptor& descriptor) {
+    if (const auto taken = descriptor.authored_id.empty() ? _by_authored_id.end() : _by_authored_id.find(descriptor.authored_id);
+        taken != _by_authored_id.end() && !entity_from_id(taken->second)) {
+        forget(taken->second); // destroyed past the registry (flecs itself): its id is free again
+    }
     if (!descriptor.authored_id.empty() && _by_authored_id.contains(descriptor.authored_id)) {
         set_error("duplicate authored entity id '" + descriptor.authored_id + "'");
         return {};
@@ -84,8 +88,11 @@ EcsEntity EcsEntityRegistry::register_existing(EcsEntity entity, EntityAuthoredI
     if (!authored_id.empty()) {
         const auto duplicate = _by_authored_id.find(authored_id);
         if (duplicate != _by_authored_id.end() && duplicate->second != entity.id()) {
-            set_error("duplicate authored entity id '" + authored_id + "'");
-            return {};
+            if (entity_from_id(duplicate->second)) {
+                set_error("duplicate authored entity id '" + authored_id + "'");
+                return {};
+            }
+            forget(duplicate->second); // destroyed past the registry (flecs itself): its id is free again
         }
     }
 

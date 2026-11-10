@@ -3,6 +3,7 @@
 // Renderer3D asks for it. It shares the 2D backend's device, pipeline cache
 // and frame: a view is rendered in the frame's command buffer between the 2D
 // draws around it. Experimental: see docs/3d_plan.md.
+#include "gpu_area_lights3d.hpp"
 #include "gpu_buffer.hpp"
 #include "gpu_mesh_pool.hpp"
 #include "gpu_shader.hpp"
@@ -10,10 +11,13 @@
 
 #include <SDL3/SDL.h>
 #include <array>
+#include <chrono>
 #include <kin/render3d/backend3d.hpp>
 #include <kin/render3d/local_lights3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
+#include <kin/renderer/resource_graph.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -31,18 +35,49 @@ class GpuTextureBackend;
 
 // A view's bounding planes (xyz the normal, inward, length 1; w the offset),
 // from its view-projection matrix; an infinite far plane is left out.
+// A view's bounding planes: its six (five with no far plane), and a seventh for a camera's clip plane (Camera3D::
+// clip_plane: a mirror's or a portal's view culls what is behind it as it culls what is out of view).
 struct GpuFrustum {
-    std::array<Vec4f, 6> planes{};
+    std::array<Vec4f, 7> planes{};
     u32 count = 0;
 };
 
 // One mesh instance as mesh.vert reads it (std430): 128 bytes.
 struct GpuInstance3D {
     f32 model[16];
-    f32 normal[12]; // three columns of the normals' matrix, each padded to four
+    f32 normal[12]; // three columns of the normals' matrix, each padded to four (w: the pick id, the DrawClip3D)
     f32 color[4];   // linear, straight alpha
 };
 static_assert(sizeof(GpuInstance3D) == 128);
+
+class GpuRenderer3D;
+class GpuPreparedScene3D final : public IPreparedSceneBackend3D {
+public:
+    bool valid() const override;
+    GpuRenderer3D* owner = nullptr;
+    SharedDevice device;
+    u64 frame = 0;
+    struct Source {
+        const Scene3D* scene = nullptr;
+        std::weak_ptr<const u64> lifetime;
+        u64 identity = 0, revision = 0, pose = 0;
+        std::vector<u32> first;
+    };
+    std::array<Source, 2> sources;
+    struct Batch {
+        const InstanceBatch3D* batch;
+        u64 revision;
+    };
+    std::vector<Batch> batches;
+    std::vector<GpuInstance3D> records;
+    std::vector<Vec4f> spheres;
+    std::vector<f32> scales;
+    std::vector<u32> uploaded_rows, uploaded_local_rows;
+    u64 local_upload_generation = 0;
+    u64 upload_generation = 0, joints_generation = 0, offsets_generation = 0;
+    u32 joint_mask = 0;
+    u64 cpu_bytes() const;
+};
 
 // Meshes the GPU cuts (MeshOptions3D::clusters, on a device that can) share big buffers, so that one dispatch of the
 // cut covers many meshes (a barrier for every buffer bound is what a dispatch a mesh costs: Sponza's hundred meshes
@@ -66,6 +101,14 @@ struct GpuClusterChunk {
 // A mesh's buffers. Games may keep meshes past the renderer (in scenes that
 // outlive it): like textures they hold the device's shared handle, and skip
 // the release once it is gone.
+// A mesh with morph targets, blended on the GPU (morph_blend.comp): its vertices at rest (GpuMeshVertex, 9 words each)
+// and every target's offsets (6 floats a vertex, target after target), shared by the mesh's copies.
+struct GpuMorphSource {
+    GpuBuffer base, deltas;
+    u32 vertices = 0, targets = 0;
+    bool normals = false; // a target moves normals
+};
+
 class GpuMesh3D final : public IMeshBackend3D {
 public:
     explicit GpuMesh3D(SharedDevice device) : device(std::move(device)) {}
@@ -101,7 +144,29 @@ public:
     std::shared_ptr<GpuClusterChunk> chunk;
     u32 table_first = 0;
     u64 serial = 0; // unique for the renderer's life: the shadow cache's name for the mesh (a pointer can be reused)
+    // A mesh with morph targets (MeshData3D::morph_targets): its own vertex buffer, rewritten by update_mesh_vertices,
+    // and how many times it has been (the shadow caches' key for its shape).
+    bool dynamic = false;
+    u32 vertex_count = 0;
+    u64 content = 0;
+    std::shared_ptr<const GpuMorphSource> morph; // set where the GPU blends (else the CPU does, update_mesh_vertices)
+    // With `morph`: the vertices as they were before this frame's first blend (the velocity pre-pass's previous
+    // positions: prepass_velocity_morph.vert), and the frame (GpuRenderer2DBackend's serial) of the last blend.
+    SDL_GPUBuffer* previous = nullptr;
+    u64 blended_frame = 0;
+    // Where global illumination can be had: the box of each run of gi_run_triangles of level 0's triangles (the mesh's
+    // space, at rest), so that the GI scene's voxelizer takes only the runs that reach where it changed.
+    std::vector<Bounds3D> gi_runs;
+    // And level 0's triangles (three corners each, the mesh's space): the area lights' shadows (gpu_area_lights3d.hpp).
+    std::vector<Vec3f> gi_triangles;
 };
+constexpr u32 gi_run_triangles = 64;
+// The GI scene's emitters: an emissive voxel holds its colour and, in its alpha (half float: whole numbers to 2048
+// exact), its emitter's number, whose strength the GI's light takes each render from a list.
+constexpr u32 max_gi_emitters = 2048;
+// The GI's sun map: its side, and its slot in the local shadow cache (after the local lights' and the moon's).
+constexpr u32 gi_sun_map_side = 4096;
+constexpr u32 gi_sun_cache = max_local_shadow_layers + max_shadow_cascades;
 
 // A cluster as the GPU cut reads it (cluster_cull.comp's Cluster, std430): 80 bytes.
 struct GpuCluster {
@@ -122,12 +187,84 @@ public:
     GpuTexture irradiance; // equirectangular, small: what a diffuse surface facing each way receives
     u32 levels = 1;
     bool filtered = false;
+    u64 generation = 0; // counts the filterings (the reflection array copies the specular again when it changes)
+};
+
+// A reflection probe's picture (render3d/reflection_probes3d.hpp): the view it is captured with (square, 90 degrees,
+// float), its six faces, and the panorama made of them, mipmapped, as an environment's picture is. The renderer
+// filters the panorama into a layer of its reflection array (GpuRenderer3D::prepare_reflections).
+class GpuReflectionCapture3D final : public IReflectionCaptureBackend3D {
+public:
+    u64 generation() const override { return captured; }
+    std::shared_ptr<IViewBackend3D> view;
+    GpuTexture faces;  // 6 layers, the views' float pictures
+    GpuTexture source; // the panorama, 4 x 2 faces' sides, mipmapped
+    u32 side = 0;
+    u64 captured = 0; // captures so far
 };
 
 // A material's own fragment shader (Material3D::shader).
 class GpuMaterialShader3D final : public IMaterialShaderBackend3D {
 public:
     GpuShader shader;
+    SharedDevice device;
+    std::vector<ShaderResourceInfo> textures, buffers;
+    bool valid() const override { return bool(shader); }
+};
+// A material's surface shader (Material3D::surface): its variants, in SurfaceVariant3D's order, each standing for the
+// stock mesh fragment shader of the same defines (mesh.frag ... mesh_velocity_light_fog.frag) with its layout.
+class GpuSurfaceShader3D final : public ISurfaceShaderBackend3D {
+public:
+    std::array<GpuShader, surface_variant_count3d> variants;
+    SharedDevice device;
+    // Its variants (but the cut-outs) sample Material3D::graph_maps, the sampler after the stock layout's (made from
+    // kin_material.inc.glsl since graph maps; older SPIR-V has the stock layout as it was).
+    bool graph_maps = false;
+    // Its fog variants sample the fog volume's sums (uFogVolume, after the graph maps; made since volumetric fog): the
+    // plain ones', and the light ones' (none: SDL_GPU's 16 samplers are the stock light layout's and the graph maps).
+    bool fog_volume = false, fog_volume_lit = false;
+    bool valid() const override {
+        for (u32 i = 0; i < surface_required_variants3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    // Its merged draws' variants (mesh_material.frag's): optional; without them its draws are not merged. (Nor are
+    // they where it moves its vertices: mesh_material.vert has no offset.)
+    bool merges() const {
+        for (u32 i = surface_required_variants3d; i < surface_mask_variant3d; ++i)
+            if (!variants[i])
+                return false;
+        return !offsets();
+    }
+    // Its vertex variants (a surface with an offset: World Position Offset): optional, all or none.
+    bool offsets() const {
+        for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    SDL_GPUShader* vertex(SurfaceVariant3D v) const { return variants[u32(v)].handle(); }
+    // Its cut-outs' variants (a surface defining kin_surface_alpha): optional; without them its cut-outs in the
+    // shadow, occluder, pick, pre- and visibility passes follow the base map's alpha.
+    bool masks() const {
+        for (u32 i = surface_mask_variant3d; i < surface_vertex_variant3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    SDL_GPUShader* mask(SurfaceVariant3D v) const { return variants[u32(v)].handle(); }
+};
+class GpuMaterialInputs3D final : public IMaterialInputsBackend3D {
+public:
+    SharedDevice device;
+    std::shared_ptr<GpuMaterialShader3D> shader;
+    std::vector<Texture> input_textures;
+    std::vector<DataBuffer> input_buffers;
+    mutable u64 validation_epoch = 0, signature = 0;
+    bool valid() const override { return device && *device && shader && shader->valid(); }
+    std::span<const Texture> textures() const override { return input_textures; }
+    std::span<const DataBuffer> buffers() const override { return input_buffers; }
 };
 
 // Where last frame's copies were, for the velocity of this frame's (Scene3D::taa):
@@ -150,6 +287,31 @@ struct GpuCopyHistory {
     std::vector<u32> joint_first;
 };
 
+// A copy of a view's adapted exposure on its way back from the GPU (Renderer3D::exposure): a small transfer buffer the
+// frame's commands download into, and the fence that says that frame is done (submitted right after it).
+struct GpuSharedFence {
+    SharedDevice device;
+    SDL_GPUFence* fence = nullptr;
+    GpuSharedFence(SharedDevice device, SDL_GPUFence* fence) : device(std::move(device)), fence(fence) {}
+    GpuSharedFence(const GpuSharedFence&) = delete;
+    GpuSharedFence& operator=(const GpuSharedFence&) = delete;
+    ~GpuSharedFence(); // waits for it first: a fence is never released unsignalled
+    bool signaled() const;
+};
+struct GpuExposureReadback {
+    SharedDevice device;
+    SDL_GPUTransferBuffer* transfer = nullptr;
+    std::shared_ptr<GpuSharedFence> fence;
+    bool recorded = false; // downloaded into in commands not yet fenced
+    std::optional<f32> value;
+    GpuExposureReadback() = default;
+    GpuExposureReadback(const GpuExposureReadback&) = delete;
+    GpuExposureReadback& operator=(const GpuExposureReadback&) = delete;
+    ~GpuExposureReadback();
+    // Reads the copy if its fence has signalled (never waits); true when one is in flight.
+    bool poll();
+};
+
 class GpuView3D final : public IViewBackend3D {
 public:
     Texture texture() const override;
@@ -158,20 +320,54 @@ public:
     void reset_history() override {
         _taa_reset_asked = true;
         _occ_reset = true;
+        _exposure_valid = false;
+        _fog_volume_valid = false;
+    }
+    Vec2i render_size() const override { return extent(); }
+    bool set_render_size(Vec2i size) override {
+        _extent = size.x > 0 && size.y > 0 ? Vec2i{std::min(size.x, _size.x), std::min(size.y, _size.y)} : Vec2i{};
+        return true;
     }
 
 private:
     friend class GpuRenderer3D;
+    // What a render fills, from the top-left (set_render_size): the whole when unset.
+    Vec2i extent() const { return _extent.x > 0 ? _extent : _size; }
+    Vec2i _extent{};
+    // Scene3D::time of its frame and of the frame before (a moving surface's previous position, for the velocity).
+    f32 _offset_clock[2] = {0.0f, 0.0f};
+    bool _offset_clock_seen = false;
+    ResourceGraphCompiler _graph_compiler;
+    ResourceGraphCompiler _geometry_compiler;
+    ResourceGraphDesc _geometry_recipe;
     Vec2i _size{};
     u32 _samples = 1; // as made: what the device has for the format
     ViewOptions3D _options{};
+    u64 _taa_material_inputs = 0;
     bool _hdr = false;                                                   // drawn in float, then out through view_output
     SDL_GPUTextureFormat _format = SDL_GPU_TEXTUREFORMAT_INVALID;        // the scene's colour (float when HDR)
     SDL_GPUTextureFormat _output_format = SDL_GPU_TEXTUREFORMAT_INVALID; // the 2D pipeline's, followed
     GpuTexture _colour; // multisampled; empty with one sample (drawn into the resolved one)
     GpuTexture _depth;
-    GpuTexture _scene;             // HDR: the resolved float picture
+    GpuTexture _scene; // HDR: the resolved float picture
+    // Screen-space reflections (ssr_trace): the half-size grid's results (three words a texel), then the previous
+    // frame's picture as a pyramid (ssr_keep_picture: two words a texel, half size down), and the camera it was seen
+    // with (unjittered); `_ssr_seen` when the pyramid holds one.
+    std::shared_ptr<GpuBuffer> _ssr_buffer;
+    Mat4f _ssr_prior{};
+    f32 _ssr_prior_y = 1.0f; // its projection's [1][1] (how wide a world unit shows at a depth)
+    Vec2i _ssr_prior_grid{}; // the pyramid's level 0 (the half-size grid of the part rendered then)
+    u32 _ssr_prior_levels = 0;
+    bool _ssr_seen = false;
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
+    // ViewOptions3D::auto_exposure: the histogram and the adapted exposure (exposure_histogram/adapt.comp), whether it
+    // holds a metered exposure yet, and the clocks the time between renders is measured with.
+    std::shared_ptr<GpuBuffer> _exposure;
+    bool _exposure_valid = false;
+    bool _exposure_time_seen = false;
+    f32 _exposure_time = 0.0f;
+    std::chrono::steady_clock::time_point _exposure_wall{};
+    std::shared_ptr<GpuExposureReadback> _exposure_read;
     GpuTexture _pick, _pick_depth; // with ViewOptions3D::pick: position and id a pixel
     bool _pick_valid =
         false; // a render has written _pick since it was made (a new target holds whatever the memory did)
@@ -181,10 +377,31 @@ private:
     GpuTexture _ao_chain; // the linear depth chain of the occlusion (R32F, 5 levels), rebuilt each render that uses it;
                           // goes with _ao_depth
     GpuTexture _ao_depth, _ao_normals, _ao_raw,
-        _ao_across; // the occlusion's result is in _ao_raw (the blur ends back in it)
+        _ao_across;                   // the occlusion's result is in _ao_raw (the blur ends back in it)
+    GpuTexture _ao_upsampled;         // half-size AO reconstructed against full-size depth/normals; R8
+    bool _ao_upsampled_ready = false; // written by this render, never a previous mode/frame
     // With Scene3D::contact_shadows, the same way (the pre-pass's depth and
     // normals are shared): the march, blurred across, blurred down; R8, the view's size.
     GpuTexture _contact_raw, _contact_across; // and the contact shadows' in _contact_raw
+    // With Fog3D::sun_shadows: the share of the fog's air the sun reaches along each ray (fog_sun.comp), RGBA16F at
+    // half the view's size; made by the first render that asks, dropped by the first that does not.
+    GpuTexture _fog_sun;
+    // With Fog3D::volumetric: the lights' light in the fog's air, a cell each (fog_volume.comp, RGBA16F volumes: this
+    // frame's and the last's, swapped each render), and its sums along the rays (fog_volume_integrate.comp); made by
+    // the first render that asks, dropped by the first that does not. What the last frame's volume was made with, to
+    // read it where a cell was then: the camera's world to clip (unjittered), eye and forward, and the volume's shape.
+    std::array<GpuTexture, 2> _fog_volume;
+    GpuTexture _fog_volume_sum;
+    // Per column of its cells, the view depth they are lit to (fog_volume_depth.comp: the tile's farthest surface, then
+    // its 3 x 3 neighbourhood's), R32F.
+    std::array<GpuTexture, 2> _fog_volume_reach;
+    u32 _fog_volume_written = 0; // the one of _fog_volume the last render wrote
+    bool _fog_volume_valid = false;
+    Mat4f _fog_volume_previous{};
+    Vec3f _fog_volume_eye{}, _fog_volume_forward{};
+    f32 _fog_volume_depth = 0.0f;
+    std::array<u32, 3> _fog_volume_cells{}; // across, down, slices
+    u32 _fog_volume_frame = 0;              // the point within each cell moves each render
     // With Scene3D::taa, made by the first render that asks and dropped by the
     // first that does not: one-sample depth for the main pass (the view's own
     // may be multisampled), the 8-bit view's float picture before the resolve
@@ -193,8 +410,13 @@ private:
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
+    // The velocities the resolve took (the nearest surface's round each pixel; two halves in R32_UINT, their lowest
+    // bits holding how recently the depth bent there, for the sharpening), this frame's and the last, read and written
+    // as the history is: the next frame compares its own with them.
+    std::array<GpuTexture, 2> _taa_dilated;
     u32 _taa_read = 0;       // which of the two holds the last frame
     u32 _taa_frame = 0;      // frames drawn with it, for the jitter
+    u32 _taa_held = 0;       // frames the history holds since it was last reset (a still pixel's weight)
     bool _taa_valid = false; // the history holds a picture to blend
     u64 _taa_coverage_key = 0;
     u64 _taa_shadow_revision = 0;
@@ -231,9 +453,120 @@ private:
     u32 _occ_words = 0; // clusters the history covers
     std::vector<OccRegion> _occ_layout;
     bool _occ_reset = true; // View3D::reset_history(), a resize: the history is dropped
+    // With Scene3D::global_illumination (G5; gpu_gi3d.cpp), made by the first render that asks. The GI scene: its
+    // voxels' distances (R16F), colours and normals (RGBA8), emission (RGBA16F) and light (the lit scene: RGBA16F, each
+    // side's), each level's window stacked along z and stored wrapped round; the build's two words a voxel (the owners
+    // and the faces' ways, then the flood's seeds); a window's size, the levels, the first level's voxel side, each
+    // window's first voxel, the key of the settings a whole build was made for, and the last render's copies (a hash
+    // and a box each, by hash), from which what changed is found. The blocks made this render (the lit scene lights
+    // them at once; each a stored x, y and z in a byte each, the level in the top byte) and the boxes whose distances
+    // it wrote (a level, then a box of window blocks: the probes near them are placed again); the renders so far (the
+    // lit scene's turn). The probes (G5b): their atlases (irradiance RGBA16F, 8 x 8 a probe; moments RG16F, 16 x 16;
+    // data RGBA16F, one a probe: offset and state), stacked by level; the rays of a batch and the lists the passes
+    // read; a window's counts, the spacing in voxels, the levels, each window's first probe, those waiting to be traced
+    // first, the next in turn, the updates so far (the rays' turn) and whether their light is shown.
+    struct Gi {
+        GpuTexture distance, albedo, normal, emission, radiance, radiance_back;
+        std::shared_ptr<GpuBuffer> owners, seeds;
+        std::array<u32, 3> size{};
+        u32 levels = 0;
+        f32 cell = 0.0f;
+        std::array<std::array<i32, 3>, max_gi_levels> origin{};
+        u64 key = 0;
+        bool valid = false; // the textures hold a built scene
+        std::vector<std::pair<u64, Bounds3D>> copies;
+        std::vector<u64> copy_order; // last submission order; unchanged geometry needs no sort/diff
+        std::vector<u32> made;
+        std::vector<std::array<i32, 7>> rewritten;
+        // The emitters (an emissive draw's material, its strength left out): each one's number (from 1, in the voxels'
+        // alpha), its strength this render, and the tick it was last given one (two draws alike but for their strength
+        // in one render: the second keeps its strength in its voxels instead).
+        std::unordered_map<u64, u32> emitter_of;
+        std::vector<f32> emitter_strength;
+        std::vector<u32> emitter_tick;
+        std::array<std::vector<Bounds3D>, max_gi_levels> waiting_changes; // what changed, each level's, not yet made
+        std::vector<Bounds3D> last_changes; // what changed in the last render something did, and its tick
+        u32 last_change_tick = 0;
+        u32 ticks = 0; // renders that had the GI scene
+        u64 renders = 0;
+        GpuTexture irradiance, moments, probe_data;
+        // The probes' light on the view (gi_resolve.comp's; RGBA16F, half its size), and the render before's, which it
+        // keeps from (the pairs take turns), with that render's view.
+        GpuTexture light, slope, last_light, last_slope;
+        GpuTexture coverage; // R16F, half size; current window/probe support, without temporal history
+        // Area lights (GlobalIllumination3D::area_lights; gpu_area_lights3d.hpp): the copies' triangles in a hierarchy
+        // and the emitters as the shaders read them (made again when the copies change), the GI emitters they light
+        // (a flag each), and gi_area.comp's light on the view (RGBA16F, half size: rgb the light, a the coverage).
+        std::shared_ptr<GpuBuffer> area_triangles, area_nodes, area_emitters, area_explicit, area_scene;
+        u32 area_emitter_count = 0, area_explicit_count = 0, area_copies_at = 0; // (vec4s into area_scene)
+        bool area_built = false, area_resolved = false;
+        GpuTexture area;
+        // Interleaved (area_lights.interleave > 1): the render before's whole (area and area_before take turns), the
+        // view it was seen from (without the jitter), and which share is found next (the half's parity, or the
+        // quarter's turn: 0 to 3).
+        GpuTexture area_before;
+        Mat4f area_before_view_projection{};
+        Vec3f area_before_eye{}, area_before_forward{};
+        bool area_has_before = false;
+        u32 area_parity = 0;
+        // The texels the fill could not take from the render before, for gi_area.comp to find (two turns: one listed
+        // this render, the other cleared for the next).
+        std::shared_ptr<GpuBuffer> area_retry_args, area_retry_list;
+        u32 area_retry_turn = 0, area_retry_texels = 0, area_retry_tiles = 0;
+        // The meshes' hierarchies (made once each) in area_triangles and area_nodes, kept here too: by mesh serial,
+        // each one's first triangle and first node; what the buffers hold beyond the meshes still drawn is dropped
+        // when it is as much again.
+        std::unordered_map<u64, std::array<u32, 2>> area_meshes;
+        // Each mesh's occluder past the budget (simplify_area_light_occluder) and whether each occluder closes a volume
+        // (area_light_closed), by mesh serial x 16 + its halvings; the halvings the budget asks for now; whether the
+        // copies hold an emitter (scanned when they change).
+        std::unordered_map<u64, std::vector<Vec3f>> area_occluders;
+        std::unordered_map<u64, bool> area_closed;
+        u32 area_coarse = 0;
+        // The emitters kept as area lights (build_area_light_emitters), made again when an emitting copy changes (its
+        // signature: the emitting copies' hashes and the settings that choose them).
+        AreaLightEmitters area_lights;
+        std::unordered_map<u64, AreaLightPieces> area_pieces; // by mesh serial: area_light_pieces
+        u64 area_emitter_signature = 0;
+        bool area_scanned = false, area_emitting = false;
+        std::vector<f32> area_mesh_triangles, area_mesh_nodes;
+        // Copies that have not changed for area_settle renders (and those there at the first) are settled: their
+        // triangles, in world space, make one hierarchy (one copy in the copies' hierarchy, made again only when the
+        // settled ones change); the others (moving, or new) are copies of their meshes' own. Each copy's (hash's)
+        // first tick; the settled ones' signature, where their hierarchy is, and the render the copies last changed.
+        std::unordered_map<u64, u32> area_seen;
+        // The emitters as the main pass reads them for their reflections (each render: the GI's strengths applied).
+        std::vector<f32> area_emitter_data;
+        std::shared_ptr<GpuBuffer> area_shading;
+        // Each voxel's area light (its front's, before the probes' strength), kept while the epoch stays: the epoch
+        // (1 to 1024, in the alpha) moves on when the area lights' scene or the GI emitters' strengths change.
+        GpuTexture area_cache;
+        u32 area_epoch = 1;
+        std::vector<f32> area_strengths;
+        u64 area_settled_signature = 0;
+        std::array<u32, 2> area_settled_at{};
+        Bounds3D area_settled_box{};
+        u32 area_settled_triangles = 0, area_moving = 0, area_last_change = 0;
+        Vec3f centre{}; // unsnapped camera for continuous clipmap blending
+        bool fixed_outer = false;
+        Mat4f last_view_projection{};
+        Vec3f last_eye{}, last_forward{};
+        bool has_last = false;
+        std::shared_ptr<GpuBuffer> rays, place_list, batch_list, light_list;
+        std::array<u32, 3> probe_counts{};
+        u32 spacing = 0, probe_levels = 0;
+        std::array<std::array<i32, 3>, max_gi_levels> probe_origin{};
+        std::vector<u32> pending; // probes to trace before the others (a stored index, the level in the top 8 bits)
+        std::vector<u8> waiting;  // a probe each (level by level): 1 while it is in `pending`
+        bool probes_valid = false;
+        std::array<u32, max_gi_levels> next{}; // each level's turn: the probe it updates next
+        u64 updates = 0;
+        bool lit = false;
+    } _gi;
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
-    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0;
+    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0,
+        _idle_gi = 0;
 };
 
 class GpuRenderer3D final : public IRendererBackend3D {
@@ -249,11 +582,49 @@ public:
     RendererCapabilities3D capabilities() const override { return _capabilities; }
     std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
+    bool update_mesh_vertices(IMeshBackend3D& mesh, std::span<const MeshVertex3D> vertices) override;
+    bool set_morph_weights(IMeshBackend3D& mesh, std::span<const f32> weights) override;
+    std::shared_ptr<IMeshBackend3D> copy_mesh(const IMeshBackend3D& mesh) override;
+    std::optional<f32> read_exposure(IViewBackend3D& view) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
+    std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32 side) override;
+    bool capture_reflection(IReflectionCaptureBackend3D& capture, Scene3D& scene, Vec3f position,
+                            const ReflectionCaptureOptions3D& options, IViewBackend3D* lighting,
+                            RenderDebugStats3D& stats) override;
+    bool global_illumination_lit(IViewBackend3D& view) const override;
+    bool read_reflection_capture(IReflectionCaptureBackend3D& capture, std::vector<f32>& rgb, Vec2i& size) override;
+    bool read_mesh(const IMeshBackend3D& mesh, u32 vertex_count, MeshData3D& out) override;
+    bool read_texture(const Texture& texture, std::vector<u8>& texels, Vec2i& size) override;
+    std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i size,
+                                                                                std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
+    std::shared_ptr<ISurfaceShaderBackend3D>
+    create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) override;
+    Texture create_map_array(Vec2i size, std::span<const u8* const> layers) override;
+    Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
+                                                      std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
+    bool renders_part(const IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D* lit_by) const override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
+    bool render_lit_by(IViewBackend3D& view, const Scene3D& scene, const IViewBackend3D& lit_by,
+                       RenderDebugStats3D& stats) override;
+    bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) override;
+    std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
+                                                     RenderDebugStats3D&) override;
+    bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
+    bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
+    bool render_visibility(const VisibilityTargets3D&, IPreparedSceneBackend3D&, const VisibilityOptions3D&,
+                           RenderDebugStats3D&) override;
+    Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,
+                                            RenderDebugStats3D&) override;
+    Result3D<LocalShadows3D> render_local_shadows(const Texture&, IPreparedSceneBackend3D&,
+                                                  std::span<const LocalShadowRequest3D>, Vec2i,
+                                                  RenderDebugStats3D&) override;
+    bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
+                        RenderDebugStats3D&) override;
+    bool render_bloom(const BloomTargets3D&, const Texture&, const BloomOptions3D&, RenderDebugStats3D&) override;
+    bool render_output(const RenderTarget&, const Texture&, const OutputOptions3D&, RenderDebugStats3D&) override;
     Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) override;
     bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
 
@@ -262,8 +633,27 @@ public:
     SDL_GPUTextureFormat depth_format() const { return _depth_format; }
 
 private:
+    friend class GpuPreparedScene3D;
+    bool preparation_live(u64 frame) const;
+    bool validate_material_inputs(const Scene3D&, std::span<const Texture> outputs = {},
+                                  u64* signature = nullptr) const;
+    mutable u64 _input_validation_epoch = 0;
+    bool render_scene(IViewBackend3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
+    bool render_geometry_scene(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
-    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder, Reactive, ReactiveWire };
+    enum class Pass : u8 {
+        Opaque,
+        Wire,
+        Alpha,
+        Additive,
+        Shadow,
+        Pick,
+        Prepass,
+        Occluder,
+        Reactive,
+        ReactiveWire,
+        Visibility
+    };
     enum class Unlit : u8 { Off, Colour, Textured };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
@@ -279,21 +669,34 @@ private:
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                       SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false,
                                       bool fog = false, bool lights = false, Unlit unlit = Unlit::Off,
-                                      bool indexed = false) const;
+                                      bool indexed = false, const GpuSurfaceShader3D* surface = nullptr) const;
     // Pure requests shared by actual draws and conservative warm-up variants.
     struct MaterialPipeline {
         const GpuMaterialShader3D* custom;
         Unlit unlit;
         bool cull, mask;
         Pass pass;
+        // A surface shader's variants in place of the stock ones (never with `custom`, which takes its place).
+        const GpuSurfaceShader3D* surface = nullptr;
     };
     struct MeshPipelineRequest {
         SDL_GPUTextureFormat format;
         u32 samples;
         MaterialPipeline material;
         bool velocity, skinned;
-        bool fog = false, lights = false, indexed = false;
+        bool fog = false, lights = false, indexed = false, materials = false;
     };
+    struct MaterialUniforms {
+        f32 params[4], pbr[4], maps[4], emission[4], uv[4];
+    };
+    static_assert(sizeof(MaterialUniforms) == 80);
+    // A surface shader's slot 1: the stock block, then Material3D::shader_params (kin_surface_param).
+    struct SurfaceMaterialUniforms {
+        MaterialUniforms material;
+        f32 surface[surface_param_count3d];
+    };
+    static_assert(sizeof(SurfaceMaterialUniforms) == 80 + 4 * surface_param_count3d);
+    static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
                                        bool fog) const;
     SDL_GPUGraphicsPipeline* pipeline(const MeshPipelineRequest& request) const;
@@ -310,10 +713,12 @@ private:
     // The camera's turn into the pre-pass's velocity target, over the pre-pass's depth.
     SDL_GPUGraphicsPipeline* sky_velocity_pipeline(SDL_GPUTextureFormat depth) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
+    // The same, adding to the target (premultiplied: the target's alpha kept).
+    SDL_GPUGraphicsPipeline* fullscreen_additive(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
-    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                               bool skinned = false) const;
+    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned = false,
+                                               const GpuSurfaceShader3D* surface = nullptr, bool morph = false) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
@@ -350,8 +755,21 @@ private:
     // `plain` is an 8-bit view's resolved picture (temporal anti-aliasing), which only needs encoding.
     // `dither`: the output shader with a dither of an 8-bit step (a view with a sky; falls back to the plain one
     // without it).
-    void finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
-                     bool dither = false);
+    // `time` is Scene3D::time (auto exposure's step between renders).
+    bool finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither,
+                     f32 time, RenderDebugStats3D&);
+    // ViewOptions3D::auto_exposure: meters `source` into the view's exposure buffer and adapts it; false (the view is
+    // output with its plain exposure) where it can't.
+    bool meter_exposure(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, f32 time,
+                        RenderDebugStats3D&);
+    bool post_pass(SDL_GPUCommandBuffer*, const GpuTexture&, SDL_GPUShader*, std::span<const SDL_GPUTexture* const>,
+                   const std::array<f32, 4>&, SDL_GPUBuffer* storage = nullptr);
+    bool record_bloom(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& result,
+                      const GpuTexture& scratch, f32 threshold, RenderDebugStats3D&);
+    bool record_output(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& target,
+                       const GpuTexture* bloom, const OutputOptions3D&, RenderDebugStats3D&,
+                       SDL_GPUBuffer* exposure = nullptr);
+    const GpuTextureBackend* post_texture(const Texture&, bool attachment) const;
     // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
     bool ensure_taa_targets(GpuView3D& view, bool sharpen);
     void release_taa(GpuView3D& view);
@@ -375,7 +793,7 @@ private:
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
                                   const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive, bool reject,
-                                  bool fixed_jitter, RenderDebugStats3D& stats);
+                                  bool fixed_jitter, const GpuTexture* depth, bool overlaid, RenderDebugStats3D& stats);
 
     // render()'s stages, in the order they run, over a FrameCtx (defined in the .cpp)
     // that holds what they share. Each records into the frame's command buffer; any
@@ -392,21 +810,43 @@ private:
     // each view on the CPU, decides which maps are kept from last render (the cache) and uploads what the others draw;
     // `local_shadow_pass` records them.
     void choose_local_lights(FrameCtx& ctx);
+    // The light grid (the light variants'): the point and spot lights chosen, and for each cell of the view (tiles of
+    // grid_tile pixels by slices of view depth) those whose reach touches it, uploaded for the main pass.
+    void build_light_grid(FrameCtx& ctx);
     void build_local_shadows(FrameCtx& ctx);
-    void local_shadow_pass(FrameCtx& ctx);
+    bool local_shadow_pass(FrameCtx& ctx);
     void push_local_lights(const FrameCtx& ctx, u32 s, u32 slot);
-    // The local array made or kept (`side` x `side`, a layer for each of `spot_layers` spots then six for each of
-    // `point_slots` point lights: only ever more, until it has been idle for _release_after renders; false where it
-    // could not be made), and the moon's (its own side, `layers` cascades; how many it has, 0 where one could not be
-    // made).
-    bool ensure_local_map(u32 side, u32 spot_layers, u32 point_slots);
+    // The local array made or kept (`side` x `side`, `layers` of them, which pack_local_maps fills: only ever more,
+    // until it has been idle for _release_after renders; false where it could not be made), and the moon's (its own
+    // side, `layers` cascades; how many it has, 0 where one could not be made).
+    bool ensure_local_map(u32 side, u32 layers);
     u32 ensure_moon_map(u32 side, u32 layers);
+    bool ensure_gi_sun_map(); // the GI's sun map (made once); false where there can be none
     void upload_joints(FrameCtx& ctx);
     void begin_commands(FrameCtx& ctx); // flushes 2D; environment and empty-shadow set-up
-    void shadow_pass(FrameCtx& ctx);
+    bool shadow_pass(FrameCtx& ctx);
     // End of a render: counts the renders each feature's targets went unused and releases those unused for
     // `_release_after`; fills RenderDebugStats3D::feature_bytes.
     void age_targets(FrameCtx& ctx);
+    // The surface whose cut-out variants a cut-out material's passes use (none: the stock cut-out shaders).
+    static const GpuSurfaceShader3D* cutout_surface(const Material3D& material);
+    // A material's surface that moves its vertices (an offset: its vertex variants), or null.
+    static const GpuSurfaceShader3D* moving_surface(const Material3D& material);
+    // What a geometry pass (shadow, occluder, pick, pre-, visibility) needs of a material's surface: its cut-out's
+    // variants, or its vertex variants (a pipeline of its own), or null.
+    static const GpuSurfaceShader3D* pass_surface(const Material3D& material) {
+        if (const auto* s = cutout_surface(material))
+            return s;
+        return moving_surface(material);
+    }
+    f32 _cutout_time = 0; // Scene3D::time, for surface cut-outs (bind_cutout)
+    // For moving surfaces' vertices (bind_offset): Scene3D::time now and the time of the frame before (the
+    // velocity's previous position), the camera and its forward.
+    f32 _offset_time[2] = {0.0f, 0.0f};
+    Vec3f _offset_eye{}, _offset_forward{0.0f, 0.0f, -1.0f};
+    SDL_GPUGraphicsPipeline* geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned,
+                                               bool indexed, const GpuSurfaceShader3D* surface = nullptr) const;
+    bool draw_geometry(FrameCtx&, SDL_GPURenderPass*, SDL_GPUTextureFormat depth, bool second);
     void prepass(FrameCtx& ctx); // depth and normals (or velocity), then the occlusion and contact shadows
     void draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 which, SDL_GPUTextureFormat depth_format);
     void overlay_velocity(FrameCtx& ctx);
@@ -416,8 +856,136 @@ private:
     void push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot = 0, bool record_history = true);
     // Lights3D::sky_lights_scene: the sky drawn into a small panorama and filtered, when it has moved enough.
     void sky_environment(FrameCtx& ctx);
+    // The reflection array the light variants read at binding 6 (uEnvSpecular): layer 0 the environment's specular
+    // copied, the layers after it the probes' chosen this render, each filtered when its capture changed; their records
+    // in ctx (push_frame_uniforms). Nothing without an environment or probes.
+    void prepare_reflections(FrameCtx& ctx);
+    // Screen-space reflections: the trace (after the pre-pass, its compute with the others), and the copy of the
+    // frame's lit picture the next frame's trace reads (after the temporal resolve).
+    bool ssr_trace(FrameCtx& ctx);
+    void ssr_keep_picture(FrameCtx& ctx);
+    // G5, global illumination (gpu_gi3d.cpp). make_gi: the GI scene's pipelines, with the renderer (where the device
+    // cannot, absent and RendererCapabilities3D::global_illumination false). gi_scene: the view's GI scene for `scene`,
+    // built (compute passes into `commands`) when it has none or what it is made of changed; true when the view has one
+    // for this render. draw_gi_view: RenderDebugOptions3D::gi_view over the main pass (`pass`: its colour `format`,
+    // `samples`, its velocity target's format or INVALID), traced with `view_projection` (the one the pass draws with).
+    void make_gi();
+    void release_gi_pipelines();
+    bool gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, RenderDebugStats3D& stats);
+    // G5b: the lit scene and the probes' update, after gi_scene (compute passes into `commands`): the sky the probes'
+    // rays meet is `environment` (null: the hemisphere of Lights3D::ambient and ground_ambient) turned by
+    // `to_environment`. True when the probes' light is in the picture this render.
+    bool gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
+                   const GpuEnvironment3D* environment, const Mat4f& to_environment, RenderDebugStats3D& stats);
+    // What the light variants bind for global illumination (samplers 12 and 13: the probes' light on the view, when
+    // `resolved`), dummies without; and the probes' three atlases as the compute and the debug view read them.
+    std::array<SDL_GPUTextureSamplerBinding, 3> gi_bindings(const GpuView3D& view, bool resolved) const;
+    std::array<SDL_GPUTextureSamplerBinding, 3> gi_atlases(const GpuView3D& view, bool lit) const;
+    // G5c: the probes' light on what the pre-pass drew, at half the view's size (gi_resolve.comp), after it and its
+    // compute (`projection`: the one it drew with; `jittered`: temporal anti-aliasing's, which each texel's keeping
+    // from the render before evens out); true when it was read.
+    // `source`: another view whose probes light this one's pixels (a capture borrowing them; null: its own).
+    bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuView3D* source, const Scene3D& scene,
+                    const Mat4f& projection, bool jittered, RenderDebugStats3D& stats);
+    // GlobalIllumination3D::area_lights: their light on what the pre-pass drew (gi_area.comp), after gi_resolve; true
+    // when it was (the main pass then reads it in the coverage's place).
+    bool gi_area(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
+                 RenderDebugStats3D& stats);
+    // Fog3D::sun_shadows: the share of the fog's air the sun reaches along each ray, walked through the sun's shadow
+    // map on what the pre-pass drew (fog_sun.comp), after it; true when it was.
+    bool fog_sun(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats);
+    // And its light added to the main pass's picture, once a pixel (fog_sun_apply.frag).
+    void fog_sun_apply(FrameCtx& ctx);
+    // Fog3D::volumetric: the point and spot lights' light in the fog's air, lit in a volume over the view and summed
+    // along its rays (fog_volume.comp, fog_volume_integrate.comp), after the local shadows; true when it was.
+    bool fog_volume(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats);
+    // And the sums added to the main pass's picture, once a pixel at the pre-pass's depth (fog_volume_apply.frag).
+    void fog_volume_apply(FrameCtx& ctx);
+    // The same inside the main pass (its targets' formats and samples), between the opaque draws and the blended ones.
+    bool fog_volume_apply(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
+                          SDL_GPUTextureFormat format, u32 samples);
+    // The view's GI scene and probes as the shaders read them (kin_gi.inc.glsl's KinGiScene, 5 vec4s, into `scene`;
+    // KinGiProbes, 7, into `probes`; either may be null).
+    void gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, f32* scene, f32* probes) const;
+    void draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const GpuView3D& view,
+                      const Scene3D& scene, const Mat4f& view_projection, SDL_GPUTextureFormat format, u32 samples,
+                      SDL_GPUTextureFormat velocity_format, bool encode);
+    bool read_gi_scene(IViewBackend3D& view, GiScene3D& out) override;
+    void release_gi(GpuView3D& view);
+    // A surface material's stand-in in the GI scene: what its surface (a graph's, a surface shader's) makes of it over
+    // its UV square, gi_proxy_side texels a side, read by the voxelizer in place of the material's base and emissive
+    // maps (which may hold whatever a graph samples: a mask, a normal map). `base`: its base colour and alpha, in the
+    // colour format of materials' maps; `emission`: its emission (linear RGBA16F), made only for a material that emits,
+    // by its own fields (Material3D::emits_light) or its surface's (SurfaceTraits3D::emission): the GI's emitters are
+    // those alone. Drawn with a white vertex colour: the voxelizer multiplies it by the copy's where the surface reads
+    // it (SurfaceTraits3D::vertex_color, vertex_alpha). bake_gi_proxies makes those a render's GI scene lacks, before
+    // its passes (each material drawn twice into the 2D frame's commands, unlit and lit by nothing, and gi_proxy.frag
+    // takes the second from the first), once a look (gi_proxy_key); the unused are let go. An animated surface is
+    // pictured at the time of its bake.
+    struct GiProxy {
+        Texture base, emission;
+        u64 used = 0; // the 2D frame that last asked for it
+    };
+    static bool gi_proxied(const Material3D& material);
+    static u64 gi_proxy_key(const Material3D& material);
+    const GiProxy* gi_proxy(const Material3D& material); // null: none (not a surface material, or none made)
+    void bake_gi_proxies(const Scene3D& scene);
+    bool bake_gi_proxy(const Material3D& material, f32 time, GiProxy& out);
+    void release_gi_proxies();
+    std::unordered_map<u64, GiProxy> _gi_proxies;
+    Mesh3D _gi_proxy_quad;                                    // the UV square, facing +y
+    Texture _gi_proxy_unlit, _gi_proxy_dark, _gi_proxy_depth; // the bake's scratch targets
+    GpuShader _gi_proxy_shader;                               // gi_proxy.frag
+    bool _gi_proxy_broken = false;                            // what a bake needs could not be made: none are
+    bool _gi_available = false;
+    bool _gi_warned = false;
+    SDL_GPUComputePipeline* _gi_clear = nullptr;      // gi_clear.comp
+    SDL_GPUComputePipeline* _gi_voxelize = nullptr;   // gi_voxelize.comp
+    SDL_GPUComputePipeline* _gi_attributes = nullptr; // gi_voxelize_attributes.comp
+    SDL_GPUComputePipeline* _gi_flood = nullptr;      // gi_flood.comp
+    SDL_GPUComputePipeline* _gi_light = nullptr;      // gi_light.comp
+    SDL_GPUComputePipeline* _gi_place = nullptr;      // gi_probe_place.comp
+    SDL_GPUComputePipeline* _gi_trace = nullptr;      // gi_probe_trace.comp
+    SDL_GPUComputePipeline* _gi_update = nullptr;     // gi_probe_update.comp
+    SDL_GPUComputePipeline* _gi_resolve = nullptr;    // gi_resolve.comp
+    SDL_GPUComputePipeline* _gi_area = nullptr;       // gi_area.comp
+    SDL_GPUComputePipeline* _gi_area_fill = nullptr;  // gi_area_fill.comp
+    SDL_GPUSampler* _gi_linear = nullptr;             // filtered, clamped on all three axes
+    GpuTexture _gi_none;                              // 1 x 1 x 1, zero: the probes' bindings without probes
+    GpuShader _gi_view_shader;                        // gi_view.frag
+    SDL_GPUSampler* _gi_sampler = nullptr;            // texel by texel, clamped (the shaders fetch)
+    // A build's copies (each draw's in a run: placing, normals, colour, first joint) and their joint matrices, a small
+    // buffer bound where a draw has no skin, the lights, the blocks to make (a list, and a bit each); grow.
+    std::shared_ptr<GpuBuffer> _gi_copies, _gi_joints, _gi_empty, _gi_lights, _gi_blocks, _gi_dirty;
+    // The emitters' strengths (GpuView3D::Gi::emitter_strength) of the last GI scene made: the GI's light and its view
+    // read them.
+    std::shared_ptr<GpuBuffer> _gi_emitters;
+    // Area lights' reflections in the light variants: the LTC tables, and a buffer bound where there are none.
+    std::shared_ptr<GpuBuffer> _area_ltc, _area_dummy;
+    GpuTexture _area_cache_none; // 1 x 1 x 1: gi_light.comp's cache binding without area lights
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
+    // Scene3D::decals, in the main pass after the scene's opaque meshes (decal.vert/frag). `shared` is the custom
+    // material layout's twelve samplers as the pass binds them (the shadow maps, environment, occlusion); each decal
+    // puts its own picture and normal map in their places.
+    void draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass, std::array<SDL_GPUTextureSamplerBinding, 12> shared);
+    // Before the frame's passes: the decals in the view, as records in one storage buffer (decal.vert's KinDecal) and
+    // runs of them that share their pictures, sampler and pipeline (one instanced draw each, in the order added).
+    void prepare_decals(FrameCtx& ctx);
+    struct DecalRecord {
+        f32 model[16], to_decal[16], colour[4], surface[4], fade[4];
+    };
+    static_assert(sizeof(DecalRecord) == 176);
+    struct DecalRun {
+        u32 first = 0, count = 0;
+        Texture texture, normal;
+        Wrap3D wrap = Wrap3D::Clamp;
+        bool inside = false, mirrored = false;
+    };
+    std::vector<DecalRecord> _decal_records;
+    std::vector<u32> _decal_order, _decal_group; // the drawing order, and each decal's picture group
+    std::vector<DecalRun> _decal_runs;
+    std::shared_ptr<GpuBuffer> _decal_buffer;
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to
     // the instance buffer; draw_particles() then records them into the main pass.
     struct ParticleSource {
@@ -433,9 +1001,9 @@ private:
     u32 select_particles(FrameCtx& ctx, std::span<const ParticleSource> sources);
     void match_particles(FrameCtx& ctx, u32 total);
     void upload_particles(FrameCtx& ctx, u32 total);
-    void order_particle_batches();
     void prepare_particles(FrameCtx& ctx);
-    void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false);
+    void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false, u32 batch = ~0u, u32 first = 0,
+                        u32 count = 0);
     bool reactive_pass(FrameCtx& ctx);
     SDL_GPUGraphicsPipeline* particle_cast_pipeline() const;
     struct ParticleCastView {
@@ -458,9 +1026,15 @@ private:
     void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum,
                        SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     static Pass pass_of(const Material3D& material);
-    // A material's texture as a binding: its own, or a white one without.
-    SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v);
+    // A material's texture as a binding: its own, or a white one without, or for the picture the render draws into (a
+    // mirror's own reflection in its view: `_drawn_picture`), which a draw may not read while it is drawn.
+    SDL_GPUTexture* _drawn_picture = nullptr;
+    SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v,
+                                                 std::optional<TextureSampler3D> sampler = {});
     void bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material);
+    // A moving surface's vertex block (its parameters, the clock, the camera, the maps' transform) and its maps as the
+    // vertex samplers, for a draw with its vertex variant (moving_surface, not skinned); nothing for another.
+    void bind_offset(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material, bool skinned);
 
     GpuRenderer2DBackend* _owner = nullptr;
     GpuDevice* _device = nullptr;
@@ -468,18 +1042,22 @@ private:
     SDL_GPUTextureFormat _shadow_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
     RendererCapabilities3D _capabilities;
     GpuShader _indexed_vertex, _indexed_unlit_vertex, _indexed_unlit_textured_vertex, _indexed_prepass_vertex;
+    GpuShader _draw_material_vertex;
+    std::array<GpuShader, 4> _draw_material_fragments; // base, fog, lights, lights+fog
+    bool _draw_materials_available = false;
     GpuShader _vertex_shader;   // mesh.vert
     GpuShader _fragment_shader; // mesh.frag
     // Optional unlit main-pass variants. Fog, skinning, custom shaders and TAA use the general shaders.
     bool _unlit_available = false;
     GpuShader _unlit_vertex_shader, _unlit_textured_vertex_shader;
     GpuShader _unlit_shader, _unlit_textured_shader, _unlit_mask_shader, _unlit_textured_mask_shader;
-    GpuShader _shadow_shader;                  // shadow.frag
-    GpuShader _shadow_vertex_shader;           // shadow.vert
-    GpuShader _fullscreen_shader;              // fullscreen.vert
-    GpuShader _bloom_shader;                   // bloom.frag
-    GpuShader _output_shader;                  // view_output.frag
-    GpuShader _pick_shader;                    // pick.frag
+    GpuShader _shadow_shader;        // shadow.frag
+    GpuShader _shadow_vertex_shader; // shadow.vert
+    GpuShader _fullscreen_shader;    // fullscreen.vert
+    GpuShader _bloom_shader;         // bloom.frag
+    GpuShader _output_shader;        // view_output.frag
+    GpuShader _pick_shader;          // pick.frag
+    GpuShader _visibility_shader, _visibility_mask_shader;
     GpuShader _shadow_mask_shader;             // shadow_mask.frag
     GpuShader _shadow_mask_vertex_shader;      // shadow_mask.vert
     GpuShader _pick_mask_shader;               // pick_mask.frag
@@ -508,6 +1086,18 @@ private:
     GpuShader _sky_velocity_only_shader; // sky_velocity_only.frag
     GpuShader _sky_env_shader;           // sky_env.frag
     GpuShader _output_dither_shader; // view_output_dither.frag: view_output.frag with a dither, for a view with a sky
+    // ViewOptions3D::auto_exposure: the output's variants that read the adapted exposure, and the metering.
+    GpuShader _output_auto_shader;                                  // view_output_auto.frag
+    GpuShader _output_dither_auto_shader;                           // view_output_dither_auto.frag
+    SDL_GPUComputePipeline* _exposure_histogram_pipeline = nullptr; // exposure_histogram.comp
+    SDL_GPUComputePipeline* _exposure_adapt_pipeline = nullptr;     // exposure_adapt.comp
+    bool _auto_exposure_warned = false;
+    SDL_GPUComputePipeline* _morph_pipeline = nullptr;                  // morph_blend.comp
+    std::vector<std::weak_ptr<GpuExposureReadback>> _exposure_unfenced; // recorded this frame, fenced at its submit
+    // Scene3D::decals: the box's vertex shader and the lit projection (decal.vert, decal.frag).
+    GpuShader _decal_vertex_shader;
+    GpuShader _decal_shader;
+    bool _decals_warned = false;
     // P3c: particles (the billboards' vertex shader, the fragment shader and its soft-particle variant).
     GpuShader _particle_vertex_shader; // particle.vert
     GpuShader _particle_shader;        // particle.frag
@@ -580,6 +1170,9 @@ private:
     GpuShader _shadow_mask_skinned_vertex_shader;      // shadow_mask_skinned.vert
     GpuShader _prepass_skinned_vertex_shader;          // prepass_skinned.vert
     GpuShader _prepass_velocity_skinned_vertex_shader; // prepass_velocity_skinned.vert
+    // The same for meshes with morph targets blended on the GPU (their previous positions too; optional).
+    GpuShader _prepass_velocity_morph_vertex_shader;         // prepass_velocity_morph.vert
+    GpuShader _prepass_velocity_morph_skinned_vertex_shader; // prepass_velocity_morph_skinned.vert
     bool _skinning_available = false;
     bool _skin_warned = false;          // skinned copies cannot be drawn
     std::shared_ptr<GpuBuffer> _joints; // the frame's joint matrices (scene, then overlay); grows
@@ -595,6 +1188,9 @@ private:
     // Temporal anti-aliasing needs the pre-pass and four-float colour targets,
     // and a float storage texture; else it is off (said once, when asked for).
     bool _taa_available = false;
+    // The main pass's one-sample depth (_taa_depth) can be sampled: kept for the resolve, which takes the velocity of
+    // the nearest surface at an edge (the overlay's in front, as its slice of the depth range puts it).
+    bool _taa_depth_sampled = false;
     // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.
     bool _taa_warned = false;
     bool _taa_prepass_warned = false;
@@ -615,16 +1211,27 @@ private:
     // Ambient occlusion needs these formats and two compute pipelines; where
     // the device lacks one it is off (a line in the log the first time it is asked for).
     SDL_GPUTextureFormat _ao_depth_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
+    // Fog3D::volumetric's.
+    SDL_GPUComputePipeline* _fog_volume_pipeline = nullptr;           // fog_volume.comp
+    SDL_GPUComputePipeline* _fog_volume_integrate_pipeline = nullptr; // fog_volume_integrate.comp
+    SDL_GPUComputePipeline* _fog_volume_depth_pipeline = nullptr;     // fog_volume_depth.comp
+    GpuShader _fog_volume_apply_shader;                               // fog_volume_apply.frag
+    std::shared_ptr<GpuBuffer> _fog_lights;                           // fog_volume.comp's FogLights
+    GpuTexture _no_fog_volume; // 1 x 1 x 1: the fog variants' uFogVolume without a volume
+
     bool _ao_available = false;
     bool _ao_warned = false;
     bool _contact_warned = false;
     SDL_GPUComputePipeline* _contact_pipeline = nullptr;            // contact.comp
+    SDL_GPUComputePipeline* _fog_sun_pipeline = nullptr;            // fog_sun.comp (Fog3D::sun_shadows)
+    GpuShader _fog_sun_apply_shader;                                // fog_sun_apply.frag
     SDL_GPUComputePipeline* _gtao_pipeline = nullptr;               // gtao.comp
     SDL_GPUComputePipeline* _gtao_chain_pipeline = nullptr;         // gtao_chain.comp (optional: gtao.comp without)
     SDL_GPUComputePipeline* _ao_chain_pipeline = nullptr;           // ao_depth_chain.comp
     SDL_GPUComputePipeline* _ao_blur_chain_pipeline = nullptr;      // ao_blur_chain.comp (optional)
     SDL_GPUComputePipeline* _ao_blur_both_chain_pipeline = nullptr; // ao_blur_both_chain.comp (optional)
     SDL_GPUComputePipeline* _ao_blur_pipeline = nullptr;            // ao_blur.comp
+    SDL_GPUComputePipeline* _ao_upsample_pipeline = nullptr;        // ao_upsample.comp (optional)
     SDL_GPUComputePipeline* _ao_blur_both_pipeline =
         nullptr; // ao_blur_both.comp: both features' blur in one dispatch (optional)
     // The shadow map's cache (Lights3D::cache_shadows): what the map was last drawn from, so that the pass is skipped
@@ -648,27 +1255,59 @@ private:
     bool shadow_unchanged(FrameCtx& ctx);
     void shadow_drawn(FrameCtx& ctx, bool complete);
     bool _chain_ready = false; // the occlusion built the linear depth chain this render: the blurs read it
-    SDL_GPUSampler* _point_sampler = nullptr;           // texel by texel, for compute
-    SDL_GPUSampler* _compare_sampler = nullptr;         // the shadow map's
-    SDL_GPUSampler* _environment_sampler = nullptr;     // wraps round, clamps at the poles, mipmapped
-    SDL_GPUComputePipeline* _filter_pipeline = nullptr; // env_filter.comp
+    SDL_GPUSampler* _point_sampler = nullptr;             // texel by texel, for compute
+    SDL_GPUSampler* _compare_sampler = nullptr;           // the shadow map's
+    SDL_GPUSampler* _environment_sampler = nullptr;       // wraps round, clamps at the poles, mipmapped
+    SDL_GPUComputePipeline* _filter_pipeline = nullptr;   // env_filter.comp
+    SDL_GPUComputePipeline* _panorama_pipeline = nullptr; // probe_panorama.comp
+    SDL_GPUComputePipeline* _ssr_pipeline = nullptr;      // ssr_trace.comp
+    // While a capture renders with a view's global illumination borrowed (capture_reflection): that view, whose probes
+    // light it, untouched (no GI scene or probes of the capture's own).
+    const GpuView3D* _gi_borrowed = nullptr;
+    // While a render lit by another view (render_lit_by) whose GI has no light yet: the scene's GI is not drawn (none
+    // of the view's own is made either).
+    bool _gi_off = false;
+    SDL_GPUComputePipeline* _ssr_pyramid_pipeline = nullptr; // ssr_pyramid.comp
+    std::shared_ptr<GpuBuffer> _ssr_dummy;                   // bound where a light variant reads no reflections
+    // The reflection array (prepare_reflections): equirectangular layers the environment's specular size (or 256 x
+    // 128 without one), a level a roughness; layer 0 the environment's, then one a probe. What each holds.
+    GpuTexture _reflections;
+    u32 _reflection_levels = 0;
+    const GpuEnvironment3D* _reflection_environment = nullptr;
+    u64 _reflection_environment_generation = 0;
+    struct ReflectionLayer {
+        std::weak_ptr<IReflectionCaptureBackend3D> capture;
+        u64 generation = 0; // the capture's, when filtered here (0: nothing)
+        u64 used = 0;       // the render it was last read by
+    };
+    std::array<ReflectionLayer, max_reflection_probes3d> _reflection_layers{};
+    u64 _reflection_renders = 0;
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;
     u32 _shadow_layers = 0;
     u32 _shadow_layers_limit = max_shadow_cascades; // lowered when the device would not make more
     GpuTexture _no_shadow;                          // 1 x 1, all far: every comparison lit
+    Texture _white_maps; // 1 x 1, one white layer: graph maps for a surface whose material has none
     // P3b. The local array: a layer a spot light's map and six a point light's, `_local_side` texels a side (a light
     // draws into a corner of it); the moon's cascades are an array of their own. `_*_generation` changes when one is
     // made again (nothing cached is in it).
     GpuTexture _local_map;
-    u32 _local_side = 0, _local_layers = 0;
-    u32 _local_spot_layers = 0, _local_point_slots = 0; // its layout: the spots' layers, then the point lights' cubes
+    u32 _local_side = 0, _local_layers = 0; // the maps are packed into its layers (pack_local_maps)
     u64 _local_generation = 0;
     u32 _local_idle = 0;
     u32 _local_smaller = 0; // renders in a row the lights with maps needed a smaller side than the array's
     GpuTexture _moon_map;
     u32 _moon_side = 0, _moon_layers = 0;
     u64 _moon_generation = 0;
+    // The GI's sun map (gi_sun_map_side a side, one layer): an orthographic view along the sun over the GI's area,
+    // drawn as a local view (its own cache slot, gi_sun_cache), that the GI's light reads for its voxels' sunlight; its
+    // matrix, depth bias (the map's depth units) and texel (world) for this render, and whether there is one.
+    GpuTexture _gi_sun_map;
+    u32 _gi_sun_side = 0;
+    u64 _gi_sun_generation = 0;
+    Mat4f _gi_sun_matrix{};
+    f32 _gi_sun_bias = 0.0f, _gi_sun_texel = 0.0f;
+    bool _gi_sun_on = false;
     u32 _moon_idle = 0;
     // Which light holds which slot, across renders.
     ShadowSlots3D _spot_slots, _point_slots;
@@ -681,10 +1320,14 @@ private:
         bool fingerprinted = false;
         bool valid = false;
     };
-    std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades> _local_cache;
+    std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades + 1> _local_cache; // (+1: the GI's sun map)
     // The local views' casters of this render: the union of their copies as GpuInstance3D, each view's lists of them
     // (u32), and the joint offsets of the posed ones.
     std::shared_ptr<GpuBuffer> _local_instances, _local_lists, _local_joint_offsets;
+    // The light grid's buffers (build_light_grid): the lights (GridLight), and the cells then their lists of lights.
+    std::shared_ptr<GpuBuffer> _grid_lights, _grid_cells;
+    std::vector<u32> _grid_scratch; // the cells' counts, then their lists, as they are filled
+    bool _grid_warned = false;
     struct LocalEntry {
         u32 ref = 0, level = 0;
         u32 list_first = 0, count = 0;
@@ -701,7 +1344,11 @@ private:
         u32 layer = 0; // in its array
         u32 cache = 0; // its _local_cache index
         u32 size = 0;  // the viewport's side
+        // Packed with others into its layer (the renderer's own local maps): its square's corner, cleared alone.
+        u32 x = 0, y = 0;
+        bool packed = false;
         bool moon = false;
+        bool gi_sun = false;     // the GI's sun map: every caster over the GI's area, whatever the camera sees
         bool single_map = false; // a moon's lone map over the whole area (no slice test)
         Vec3f down{};            // the moon's light's way
         Vec3f centre{};          // a sphere that holds all that can cast into it (a spot's or point light's reach)
@@ -718,6 +1365,42 @@ private:
         bool drawn = false;
         u32 entry_first = 0, entry_count = 0;
     };
+    struct LocalGatherKey {
+        u64 scene = 0, revision = 0;
+        u32 refs = 0, kind = 0;
+        Mat4f projection{};
+        GpuFrustum frustum{};
+        Vec3f centre{};
+        f32 radius = 0;
+        bool bounded = false;
+    };
+    struct LocalGatherCache {
+        LocalGatherKey key;
+        std::weak_ptr<const u64> lifetime;
+        u32 slot = ~0u;
+        u64 frame = 0, tests = 0;
+        bool observed = false, valid = false;
+        struct Row {
+            u32 ref, first, count;
+        };
+        std::vector<Row> rows;
+        std::vector<u32> copies;
+        std::vector<u64> sort_keys;
+        std::vector<u8> sort_order;
+        std::vector<u16> sort_counts;
+        u64 bytes() const {
+            return rows.capacity() * sizeof(Row) + copies.capacity() * sizeof(u32) +
+                   sort_keys.capacity() * sizeof(u64) + sort_order.capacity() + sort_counts.capacity() * sizeof(u16);
+        }
+    };
+    // CPU payload is bounded independently of GPU instance/map retention. Empty
+    // probes admit only projections that remain unchanged across two renders.
+    std::array<LocalGatherCache, 64> _local_gather_cache;
+    u64 _local_gather_bytes = 0;
+    void clear_local_gather(LocalGatherCache& cache);
+    void trim_local_gather(u64 budget);
+    static bool same_local_gather_key(const LocalGatherKey& a, const LocalGatherKey& b);
+    LocalGatherCache* local_gather_plan(const FrameCtx& ctx, const LocalView& view, u32 refs, bool& ready);
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
     std::vector<u32> _local_list;                  // the lists, as uploaded
@@ -733,11 +1416,17 @@ private:
     std::vector<u32> _local_slot;   // each copy's place in the union (~0: none yet)
     std::vector<u8> _local_payload; // scratch
     bool _no_shadow_cleared = false;
-    // Samplers for materials' textures by filter and wrap (made on first use).
-    SDL_GPUSampler* sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v);
-    std::array<SDL_GPUSampler*, 27> _samplers{};
+    // Samplers for materials' textures by filter, wrap, anisotropy and mip bias (made on first use). The mipmapped ones
+    // read with _anisotropy and _lod_bias: this render's Scene3D::anisotropy and ::texture_lod_bias (in sixteenths of
+    // a level), clamped.
+    SDL_GPUSampler* sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v,
+                                std::optional<TextureSampler3D> sampler = {});
+    std::unordered_map<u32, SDL_GPUSampler*> _samplers;
+    u32 _anisotropy = 1;
+    i32 _lod_bias = 0;
     std::vector<std::shared_ptr<GpuMaterialShader3D>> _material_shaders;
-    std::shared_ptr<GpuBuffer> _instances;    // grows
+    std::vector<std::shared_ptr<GpuSurfaceShader3D>> _surface_shaders; // kept, as _material_shaders
+    std::shared_ptr<GpuBuffer> _instances;                             // grows
     std::shared_ptr<GpuBuffer> _caster_lists; // the cascades' lists of copies (indices into _instances); grows
     std::array<f32, 256> _srgb_to_linear{};
 
@@ -772,11 +1461,17 @@ private:
         // `instances`), the scene's matrices, and where the scene's start in the frame's joint buffer. `center` and
         // `radius` are then only a start: a copy's own bound comes from its pose.
         bool skinned = false;
+        bool batch = false; // immutable submission kind, reused with the validated ref layout
         const u32* skin_first = nullptr;
         const Mat4f* joints = nullptr;
         u32 joint_base = 0;
-        u32 group_first = 0, group_count = 0;  // in _cull_groups, preserved through draw merging
-        u32 retained = ~0u;                    // bounded retained-table cache entry, or immediate path
+        u32 group_first = 0, group_count = 0; // in _cull_groups, preserved through draw merging
+        u32 retained = ~0u;                   // bounded retained-table cache entry, or immediate path
+        u32 retained_first = 0;               // direct draws share a scene table; explicit batches start at zero
+        bool direct = false;                  // this render reads an immutable direct-scene table
+        u32 prepared_first = 0;
+        const GpuInstance3D* prepared_records = nullptr;
+        const f32* prepared_scales = nullptr;
         const Vec4f* cached_spheres = nullptr; // stable CPU bounds from a resident table, one level only
         u32 sphere_first = 0;                  // uncached local casters' start in _world_spheres
     };
@@ -790,6 +1485,42 @@ private:
         u64 identity = 0, revision = 0;
         bool operator==(const PreparedKey&) const = default;
     };
+    struct DrawBindingKey {
+        std::array<const ITextureBackend*, 6> textures{}; // the five maps, then Material3D::graph_maps
+        Wrap3D u{}, v{};
+        decltype(Material3D::texture_samplers) sampling{};
+        bool operator==(const DrawBindingKey&) const = default;
+    };
+    struct DrawCommand {
+        MaterialPipeline selection{};
+        MaterialUniforms uniforms{};
+        SDL_GPUGraphicsPipeline* pipeline = nullptr;
+        u64 pipeline_key = ~0ull, pipeline_revision = 0;
+        u32 binding = ~0u;
+    };
+    std::array<PreparedKey, 2> _draw_plan_keys{};
+    std::vector<DrawCommand> _draw_commands;
+    std::vector<DrawBindingKey> _draw_bindings;
+    std::vector<u32> _draw_order;
+    bool _draw_plan_valid = false;
+    void prepare_draw_plan(FrameCtx& ctx);
+    DrawCommand* main_command(FrameCtx& ctx, u32 ref, bool materials);
+    void batch_main_commands(FrameCtx& ctx);
+    void retain_draw_materials(FrameCtx& ctx);
+    struct DrawMaterials {
+        u64 scene = 0, revision = 0, upload_frame = ~0ull, used_frame = 0;
+        std::weak_ptr<const u64> lifetime;
+        std::shared_ptr<GpuBuffer> buffer;
+        // Surface shaders' parameters, surface_param_count3d floats a copy beside `buffer`'s records: only for a
+        // scene that has them.
+        std::shared_ptr<GpuBuffer> surface;
+        bool valid = false;
+    };
+    std::array<DrawMaterials, 8> _draw_material_tables;
+    u64 _draw_material_bytes = 0;
+    std::array<u32, 2> _draw_material_slots{~0u, ~0u};
+    std::vector<u32> _main_draw_list;
+    std::shared_ptr<GpuBuffer> _main_draw_indices;
     // Exact structural validation across clear()/resubmission. Weak mesh owners
     // prevent pointer-reuse mistakes without keeping removed assets resident.
     struct PreparedDraw {
@@ -807,6 +1538,8 @@ private:
         u64 revision;
     };
     std::array<PreparedKey, 2> _prepared_keys{};
+    // Admission history is independent of the bounded draw-layout cache.
+    std::array<std::array<u64, 2>, 2> _direct_sources{};
     std::vector<PreparedBatch> _prepared_batches; // <=128 entries, not per copy
     bool _prepared_valid = false;
     u32 _prepared_total = 0;
@@ -819,6 +1552,9 @@ private:
             layout = 0; // the GPU frame (submission) it was last claimed in; the batch layout_revision it holds
         Color color{};
         std::weak_ptr<const void> lifetime;
+        std::weak_ptr<const u64> scene_lifetime;
+        bool direct = false;
+        u32 direct_instances = 0;
         std::shared_ptr<GpuBuffer> buffer; // null: a free entry (evicted), dropped at the next collection
         u64 bounds_revision = 0;
         std::vector<Vec4f>
@@ -849,18 +1585,23 @@ private:
     bool _bounds_cache_grew = false;
     bool _gpu_markers = false; // external GPU profiler labels, no fence scopes
     u32 _bounds_cache_bytes = 0;
+    std::shared_ptr<GpuBuffer> _spare_instances; // one recycled input buffer for copy-on-write roles
+    std::vector<u32> _preparation_rows;
+    u64 _instance_generation = 0, _local_instance_generation = 0, _joints_generation = 0, _offsets_generation = 0;
     std::vector<u32> _retained_visible;
     std::shared_ptr<GpuBuffer> _retained_indices;
-    GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material) const;
+    GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material,
+                                DrawClip3D clip = DrawClip3D::camera) const;
     void retain_instances(DrawRef& ref, FrameCtx& ctx);
+    void retain_scene_instances(FrameCtx& ctx);
     void cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stats);
     struct CullGroup {
         u32 first = 0, end = 0; // relative to the draw
         u8 camera = 1;          // 0 outside, 1 partial, 2 inside
         u8 sun_mask = 0, sun_inside = 0;
         std::array<u8, max_shadow_cascades> sun_reach_planes{}, moon_reach_planes{};
-        u32 local_mask = 0, local_radius_inside = 0;
-        std::array<u8, max_local_shadow_layers + max_shadow_cascades> local_planes{};
+        u64 local_mask = 0, local_radius_inside = 0; // a bit a local view
+        std::array<u8, max_local_shadow_layers + max_shadow_cascades + 1> local_planes{};
     };
     struct Piece {
         u32 ref = 0;
@@ -1004,8 +1745,15 @@ private:
     std::vector<u8> _visible; // a copy: the bits of camera_bit, sun_bit and cascade_bit(k) (gpu_renderer3d.cpp)
     std::vector<u8>
         _level_of; // a copy: its level of detail (only filled with Scene3D::lod, for the meshes that have levels)
-    std::vector<u32> _caster_list;            // the cascades' lists, uploaded
-    std::vector<u32> _order;                  // draws sorted
+    std::vector<u32> _caster_list; // the cascades' lists, uploaded
+    std::vector<u32> _order;       // draws sorted
+    struct MainItem {
+        u32 ref, first, count, scene;
+        f32 depth;
+        bool particle, transparent;
+        bool materials = false;
+    };
+    std::vector<MainItem> _main_order;
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first
 };
 

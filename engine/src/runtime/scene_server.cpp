@@ -1,15 +1,28 @@
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/runtime/scene_server.hpp>
+#include <kin/render3d/camera3d.hpp> // view.frame's camera3d (its fields only: in 2D builds too)
 #ifdef KIN_EXPERIMENTAL_3D
+#include <kin/render3d/debug_stats3d.hpp>
+#include <kin/render3d/frame_graph3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/resource_graph.hpp>
 #endif
 
+#include "automation_internal.hpp"
 #include "runtime_internal.hpp"
 
 #include <algorithm>
+#include <vector>
+#include <cmath>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <kin/anim/anim_format.hpp>
 #include <kin/anim/player.hpp>
 #include <kin/core/json.hpp>
@@ -17,6 +30,8 @@
 #include <kin/ecs/system.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/renderer/render_view.hpp>
+#include <kin/ui2/context.hpp>
 #include <cctype>
 #include <mutex>
 #include <optional>
@@ -26,6 +41,10 @@
 
 namespace kin {
 namespace {
+
+using runtime_detail::error_result;
+using runtime_detail::exact_integer;
+using runtime_detail::ok_result;
 
 constexpr i64 MAX_TICKS_PER_CALL = 1'000'000;
 
@@ -153,7 +172,7 @@ std::vector<EntityAnimationSnapshot> animation_snapshots(flecs::world& world) {
     if (!world.lookup("AnimationPlayer")) {
         return snapshots;
     }
-    world.each([&](flecs::entity entity, AnimationPlayer& player) {
+    kin::each(world, [&](flecs::entity entity, AnimationPlayer& player) {
         const char* name = entity.name();
         snapshots.push_back({
             .id = entity.id(),
@@ -335,8 +354,11 @@ void write_kin_world_snapshot_json(JsonWriter& json, EcsWorld& world, bool inclu
     json.key("schedule");
     write_schedule_snapshot_json(json, world.systems().schedule_snapshot());
     if (include_events) {
+        // The log records only once asked for (EcsEventRegistry::record): the
+        // first answer has what happened since, the next ones more.
         json.key("events");
         write_events_json(json, world.events());
+        world.events().record(true);
     }
     json.end_object();
 }
@@ -355,16 +377,6 @@ void write_animation_diagnostics(JsonWriter& json, const std::vector<AnimationDi
         json.end_object();
     }
     json.end_array();
-}
-
-// Builds a result object string for a handler. The lambda receives the writer
-// already inside the top-level object scope is NOT assumed; callers open it.
-ServerResponse ok_result(const std::string& json) {
-    return {.ok = true, .error = {}, .result_json = json};
-}
-
-ServerResponse error_result(std::string message) {
-    return {.ok = false, .error = std::move(message), .result_json = {}};
 }
 
 ServerResponse handle_game_info(const GameInfo* game, const WindowedAppConfig& window) {
@@ -491,6 +503,12 @@ ServerResponse handle_world_snapshot(ServerContext& ctx, const JsonValue& params
     i32 index = scenes.depth() - 1;
     if (const JsonValue* scene_index = params.find("scene")) {
         index = static_cast<i32>(scene_index->as_int(index));
+    } else {
+        // The topmost scene with a world: overlays without one (a transition,
+        // a pause menu's) show the game's world under them.
+        while (index > 0 && scenes.at_mut(index) && !scenes.at_mut(index)->world()) {
+            --index;
+        }
     }
     Scene* scene = scenes.at_mut(index);
     if (!scene) {
@@ -652,6 +670,171 @@ ServerResponse handle_view_screenshot(ServerContext& ctx, const JsonValue& param
     return ok_result(out.str());
 }
 
+// view.scene {path, content?}: the top scene shows the scene file `path` (in
+// the working folder) in place of its own, read as it reads its own (Kin
+// Studio's scene view: see Scene::view_scene).
+ServerResponse handle_view_scene(ServerContext& ctx, const JsonValue& params) {
+    Scene* scene = ctx.scenes().top_mut();
+    if (!scene) {
+        return error_result("no active scene");
+    }
+    std::string path_error;
+    const std::optional<std::filesystem::path> file = confine_to_working_dir(params.string_at("path"), path_error);
+    if (!file) {
+        return error_result("invalid scene path: " + path_error);
+    }
+    const std::filesystem::path content = params.string_at("content");
+    std::string error;
+    if (!scene->view_scene(*file, content, error)) {
+        KIN_LOG_WARN_F("server", "view.scene failed", (LogFields{{.name = "path", .value = file->string()}, {.name = "error", .value = error}}));
+        return error_result(error);
+    }
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("path", std::string_view{file->string()});
+    json.end_object();
+    return ok_result(out.str());
+}
+
+// view.edit {entities: [{id, components: {name: {field: value}}}]}: the scene
+// shown (view.scene) changed in place, as a tool changed it since it sent the
+// file (Scene::view_edit). An error when the scene can't: the tool sends the
+// file again.
+ServerResponse handle_view_edit(ServerContext& ctx, const JsonValue& params) {
+    Scene* scene = ctx.scenes().top_mut();
+    if (!scene) {
+        return error_result("no active scene");
+    }
+    const JsonValue* entities = params.find("entities");
+    if (!entities || !entities->is_array()) {
+        return error_result("view.edit needs entities: an array of {id, components}");
+    }
+    std::string error;
+    if (!scene->view_edit(*entities, error)) {
+        return error_result(error.empty() ? std::string("the scene did not take the edit") : error);
+    }
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("edited", static_cast<i64>(entities->items().size()));
+    json.end_object();
+    return ok_result(out.str());
+}
+
+// view.frame {path, width, height, x, y, zoom, rotation}: the top scene drawn
+// at `width` x `height` through a camera centred on world point (x, y), `zoom`
+// screen units a world unit, turned `rotation` degrees; its pixels written to
+// `path` (in the working folder) as they are: rows of RGBA bytes, top first.
+// The camera stays for later frames (screenshots too). A 3D scene's:
+// {path, width, height, camera3d: {position: [x, y, z], rotation: [x, y, z, w],
+// fov, near}} (Scene::set_view_camera3d), in place of x, y, zoom, rotation.
+ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
+    Scene* scene = ctx.scenes().top_mut();
+    if (!scene) {
+        return error_result("no active scene");
+    }
+    const i64 width = params.int_at("width", 0);
+    const i64 height = params.int_at("height", 0);
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
+        return error_result("view.frame needs a width and height of 1 to 8192");
+    }
+    const f64 zoom = params.number_at("zoom", 1.0);
+    if (!(zoom > 0.0)) {
+        return error_result("view.frame needs a zoom above 0");
+    }
+    std::string path_error;
+    const std::optional<std::filesystem::path> file = confine_to_working_dir(params.string_at("path", "kin-view.rgba"), path_error);
+    if (!file) {
+        return error_result("invalid frame path: " + path_error);
+    }
+    const Vec2i size{static_cast<i32>(width), static_cast<i32>(height)};
+    if (ctx.window().size() != size) {
+        ctx.window().set_size(size);
+        ctx.window().sync(); // sized later on some systems (X11)
+    }
+    if (const JsonValue* given = params.find("camera3d")) {
+        // A 3D camera: where it is, its turn (a quaternion), its field of view and near plane.
+        const auto numbers = [&](std::string_view key, std::size_t count) -> std::optional<std::vector<f32>> {
+            const JsonValue* value = given->find(key);
+            if (!value) {
+                return std::vector<f32>{};
+            }
+            if (!value->is_array() || value->items().size() != count) {
+                return std::nullopt;
+            }
+            std::vector<f32> out;
+            for (const JsonValue& item : value->items()) {
+                if (!item.is_number() || !std::isfinite(item.as_number())) {
+                    return std::nullopt;
+                }
+                out.push_back(static_cast<f32>(item.as_number()));
+            }
+            return out;
+        };
+        const std::optional<std::vector<f32>> position = numbers("position", 3);
+        const std::optional<std::vector<f32>> rotation = numbers("rotation", 4);
+        const f64 fov = given->number_at("fov", 60.0);
+        const f64 near_plane = given->number_at("near", 0.1); // (not `near`: a macro on Windows)
+        if (!given->is_object() || !position || !rotation || !(fov > 0.0 && fov < 180.0) || !(near_plane > 0.0)) {
+            return error_result("view.frame's camera3d needs position [x, y, z], rotation [x, y, z, w], fov between 0 and 180 and near above 0");
+        }
+        Camera3D camera;
+        if (position->size() == 3) {
+            camera.position = {(*position)[0], (*position)[1], (*position)[2]};
+        }
+        if (rotation->size() == 4) {
+            const f32 length = std::sqrt((*rotation)[0] * (*rotation)[0] + (*rotation)[1] * (*rotation)[1] +
+                                         (*rotation)[2] * (*rotation)[2] + (*rotation)[3] * (*rotation)[3]);
+            if (!(length > 1e-6f)) {
+                return error_result("view.frame's camera3d rotation is not a turn (its length is 0)");
+            }
+            camera.rotation = {(*rotation)[0] / length, (*rotation)[1] / length, (*rotation)[2] / length, (*rotation)[3] / length};
+        }
+        camera.fov = static_cast<f32>(fov);
+        camera.z_near = static_cast<f32>(near_plane);
+        if (!scene->set_view_camera3d(&camera)) {
+            return error_result("the scene has no 3D world to draw through another camera");
+        }
+    } else {
+        Camera2D camera;
+        camera.set_viewport({static_cast<f32>(width), static_cast<f32>(height)});
+        camera.zoom = static_cast<f32>(zoom);
+        camera.rotation = static_cast<f32>(params.number_at("rotation", 0.0));
+        camera.look_at({static_cast<f32>(params.number_at("x", 0.0)), static_cast<f32>(params.number_at("y", 0.0))});
+        if (!scene->set_view_camera(&camera)) {
+            return error_result("the scene has no world to draw through another camera");
+        }
+    }
+    ctx.render_frame();
+    std::vector<u8> pixels;
+    Vec2i read{};
+    const Vec2i points = ctx.window().size();
+    if (!ctx.renderer().read_rgba(Rectf{0.0f, 0.0f, static_cast<f32>(points.x), static_cast<f32>(points.y)}, pixels, read) ||
+        pixels.size() != static_cast<std::size_t>(read.x) * static_cast<std::size_t>(read.y) * 4u) {
+        return error_result("failed to read the frame back (the backend cannot read pixels)");
+    }
+    if (read != size) {
+        return error_result("the frame came out " + std::to_string(read.x) + "x" + std::to_string(read.y) + ", not " +
+                            std::to_string(size.x) + "x" + std::to_string(size.y) + " (the window could not be sized)");
+    }
+    {
+        std::ofstream out(*file, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+        if (!out) {
+            return error_result("failed to write the frame to " + file->string());
+        }
+    }
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("path", std::string_view{file->string()});
+    json.field("width", read.x);
+    json.field("height", read.y);
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_sim_reset(ServerContext& ctx, const JsonValue& params) {
     if (!ctx.can_reset()) {
         KIN_LOG_WARN("server", "sim.reset rejected");
@@ -659,7 +842,17 @@ ServerResponse handle_sim_reset(ServerContext& ctx, const JsonValue& params) {
     }
     std::optional<u64> seed;
     if (const JsonValue* value = params.find("seed")) {
-        seed = static_cast<u64>(value->as_int());
+        u64 parsed = 0;
+        if (value->is_string()) {
+            if (!runtime_detail::parse_u64(value->as_string(), parsed)) {
+                return error_result("seed must be an unsigned decimal integer");
+            }
+            seed = parsed;
+        } else if (const auto exact = exact_integer(*value, 0, 9007199254740991)) {
+            seed = static_cast<u64>(*exact);
+        } else {
+            return error_result("seed must be an exact integer; use a decimal string above 2^53-1");
+        }
     }
     ctx.reset(seed);
     KIN_LOG_INFO_F("server",
@@ -690,17 +883,50 @@ ServerResponse handle_server_status(ServerContext& ctx) {
     return ok_result(out.str());
 }
 
+// The stock 3D frame's graph as the renderer compiles it, with the last render's CPU recording time per pass: for a
+// tool that shows how the frame is made. `available`: false where there is no 3D renderer.
+ServerResponse handle_render_graph(ServerContext& ctx) {
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+#ifdef KIN_EXPERIMENTAL_3D
+    Renderer3D* renderer3d = ctx.renderer3d();
+    if (renderer3d && renderer3d->available()) {
+        ResourceGraphCompiler compiler;
+        const CompiledResourceGraph& plan = compiler.compile(stock_frame_graph3d(), ~u64{0});
+        const RenderDebugStats3D& stats = renderer3d->debug_stats();
+        const bool rendered = stats.graph_passes > 0; // the last render ran the stock frame
+        json.field("available", true);
+        json.field("rendered", rendered);
+        json.field("record_ms", stats.graph_record_ms);
+        json.field("compile_ms", stats.graph_compile_ms);
+        json.key("graph");
+        write_resource_graph_json(json, plan, rendered ? std::span<const f64>(stats.graph_pass_ms) : std::span<const f64>());
+        json.end_object();
+        return ok_result(out.str());
+    }
+#else
+    (void)ctx;
+#endif
+    json.field("available", false);
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) {
     const std::deque<ServerContext::FrameTiming>& timings = ctx.frame_timings();
+    const auto total = [](const ServerContext::FrameTiming& t) { return t.update_ms + t.render_ms + t.present_ms; };
     ServerContext::FrameTiming sum{};
     ServerContext::FrameTiming max{};
+    f64 sum_total = 0.0;
     f64 max_total = 0.0;
     for (const ServerContext::FrameTiming& t : timings) {
         sum.update_ms += t.update_ms;
         sum.render_ms += t.render_ms;
+        sum_total += total(t);
         max.update_ms = std::max(max.update_ms, t.update_ms);
         max.render_ms = std::max(max.render_ms, t.render_ms);
-        max_total = std::max(max_total, t.update_ms + t.render_ms);
+        max_total = std::max(max_total, total(t));
     }
     const f64 n = timings.empty() ? 1.0 : static_cast<f64>(timings.size());
     const ServerContext::FrameTiming last = timings.empty() ? ServerContext::FrameTiming{} : timings.back();
@@ -717,20 +943,32 @@ ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) 
     json.begin_object();
     json.field("frames", static_cast<u64>(timings.size()));
     json.field("window", static_cast<u64>(ServerContext::frame_timing_window));
-    write(json, "last", last.update_ms, last.render_ms, last.update_ms + last.render_ms);
-    write(json, "mean", sum.update_ms / n, sum.render_ms / n, (sum.update_ms + sum.render_ms) / n);
+    write(json, "last", last.update_ms, last.render_ms, total(last));
+    write(json, "mean", sum.update_ms / n, sum.render_ms / n, sum_total / n);
     write(json, "max", max.update_ms, max.render_ms, max_total);
+    // Each frame after `since` (a frame number; -1: all kept), oldest first:
+    // what a tool plots, asking again with the last it has.
+    if (const JsonValue* since = params.find("since")) {
+        const i64 after = static_cast<i64>(since->as_number());
+        json.key("history").begin_array();
+        for (const ServerContext::FrameTiming& t : timings) {
+            if (t.frame > after) {
+                json.begin_object();
+                json.field("frame", t.frame);
+                json.field("update_ms", t.update_ms);
+                json.field("render_ms", t.render_ms);
+                json.field("present_ms", t.present_ms);
+                json.field("interval_ms", t.interval_ms);
+                json.end_object();
+            }
+        }
+        json.end_array();
+    }
     json.end_object();
     if (const JsonValue* reset = params.find("reset"); reset && reset->as_bool()) {
         ctx.clear_frame_timings();
     }
     return ok_result(out.str());
-}
-
-ServerResponse handle_ui_snapshot(ServerContext& ctx, const JsonValue& params) {
-    (void)ctx;
-    (void)params;
-    return error_result("ui.snapshot is unavailable after the legacy UI module was removed");
 }
 
 ServerResponse handle_input_mouse(ServerContext& ctx, const JsonValue& params) {
@@ -805,6 +1043,79 @@ std::optional<Key> parse_key_name(std::string_view name) {
     return std::nullopt;
 }
 
+// A finger on the window: down, moved, up, or a tap, at `x`, `y` (logical
+// UI space, or "space": "window"); `id` tells fingers apart.
+ServerResponse handle_input_touch(ServerContext& ctx, const JsonValue& params) {
+    const JsonValue* x = params.find("x");
+    const JsonValue* y = params.find("y");
+    if (!x || !y || !x->is_number() || !y->is_number()) {
+        return error_result("input.touch requires numbers 'x' and 'y'");
+    }
+    const std::string mode = params.string_at("mode", "tap");
+    if (mode != "down" && mode != "move" && mode != "up" && mode != "tap") {
+        return error_result("mode must be 'down', 'move', 'up', or 'tap'");
+    }
+    Vec2f pos{static_cast<f32>(x->as_number()), static_cast<f32>(y->as_number())};
+    if (params.string_at("space", "logical") != "window") {
+        pos = ctx.renderer().logical_to_window(pos);
+    }
+    const JsonValue* id = params.find("id");
+    const u64 finger = id && id->is_number() ? static_cast<u64>(std::max(0.0, id->as_number())) : 0;
+    ctx.queue_touch(finger, pos, mode);
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "touch");
+    json.field("mode", std::string_view{mode});
+    json.end_object();
+    return ok_result(out.str());
+}
+
+// A player's game controller, driven: a button tapped or held, sticks and
+// triggers set, or it unplugged. The game reads it as it reads a real one.
+ServerResponse handle_input_pad(ServerContext& ctx, const JsonValue& params) {
+    ServerContext::PadInput pad;
+    const JsonValue* player = params.find("player");
+    pad.player = player && player->is_number() ? static_cast<i32>(player->as_number()) : 0;
+    if (pad.player < 0 || pad.player >= max_input_players) {
+        return error_result("input.pad 'player' is 0 to " + std::to_string(max_input_players - 1));
+    }
+    if (const JsonValue* button = params.find("button")) {
+        PadControl control = PadControl::A;
+        if (!button->is_string() || !parse_pad_control(button->as_string(), control) ||
+            static_cast<u8>(control) >= static_cast<u8>(GamepadButton::Count)) {
+            return error_result("input.pad 'button' is a button: a, b, x, y, back, start, left_stick, right_stick, "
+                                "left_shoulder, right_shoulder or dpad_up/down/left/right (sticks and triggers are values)");
+        }
+        pad.button = control;
+    }
+    pad.mode = params.string_at("mode", "press");
+    if (pad.mode != "press" && pad.mode != "hold" && pad.mode != "release") {
+        return error_result("mode must be 'press', 'hold', or 'release'");
+    }
+    for (u8 a = 0; a <= static_cast<u8>(PadAxis::RightTrigger); ++a) {
+        if (const JsonValue* value = params.find(std::string(pad_axis_name(static_cast<PadAxis>(a))))) {
+            if (!value->is_number()) {
+                return error_result("input.pad axis values are numbers");
+            }
+            const bool trigger = a >= static_cast<u8>(PadAxis::LeftTrigger);
+            pad.axes[a] = std::clamp(static_cast<f32>(value->as_number()), trigger ? 0.0f : -1.0f, 1.0f);
+        }
+    }
+    if (const JsonValue* connected = params.find("connected")) {
+        pad.connected = !connected->is_bool() || connected->as_bool();
+    }
+    const i32 queued_player = pad.player;
+    ctx.queue_pad(std::move(pad));
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "pad");
+    json.field("player", static_cast<f64>(queued_player));
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_input_key(ServerContext& ctx, const JsonValue& params) {
     const std::string name = params.string_at("name");
     const std::optional<Key> key = parse_key_name(name);
@@ -839,6 +1150,33 @@ ServerResponse handle_input_key(ServerContext& ctx, const JsonValue& params) {
     json.begin_object();
     json.field("queued", key_name(*key));
     json.field("mode", std::string_view{mode});
+    json.end_object();
+    return ok_result(out.str());
+}
+
+// A file dropped on the window, as from the desktop: Input::take_dropped_files
+// has it at the next tick. At `x`, `y` (logical, or "space": "window"), or
+// where the pointer is.
+ServerResponse handle_input_drop(ServerContext& ctx, const JsonValue& params) {
+    const JsonValue* path = params.find("path");
+    if (!path || !path->is_string() || path->as_string().empty()) {
+        return error_result("input.drop requires a string 'path'");
+    }
+    Vec2f pos = ctx.app().input().mouse_pos();
+    const JsonValue* x = params.find("x");
+    const JsonValue* y = params.find("y");
+    if (x && y && x->is_number() && y->is_number()) {
+        pos = {static_cast<f32>(x->as_number()), static_cast<f32>(y->as_number())};
+        if (params.string_at("space", "logical") != "window") {
+            pos = ctx.renderer().logical_to_window(pos);
+        }
+    }
+    ctx.queue_drop(path->as_string(), pos);
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "drop");
+    json.field("path", std::string_view{path->as_string()});
     json.end_object();
     return ok_result(out.str());
 }
@@ -892,6 +1230,14 @@ void ServerContext::queue_action(std::string name, std::string mode) {
     _pending.push_back({PendingInput::Kind::Action, std::move(name), std::move(mode), {}, 0.0f});
 }
 
+bool ServerContext::queue_ui_action(std::function<void()> action) {
+    if (_pending_ui_action) {
+        return false;
+    }
+    _pending_ui_action = std::move(action);
+    return true;
+}
+
 void ServerContext::queue_mouse_move(Vec2f window_pos) {
     _pending.push_back({PendingInput::Kind::MouseMove, {}, {}, window_pos, 0.0f});
 }
@@ -916,7 +1262,30 @@ void ServerContext::queue_key(Key key, std::string mode, KeyModifiers modifiers)
     _pending.push_back({PendingInput::Kind::Key, {}, std::move(mode), {}, 0.0f, key, modifiers});
 }
 
+void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
+    _pending.push_back({PendingInput::Kind::Drop, std::move(path), {}, window_pos, 0.0f});
+}
+
+void ServerContext::queue_touch(u64 id, Vec2f window_pos, std::string mode) {
+    PendingInput in{PendingInput::Kind::Touch, {}, std::move(mode), window_pos, 0.0f};
+    in.touch = id;
+    _pending.push_back(std::move(in));
+}
+
+void ServerContext::queue_pad(PadInput pad) {
+    PendingInput in{PendingInput::Kind::Pad, {}, pad.mode, {}, 0.0f};
+    in.pad = std::move(pad);
+    _pending.push_back(std::move(in));
+}
+
 void ServerContext::step() {
+    if (_development) {
+        runtime_detail::advance_development(_scenes, static_cast<u64>(_frame + 1), false);
+    }
+    auto ui_action = std::exchange(_pending_ui_action, {});
+    if (ui_action) {
+        ui_action();
+    }
     Input& input = _app.input();
     input.begin_frame();
 
@@ -932,9 +1301,18 @@ void ServerContext::step() {
         input.set_key_released(key);
         input.set_modifier_held(modifiers, false);
     }
+    for (const auto& [player, button] : _tapped_pad_buttons) {
+        _pads[static_cast<std::size_t>(player)].set_button(button, false);
+    }
+    input.update_touch(static_cast<f64>(_frame) * static_cast<f64>(_fixed_dt)); // the steps' time
+    for (const u64 id : _tapped_touches) {
+        input.set_touch_up(id);
+    }
+    _tapped_touches.clear();
     _tapped_actions.clear();
     _tapped_buttons.clear();
     _tapped_keys.clear();
+    _tapped_pad_buttons.clear();
 
     for (const PendingInput& in : _pending) {
         switch (in.kind) {
@@ -972,6 +1350,46 @@ void ServerContext::step() {
         case PendingInput::Kind::Text:
             input.set_text_input(in.text);
             break;
+        case PendingInput::Kind::Drop:
+            input.add_dropped_file({.path = in.text, .pos = in.pos, .window = _window.id()});
+            break;
+        case PendingInput::Kind::Touch:
+            if (in.mode == "move") {
+                input.set_touch_moved(in.touch, in.pos);
+            } else if (in.mode == "up") {
+                input.set_touch_moved(in.touch, in.pos);
+                input.set_touch_up(in.touch);
+            } else {
+                input.set_touch_down(in.touch, in.pos, _window.id());
+                if (in.mode == "tap") {
+                    _tapped_touches.push_back(in.touch);
+                }
+            }
+            break;
+        case PendingInput::Kind::Pad: {
+            const auto at = static_cast<std::size_t>(in.pad.player);
+            GamepadState& pad = _pads[at];
+            _driven_pads[at] = true;
+            pad.connected = in.pad.connected;
+            if (!pad.connected) {
+                pad = {};
+                break;
+            }
+            f32* values[] = {&pad.left_x, &pad.left_y, &pad.right_x, &pad.right_y, &pad.left_trigger, &pad.right_trigger};
+            for (std::size_t a = 0; a < in.pad.axes.size(); ++a) {
+                if (in.pad.axes[a]) {
+                    *values[a] = *in.pad.axes[a];
+                }
+            }
+            if (in.pad.button) {
+                const auto button = static_cast<GamepadButton>(*in.pad.button);
+                pad.set_button(button, in.mode != "release");
+                if (in.mode == "press") {
+                    _tapped_pad_buttons.emplace_back(in.pad.player, button);
+                }
+            }
+            break;
+        }
         case PendingInput::Kind::Key:
             if (in.mode == "release") {
                 input.set_key_released(in.key);
@@ -987,6 +1405,21 @@ void ServerContext::step() {
         }
     }
     _pending.clear();
+    // Driven controllers, as App gives real ones: each player's, and the
+    // first player's (else the lowest driven connected) as the controller.
+    if (std::ranges::any_of(_driven_pads, [](bool driven) { return driven; })) {
+        const GamepadState* first = nullptr;
+        for (i32 p = 0; p < max_input_players; ++p) {
+            const auto at = static_cast<std::size_t>(p);
+            if (_driven_pads[at]) {
+                input.set_player_gamepad(p, _pads[at]);
+                if (!first && (_pads[at].connected || p == 0)) {
+                    first = &_pads[at];
+                }
+            }
+        }
+        input.set_gamepad(first && first->connected ? *first : GamepadState{});
+    }
 
     SceneContext scene_ctx = make_context();
     runtime_detail::pump_scene_assets(_asset_server, _render);
@@ -994,19 +1427,69 @@ void ServerContext::step() {
     const auto update_start = clock::now();
     _scenes.update(scene_ctx);
     const auto render_start = clock::now();
-    if (_render) {
+    auto present_start = render_start;
+    if (_render || ui_action) {
         _scenes.render(scene_ctx);
+        present_start = clock::now();
         _renderer.present();
     }
+    if (ui_action) {
+        // A hidden/paused UI may not have begun a frame. Its queued action must
+        // still expire on this step instead of firing when it reappears.
+        for (i32 index = 0; index < _scenes.depth(); ++index) {
+            if (auto* scene = _scenes.at_mut(index); scene && scene->ui_context()) {
+                scene->ui_context()->cancel_action();
+            }
+        }
+    }
     const auto end = clock::now();
-    _timings.push_back({
-        .update_ms = std::chrono::duration<f64, std::milli>(render_start - update_start).count(),
-        .render_ms = std::chrono::duration<f64, std::milli>(end - render_start).count(),
+    const auto ms = [](clock::duration d) { return std::chrono::duration<f64, std::milli>(d).count(); };
+    record_frame_timing({
+        .update_ms = ms(render_start - update_start),
+        .render_ms = ms(present_start - render_start),
+        .present_ms = ms(end - present_start),
     });
+    ++_frame;
+    if (_recording) {
+        _recording->frame(*this);
+        if (!_recording->good()) {
+            _report.fail(_recording->error());
+        }
+    }
+}
+
+void ServerContext::start_recording(const std::filesystem::path& path, const GameInfo* game, std::optional<u64> seed) {
+    if (_recording) {
+        throw std::logic_error("automation recording is already active");
+    }
+    _recording = std::make_shared<AutomationRecorder>(path, *this, game, seed);
+    if (!_recording->good()) {
+        throw std::runtime_error(_recording->error());
+    }
+}
+
+void ServerContext::begin_record_command(std::string_view method, const JsonValue& params) {
+    if (_recording) {
+        _recording->begin_command(*this, method, params);
+    }
+}
+
+void ServerContext::record_command(std::string_view method, const JsonValue& params, const ServerResponse& response) {
+    if (!_recording) {
+        return;
+    }
+    _recording->command(*this, method, params, response);
+    if (!_recording->good()) {
+        _report.fail(_recording->error());
+    }
+}
+
+void ServerContext::record_frame_timing(FrameTiming timing) {
+    timing.frame = _timed_frames++;
+    _timings.push_back(timing);
     if (_timings.size() > frame_timing_window) {
         _timings.pop_front();
     }
-    ++_frame;
 }
 
 SceneContext ServerContext::make_context() {
@@ -1021,6 +1504,7 @@ SceneContext ServerContext::make_context() {
         .rng = _rng,
         .report = &_report,
         .renderer3d = _renderer3d,
+        .development = _development,
     };
 }
 
@@ -1049,21 +1533,33 @@ void ServerContext::reset(std::optional<u64> seed) {
     }
     _report = {};
     _pending.clear();
+    _pending_ui_action = {};
     _timings.clear();
 
     SceneContext scene_ctx = make_context();
     _scenes.clear();
     _scenes.flush_pending(scene_ctx);
+    const InputMap map = _app.input().map();
+    _app.input() = Input{};
+    _app.input().set_map(map);
+    _tapped_actions.clear();
+    _tapped_buttons.clear();
+    _tapped_keys.clear();
+    _pads = {};
+    _driven_pads = {};
+    _tapped_pad_buttons.clear();
+    _tapped_touches.clear();
     if (_reset_scenes) {
         _reset_scenes(_scenes);
     }
     _scenes.flush_pending(scene_ctx);
 }
 
-ServerResponse dispatch_server_command(ServerContext& ctx,
-                                       const GameInfo* game,
-                                       std::string_view method,
-                                       const JsonValue& params) {
+static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const GameInfo* game, std::string_view method,
+                                                   const JsonValue& params) {
+    if (auto response = dispatch_automation_command(ctx, method, params)) {
+        return *response;
+    }
     if (method == "game.info") {
         return handle_game_info(game, ctx.window_config());
     }
@@ -1094,14 +1590,29 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
     if (method == "input.text") {
         return handle_input_text(ctx, params);
     }
+    if (method == "input.drop") {
+        return handle_input_drop(ctx, params);
+    }
     if (method == "input.key") {
         return handle_input_key(ctx, params);
     }
-    if (method == "ui.snapshot") {
-        return handle_ui_snapshot(ctx, params);
+    if (method == "input.pad") {
+        return handle_input_pad(ctx, params);
+    }
+    if (method == "input.touch") {
+        return handle_input_touch(ctx, params);
     }
     if (method == "view.screenshot") {
         return handle_view_screenshot(ctx, params);
+    }
+    if (method == "view.scene") {
+        return handle_view_scene(ctx, params);
+    }
+    if (method == "view.edit") {
+        return handle_view_edit(ctx, params);
+    }
+    if (method == "view.frame") {
+        return handle_view_frame(ctx, params);
     }
     if (method == "sim.reset") {
         return handle_sim_reset(ctx, params);
@@ -1112,10 +1623,21 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
     if (method == "frame.timing") {
         return handle_frame_timing(ctx, params);
     }
+    if (method == "render.graph") {
+        return handle_render_graph(ctx);
+    }
     if (method == "ping") {
         return ok_result("{\"pong\":true}");
     }
     return error_result("unknown method: " + std::string(method));
+}
+
+ServerResponse dispatch_server_command(ServerContext& ctx, const GameInfo* game, std::string_view method,
+                                       const JsonValue& params) {
+    ctx.begin_record_command(method, params);
+    auto response = dispatch_server_command_impl(ctx, game, method, params);
+    ctx.record_command(method, params, response);
+    return response;
 }
 
 namespace {
@@ -1456,7 +1978,23 @@ ServerTransport parse_server_transport(std::string_view text) {
     return text == "http" ? ServerTransport::Http : ServerTransport::Stdio;
 }
 
+std::string_view automation_mode_name(AutomationMode mode) {
+    switch (mode) {
+    case AutomationMode::Driven:
+        return "driven";
+    case AutomationMode::Realtime:
+        return "realtime";
+    case AutomationMode::Inspect:
+        return "inspect";
+    }
+    return "driven";
+}
+
 int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
+    if (!config.automation_record_path.empty() && config.mode != ServerMode::Driven) {
+        KIN_LOG_ERROR("server", "automation recording requires driven mode");
+        return 1;
+    }
 #ifndef KIN_EXPERIMENTAL_3D
     if (config.rendering_3d) {
         KIN_LOG_ERROR("server", "3D rendering requested in a 2D-only build");
@@ -1534,7 +2072,18 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
 
     // Realize the initial scene stack (apply pending push + on_enter) without
     // advancing gameplay, so read endpoints work before the first tick.
+    ctx.enable_development(config.development);
+    ctx.set_automation_mode(config.mode == ServerMode::Driven ? AutomationMode::Driven : AutomationMode::Realtime);
     ctx.realize_scenes();
+    if (!config.automation_record_path.empty()) {
+        try {
+            ctx.start_recording(config.automation_record_path, config.game, config.seed);
+        } catch (const std::exception& error) {
+            KIN_LOG_ERROR("server", error.what());
+            ctx.shutdown_scenes();
+            return 1;
+        }
+    }
 
     int code = 0;
     if (config.transport == ServerTransport::Http) {
@@ -1548,6 +2097,470 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
     // after `renderer` — freeing GPU resources into a dead device.
     ctx.shutdown_scenes();
     return code;
+}
+
+struct LiveInspector::Shared {
+    std::mutex mutex;
+    std::condition_variable arrived; // a line, or the end of them
+    std::deque<std::string> lines;
+    bool reading = true;
+};
+
+// Answers on their way to the tool, in order.
+struct LiveInspector::Outbox {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::deque<std::string> answers;
+    bool writing = false; // one is being written
+    bool closing = false;
+};
+
+namespace {
+
+// stdout's lock while an answer is written to std::cout: the game's own prints
+// to it (through stdio, as std::cout's are) wait, not landing inside the answer.
+class StdoutLock {
+public:
+    explicit StdoutLock(bool lock) : _locked(lock) {
+        if (_locked) {
+#if defined(_WIN32)
+            _lock_file(stdout);
+#else
+            flockfile(stdout);
+#endif
+        }
+    }
+    ~StdoutLock() {
+        if (_locked) {
+#if defined(_WIN32)
+            _unlock_file(stdout);
+#else
+            funlockfile(stdout);
+#endif
+        }
+    }
+    StdoutLock(const StdoutLock&) = delete;
+    StdoutLock& operator=(const StdoutLock&) = delete;
+
+private:
+    bool _locked;
+};
+
+ServerResponse set_debug_breakpoints(const JsonValue& params) {
+    ScriptDebugger::Breakpoints breakpoints;
+    const JsonValue* files = params.find("files");
+    if (files && !files->is_object()) {
+        return error_result("files must be an object of line lists");
+    }
+    i64 count = 0;
+    if (files) {
+        for (const auto& [file, lines] : files->members()) {
+            std::set<i32>& set = breakpoints[file];
+            for (const JsonValue& line : lines.items()) {
+                if (line.is_number() && line.as_int() > 0) {
+                    set.insert(static_cast<i32>(line.as_int()));
+                }
+            }
+            count += static_cast<i64>(set.size());
+        }
+    }
+    script_debugger().set_breakpoints(std::move(breakpoints));
+    return ok_result("{\"breakpoints\":" + std::to_string(count) + "}");
+}
+
+// The answer to what the reader does itself as it reads it (debug.breakpoints
+// and debug.pause: the debugger's own, taken at once, so that a game's first
+// update already stops), else nullopt.
+std::optional<std::string> answered_on_reading(std::string_view line) {
+    if (line.find("\"debug.") == std::string_view::npos) {
+        return std::nullopt; // not parsed: most lines are not
+    }
+    const JsonParseResult parsed = parse_json(strip_bom(line));
+    if (!parsed.ok()) {
+        return std::nullopt;
+    }
+    const std::string method = parsed.value->string_at("method");
+    if (method != "debug.breakpoints" && method != "debug.pause") {
+        return std::nullopt;
+    }
+    ServerResponse response;
+    if (method == "debug.pause") {
+        script_debugger().pause();
+        response = ok_result("{\"stopped\":false}");
+    } else {
+        static const JsonValue empty_params;
+        const JsonValue* given = parsed.value->find("params");
+        response = set_debug_breakpoints(given ? *given : empty_params);
+    }
+    std::ostringstream answer;
+    write_envelope(answer, parsed.value->find("id"), response);
+    return std::move(answer).str();
+}
+
+} // namespace
+
+LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
+    : _shared(std::make_shared<Shared>()),
+      _outbox(std::make_shared<Outbox>()),
+      _out(out) {
+    // The reader holds the shared state, so it can outlive this when it is
+    // still blocked reading as the game ends (it is then left behind).
+    _reader = std::thread([shared = _shared, outbox = _outbox, &in] {
+        std::string line;
+        while (std::getline(in, line)) {
+            if (std::optional<std::string> answer = answered_on_reading(line)) {
+                {
+                    std::lock_guard<std::mutex> lock(outbox->mutex);
+                    outbox->answers.push_back(std::move(*answer));
+                }
+                outbox->changed.notify_all();
+                line.clear();
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> lock(shared->mutex);
+                shared->lines.push_back(std::move(line));
+            }
+            shared->arrived.notify_all();
+            line.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(shared->mutex);
+            shared->reading = false;
+        }
+        shared->arrived.notify_all();
+    });
+    // The writer, too, holds what it shares: blocked by a tool that stopped
+    // reading as the game ends, it is left behind.
+    _writer = std::thread([outbox = _outbox, &out = _out] {
+        const bool to_stdout = &out == &std::cout;
+        std::unique_lock<std::mutex> lock(outbox->mutex);
+        for (;;) {
+            outbox->changed.wait(lock, [&] { return !outbox->answers.empty() || outbox->closing; });
+            if (outbox->answers.empty()) {
+                return; // closing, all written
+            }
+            const std::string answer = std::move(outbox->answers.front());
+            outbox->answers.pop_front();
+            outbox->writing = true;
+            lock.unlock();
+            {
+                const StdoutLock stdout_lock{to_stdout};
+                out << answer;
+                out.flush();
+            }
+            lock.lock();
+            outbox->writing = false;
+            outbox->changed.notify_all();
+        }
+    });
+    script_debugger().set_waiter([this](ScriptDebugger&) { return wait_stopped(); });
+    KIN_LOG_INFO("server", "inspector listening on stdin");
+}
+
+LiveInspector::~LiveInspector() {
+    script_debugger().set_waiter({});
+    script_debugger().set_breakpoints({});
+    if (_writer.joinable()) {
+        // What is left goes out, unless the tool has stopped reading.
+        std::unique_lock<std::mutex> lock(_outbox->mutex);
+        _outbox->closing = true;
+        _outbox->changed.notify_all();
+        const bool written = _outbox->changed.wait_for(lock, std::chrono::seconds(2), [&] {
+            return _outbox->answers.empty() && !_outbox->writing;
+        });
+        lock.unlock();
+        if (written) {
+            _writer.join();
+        } else {
+            _writer.detach();
+        }
+    }
+    if (!_reader.joinable()) {
+        return;
+    }
+    bool reading = false;
+    {
+        std::lock_guard<std::mutex> lock(_shared->mutex);
+        reading = _shared->reading;
+    }
+    if (reading) {
+        _reader.detach();
+    } else {
+        _reader.join();
+    }
+}
+
+void LiveInspector::poll(ServerContext& ctx, const GameInfo* game) {
+    ctx.set_automation_mode(AutomationMode::Inspect);
+    _ctx = &ctx;
+    std::deque<std::string> lines;
+    bool reading = true;
+    {
+        std::lock_guard<std::mutex> lock(_shared->mutex);
+        lines.swap(_shared->lines);
+        reading = _shared->reading;
+    }
+    for (const std::string& line : lines) {
+        if (line.find_first_not_of(" \t\r\n") != std::string::npos) {
+            answer(ctx, game, line);
+        }
+    }
+    if (!reading && !_finished) {
+        // Nobody is left to resume it.
+        _finished = true;
+        _paused = false;
+        _steps = 0;
+        KIN_LOG_INFO("server", "inspector input closed");
+    }
+}
+
+void LiveInspector::flush() {
+    std::unique_lock<std::mutex> lock(_outbox->mutex);
+    _outbox->changed.wait(lock, [&] { return _outbox->answers.empty() && !_outbox->writing; });
+}
+
+void LiveInspector::send(const JsonValue* id, const ServerResponse& response) {
+    std::ostringstream line;
+    write_envelope(line, id, response);
+    {
+        std::lock_guard<std::mutex> lock(_outbox->mutex);
+        _outbox->answers.push_back(std::move(line).str());
+    }
+    _outbox->changed.notify_all();
+}
+
+bool LiveInspector::admit_update() {
+    if (_paused) {
+        if (_steps <= 0) {
+            return false;
+        }
+        --_steps;
+    }
+    ++_frame;
+    return true;
+}
+
+void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string_view line) {
+    const JsonParseResult parsed = parse_json(strip_bom(line));
+    if (!parsed.ok()) {
+        send(nullptr, error_result("invalid JSON: " + parsed.error));
+        return;
+    }
+    const JsonValue& root = *parsed.value;
+    const JsonValue* id = root.find("id");
+    const std::string method = root.string_at("method");
+    static const JsonValue empty_params;
+    const JsonValue* given = root.find("params");
+    const JsonValue& params = given ? *given : empty_params;
+    const auto status = [&] { return this->status(false); };
+
+    ServerResponse response;
+    if (method.empty()) {
+        response = error_result("request missing 'method'");
+    } else if (method == "server.shutdown") {
+        KIN_LOG_INFO("server", "inspector asked the game to quit");
+        ctx.app().quit();
+        response = ok_result("{\"bye\":true}");
+    } else if (method == "server.status") {
+        response = status();
+    } else if (method == "sim.pause") {
+        _paused = true;
+        _steps = 0;
+        response = status();
+    } else if (method == "sim.resume") {
+        _paused = false;
+        _steps = 0;
+        response = status();
+    } else if (method == "sim.step") {
+        const i64 count = params.int_at("count", 1);
+        if (count < 0) {
+            response = error_result("count must be >= 0");
+        } else {
+            _paused = true;
+            _steps += std::min(count, MAX_TICKS_PER_CALL);
+            response = status();
+        }
+    } else if (method.starts_with("debug.")) {
+        std::optional<ScriptResume> resume;
+        response = answer_debug(method, params, false, resume);
+    } else if (method == "sim.tick" || method == "sim.reset" || method.starts_with("input.") ||
+               method.starts_with("view.") || method == "ui.action") {
+        response = error_result(method + " drives a headless server (--server); this game runs in its window");
+    } else if (method == "ui.snapshot" || method == "ui.query") {
+        // The last frame's UI: laying one out here would consume the player's input.
+        response = *dispatch_automation_command(ctx, method, params, false);
+    } else {
+        response = dispatch_server_command(ctx, game, method, params);
+    }
+    send(id, response);
+}
+
+ServerResponse LiveInspector::status(bool stopped) const {
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("frame", _frame);
+    json.field("paused", _paused);
+    json.field("stopped", stopped);
+    json.field("failed", _ctx && _ctx->report().failed);
+    if (_ctx) {
+        json.field("fixed_dt", static_cast<f64>(_ctx->fixed_dt()));
+        json.field("scene_depth", _ctx->scenes().depth());
+    }
+    json.end_object();
+    return ok_result(out.str());
+}
+
+namespace {
+
+void write_script_value(JsonWriter& json, const ScriptValue& value) {
+    json.begin_object();
+    json.field("name", value.name);
+    json.field("value", value.value);
+    json.field("kind", value.kind);
+    if (!value.fields.empty()) {
+        json.key("fields").begin_array();
+        for (const ScriptValue& field : value.fields) {
+            write_script_value(json, field);
+        }
+        json.end_array();
+    }
+    if (value.more) {
+        json.field("more", true);
+    }
+    json.end_object();
+}
+
+std::string debug_state_json(const std::optional<ScriptStop>& stop) {
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("stopped", stop.has_value());
+    if (stop) {
+        json.field("serial", stop->serial);
+        json.field("reason", stop->reason);
+        json.key("frames").begin_array();
+        for (const ScriptFrame& frame : stop->frames) {
+            json.begin_object();
+            json.field("function", frame.function);
+            json.field("file", frame.file);
+            json.field("line", frame.line);
+            for (const auto& [name, values] : {std::pair{"locals", &frame.locals}, std::pair{"upvalues", &frame.upvalues}}) {
+                json.key(name).begin_array();
+                for (const ScriptValue& value : *values) {
+                    write_script_value(json, value);
+                }
+                json.end_array();
+            }
+            json.end_object();
+        }
+        json.end_array();
+    }
+    json.end_object();
+    return out.str();
+}
+
+} // namespace
+
+ServerResponse LiveInspector::answer_debug(std::string_view method, const JsonValue& params, bool stopped,
+                                           std::optional<ScriptResume>& resume) {
+    ScriptDebugger& debugger = script_debugger();
+    if (method == "debug.breakpoints") {
+        return set_debug_breakpoints(params);
+    }
+    if (method == "debug.state") {
+        return ok_result(debug_state_json(debugger.stop()));
+    }
+    if (method == "debug.pause") {
+        if (!stopped) {
+            debugger.pause();
+        }
+        return ok_result(debug_state_json(debugger.stop()));
+    }
+    if (method == "debug.continue" || method == "debug.step") {
+        if (!stopped) {
+            return error_result("no script is stopped");
+        }
+        if (method == "debug.continue") {
+            resume = ScriptResume::Continue;
+        } else {
+            const std::string how = params.string_at("how", "over");
+            if (how == "into") {
+                resume = ScriptResume::Into;
+            } else if (how == "over") {
+                resume = ScriptResume::Over;
+            } else if (how == "out") {
+                resume = ScriptResume::Out;
+            } else {
+                return error_result("how must be into, over or out");
+            }
+        }
+        return ok_result("{\"stopped\":false}");
+    }
+    return error_result("unknown method: " + std::string(method));
+}
+
+ScriptResume LiveInspector::wait_stopped() {
+    // What waits for the game to go on: answered once it does, in order.
+    std::deque<std::string> later;
+    const auto go_on = [&](ScriptResume how) {
+        std::lock_guard<std::mutex> lock(_shared->mutex);
+        _shared->lines.insert(_shared->lines.begin(), std::make_move_iterator(later.begin()),
+                              std::make_move_iterator(later.end()));
+        return how;
+    };
+    KIN_LOG_INFO("server", "a script stopped for the inspector");
+    for (;;) {
+        std::string line;
+        {
+            std::unique_lock<std::mutex> lock(_shared->mutex);
+            _shared->arrived.wait(lock, [&] { return !_shared->lines.empty() || !_shared->reading; });
+            if (_shared->lines.empty()) {
+                // The tool is gone: nobody is left to say go on.
+                lock.unlock();
+                script_debugger().set_breakpoints({});
+                return go_on(ScriptResume::Continue);
+            }
+            line = std::move(_shared->lines.front());
+            _shared->lines.pop_front();
+        }
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
+            continue;
+        }
+        const JsonParseResult parsed = parse_json(strip_bom(line));
+        if (!parsed.ok()) {
+            send(nullptr, error_result("invalid JSON: " + parsed.error));
+            continue;
+        }
+        const JsonValue& root = *parsed.value;
+        const JsonValue* id = root.find("id");
+        const std::string method = root.string_at("method");
+        static const JsonValue empty_params;
+        const JsonValue* given = root.find("params");
+        const JsonValue& params = given ? *given : empty_params;
+        if (method.starts_with("debug.")) {
+            std::optional<ScriptResume> resume;
+            send(id, answer_debug(method, params, true, resume));
+            if (resume) {
+                return go_on(*resume);
+            }
+        } else if (method == "server.status") {
+            send(id, status(true));
+        } else if (method == "ping") {
+            send(id, ok_result("{\"pong\":true}"));
+        } else if (method == "server.shutdown") {
+            KIN_LOG_INFO("server", "inspector asked the game to quit");
+            if (_ctx) {
+                _ctx->app().quit();
+            }
+            send(id, ok_result("{\"bye\":true}"));
+            script_debugger().set_breakpoints({});
+            return go_on(ScriptResume::Continue);
+        } else {
+            later.push_back(std::move(line));
+        }
+    }
 }
 
 } // namespace kin

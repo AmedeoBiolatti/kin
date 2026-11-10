@@ -41,10 +41,12 @@ public:
     Vec2f logical_to_window(Vec2f logical) const override;
 
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override;
+    bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
     void draw_texture(const Texture& texture, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) override;
+    bool draw_textured_geometry(const Texture&, std::span<const ShaderVertex>, std::span<const u32>) override;
 
     void fill_rect(Rectf rect, Color color) override;
     void draw_rect(Rectf rect, Color color) override;
@@ -153,6 +155,10 @@ private:
     GeometryBatch _batch;
     BlendMode _blend = BlendMode::Alpha;
     bool _min_max_blend = false;  // the driver takes BlendMode::Max and Min
+    // How wide shapes' soft edges fade, in pixels: half a pixel (docs/rendering.md,
+    // "Shape edges"), a whole one on SDL's software driver, whose triangles snap
+    // their corners to half pixels (a half pixel band would come and go).
+    f32 _soft_edge_pixels = 0.5f;
     bool _warned_min_max = false;
     RendererBackendStats _stats;
     bool _texture_batching_enabled = true;

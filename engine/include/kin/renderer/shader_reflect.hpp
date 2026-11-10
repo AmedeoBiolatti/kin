@@ -7,7 +7,6 @@
 
 #include <kin/core/types.hpp>
 #include <kin/renderer/shader.hpp>
-
 #include <optional>
 #include <string>
 #include <string_view>
@@ -22,7 +21,20 @@ struct ShaderParamInfo {
     u32 size = 0; // a whole array's, for an array
 };
 
+enum class ShaderResourceKind { SampledTexture, StorageTexture, StorageBuffer, UniformBuffer, Unsupported };
+enum class ShaderSampleType { Float, Uint, Sint, Unknown };
+struct ShaderResourceInfo {
+    ShaderResourceKind kind = ShaderResourceKind::Unsupported;
+    u32 set = 0, binding = 0, elements = 1;
+    u32 dimensions = 0; // 1/2/3 axes; zero for unsupported image dimensions
+    ShaderSampleType sample_type = ShaderSampleType::Unknown;
+    bool arrayed = false, comparison = false, multisampled = false, read_only = false;
+    u32 min_bytes = 0; // fixed block prefix, including one runtime-array element
+};
+
 struct ShaderLayout {
+    u32 execution_model = ~u32{0}; // SPIR-V: 4 fragment, 5 compute
+    std::vector<ShaderResourceInfo> resources{};
     u32 samplers = 0;         // sampled textures, set 2 bindings 0..
     u32 storage_textures = 0; // set 2, after the samplers
     u32 storage_buffers = 0;  // set 2, after those

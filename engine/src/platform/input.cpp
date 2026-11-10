@@ -4,10 +4,13 @@
 #include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
 
+#include "window_points.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -145,6 +148,10 @@ InputBinding key_binding(Key key, KeyModifiers modifiers = KeyModifiers::None) {
     };
 }
 
+std::size_t pad_index(InputBinding binding) {
+    return binding.code >= 0 ? static_cast<std::size_t>(binding.code) : static_cast<std::size_t>(-1);
+}
+
 InputBinding mouse_binding(MouseButton button) {
     return {
         .device = InputBindingDevice::MouseButton,
@@ -274,7 +281,144 @@ std::string_view binding_name(InputBinding binding) {
     if (binding.device == InputBindingDevice::Key) {
         return key_name(to_key(binding.code));
     }
+    if (binding.device == InputBindingDevice::Gamepad) {
+        return pad_control_name(static_cast<PadControl>(binding.code));
+    }
+    if (binding.device == InputBindingDevice::Touch) {
+        return touch_control_name(static_cast<TouchControl>(binding.code));
+    }
     return mouse_button_name(to_mouse_button(binding.code));
+}
+
+std::string_view touch_control_name(TouchControl control) {
+    switch (control) {
+    case TouchControl::Tap: return "tap";
+    case TouchControl::DoubleTap: return "double_tap";
+    case TouchControl::LongPress: return "long_press";
+    case TouchControl::SwipeLeft: return "swipe_left";
+    case TouchControl::SwipeRight: return "swipe_right";
+    case TouchControl::SwipeUp: return "swipe_up";
+    case TouchControl::SwipeDown: return "swipe_down";
+    case TouchControl::TwoFingerTap: return "two_finger_tap";
+    case TouchControl::Count: break;
+    }
+    return "unknown";
+}
+
+bool parse_touch_control(std::string_view name, TouchControl& out) {
+    const std::string target = lower_copy(name);
+    for (u8 code = 0; code < static_cast<u8>(TouchControl::Count); ++code) {
+        if (touch_control_name(static_cast<TouchControl>(code)) == target) {
+            out = static_cast<TouchControl>(code);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string_view pad_control_name(PadControl control) {
+    switch (control) {
+    case PadControl::A: return "a";
+    case PadControl::B: return "b";
+    case PadControl::X: return "x";
+    case PadControl::Y: return "y";
+    case PadControl::Back: return "back";
+    case PadControl::Start: return "start";
+    case PadControl::LeftStick: return "left_stick";
+    case PadControl::RightStick: return "right_stick";
+    case PadControl::LeftShoulder: return "left_shoulder";
+    case PadControl::RightShoulder: return "right_shoulder";
+    case PadControl::DPadUp: return "dpad_up";
+    case PadControl::DPadDown: return "dpad_down";
+    case PadControl::DPadLeft: return "dpad_left";
+    case PadControl::DPadRight: return "dpad_right";
+    case PadControl::LeftStickLeft: return "left_stick_left";
+    case PadControl::LeftStickRight: return "left_stick_right";
+    case PadControl::LeftStickUp: return "left_stick_up";
+    case PadControl::LeftStickDown: return "left_stick_down";
+    case PadControl::RightStickLeft: return "right_stick_left";
+    case PadControl::RightStickRight: return "right_stick_right";
+    case PadControl::RightStickUp: return "right_stick_up";
+    case PadControl::RightStickDown: return "right_stick_down";
+    case PadControl::LeftTrigger: return "left_trigger";
+    case PadControl::RightTrigger: return "right_trigger";
+    case PadControl::Count: break;
+    }
+    return "unknown";
+}
+
+std::string_view pad_axis_name(PadAxis axis) {
+    switch (axis) {
+    case PadAxis::LeftX: return "left_x";
+    case PadAxis::LeftY: return "left_y";
+    case PadAxis::RightX: return "right_x";
+    case PadAxis::RightY: return "right_y";
+    case PadAxis::LeftTrigger: return "left_trigger";
+    case PadAxis::RightTrigger: return "right_trigger";
+    }
+    return "left_x";
+}
+
+bool parse_pad_control(std::string_view name, PadControl& out) {
+    const std::string target = lower_copy(name);
+    for (u8 code = 0; code < static_cast<u8>(PadControl::Count); ++code) {
+        if (pad_control_name(static_cast<PadControl>(code)) == target) {
+            out = static_cast<PadControl>(code);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parse_pad_axis(std::string_view name, PadAxis& out) {
+    const std::string target = lower_copy(name);
+    for (u8 code = 0; code <= static_cast<u8>(PadAxis::RightTrigger); ++code) {
+        if (pad_axis_name(static_cast<PadAxis>(code)) == target) {
+            out = static_cast<PadAxis>(code);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string binding_text(InputBinding binding) {
+    switch (binding.device) {
+    case InputBindingDevice::Key: return "key:" + std::string(key_name(to_key(binding.code)));
+    case InputBindingDevice::MouseButton: return "mouse:" + std::string(mouse_button_name(to_mouse_button(binding.code)));
+    case InputBindingDevice::Gamepad: return "pad:" + std::string(pad_control_name(static_cast<PadControl>(binding.code)));
+    case InputBindingDevice::Touch: return "touch:" + std::string(touch_control_name(static_cast<TouchControl>(binding.code)));
+    }
+    return {};
+}
+
+std::optional<InputBinding> parse_binding_text(std::string_view text) {
+    const std::size_t colon = text.find(':');
+    if (colon == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::string_view device = text.substr(0, colon);
+    const std::string_view name = text.substr(colon + 1);
+    if (device == "key") {
+        Key key = Key::Unknown;
+        return parse_key(name, key) ? std::optional(key_binding(key)) : std::nullopt;
+    }
+    if (device == "mouse") {
+        MouseButton button = MouseButton::Left;
+        return parse_mouse_button(name, button) ? std::optional(mouse_binding(button)) : std::nullopt;
+    }
+    if (device == "pad") {
+        PadControl control = PadControl::A;
+        return parse_pad_control(name, control)
+                   ? std::optional(InputBinding{.device = InputBindingDevice::Gamepad, .code = static_cast<i32>(control)})
+                   : std::nullopt;
+    }
+    if (device == "touch") {
+        TouchControl control = TouchControl::Tap;
+        return parse_touch_control(name, control)
+                   ? std::optional(InputBinding{.device = InputBindingDevice::Touch, .code = static_cast<i32>(control)})
+                   : std::nullopt;
+    }
+    return std::nullopt;
 }
 
 bool parse_key(std::string_view name, Key& out) {
@@ -330,29 +474,15 @@ void write_modifiers(std::ostream& out, KeyModifiers modifiers) {
     }
 }
 
-InputMap load_input_map(const std::filesystem::path& path) {
-    const std::optional<std::string> text = read_content_text(path);
-    if (!text) {
-        KIN_LOG_ERROR_F("input",
-                        "input map open failed",
-                        (LogFields{{.name = "path", .value = path.string()},
-                                   {.name = "error", .value = "open_failed"}}));
-        throw std::runtime_error("Failed to open input map: " + path.string());
-    }
-    std::istringstream file{*text};
-
+bool parse_input_map(std::string_view text, InputMap& out, std::string& error) {
+    std::istringstream file{std::string(text)};
     InputMap map;
     std::string line;
     i32 line_no = 0;
     const auto fail = [&](std::string_view message) {
-        KIN_LOG_ERROR_F("input",
-                        "input map parse failed",
-                        (LogFields{{.name = "path", .value = path.string()},
-                                   {.name = "line", .value = std::to_string(line_no)},
-                                   {.name = "error", .value = std::string{message}}}));
-        throw std::runtime_error(path.string() + ":" + std::to_string(line_no) + ": " + std::string{message});
+        error = "line " + std::to_string(line_no) + ": " + std::string{message};
+        return false;
     };
-
     while (std::getline(file, line)) {
         ++line_no;
         std::istringstream in(trim_comment(std::move(line)));
@@ -360,67 +490,106 @@ InputMap load_input_map(const std::filesystem::path& path) {
         if (!(in >> kind)) {
             continue;
         }
-
         if (kind == "key") {
             std::string action;
             std::string key_name_text;
             if (!(in >> action >> key_name_text)) {
-                fail("key requires action and key name");
+                return fail("key requires action and key name");
             }
-
             Key key = Key::Unknown;
             if (!parse_key(key_name_text, key)) {
-                fail("unknown key");
+                return fail("unknown key");
             }
-
             KeyModifiers modifiers = KeyModifiers::None;
             for (std::string modifier; in >> modifier;) {
                 if (!parse_modifier(modifier, modifiers)) {
-                    fail("unknown key modifier");
+                    return fail("unknown key modifier");
                 }
             }
-
             map.bind(action, key, modifiers);
             continue;
         }
-
         if (kind == "mouse") {
             std::string action;
             std::string button_name_text;
             if (!(in >> action >> button_name_text)) {
-                fail("mouse requires action and button name");
+                return fail("mouse requires action and button name");
             }
-
             MouseButton button = MouseButton::Left;
             if (!parse_mouse_button(button_name_text, button)) {
-                fail("unknown mouse button");
+                return fail("unknown mouse button");
             }
-
             map.bind(action, button);
             continue;
         }
-
-        fail("unknown directive");
+        if (kind == "touch") {
+            std::string action;
+            std::string control_name;
+            if (!(in >> action >> control_name)) {
+                return fail("touch requires action and gesture name");
+            }
+            TouchControl control = TouchControl::Tap;
+            if (!parse_touch_control(control_name, control)) {
+                return fail("unknown touch gesture");
+            }
+            map.bind(action, control);
+            continue;
+        }
+        if (kind == "pad") {
+            std::string action;
+            std::string control_name;
+            if (!(in >> action >> control_name)) {
+                return fail("pad requires action and control name");
+            }
+            PadControl control = PadControl::A;
+            if (!parse_pad_control(control_name, control)) {
+                return fail("unknown pad control");
+            }
+            map.bind(action, control);
+            continue;
+        }
+        if (kind == "axis") {
+            std::string name;
+            std::string what;
+            std::string value;
+            if (!(in >> name >> what >> value)) {
+                return fail("axis requires a name, then -, +, stick or deadzone, and its value");
+            }
+            InputAxis axis = map.axis(name) ? *map.axis(name) : InputAxis{.name = name};
+            if (what == "-" || what == "+") {
+                const std::optional<InputBinding> binding = parse_binding_text(value);
+                if (!binding) {
+                    return fail("unknown axis binding (key:<Key>, mouse:<button>, pad:<control>, touch:<gesture>)");
+                }
+                (what == "-" ? axis.negative : axis.positive).push_back(*binding);
+            } else if (what == "stick") {
+                InputAxisStick stick;
+                stick.inverted = value.starts_with('-');
+                if (!parse_pad_axis(stick.inverted ? std::string_view(value).substr(1) : std::string_view(value), stick.axis)) {
+                    return fail("unknown pad axis");
+                }
+                axis.sticks.push_back(stick);
+            } else if (what == "deadzone") {
+                try {
+                    axis.dead_zone = std::clamp(std::stof(value), 0.0f, 0.95f);
+                } catch (const std::exception&) {
+                    return fail("deadzone requires a number");
+                }
+            } else {
+                return fail("unknown axis part");
+            }
+            map.set_axis(std::move(axis));
+            continue;
+        }
+        return fail("unknown directive");
     }
-
-    KIN_LOG_INFO_F("input",
-                   "input map loaded",
-                   (LogFields{{.name = "path", .value = path.string()},
-                              {.name = "count", .value = std::to_string(map.action_count())},
-                              {.name = "status", .value = "loaded"}}));
-    return map;
+    out = std::move(map);
+    error.clear();
+    return true;
 }
 
-bool save_input_map(const InputMap& map, const std::filesystem::path& path) {
-    std::ofstream out(path);
-    if (!out) {
-        KIN_LOG_ERROR_F("input",
-                        "input map save failed",
-                        (LogFields{{.name = "path", .value = path.string()},
-                                   {.name = "error", .value = "open_failed"}}));
-        return false;
-    }
-
+std::string serialize_input_map(const InputMap& map) {
+    std::ostringstream out;
     out << "# kin input map\n";
     for (const InputAction& action : map.actions()) {
         for (InputBinding binding : action.bindings) {
@@ -430,10 +599,64 @@ bool save_input_map(const InputMap& map, const std::filesystem::path& path) {
                 out << '\n';
             } else if (binding.device == InputBindingDevice::MouseButton) {
                 out << "mouse " << action.name << ' ' << mouse_button_name(to_mouse_button(binding.code)) << '\n';
+            } else if (binding.device == InputBindingDevice::Touch) {
+                out << "touch " << action.name << ' ' << touch_control_name(static_cast<TouchControl>(binding.code)) << '\n';
+            } else {
+                out << "pad " << action.name << ' ' << pad_control_name(static_cast<PadControl>(binding.code)) << '\n';
             }
         }
     }
+    for (const InputAxis& axis : map.axes()) {
+        for (InputBinding binding : axis.negative) {
+            out << "axis " << axis.name << " - " << binding_text(binding) << '\n';
+        }
+        for (InputBinding binding : axis.positive) {
+            out << "axis " << axis.name << " + " << binding_text(binding) << '\n';
+        }
+        for (const InputAxisStick& stick : axis.sticks) {
+            out << "axis " << axis.name << " stick " << (stick.inverted ? "-" : "") << pad_axis_name(stick.axis) << '\n';
+        }
+        out << "axis " << axis.name << " deadzone " << axis.dead_zone << '\n';
+    }
+    return out.str();
+}
 
+InputMap load_input_map(const std::filesystem::path& path) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
+        KIN_LOG_ERROR_F("input",
+                        "input map open failed",
+                        (LogFields{{.name = "path", .value = path.string()},
+                                   {.name = "error", .value = "open_failed"}}));
+        throw std::runtime_error("Failed to open input map: " + path.string());
+    }
+    InputMap map;
+    std::string error;
+    if (!parse_input_map(*text, map, error)) {
+        KIN_LOG_ERROR_F("input",
+                        "input map parse failed",
+                        (LogFields{{.name = "path", .value = path.string()},
+                                   {.name = "error", .value = error}}));
+        throw std::runtime_error(path.string() + ": " + error);
+    }
+    KIN_LOG_INFO_F("input",
+                   "input map loaded",
+                   (LogFields{{.name = "path", .value = path.string()},
+                              {.name = "count", .value = std::to_string(map.action_count())},
+                              {.name = "status", .value = "loaded"}}));
+    return map;
+}
+
+bool save_input_map(const InputMap& map, const std::filesystem::path& path) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        KIN_LOG_ERROR_F("input",
+                        "input map save failed",
+                        (LogFields{{.name = "path", .value = path.string()},
+                                   {.name = "error", .value = "open_failed"}}));
+        return false;
+    }
+    out << serialize_input_map(map);
     const bool ok = static_cast<bool>(out);
     if (ok) {
         KIN_LOG_INFO_F("input",
@@ -465,20 +688,51 @@ void Input::advance_step_edges() {
     // clicks.) Per-frame keyboard edges live exactly one rendered frame; per-frame
     // mouse edges live until the next stepping frame (see begin_frame) so update()-time
     // ui2 can observe a click from a 0-step frame.
-    _key_prev = _key_cur;
-    _key_pressed.fill(false);
-    _key_released.fill(false);
+    _keys.advance_step();
+    for (Buttons<pad_control_count>& pad : _pads) {
+        pad.advance_step();
+    }
+    _screen_actions.advance_step();
+    advance_touch_step(false);
     _mouse_wheel_y = 0.0f;
+    _mouse_wheel_x = 0.0f;
     _mouse_motion = {};
 }
 
+// What a step reads of touch, used up: the gestures' edges, fingers lifted,
+// pinch and pan. At a frame's start (`frame_start`), gestures made before the
+// frame before are let go, so a step sees each held, then released.
+void Input::advance_touch_step(bool frame_start) {
+    _touch_controls.advance_step();
+    if (frame_start) {
+        for (const std::size_t control : _touch_release_ready) {
+            _touch_controls.set(control, false);
+        }
+        _touch_release_ready = std::exchange(_touch_release, {});
+    }
+    _touches_ended.clear();
+    _pinch = 1.0f;
+    _pan = {};
+}
+
+void Input::clear_touch_frame() {
+    _touch_controls.clear_frame();
+    _frame_touches_ended.clear();
+    _frame_pinch = 1.0f;
+    _frame_pan = {};
+}
+
 void Input::consume_frame_edges() {
-    _key_frame_pressed.fill(false);
+    _keys.clear_frame();
     _key_frame_repeated.fill(false);
-    _key_frame_released.fill(false);
-    _mouse_frame_pressed.fill(false);
-    _mouse_frame_released.fill(false);
+    for (Buttons<pad_control_count>& pad : _pads) {
+        pad.clear_frame();
+    }
+    _screen_actions.clear_frame();
+    _mouse.clear_frame();
+    clear_touch_frame();
     _frame_mouse_wheel_y = 0.0f;
+    _frame_mouse_wheel_x = 0.0f;
     _frame_mouse_motion = {};
     _text_input.clear();
 }
@@ -489,17 +743,19 @@ void Input::begin_frame(bool advance_transients) {
         // reset, including the per-frame MOUSE edges. At sim rate every frame steps, so
         // this is the only path taken and behaviour is identical to a plain per-frame
         // clear.
-        _key_prev = _key_cur;
-        _key_pressed.fill(false);
-        _key_released.fill(false);
-        _mouse_prev = _mouse_cur;
-        _mouse_pressed.fill(false);
-        _mouse_released.fill(false);
-        _mouse_frame_pressed.fill(false);
-        _mouse_frame_released.fill(false);
+        _keys.advance_step();
+        for (Buttons<pad_control_count>& pad : _pads) {
+            pad.advance_step();
+        }
+        // Not the on-screen controls': they were set after that step, as the
+        // last frame drew, for this frame's steps (advance_step_edges uses them).
+        _mouse.advance_step();
+        _mouse.clear_frame();
+        advance_touch_step(true);
         // App::run already used the step wheel up in that step (advance_step_edges);
         // this clears it for callers that step without it (run_for, tests).
         _mouse_wheel_y = 0.0f;
+        _mouse_wheel_x = 0.0f;
         _mouse_motion = {};
     } else {
         // A 0-step frame (refresh > sim rate): the per-frame MOUSE edges PERSIST so UI
@@ -513,7 +769,7 @@ void Input::begin_frame(bool advance_transients) {
         // The step wheel keeps adding up until a step reads it.
         for (i32 button = 0; button < MOUSE_BUTTON_COUNT; ++button) {
             if (_mouse_frame_pressed_consumed[button]) {
-                _mouse_frame_pressed[button] = false;
+                _mouse.frame_pressed[button] = false;
             }
         }
     }
@@ -526,67 +782,104 @@ void Input::begin_frame(bool advance_transients) {
     // frame between fixed steps makes menus jump many entries per keypress at high FPS.
     // Keyboard read from update() must use the sticky pressed() API, which already
     // survives 0-step frames.)
-    _key_frame_pressed.fill(false);
+    _keys.clear_frame();
     _key_frame_repeated.fill(false);
-    _key_frame_released.fill(false);
+    for (Buttons<pad_control_count>& pad : _pads) {
+        pad.clear_frame();
+    }
+    _screen_actions.clear_frame();
+    release_unset_screen_controls();
+    clear_touch_frame();
     _mouse_pos_prev = _mouse_pos;
     _frame_mouse_wheel_y = 0.0f;
+    _frame_mouse_wheel_x = 0.0f;
     _frame_mouse_motion = {};
     _text_input.clear();
+    apply_pointer_touch();
 }
 
 void Input::process_native_event(const void* native_event) {
     const auto& event = *static_cast<const SDL_Event*>(native_event);
+    // The system's Back key (a phone's Back button or gesture, a keyboard's
+    // Back) is Escape: what leaves a menu or pauses a game on a desktop.
+    const auto scancode = [&]() -> i32 {
+        return event.key.scancode == SDL_SCANCODE_AC_BACK ? SDL_SCANCODE_ESCAPE : event.key.scancode;
+    };
 
-    if (event.type == SDL_EVENT_KEY_DOWN && valid_scancode(event.key.scancode)) {
-        if (!_key_cur[event.key.scancode]) {
-            _key_pressed[event.key.scancode] = true;
-            _key_frame_pressed[event.key.scancode] = true;
+    if (event.type == SDL_EVENT_KEY_DOWN && valid_scancode(scancode())) {
+        const i32 key = scancode();
+        if (!_keys.cur[key]) {
             _last_key_press_event_time_ns = event.key.timestamp;
             _last_key_press_detected_time_ns = SDL_GetTicksNS();
         } else if (event.key.repeat) {
-            _key_frame_repeated[event.key.scancode] = true;
+            _key_frame_repeated[key] = true;
         }
-        _key_cur[event.key.scancode] = true;
+        _keys.set(key, true);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
-    } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(event.key.scancode)) {
-        if (_key_cur[event.key.scancode]) {
-            _key_released[event.key.scancode] = true;
-            _key_frame_released[event.key.scancode] = true;
+    } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(scancode())) {
+        _keys.set(scancode(), false);
+        _keyboard_window = static_cast<WindowId>(event.key.windowID);
+    } else if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION ||
+               event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED) {
+        // Where on the window, in points: the system gives 0..1 of its size.
+        Vec2f pos{event.tfinger.x, event.tfinger.y};
+        if (SDL_Window* window = SDL_GetWindowFromID(event.tfinger.windowID)) {
+            int w = 0;
+            int h = 0;
+            SDL_GetWindowSize(window, &w, &h);
+            const f32 scale = detail::window_units_per_point(window);
+            pos = {event.tfinger.x * static_cast<f32>(w) / scale, event.tfinger.y * static_cast<f32>(h) / scale};
         }
-        _key_cur[event.key.scancode] = false;
-        _keyboard_window = static_cast<WindowId>(event.key.windowID);
+        _touch_now = std::max(_touch_now, static_cast<f64>(event.tfinger.timestamp) * 1e-9);
+        // One id for a finger whatever screen it is on.
+        const u64 id = static_cast<u64>(event.tfinger.fingerID) ^ (static_cast<u64>(event.tfinger.touchID) << 32);
+        if (event.type == SDL_EVENT_FINGER_DOWN) {
+            touch_down(id, pos, static_cast<WindowId>(event.tfinger.windowID));
+        } else if (event.type == SDL_EVENT_FINGER_MOTION) {
+            touch_moved(id, pos);
+        } else {
+            touch_moved(id, pos);
+            if (event.type == SDL_EVENT_FINGER_CANCELED) {
+                claim_touch(id); // taken away: no tap, no click
+            }
+            touch_up(id);
+        }
+    } else if ((event.type == SDL_EVENT_MOUSE_MOTION && event.motion.which == SDL_TOUCH_MOUSEID) ||
+               ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+                event.button.which == SDL_TOUCH_MOUSEID) ||
+               (event.type == SDL_EVENT_MOUSE_WHEEL && event.wheel.which == SDL_TOUCH_MOUSEID)) {
+        // The mouse the system makes from a finger: the finger is read itself.
     } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+        // In points (window_points.hpp), as Window::size() is.
+        const f32 scale = detail::window_units_per_point(event.motion.windowID);
+        _pointer_is_touch = false;
         _last_mouse_motion_event_time_ns = event.motion.timestamp;
-        _mouse_motion.x += event.motion.xrel;
-        _mouse_motion.y += event.motion.yrel;
-        _frame_mouse_motion.x += event.motion.xrel;
-        _frame_mouse_motion.y += event.motion.yrel;
-        _mouse_pos = {event.motion.x, event.motion.y};
+        _mouse_motion.x += event.motion.xrel / scale;
+        _mouse_motion.y += event.motion.yrel / scale;
+        _frame_mouse_motion.x += event.motion.xrel / scale;
+        _frame_mouse_motion.y += event.motion.yrel / scale;
+        _mouse_pos = {event.motion.x / scale, event.motion.y / scale};
         _mouse_window = static_cast<WindowId>(event.motion.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && valid_mouse_button(event.button.button)) {
-        if (!_mouse_cur[event.button.button]) {
-            _mouse_pressed[event.button.button] = true;
-            _mouse_frame_pressed[event.button.button] = true;
-        }
-        _mouse_cur[event.button.button] = true;
-        _drag_start[event.button.button] = {event.button.x, event.button.y};
-        _mouse_pos = {event.button.x, event.button.y};
+        const f32 scale = detail::window_units_per_point(event.button.windowID);
+        _pointer_is_touch = false;
+        _mouse.set(event.button.button, true);
+        _drag_start[event.button.button] = {event.button.x / scale, event.button.y / scale};
+        _mouse_pos = {event.button.x / scale, event.button.y / scale};
         _mouse_window = static_cast<WindowId>(event.button.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && valid_mouse_button(event.button.button)) {
-        if (_mouse_cur[event.button.button]) {
-            _mouse_released[event.button.button] = true;
-            _mouse_frame_released[event.button.button] = true;
-        }
-        _mouse_cur[event.button.button] = false;
-        _mouse_pos = {event.button.x, event.button.y};
+        const f32 scale = detail::window_units_per_point(event.button.windowID);
+        _mouse.set(event.button.button, false);
+        _mouse_pos = {event.button.x / scale, event.button.y / scale};
         _mouse_window = static_cast<WindowId>(event.button.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
         _mouse_wheel_y += event.wheel.y;
         _frame_mouse_wheel_y += event.wheel.y;
+        _mouse_wheel_x += event.wheel.x;
+        _frame_mouse_wheel_x += event.wheel.x;
         _mouse_window = static_cast<WindowId>(event.wheel.windowID);
     } else if (event.type == SDL_EVENT_TEXT_INPUT && event.text.text) {
         _text_input += event.text.text;
@@ -598,11 +891,13 @@ void Input::process_native_event(const void* native_event) {
         set_text_composition(event.edit.text ? event.edit.text : "", event.edit.start);
         _keyboard_window = static_cast<WindowId>(event.edit.windowID);
     } else if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION) {
-        _drop_position = Vec2f{event.drop.x, event.drop.y};
+        const f32 scale = detail::window_units_per_point(event.drop.windowID);
+        _drop_position = Vec2f{event.drop.x / scale, event.drop.y / scale};
     } else if (event.type == SDL_EVENT_DROP_FILE && event.drop.data) {
         _dropped_files.push_back({
             .path = std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(event.drop.data))),
-            .pos = {event.drop.x, event.drop.y},
+            .pos = {event.drop.x / detail::window_units_per_point(event.drop.windowID),
+                    event.drop.y / detail::window_units_per_point(event.drop.windowID)},
             .window = static_cast<WindowId>(event.drop.windowID),
         });
     } else if (event.type == SDL_EVENT_DROP_COMPLETE) {
@@ -620,22 +915,22 @@ void Input::add_dropped_file(DroppedFile file) {
 
 bool Input::pressed(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && (_key_pressed[scancode] || (_key_cur[scancode] && !_key_prev[scancode]));
+    return valid_scancode(scancode) && _keys.test(scancode, Edge::Pressed);
 }
 
 bool Input::held(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && _key_cur[scancode];
+    return valid_scancode(scancode) && _keys.cur[scancode];
 }
 
 bool Input::released(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && (_key_released[scancode] || (!_key_cur[scancode] && _key_prev[scancode]));
+    return valid_scancode(scancode) && _keys.test(scancode, Edge::Released);
 }
 
 bool Input::frame_pressed(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && _key_frame_pressed[scancode];
+    return valid_scancode(scancode) && _keys.frame_pressed[scancode];
 }
 
 bool Input::frame_repeated(Key key) const {
@@ -645,16 +940,16 @@ bool Input::frame_repeated(Key key) const {
 
 bool Input::frame_released(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && _key_frame_released[scancode];
+    return valid_scancode(scancode) && _keys.frame_released[scancode];
 }
 
 bool Input::modifier_held(KeyModifiers modifiers) const {
     if (!any(modifiers)) {
         return true;
     }
-    const bool shift = _key_cur[SDL_SCANCODE_LSHIFT] || _key_cur[SDL_SCANCODE_RSHIFT];
-    const bool ctrl = _key_cur[SDL_SCANCODE_LCTRL] || _key_cur[SDL_SCANCODE_RCTRL];
-    const bool alt = _key_cur[SDL_SCANCODE_LALT] || _key_cur[SDL_SCANCODE_RALT];
+    const bool shift = _keys.cur[SDL_SCANCODE_LSHIFT] || _keys.cur[SDL_SCANCODE_RSHIFT];
+    const bool ctrl = _keys.cur[SDL_SCANCODE_LCTRL] || _keys.cur[SDL_SCANCODE_RCTRL];
+    const bool alt = _keys.cur[SDL_SCANCODE_LALT] || _keys.cur[SDL_SCANCODE_RALT];
     if (has_modifier(modifiers, KeyModifiers::Shift) && !shift) {
         return false;
     }
@@ -674,27 +969,27 @@ Vec2f Input::mouse_pos(WindowId window_id) const {
 
 bool Input::mouse_pressed(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && (_mouse_pressed[raw_button] || (_mouse_cur[raw_button] && !_mouse_prev[raw_button]));
+    return valid_mouse_button(raw_button) && _mouse.test(raw_button, Edge::Pressed);
 }
 
 bool Input::mouse_held(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && _mouse_cur[raw_button];
+    return valid_mouse_button(raw_button) && _mouse.cur[raw_button];
 }
 
 bool Input::mouse_released(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && (_mouse_released[raw_button] || (!_mouse_cur[raw_button] && _mouse_prev[raw_button]));
+    return valid_mouse_button(raw_button) && _mouse.test(raw_button, Edge::Released);
 }
 
 bool Input::mouse_frame_pressed(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && _mouse_frame_pressed[raw_button];
+    return valid_mouse_button(raw_button) && _mouse.frame_pressed[raw_button];
 }
 
 bool Input::mouse_frame_released(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && _mouse_frame_released[raw_button];
+    return valid_mouse_button(raw_button) && _mouse.frame_released[raw_button];
 }
 
 void Input::consume_mouse_frame_pressed(MouseButton button) {
@@ -708,7 +1003,7 @@ void Input::consume_mouse_frame_pressed(MouseButton button) {
 
 bool Input::mouse_dragging(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    if (!valid_mouse_button(raw_button) || !_mouse_cur[raw_button]) {
+    if (!valid_mouse_button(raw_button) || !_mouse.cur[raw_button]) {
         return false;
     }
 
@@ -739,6 +1034,11 @@ void Input::set_mouse_wheel_y(f32 value) {
     _frame_mouse_wheel_y += value;
 }
 
+void Input::set_mouse_wheel_x(f32 value) {
+    _mouse_wheel_x += value;
+    _frame_mouse_wheel_x += value;
+}
+
 void Input::set_mouse_pos(Vec2f pos, WindowId window_id) {
     _mouse_pos = pos;
     _mouse_window = window_id;
@@ -751,14 +1051,7 @@ void Input::set_mouse_held(MouseButton button, bool held) {
         return;
     }
 
-    if (held && !_mouse_cur[raw_button]) {
-        _mouse_pressed[raw_button] = true;
-        _mouse_frame_pressed[raw_button] = true;
-    } else if (!held && _mouse_cur[raw_button]) {
-        _mouse_released[raw_button] = true;
-        _mouse_frame_released[raw_button] = true;
-    }
-    _mouse_cur[raw_button] = held;
+    _mouse.set(raw_button, held);
     if (held) {
         _drag_start[raw_button] = _mouse_pos;
     }
@@ -770,10 +1063,7 @@ void Input::set_mouse_pressed(MouseButton button) {
         return;
     }
 
-    _mouse_prev[raw_button] = false;
-    _mouse_cur[raw_button] = true;
-    _mouse_pressed[raw_button] = true;
-    _mouse_frame_pressed[raw_button] = true;
+    _mouse.press(raw_button);
     _drag_start[raw_button] = _mouse_pos;
 }
 
@@ -799,25 +1089,20 @@ void Input::set_key_pressed(Key key) {
     if (!valid_scancode(scancode)) {
         return;
     }
-    _key_prev[scancode] = false;
-    _key_cur[scancode] = true;
-    _key_pressed[scancode] = true;
-    _key_frame_pressed[scancode] = true;
+    _keys.press(scancode);
 }
 
 void Input::set_key_released(Key key) {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    if (!valid_scancode(scancode) || !_key_cur[scancode]) {
+    if (!valid_scancode(scancode) || !_keys.cur[scancode]) {
         return;
     }
-    _key_cur[scancode] = false;
-    _key_released[scancode] = true;
-    _key_frame_released[scancode] = true;
+    _keys.set(scancode, false);
 }
 
 void Input::set_key_repeated(Key key) {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    if (!valid_scancode(scancode) || !_key_cur[scancode]) {
+    if (!valid_scancode(scancode) || !_keys.cur[scancode]) {
         return;
     }
     _key_frame_repeated[scancode] = true;
@@ -825,13 +1110,13 @@ void Input::set_key_repeated(Key key) {
 
 void Input::set_modifier_held(KeyModifiers modifiers, bool held) {
     if (has_modifier(modifiers, KeyModifiers::Shift)) {
-        _key_cur[SDL_SCANCODE_LSHIFT] = held;
+        _keys.cur[SDL_SCANCODE_LSHIFT] = held;
     }
     if (has_modifier(modifiers, KeyModifiers::Ctrl)) {
-        _key_cur[SDL_SCANCODE_LCTRL] = held;
+        _keys.cur[SDL_SCANCODE_LCTRL] = held;
     }
     if (has_modifier(modifiers, KeyModifiers::Alt)) {
-        _key_cur[SDL_SCANCODE_LALT] = held;
+        _keys.cur[SDL_SCANCODE_LALT] = held;
     }
 }
 
@@ -890,6 +1175,46 @@ void InputMap::bind(std::string_view action, MouseButton button) {
                                {.name = "binding", .value = std::string{mouse_button_name(button)}}}));
 }
 
+void InputMap::bind(std::string_view action, TouchControl control) {
+    _bindings[std::string(action)].push_back({.device = InputBindingDevice::Touch, .code = static_cast<i32>(control)});
+}
+
+void InputMap::bind(std::string_view action, PadControl control) {
+    _bindings[std::string(action)].push_back({.device = InputBindingDevice::Gamepad, .code = static_cast<i32>(control)});
+}
+
+void InputMap::set_bindings(std::string_view action, std::vector<InputBinding> bindings) {
+    if (bindings.empty()) {
+        _bindings.erase(std::string(action));
+    } else {
+        _bindings[std::string(action)] = std::move(bindings);
+    }
+}
+
+void InputMap::set_axis(InputAxis axis) {
+    std::string name = axis.name;
+    _axes[std::move(name)] = std::move(axis);
+}
+
+bool InputMap::remove_axis(std::string_view name) {
+    return _axes.erase(std::string(name)) > 0;
+}
+
+const InputAxis* InputMap::axis(std::string_view name) const {
+    const auto found = _axes.find(std::string(name));
+    return found == _axes.end() ? nullptr : &found->second;
+}
+
+std::vector<InputAxis> InputMap::axes() const {
+    std::vector<InputAxis> result;
+    result.reserve(_axes.size());
+    for (const auto& [name, axis] : _axes) {
+        result.push_back(axis);
+    }
+    std::ranges::sort(result, {}, &InputAxis::name);
+    return result;
+}
+
 void InputMap::unbind(std::string_view action) {
     const std::size_t erased = _bindings.erase(std::string(action));
     KIN_LOG_DEBUG_F("input",
@@ -901,6 +1226,7 @@ void InputMap::unbind(std::string_view action) {
 void InputMap::clear() {
     const std::size_t count = _bindings.size();
     _bindings.clear();
+    _axes.clear();
     KIN_LOG_DEBUG_F("input",
                     "input bindings cleared",
                     (LogFields{{.name = "count", .value = std::to_string(count)}}));
@@ -1055,14 +1381,7 @@ void Input::set_action_held(std::string_view action, bool is_held) {
         const SDL_Scancode scancode = binding_scancode(binding);
         if (binding.device == InputBindingDevice::Key && valid_scancode(scancode)) {
             set_modifier_held(binding.modifiers, is_held);
-            if (is_held && !_key_cur[scancode]) {
-                _key_pressed[scancode] = true;
-                _key_frame_pressed[scancode] = true;
-            } else if (!is_held && _key_cur[scancode]) {
-                _key_released[scancode] = true;
-                _key_frame_released[scancode] = true;
-            }
-            _key_cur[scancode] = is_held;
+            _keys.set(scancode, is_held);
         }
     }
 }
@@ -1080,93 +1399,570 @@ void Input::set_action_pressed(std::string_view action) {
         }
 
         set_modifier_held(binding.modifiers, true);
-        _key_prev[scancode] = false;
-        _key_cur[scancode] = true;
-        _key_pressed[scancode] = true;
-        _key_frame_pressed[scancode] = true;
+        _keys.press(scancode);
     }
+}
+
+Input::Reach Input::everything() const {
+    return {.keyboard = true, .gamepads = (1u << pad_count) - 1u, .map = &_map};
+}
+
+// A player's devices and map: their own controller; the keyboard as
+// set_players says (with none set, player 0 has it, and, while no player has
+// a controller of their own, set_gamepad's: one player who never joined).
+Input::Reach Input::reach_of_player(i32 player) const {
+    if (player < 0) {
+        return everything();
+    }
+    if (player >= max_input_players) {
+        return {.map = &_map};
+    }
+    const u32 own = 1u << (player + 1);
+    if (_players.empty()) {
+        if (player != 0) {
+            return {.gamepads = own, .map = &_map};
+        }
+        const bool joined = std::any_of(_pad_states.begin() + 1, _pad_states.end(), [](const GamepadState& pad) { return pad.connected; });
+        return {.keyboard = true, .gamepads = own | (joined ? 0u : 1u), .map = &_map};
+    }
+    if (player >= static_cast<i32>(_players.size())) {
+        return {.gamepads = own, .map = &_map};
+    }
+    const InputPlayer& p = _players[static_cast<std::size_t>(player)];
+    return {.keyboard = p.keyboard, .gamepads = own, .map = p.map ? &*p.map : &_map};
+}
+
+bool Input::binding_edge(const Reach& reach, InputBinding binding, Edge edge) const {
+    switch (binding.device) {
+    case InputBindingDevice::Key: {
+        const SDL_Scancode scancode = binding_scancode(binding);
+        return reach.keyboard && valid_scancode(scancode) && modifier_held(binding.modifiers) && _keys.test(scancode, edge);
+    }
+    case InputBindingDevice::MouseButton: {
+        const u8 button = binding_mouse_button(binding);
+        return reach.keyboard && valid_mouse_button(button) && _mouse.test(button, edge);
+    }
+    case InputBindingDevice::Touch: {
+        const auto control = static_cast<std::size_t>(binding.code);
+        return reach.keyboard && binding.code >= 0 && control < touch_control_count && _touch_controls.test(control, edge);
+    }
+    case InputBindingDevice::Gamepad: {
+        const std::size_t control = pad_index(binding);
+        if (control >= pad_control_count) {
+            return false;
+        }
+        for (std::size_t at = 0; at < pad_count; ++at) {
+            if (((reach.gamepads >> at) & 1u) != 0 && _pads[at].test(control, edge)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    }
+    return false;
+}
+
+bool Input::map_edge(const Reach& reach, std::string_view action, Edge edge) const {
+    if (reach.keyboard && screen_edge(action, edge)) {
+        return true; // an on-screen control holds it, bound or not
+    }
+    const std::vector<InputBinding>* bindings = reach.map->bindings(action);
+    return bindings && std::ranges::any_of(*bindings, [&](InputBinding binding) { return binding_edge(reach, binding, edge); });
+}
+
+bool Input::screen_edge(std::string_view action, Edge edge) const {
+    const auto found = std::ranges::find(_screen_action_names, action);
+    return found != _screen_action_names.end() &&
+           _screen_actions.test(static_cast<std::size_t>(found - _screen_action_names.begin()), edge);
+}
+
+void Input::set_screen_action(std::string_view action, bool is_held) {
+    if (action.empty()) {
+        return;
+    }
+    auto found = std::ranges::find(_screen_action_names, action);
+    if (found == _screen_action_names.end()) {
+        // A slot no control holds any more is taken again.
+        found = std::ranges::find_if(_screen_action_names, [&](const std::string& name) {
+            const auto at = static_cast<std::size_t>(&name - _screen_action_names.data());
+            return !_screen_action_set[at] && !_screen_actions.cur[at] && !_screen_actions.pressed[at] && !_screen_actions.released[at];
+        });
+        if (found == _screen_action_names.end()) {
+            if (_screen_action_names.size() >= max_screen_actions) {
+                return;
+            }
+            _screen_action_names.emplace_back();
+            found = _screen_action_names.end() - 1;
+        }
+        *found = std::string(action);
+    }
+    const auto at = static_cast<std::size_t>(found - _screen_action_names.begin());
+    _screen_actions.set(at, is_held);
+    _screen_action_set[at] = true;
+}
+
+void Input::set_screen_axis(std::string_view name, f32 value) {
+    if (name.empty()) {
+        return;
+    }
+    value = std::isfinite(value) ? std::clamp(value, -1.0f, 1.0f) : 0.0f;
+    const auto found = std::ranges::find(_screen_axes, name, &ScreenAxis::name);
+    if (found != _screen_axes.end()) {
+        found->value = value;
+        found->set = true;
+    } else {
+        _screen_axes.push_back({.name = std::string(name), .value = value, .set = true});
+    }
+}
+
+bool Input::screen_action_held(std::string_view action) const {
+    return screen_edge(action, Edge::Held);
+}
+
+f32 Input::screen_axis(std::string_view name) const {
+    const auto found = std::ranges::find(_screen_axes, name, &ScreenAxis::name);
+    return found != _screen_axes.end() ? found->value : 0.0f;
+}
+
+// At a frame's start: what no control set through the last frame is let go.
+void Input::release_unset_screen_controls() {
+    for (std::size_t at = 0; at < _screen_action_names.size(); ++at) {
+        if (!_screen_action_set[at]) {
+            _screen_actions.set(at, false);
+        }
+    }
+    _screen_action_set.fill(false);
+    std::erase_if(_screen_axes, [](const ScreenAxis& axis) { return !axis.set; });
+    for (ScreenAxis& axis : _screen_axes) {
+        axis.set = false;
+    }
+}
+
+bool Input::action_edge(i32 player, std::string_view action, Edge edge) const {
+    if (player >= 0) {
+        return map_edge(reach_of_player(player), action, edge);
+    }
+    if (map_edge(everything(), action, edge)) {
+        return true;
+    }
+    // Players with maps of their own bind actions the Input's map may not have.
+    for (std::size_t p = 0; p < _players.size(); ++p) {
+        if (_players[p].map && map_edge(reach_of_player(static_cast<i32>(p)), action, edge)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Input::pressed(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) &&
-                (_key_pressed[scancode] || (_key_cur[scancode] && !_key_prev[scancode]));
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && (_mouse_pressed[button] || (_mouse_cur[button] && !_mouse_prev[button]));
-    });
+    return action_edge(-1, action, Edge::Pressed);
 }
 
 bool Input::held(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_cur[scancode];
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && _mouse_cur[button];
-    });
+    return action_edge(-1, action, Edge::Held);
 }
 
 bool Input::released(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) &&
-                (_key_released[scancode] || (!_key_cur[scancode] && _key_prev[scancode]));
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && (_mouse_released[button] || (!_mouse_cur[button] && _mouse_prev[button]));
-    });
+    return action_edge(-1, action, Edge::Released);
 }
 
 bool Input::frame_pressed(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_frame_pressed[scancode];
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && _mouse_frame_pressed[button];
-    });
+    return action_edge(-1, action, Edge::FramePressed);
 }
 
 bool Input::frame_released(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
+    return action_edge(-1, action, Edge::FrameReleased);
+}
+
+bool Input::pressed(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::Pressed);
+}
+
+bool Input::held(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::Held);
+}
+
+bool Input::released(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::Released);
+}
+
+bool Input::frame_pressed(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::FramePressed);
+}
+
+bool Input::frame_released(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::FrameReleased);
+}
+
+bool pad_control_held(const GamepadState& pad, PadControl control) {
+    if (!pad.connected) {
         return false;
     }
+    constexpr f32 half = 0.5f;
+    const auto code = static_cast<u8>(control);
+    if (code < static_cast<u8>(GamepadButton::Count)) {
+        return pad.button(static_cast<GamepadButton>(code));
+    }
+    switch (control) {
+    case PadControl::LeftStickLeft: return pad.left_x < -half;
+    case PadControl::LeftStickRight: return pad.left_x > half;
+    case PadControl::LeftStickUp: return pad.left_y > half;
+    case PadControl::LeftStickDown: return pad.left_y < -half;
+    case PadControl::RightStickLeft: return pad.right_x < -half;
+    case PadControl::RightStickRight: return pad.right_x > half;
+    case PadControl::RightStickUp: return pad.right_y > half;
+    case PadControl::RightStickDown: return pad.right_y < -half;
+    case PadControl::LeftTrigger: return pad.left_trigger > half;
+    case PadControl::RightTrigger: return pad.right_trigger > half;
+    default: return false;
+    }
+}
 
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_frame_released[scancode];
+bool binding_pressed(const Input& input, InputBinding binding, i32 player) {
+    return input.binding_edge(input.reach_of_player(player), binding, Input::Edge::Pressed);
+}
+
+f32 pad_axis_raw(const GamepadState& pad, PadAxis axis) {
+    switch (axis) {
+    case PadAxis::LeftX: return pad.left_x;
+    case PadAxis::LeftY: return pad.left_y;
+    case PadAxis::RightX: return pad.right_x;
+    case PadAxis::RightY: return pad.right_y;
+    case PadAxis::LeftTrigger: return pad.left_trigger;
+    case PadAxis::RightTrigger: return pad.right_trigger;
+    }
+    return 0.0f;
+}
+
+bool binding_held(const Input& input, InputBinding binding, i32 player) {
+    return input.binding_edge(input.reach_of_player(player), binding, Input::Edge::Held);
+}
+
+f32 Input::reach_axis(const Reach& reach, const InputAxis& axis) const {
+    const auto held_any = [&](const std::vector<InputBinding>& bindings) {
+        return std::ranges::any_of(bindings, [&](InputBinding binding) { return binding_edge(reach, binding, Edge::Held); });
+    };
+    f32 value = (held_any(axis.positive) ? 1.0f : 0.0f) - (held_any(axis.negative) ? 1.0f : 0.0f);
+    // A stick pushed further wins (on any of the controllers reached); the
+    // dead zone taken off and the rest stretched to the end.
+    const f32 dead = std::clamp(axis.dead_zone, 0.0f, 0.95f);
+    for (std::size_t at = 0; at < pad_count; ++at) {
+        const GamepadState& pad = _pad_states[at];
+        if (((reach.gamepads >> at) & 1u) == 0 || !pad.connected) {
+            continue;
         }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && _mouse_frame_released[button];
-    });
+        for (const InputAxisStick& stick : axis.sticks) {
+            f32 raw = pad_axis_raw(pad, stick.axis);
+            if (stick.inverted) {
+                raw = -raw;
+            }
+            const f32 past = std::abs(raw) <= dead ? 0.0f : std::copysign((std::abs(raw) - dead) / (1.0f - dead), raw);
+            if (std::abs(past) > std::abs(value)) {
+                value = past;
+            }
+        }
+    }
+    return std::clamp(value, -1.0f, 1.0f);
+}
+
+f32 axis_value(const Input& input, const InputAxis& axis, i32 player) {
+    return input.reach_axis(input.reach_of_player(player), axis);
+}
+
+f32 Input::player_axis(i32 player, std::string_view name) const {
+    const auto furthest = [](f32 a, f32 b) { return std::abs(b) > std::abs(a) ? b : a; };
+    if (player >= 0) {
+        const Reach reach = reach_of_player(player);
+        const InputAxis* axis = reach.map->axis(name);
+        const f32 value = axis ? reach_axis(reach, *axis) : 0.0f;
+        return reach.keyboard ? furthest(value, screen_axis(name)) : value; // an on-screen stick
+    }
+    f32 value = screen_axis(name);
+    if (const InputAxis* axis = _map.axis(name)) {
+        value = furthest(value, reach_axis(everything(), *axis));
+    }
+    for (std::size_t p = 0; p < _players.size(); ++p) {
+        if (_players[p].map) {
+            if (const InputAxis* axis = _players[p].map->axis(name)) {
+                value = furthest(value, reach_axis(reach_of_player(static_cast<i32>(p)), *axis));
+            }
+        }
+    }
+    return value;
+}
+
+f32 Input::axis(std::string_view name) const {
+    return player_axis(-1, name);
+}
+
+f32 Input::axis(i32 player, std::string_view name) const {
+    return player_axis(player, name);
+}
+
+void Input::set_pad(std::size_t at, const GamepadState& state) {
+    _pad_states[at] = state;
+    for (std::size_t control = 0; control < pad_control_count; ++control) {
+        _pads[at].set(control, pad_control_held(state, static_cast<PadControl>(control)));
+    }
+}
+
+void Input::set_gamepad(const GamepadState& state) {
+    set_pad(0, state);
+}
+
+void Input::set_player_gamepad(i32 player, const GamepadState& state) {
+    if (player >= 0 && player < max_input_players) {
+        set_pad(static_cast<std::size_t>(player) + 1, state);
+    }
+}
+
+const GamepadState& Input::player_gamepad(i32 player) const {
+    static const GamepadState none{};
+    return player >= 0 && player < max_input_players ? _pad_states[static_cast<std::size_t>(player) + 1] : none;
+}
+
+bool Input::pad_frame_pressed(PadControl control) const {
+    const auto index = static_cast<std::size_t>(control);
+    return index < pad_control_count && _pads[0].frame_pressed[index];
+}
+
+bool Input::pad_frame_pressed(PadControl control, i32 player) const {
+    const auto index = static_cast<std::size_t>(control);
+    if (index >= pad_control_count) {
+        return false;
+    }
+    if (player < 0) {
+        return std::ranges::any_of(_pads, [index](const Buttons<pad_control_count>& pad) { return pad.frame_pressed[index]; });
+    }
+    return player < max_input_players && _pads[static_cast<std::size_t>(player) + 1].frame_pressed[index];
+}
+
+// --- touch ---------------------------------------------------------------------------
+
+namespace {
+// How gestures are told apart (window pixels, seconds).
+constexpr f32 touch_slop = 12.0f;           // moving less is holding still
+constexpr f64 tap_seconds = 0.3;
+constexpr f64 double_tap_seconds = 0.35;    // between two taps
+constexpr f32 double_tap_distance = 40.0f;
+constexpr f64 long_press_seconds = 0.5;
+constexpr f64 swipe_seconds = 0.5;
+constexpr f32 swipe_distance = 60.0f;
+
+f32 distance(Vec2f a, Vec2f b) {
+    return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+}
+
+// The two unclaimed fingers when exactly two are down (for pinch and pan).
+std::optional<std::pair<const TouchPoint*, const TouchPoint*>> two_fingers(const std::vector<TouchPoint>& touches) {
+    const TouchPoint* a = nullptr;
+    const TouchPoint* b = nullptr;
+    for (const TouchPoint& t : touches) {
+        if (t.claimed) continue;
+        if (!a) a = &t;
+        else if (!b) b = &t;
+        else return std::nullopt;
+    }
+    if (!a || !b) return std::nullopt;
+    return std::pair{a, b};
+}
+} // namespace
+
+const TouchPoint* Input::touch(u64 id) const {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    return found != _touches.end() ? &*found : nullptr;
+}
+
+bool Input::touch_pressed(TouchControl control) const {
+    const auto index = static_cast<std::size_t>(control);
+    return index < touch_control_count && _touch_controls.test(index, Edge::Pressed);
+}
+
+bool Input::touch_frame_pressed(TouchControl control) const {
+    const auto index = static_cast<std::size_t>(control);
+    return index < touch_control_count && _touch_controls.frame_pressed[index];
+}
+
+void Input::make_gesture(TouchControl control) {
+    const auto index = static_cast<std::size_t>(control);
+    _touch_controls.press(index);
+    if (std::ranges::find(_touch_release, index) == _touch_release.end()) {
+        _touch_release.push_back(index);
+    }
+    std::erase(_touch_release_ready, index); // made again: held on
+}
+
+void Input::set_touch_down(u64 id, Vec2f pos, WindowId window) {
+    touch_down(id, pos, window);
+}
+
+void Input::set_touch_moved(u64 id, Vec2f pos) {
+    touch_moved(id, pos);
+}
+
+void Input::set_touch_up(u64 id) {
+    touch_up(id);
+}
+
+void Input::touch_down(u64 id, Vec2f pos, WindowId window) {
+    if (touch(id)) {
+        touch_up(id); // never saw it lifted
+    }
+    _touches.push_back({.id = id, .pos = pos, .start = pos, .window = window, .down_at = _touch_now});
+    _strokes.push_back({.id = id, .down_at = _touch_now, .start = pos});
+    const auto unclaimed = std::ranges::count_if(_touches, [](const TouchPoint& t) { return !t.claimed; });
+    if (unclaimed >= 2) {
+        for (TouchStroke& stroke : _strokes) {
+            stroke.multi = true; // no tap or swipe of one finger now
+        }
+        _two_down_at = unclaimed == 2 ? _touch_now : -1.0;
+        _two_moved = false;
+        // A second finger: a pinch, not a press on what the first is over.
+        if (_pointer_touch) {
+            cancel_pointer_press();
+        }
+        return;
+    }
+    if (!_pointer_touch && unclaimed == 1) { // the only finger no control has
+        // The pointer goes there now and presses a frame later, so UI sees it
+        // over what it touches first, as a mouse is before it clicks.
+        _pointer_touch = id;
+        _pointer_is_touch = true;
+        set_mouse_pos(pos, window);
+        _pointer_press_pending = true;
+    }
+}
+
+void Input::touch_moved(u64 id, Vec2f pos) {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    if (found == _touches.end()) {
+        return;
+    }
+    const Vec2f was = found->pos;
+    // Two fingers: how their spread and middle change.
+    if (const auto two = two_fingers(_touches); two && !found->claimed) {
+        const TouchPoint& other = two->first->id == id ? *two->second : *two->first;
+        const f32 before = distance(was, other.pos);
+        const f32 after = distance(pos, other.pos);
+        if (before > 1.0f && after > 1.0f) {
+            _pinch *= after / before;
+            _frame_pinch *= after / before;
+        }
+        const Vec2f moved{(pos.x - was.x) * 0.5f, (pos.y - was.y) * 0.5f};
+        _pan = {_pan.x + moved.x, _pan.y + moved.y};
+        _frame_pan = {_frame_pan.x + moved.x, _frame_pan.y + moved.y};
+    }
+    found->pos = pos;
+    if (const auto stroke = std::ranges::find(_strokes, id, &TouchStroke::id); stroke != _strokes.end()) {
+        stroke->travel = std::max(stroke->travel, distance(pos, stroke->start));
+        if (stroke->multi && stroke->travel > touch_slop) {
+            _two_moved = true;
+        }
+    }
+    if (_pointer_touch == id) {
+        set_mouse_motion({pos.x - was.x, pos.y - was.y});
+        set_mouse_pos(pos, found->window);
+    }
+}
+
+void Input::touch_up(u64 id) {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    if (found == _touches.end()) {
+        return;
+    }
+    const TouchPoint point = *found;
+    _touches.erase(found);
+    _touches_ended.push_back(point);
+    _frame_touches_ended.push_back(point);
+    if (_pointer_touch == id) {
+        if (_pointer_press_pending) {
+            _pointer_release_pending = true; // a tap within a frame: pressed next frame, let go the one after
+        } else {
+            _mouse.set(to_sdl_mouse_button(MouseButton::Left), false); // the click, if it was one
+        }
+        _pointer_touch.reset();
+    }
+    const auto stroke = std::ranges::find(_strokes, id, &TouchStroke::id);
+    if (stroke == _strokes.end()) {
+        return; // claimed
+    }
+    const TouchStroke s = *stroke;
+    _strokes.erase(stroke);
+    const f64 held = _touch_now - s.down_at;
+    if (!s.multi && !s.long_pressed) {
+        const Vec2f d{point.pos.x - s.start.x, point.pos.y - s.start.y};
+        if (held <= tap_seconds && s.travel <= touch_slop) {
+            make_gesture(TouchControl::Tap);
+            if (_last_tap && _touch_now - _last_tap->first <= double_tap_seconds &&
+                distance(_last_tap->second, point.pos) <= double_tap_distance) {
+                make_gesture(TouchControl::DoubleTap);
+                _last_tap.reset();
+            } else {
+                _last_tap = std::pair{_touch_now, point.pos};
+            }
+        } else if (held <= swipe_seconds && std::max(std::abs(d.x), std::abs(d.y)) >= swipe_distance) {
+            if (std::abs(d.x) >= 2.0f * std::abs(d.y)) {
+                make_gesture(d.x < 0 ? TouchControl::SwipeLeft : TouchControl::SwipeRight);
+            } else if (std::abs(d.y) >= 2.0f * std::abs(d.x)) {
+                make_gesture(d.y < 0 ? TouchControl::SwipeUp : TouchControl::SwipeDown);
+            }
+        }
+    }
+    // Both of two fingers up, soon and still: a two-finger tap.
+    if (_strokes.empty()) {
+        if (_two_down_at >= 0.0 && !_two_moved && _touch_now - _two_down_at <= tap_seconds) {
+            make_gesture(TouchControl::TwoFingerTap);
+        }
+        _two_down_at = -1.0;
+        _two_moved = false;
+    }
+}
+
+void Input::cancel_pointer_press() {
+    if (_pointer_press_pending) {
+        _pointer_press_pending = _pointer_release_pending = false;
+    } else {
+        const u8 left = to_sdl_mouse_button(MouseButton::Left);
+        _mouse.cur[left] = _mouse.prev[left] = _mouse.pressed[left] = _mouse.frame_pressed[left] = false;
+    }
+    _pointer_touch.reset();
+}
+
+// At a frame's start: the pointer's press a frame after its finger came, and
+// a quick tap's release the frame after that.
+void Input::apply_pointer_touch() {
+    const u8 left = to_sdl_mouse_button(MouseButton::Left);
+    if (_pointer_release_pending && !_pointer_press_pending) {
+        _mouse.set(left, false);
+        _pointer_release_pending = false;
+    }
+    if (_pointer_press_pending) {
+        _mouse.set(left, true);
+        _drag_start[left] = _mouse_pos;
+        _pointer_press_pending = false;
+    }
+}
+
+void Input::claim_touch(u64 id) {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    if (found == _touches.end() || found->claimed) {
+        return;
+    }
+    found->claimed = true;
+    std::erase_if(_strokes, [id](const TouchStroke& s) { return s.id == id; });
+    if (_pointer_touch == id) {
+        cancel_pointer_press(); // let go of what it pressed without clicking it
+    }
+}
+
+void Input::update_touch(f64 now) {
+    _touch_now = std::max(_touch_now, now);
+    for (TouchStroke& stroke : _strokes) {
+        if (!stroke.multi && !stroke.long_pressed && stroke.travel <= touch_slop && _touch_now - stroke.down_at >= long_press_seconds) {
+            stroke.long_pressed = true;
+            make_gesture(TouchControl::LongPress);
+        }
+    }
 }
 
 } // namespace kin

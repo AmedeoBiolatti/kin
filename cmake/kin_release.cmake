@@ -7,6 +7,28 @@ if(KIN_ENABLE_LTO)
     set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 endif()
 
+# MSVC debug information for packaged symbols. /Zi writes every compile to a
+# shared PDB, which ccache cannot cache and parallel compiles under Ninja contend
+# for; /Z7 keeps it in the object files and the link writes the one PDB that ships.
+if(CMAKE_C_COMPILER_LAUNCHER OR CMAKE_CXX_COMPILER_LAUNCHER)
+    set(KIN_MSVC_DEBUG_INFORMATION /Z7 CACHE INTERNAL "MSVC debug information format")
+else()
+    set(KIN_MSVC_DEBUG_INFORMATION /Zi CACHE INTERNAL "MSVC debug information format")
+endif()
+
+# With GCC, each link-time-optimized executable re-optimizes the whole engine,
+# about two CPU-minutes, and tests are dozens of executables: a CI build of
+# them spent 16 minutes linking. Tests gain nothing from it. -ffat-lto-objects
+# makes every object hold its normal code beside the LTO form, so a test links as
+# an ordinary program (KIN_LINK_WITHOUT_LTO, set by kin_add_test) while the
+# executables that ship are still optimized from the same objects. The tests'
+# sources are still compiled with -flto, as the release audit checks.
+if(KIN_ENABLE_LTO AND KIN_BUILD_TESTS AND NOT KIN_LTO_TESTS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(KIN_LTO_FAT_OBJECTS ON CACHE INTERNAL "Objects keep their normal code beside the LTO form")
+else()
+    set(KIN_LTO_FAT_OBJECTS OFF CACHE INTERNAL "Objects keep their normal code beside the LTO form")
+endif()
+
 function(kin_apply_release_policy target)
     get_target_property(applied ${target} KIN_RELEASE_POLICY_APPLIED)
     get_target_property(imported ${target} IMPORTED)
@@ -28,6 +50,14 @@ function(kin_apply_release_policy target)
         foreach(config RELEASE RELWITHDEBINFO MINSIZEREL)
             set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_${config} ON)
         endforeach()
+        if(KIN_LTO_FAT_OBJECTS)
+            target_compile_options(${target} PRIVATE "$<$<AND:${optimized},$<COMPILE_LANGUAGE:C,CXX>>:-ffat-lto-objects>")
+            get_target_property(without_lto ${target} KIN_LINK_WITHOUT_LTO)
+            if(without_lto)
+                # Later than the -flto the IPO property adds to the link line.
+                target_link_options(${target} PRIVATE "$<${optimized}:-fno-lto;-fno-use-linker-plugin>")
+            endif()
+        endif()
     endif()
     if(KIN_ENABLE_SIZE_OPTIMIZATIONS)
         target_compile_options(${target} PRIVATE
@@ -43,7 +73,7 @@ function(kin_apply_release_policy target)
         # Add debug information without changing Release/MinSizeRel optimization.
         target_compile_options(${target} PRIVATE
             "$<$<AND:${optimized},$<OR:$<COMPILE_LANG_AND_ID:C,GNU,Clang>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>>:-g>"
-            "$<$<AND:${optimized},$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>>:/Zi>")
+            "$<$<AND:${optimized},$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>>:${KIN_MSVC_DEBUG_INFORMATION}>")
         if(MSVC)
             target_link_options(${target} PRIVATE "$<${optimized}:/DEBUG:FULL;/OPT:REF;/OPT:ICF>")
         endif()

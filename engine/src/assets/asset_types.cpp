@@ -17,6 +17,21 @@ std::string_view asset_type_name(AssetType type) {
     case AssetType::TileMap: return "TileMap";
     case AssetType::Dialogue: return "Dialogue";
     case AssetType::Prefab: return "Prefab";
+    case AssetType::Scene: return "Scene";
+    case AssetType::Audio: return "Audio";
+    case AssetType::Font: return "Font";
+    case AssetType::Model: return "Model";
+    case AssetType::TileSet: return "TileSet";
+    case AssetType::Shape: return "Shape";
+    case AssetType::Shader: return "Shader";
+    case AssetType::ColorLut: return "ColorLut";
+    case AssetType::UiScreen: return "UiScreen";
+    case AssetType::UiTheme: return "UiTheme";
+    case AssetType::Skeleton2D:
+        return "Skeleton2D";
+    case AssetType::Animator3D: return "Animator3D";
+    case AssetType::Collider3D: return "Collider3D";
+    case AssetType::Materials3D: return "Materials3D";
     }
     return "Unknown";
 }

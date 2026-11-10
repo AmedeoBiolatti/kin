@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -86,6 +88,12 @@ void test_create_lookup_handle_and_enabled_state() {
     assert(world.entities().destroy(handle));
     assert(!world.entities().valid(handle));
     assert(!world.entities().find_by_authored_id("root-id"));
+    // One destroyed past the registry (by flecs itself) leaves its authored id free.
+    kin::EcsEntity first = world.entities().create({.name = "first", .authored_id = "kept-id"});
+    assert(first);
+    first.raw().destruct();
+    kin::EcsEntity again = world.entities().create({.name = "again", .authored_id = "kept-id"});
+    assert(again && world.entities().find_by_authored_id("kept-id").id() == again.id());
 }
 
 void test_rename_reparent_detach_and_cycle_rejection() {
@@ -184,6 +192,71 @@ void test_scene_documents_use_authored_ids() {
 
 } // namespace
 
+// EcsWorld::each keeps its query: later entities, prefabs left out (as
+// flecs's world.each), the same after the world is moved.
+void test_each_keeps_its_query() {
+    kin::EcsWorld world;
+    const auto count = [](kin::EcsWorld& w) {
+        int with_transform = 0;
+        int with_both = 0;
+        w.each([&](flecs::entity, const Transform&) { ++with_transform; });
+        w.each([&](const Transform&, Stats&) { ++with_both; });
+        return std::pair{with_transform, with_both};
+    };
+    world.raw().entity().set(Transform{});
+    assert((count(world) == std::pair{1, 0}));
+    world.raw().entity().set(Transform{}).set(Stats{.hp = 3});
+    world.raw().prefab().set(Transform{}); // a prefab is not walked
+    assert((count(world) == std::pair{2, 1}));
+    world.each([](Stats& stats) { stats.hp += 1; });
+    int hp = 0;
+    world.each([&](const Stats& stats) { hp = stats.hp; });
+    assert(hp == 4);
+    kin::EcsWorld moved{std::move(world)};
+    moved.raw().entity().set(Transform{});
+    assert((count(moved) == std::pair{3, 1}));
+    kin::EcsWorld other;
+    other.raw().entity().set(Transform{});
+    other = std::move(moved);
+    assert((count(other) == std::pair{3, 1}));
+
+    // From the flecs world: its owner's kept queries, a keyed one too.
+    flecs::world& raw = other.raw();
+    assert(kin::owner_of(raw) == &other);
+    int seen = 0;
+    kin::each(raw, [&](const Transform&) { ++seen; });
+    assert(seen == 3);
+    static const char key = 0;
+    const auto without_stats = [](flecs::world& w) { return w.query_builder<const Transform>().without<Stats>().build(); };
+    seen = 0;
+    kin::kept_query<const Transform>(raw, &key, without_stats).each([&](const Transform&) { ++seen; });
+    assert(seen == 2);
+    raw.entity().set(Transform{});
+    seen = 0;
+    kin::kept_query<const Transform>(raw, &key, without_stats).each([&](const Transform&) { ++seen; });
+    assert(seen == 3);
+    // A flecs world kin did not make: as flecs does it.
+    flecs::world plain;
+    plain.entity().set(Transform{});
+    assert(kin::owner_of(plain) == nullptr);
+    seen = 0;
+    kin::each(plain, [&](const Transform&) { ++seen; });
+    assert(seen == 1);
+    // Something walking the world as it ends (an observer of a removal) finds no owner.
+    {
+        auto ending = std::make_unique<kin::EcsWorld>();
+        ending->raw().entity().set(Stats{});
+        bool walked = false;
+        ending->raw().observer<Stats>().event(flecs::OnRemove).each([&](flecs::entity e, Stats&) {
+            flecs::world w = e.world();
+            kin::each(w, [](const Transform&) {});
+            walked = true;
+        });
+        ending.reset();
+        assert(walked);
+    }
+}
+
 int main() {
     test_worlds_register_components_in_any_order();
     test_create_lookup_handle_and_enabled_state();
@@ -191,5 +264,6 @@ int main() {
     test_snapshot_reports_identity_metadata_and_raw_fallbacks();
     test_deep_clone_copies_registered_components_and_hierarchy();
     test_scene_documents_use_authored_ids();
+    test_each_keeps_its_query();
     return 0;
 }

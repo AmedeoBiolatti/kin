@@ -20,8 +20,10 @@ struct PhysicsDebugRenderOptions {
     Color sensor_color = Color::rgb(245, 204, 72);
     Color sleeping_color = Color::rgb(72, 76, 86);
     Color contact_color = Color::rgb(238, 92, 92);
+    Color joint_color = Color::rgb(214, 128, 255);
     i32 circle_segments = 32;
     bool draw_contacts = true;
+    bool draw_joints = true;
 };
 
 void submit_physics_debug(RenderQueue& queue, const PhysicsWorld& physics, PhysicsDebugRenderOptions options = {});

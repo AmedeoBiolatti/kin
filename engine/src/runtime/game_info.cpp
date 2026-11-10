@@ -50,7 +50,7 @@ void write_bool(std::ostream& out, bool value) {
 
 } // namespace
 
-WindowedAppConfig window_config(const GameInfo& info) {
+WindowedAppConfig window_config(const GameInfo& info, const std::filesystem::path& content) {
     return {
         .title = info.title,
         .width = info.window.width,
@@ -62,7 +62,9 @@ WindowedAppConfig window_config(const GameInfo& info) {
         .hdr = info.window.hdr,
         .resizable = info.window.resizable,
         .borderless = info.window.borderless,
+        .wait_for_events = info.window.wait_for_events,
         .input_map = info.input_map,
+        .icon = content.empty() || info.icon.empty() ? std::filesystem::path{} : content / info.icon,
     };
 }
 
@@ -129,6 +131,10 @@ GameInfo load_game_info(const std::filesystem::path& path) {
             info.version = read_rest();
             continue;
         }
+        if (kind == "icon") {
+            info.icon = read_rest();
+            continue;
+        }
         if (kind == "description") {
             info.description = read_rest();
             continue;
@@ -160,6 +166,14 @@ GameInfo load_game_info(const std::filesystem::path& path) {
                     fail("window borderless requires a boolean");
                 }
             }
+            continue;
+        }
+        if (kind == "steam_app_id") {
+            u64 id = 0;
+            if (!(in >> id) || id > 0xffffffffu) {
+                fail("steam_app_id requires a number");
+            }
+            info.steam_app_id = static_cast<u32>(id);
             continue;
         }
         if (kind == "tag") {
@@ -200,6 +214,9 @@ bool save_game_info(const GameInfo& info, const std::filesystem::path& path) {
     if (!info.version.empty()) {
         out << "version " << info.version << '\n';
     }
+    if (!info.icon.empty()) {
+        out << "icon " << info.icon << '\n';
+    }
     if (!info.description.empty()) {
         out << "description " << info.description << '\n';
     }
@@ -220,6 +237,9 @@ bool save_game_info(const GameInfo& info, const std::filesystem::path& path) {
     out << "headless ";
     write_bool(out, info.headless_supported);
     out << '\n';
+    if (info.steam_app_id != 0) {
+        out << "steam_app_id " << info.steam_app_id << '\n';
+    }
     for (const std::string& tag : info.tags) {
         out << "tag " << tag << '\n';
     }
@@ -261,6 +281,9 @@ void write_game_info(std::ostream& out, const GameInfo& info) {
     }
     out << '\n';
     out << "- headless: " << (info.headless_supported ? "yes" : "no") << '\n';
+    if (info.steam_app_id != 0) {
+        out << "- steam_app_id: " << info.steam_app_id << '\n';
+    }
 
     if (!info.tags.empty()) {
         out << "- tags: ";

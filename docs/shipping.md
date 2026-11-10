@@ -28,11 +28,13 @@ kin_game(my_game TITLE "My Game")   # content/ beside this CMakeLists.txt
 | Argument | Default | |
 |---|---|---|
 | `CONTENT <dir>` | `content/` | The game's content folder |
+| `IMPORTS <file.json>` | none | Import authoring sources and merge generated native assets with `CONTENT`; see [2D imports](importing_2d.md) |
 | `NAME <name>` | the target | Its name beside the executable: `<name>.kinpak` or `<name>/` |
 | `TITLE <text>` | the name | The product name in the Windows version info |
 | `VERSION <x.y.z>` | the project's | Version info, and the package's name |
 | `ICON <file.ico>` | none | The Windows executable's icon |
 | `FILES <file>...` | none | More files to ship beside the executable (a readme) |
+| `INFO <file>` | none | A game info file (`project.kin`): `TITLE`, `VERSION` and `ICON` default to its `title`, `version` and `icon` |
 | `NO_CONTENT` | | The game has no content folder |
 
 In the game, `find_content_root` finds the content and gives the folder to read
@@ -52,6 +54,21 @@ int main(int argc, char** argv) {
     ...
 }
 ```
+
+`kin_game` also defines `KIN_GAME_TITLE`, `KIN_GAME_VERSION` and
+`KIN_GAME_ICON` on the game's target, as string literals, so the game's
+`GameInfo` can come from the same place as its package's name:
+
+```cpp
+kin::GameInfo game{.id = "my_game", .title = KIN_GAME_TITLE, .version = KIN_GAME_VERSION, .icon = KIN_GAME_ICON};
+kin::WindowedAppConfig window = kin::window_config(game, root); // the window's icon from the content
+```
+
+A game info's `icon` is a PNG in the content (`icon icon.png`). The window
+shows it (`WindowedAppConfig::icon`, read through the content layer, so from
+the pack too). With `INFO`, a `.ico` of the same name beside it
+(`content/icon.ico`) becomes the Windows executable's icon. Kin Studio writes
+that file when it exports.
 
 `KIN_GAME_CONTENT` is defined by `kin_game` on the game's target. The first of
 these that exists is used:
@@ -199,6 +216,14 @@ const std::span<const unsigned char> spirv = my_game_shader("water.frag.spv"); /
 Shaders can also be kept in the content as `.spv` files and read with
 `read_content_file`.
 
+A 3D game's material graphs (`.kingraph` in its content) are cooked by
+`kin_game`, each beside its graph as `<graph>.kingraph.spv` (its parameters'
+layout and every variant's SPIR-V: what a game without glslc loads), when glslc
+and the `kin_material_graph` tool run where it builds. Android's builds can't
+(their tools are Android's): build the game for the desktop first and keep the
+cooked files with the content, or a shipping build stops at configure, naming
+the graphs. Commit them, or ignore `*.kingraph.spv`, as the game prefers.
+
 ## Platforms
 
 **Windows.** The game is a windowed app (no console window) on the static C++
@@ -229,7 +254,9 @@ checks that it asks for nothing newer than glibc 2.31, and runs it in the
 runtime.
 
 **Steam.** The package's folder is a depot as it is: the executable, its pack
-and `licenses/`.
+and `licenses/`, and with `kin_game(... STEAM_REDIST <dir>)` Steam's API library.
+Achievements, the overlay, rich presence and the rest are in
+[platform services](platform_services.md).
 
 ## Licenses
 
@@ -243,7 +270,7 @@ If a dependency moves a license file, configuring fails and names it.
 - Compressed or encrypted packs (images and sounds are already compressed; a
   pack only gathers them).
 - A pack appended to the executable, for a single-file game.
-- Installers, code signing, a Linux `.desktop` file and icon, macOS bundles.
+- Installers, code signing, a Linux `.desktop` file, macOS bundles.
 
 ## Optional components and release optimization
 
@@ -256,6 +283,8 @@ sources, external dependencies and owned tests. `KIN_EXPERIMENTAL_3D` currently
 requires scripting for its scene-session lifecycle and a GPU-capable renderer.
 `KIN_ENABLE_SCENE_SERVER` controls the server component and honors the existing
 `KIN_ENABLE_AGENT_SERVER` option as its default.
+`KIN_ENABLE_DEVELOPMENT` builds development sessions (`--dev`, safe live
+reload; [hot reload](hot_reload.md)); shipping builds turn it off.
 
 `kin::engine` remains the umbrella target. Narrow consumers can link
 `kin::audio`, `kin::physics` or `kin::scripting`; ECS/render/scene adapters are

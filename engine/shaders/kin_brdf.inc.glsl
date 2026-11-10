@@ -51,12 +51,39 @@ struct Surface {
     vec3 diffuse; // the colour it scatters
     vec3 f0;      // what it reflects head on
     vec3 boost;   // the light a rough specular loses to a second bounce, put back
+    vec3 backlight; // a thin surface's (a leaf's) colour for the light it lets through from behind; 0: none
+    float coat;       // a clear coat's strength over it (glTF's KHR_materials_clearcoat); 0: none
+    float coat_alpha; // the coat's roughness squared
+    float dielectric; // what a dielectric reflects head on (0.04: KinSurface::specular 0.5)
+    float wrap;       // how far the diffuse light wraps round (KinSurface::diffuse_wrap); 0: Lambert's
 };
+
+// The diffuse light's share at `n_l` (the cosine to the light), wrapped by `wrap`: Lambert's at 0; at 0.5 the light's
+// first two spherical harmonic bands (1/4 + n.l / 2: some to the side facing away, as Unreal's directional volume
+// lighting); at 1 the first alone (1/4 from every side, its non-directional). The same on average over every way a
+// surface faces.
+float wrapped_diffuse(float n_l, float wrap) {
+    return max(min(0.5 * wrap, 0.25) + (1.0 - wrap) * n_l, 0.0);
+}
+
+// The light a thin surface lets through from `l` (Unreal's two-sided foliage): the light on its back, wrapped by half
+// (McAuley's energy-conserving wrap: some still where the front is lit at a slant), scattered on mostly the way it
+// went, by a GGX lobe of alpha 0.6 about it, in kin's units (a light of colour 1 on white: 1, as the diffuse is).
+vec3 transmitted(Surface s, vec3 l, float n_l) {
+    float wrap = clamp((0.5 - n_l) / 2.25, 0.0, 1.0);
+    float on = clamp(-dot(s.v, l), 0.0, 1.0);
+    float d = on * on * (0.36 - 1.0) + 1.0;
+    return s.backlight * (wrap * 0.36 / (d * d));
+}
 
 vec3 shade(Surface s, vec3 l, vec3 radiance) {
     float n_l = dot(s.n, l);
+    vec3 through = transmitted(s, l, n_l) * radiance;
+    if (s.wrap > 0.0) {
+        through += s.diffuse * (wrapped_diffuse(n_l, s.wrap) * (1.0 - s.dielectric)) * radiance;
+    }
     if (n_l <= 0.0) {
-        return vec3(0.0);
+        return through;
     }
     vec3 h = normalize(l + s.v);
     float n_h = clamp(dot(s.n, h), 0.0, 1.0);
@@ -66,5 +93,13 @@ vec3 shade(Surface s, vec3 l, vec3 radiance) {
     // a dielectric's Fresnel (the diffuse of a metal is already gone from
     // `diffuse`; between, glTF mixes the two materials).
     vec3 specular = s.boost * f * (distribution(n_h, s.alpha) * visibility(n_l, max(s.n_v, 1e-4), s.alpha) * PI);
-    return (s.diffuse * (1.0 - fresnel(vec3(0.04), v_h)) + specular) * radiance * n_l;
+    // (A wrapped diffuse is in `through`, weighed by the reflectance head on: Lambert's here.)
+    vec3 lit = (s.wrap > 0.0 ? vec3(0.0) : s.diffuse * (1.0 - fresnel(vec3(s.dielectric), v_h))) + specular;
+    if (s.coat > 0.0) {
+        // A clear coat (a dielectric of IOR 1.5, glTF's KHR_materials_clearcoat): its own highlight, and what it
+        // reflects the layer below does not get.
+        float fc = s.coat * fresnel(vec3(0.04), v_h).x;
+        lit = lit * (1.0 - fc) + vec3(fc * distribution(n_h, s.coat_alpha) * visibility(n_l, max(s.n_v, 1e-4), s.coat_alpha) * PI);
+    }
+    return lit * radiance * n_l + through;
 }

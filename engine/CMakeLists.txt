@@ -1,3 +1,9 @@
+# Static libraries need their own objects and generated prerequisites, not the
+# archives used at final link time. Let CMake prune those build dependencies.
+if(NOT DEFINED CMAKE_OPTIMIZE_DEPENDENCIES)
+    set(CMAKE_OPTIMIZE_DEPENDENCIES ON)
+endif()
+
 # Shared support has no dependency on optional components. In particular, the
 # default asset-loader registration in kin_engine may depend on audio, while
 # audio's logging/localization only depend on this lower layer.
@@ -9,12 +15,16 @@ add_library(kin_foundation STATIC
     src/core/hash.cpp
     src/core/jobs.cpp
     src/core/json_value.cpp
+    src/core/large_stack.cpp
+    src/core/profile.cpp
+    src/core/script_debugger.cpp
     src/core/utf8.cpp
     src/l10n/gettext.cpp
     src/l10n/language_file.cpp
     src/l10n/localization.cpp
     src/l10n/message_format.cpp
     src/platform/log.cpp
+    src/platform/services_active.cpp
 )
 target_compile_features(kin_foundation PUBLIC cxx_std_23)
 target_include_directories(kin_foundation PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -24,7 +34,44 @@ if(KIN_ENABLE_THREADS)
     find_package(Threads REQUIRED)
     target_link_libraries(kin_foundation PUBLIC Threads::Threads)
 endif()
+if(ANDROID)
+    # Content packs are read from the APK's assets (AAssetManager).
+    target_link_libraries(kin_foundation PUBLIC android)
+endif()
 kin_enable_release_optimizations(kin_foundation)
+
+# Keep reflection/template instantiations out of scene parsing and distribute
+# them across smaller files without changing the public registration sequence.
+set(_kin_scene_component_sources
+    src/scene/scene_components.cpp
+    src/scene/scene_components_render.cpp
+    src/scene/scene_components_particles.cpp
+    src/scene/scene_components_gameplay.cpp
+    src/scene/scene_components_lighting.cpp
+    src/scene/scene_components_view.cpp
+)
+if(KIN_ENABLE_PHYSICS)
+    list(APPEND _kin_scene_component_sources src/scene/scene_components_physics2d.cpp)
+endif()
+
+# Give expensive scripting compilations an early position among equally ready
+# Ninja jobs after static-library dependency pruning.
+if(KIN_ENABLE_SCRIPTING)
+    add_library(kin_scripting STATIC)
+    add_library(kin_scripting_scenes STATIC)
+endif()
+
+set(_kin_widget_sources
+    src/ui2/widgets_core.cpp
+    src/ui2/widgets_inputs.cpp
+    src/ui2/widgets_menus.cpp
+    src/ui2/widgets_collections.cpp
+    src/ui2/widgets_editor.cpp
+    src/ui2/widgets_text_edit.cpp)
+if(KIN_ENABLE_PCH AND KIN_ENABLE_WIDGET_PCH)
+    # Make the shared preamble ready early among equally ready Ninja jobs.
+    add_library(kin_ui2_widgets OBJECT ${_kin_widget_sources})
+endif()
 
 add_library(kin_engine STATIC
     src/anim/animation.cpp
@@ -36,8 +83,11 @@ add_library(kin_engine STATIC
     src/anim/registry.cpp
     src/anim/state_machine.cpp
     src/anim/track.cpp
+    src/anim/skeleton2d.cpp
+    src/anim/skeleton_blend2d.cpp
     src/anim/value.cpp
     src/assets/asset_manager.cpp
+    src/assets/asset_memory.cpp
     src/assets/asset_server.cpp
     src/assets/bake_cache.cpp
     src/assets/image.cpp
@@ -45,9 +95,10 @@ add_library(kin_engine STATIC
     src/core/bidi.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
-    src/core/profile.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
+    src/ecs/assets2d.cpp
+    src/ecs/asset_memory2d.cpp
     src/ecs/component.cpp
     src/ecs/component_schema.cpp
     src/ecs/editor.cpp
@@ -56,16 +107,33 @@ add_library(kin_engine STATIC
     src/ecs/ecs_scene.cpp
     src/ecs/particles.cpp
     src/ecs/render.cpp
+    src/ecs/animator.cpp
+    src/ecs/camera.cpp
+    src/ecs/lighting.cpp
+    src/ecs/shader_effect.cpp
+    src/ecs/ui_screens.cpp
+    src/ecs/dialogue.cpp
+    src/ecs/saving.cpp
+    src/ecs/scene_flow.cpp
+    src/ecs/sprite_animator.cpp
+    src/ecs/skeleton2d.cpp
+    src/ecs/normal_sprite2d.cpp
+    src/ecs/text.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
+    src/ecs/tween.cpp
     src/ecs/ui2.cpp
     src/ecs/ui2_sync.cpp
     src/platform/app.cpp
     src/platform/input.cpp
+    src/platform/input_router.cpp
     src/platform/file_dialogs.cpp
     src/platform/gamepad.cpp
     src/platform/resource_paths.cpp
     src/platform/process.cpp
+    src/platform/services.cpp
+    src/platform/services_catalog.cpp
+    src/platform/services_steam.cpp
     src/platform/user_data.cpp
     src/platform/window.cpp
     src/particles/animation_particles.cpp
@@ -75,16 +143,23 @@ add_library(kin_engine STATIC
     src/pathfinding/hex_pathfinding.cpp
     src/pathfinding/navmesh3d.cpp
     src/pathfinding/path_server.cpp
+    src/pathfinding/navigation2d.cpp
     src/pathfinding/pathfinding.cpp
     src/prefab/prefab_asset.cpp
+    src/prefab/prefab_pool2d.cpp
     src/prefab/prefab_structure.cpp
     src/renderer/animation_import.cpp
     src/renderer/cached_target.cpp
     src/renderer/render_graph.cpp
+    src/renderer/resource_graph.cpp
+    src/renderer/graph_resources.cpp
     src/renderer/render_profile.cpp
+    src/renderer/material.cpp
     src/renderer/render_queue.cpp
     src/renderer/render_view.cpp
     src/renderer/lighting.cpp
+    src/renderer/normal_lighting2d.cpp
+    src/renderer/normal_lighting2d_gpu.cpp
     src/renderer/post_blur.cpp
     src/renderer/path.cpp
     src/renderer/shape.cpp
@@ -103,7 +178,10 @@ add_library(kin_engine STATIC
     src/runtime/scene_app.cpp
     src/runtime/windowed_app.cpp
     src/scene/scene_asset.cpp
+    ${_kin_scene_component_sources}
     src/scene/scene_asset_runtime.cpp
+    src/scene/live_scene2d.cpp
+    src/scene/scene_preload2d.cpp
     src/scene/scene_manager.cpp
     src/scene/transitions.cpp
     src/save/save_store.cpp
@@ -112,7 +190,15 @@ add_library(kin_engine STATIC
     src/ui2/layout.cpp
     src/ui2/menu_scene.cpp
     src/ui2/state.cpp
+    src/ui2/semantics.cpp
+    src/ui2/accessibility.cpp
     src/ui2/context.cpp
+    src/ui2/compose.cpp
+    src/ui2/composed.cpp
+    src/ui2/value_field.cpp
+    src/ui2/drag_value.cpp
+    src/ui2/scale.cpp
+    src/ui2/charts.cpp
     src/ui2/skin_loader.cpp
     src/ui2/style_internal.cpp
     src/ui2/text_baked.cpp
@@ -120,6 +206,8 @@ add_library(kin_engine STATIC
     src/ui2/text_script.cpp
     src/ui2/theme.cpp
     src/ui2/theme_file.cpp
+    src/ui2/screen.cpp
+    src/ui2/touch_controls.cpp
     src/ui2/widget_internal.cpp
     src/ui2/widgets_core.cpp
     src/ui2/widgets_inputs.cpp
@@ -134,6 +222,7 @@ add_library(kin_engine_components INTERFACE)
 add_library(kin::engine ALIAS kin_engine_components)
 target_link_libraries(kin_engine_components INTERFACE kin_engine)
 target_link_libraries(kin_engine PUBLIC kin_foundation)
+include(kin_accessibility)
 
 target_sources(kin_engine PRIVATE src/renderer/shader_params.cpp)
 if(KIN_HAS_SDL_RENDERER)
@@ -161,6 +250,7 @@ if(KIN_HAS_GPU_RENDERER)
         src/renderer/shader_reflect.cpp
         src/renderer/gpu/gpu_buffer.cpp
         src/renderer/gpu/gpu_device.cpp
+        src/renderer/gpu/gpu_memory.cpp
         src/renderer/gpu/gpu_frame_timer.cpp
         src/renderer/gpu/gpu_geometry_batch.cpp
         src/renderer/gpu/gpu_pipeline_cache.cpp
@@ -202,11 +292,19 @@ if(KIN_ENABLE_AUDIO)
     target_link_libraries(kin_engine_components INTERFACE kin_audio_ecs)
 endif()
 if(KIN_ENABLE_PHYSICS)
-    add_library(kin_physics STATIC src/physics/physics.cpp)
+    if(KIN_PHYSICS_BOX2D_V3)
+        add_library(kin_physics STATIC src/physics/physics_box2d3.cpp)
+        target_compile_definitions(kin_physics PUBLIC KIN_PHYSICS_BOX2D_V3=1)
+        # Box2D's own worker threads, where kin has threads at all.
+        target_compile_definitions(kin_physics PRIVATE KIN_ENABLE_THREADS=$<BOOL:${KIN_ENABLE_THREADS}>)
+    else()
+        add_library(kin_physics STATIC src/physics/physics.cpp)
+    endif()
     add_library(kin::physics ALIAS kin_physics)
     target_compile_features(kin_physics PUBLIC cxx_std_23)
     target_include_directories(kin_physics PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(kin_physics PUBLIC kin::components box2d)
+    target_link_libraries(kin_physics PRIVATE earcut_hpp::earcut_hpp) # concave polygons, in triangles
     kin_enable_release_optimizations(kin_physics)
 
     add_library(kin_physics_render STATIC src/physics/debug_render.cpp)
@@ -221,30 +319,82 @@ if(KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_engine_components INTERFACE kin_physics_render kin_physics_ecs)
 endif()
 if(KIN_ENABLE_SCRIPTING)
-    add_library(kin_scripting STATIC
+    target_sources(kin_scripting PRIVATE
+        src/scripting/lua_api_surface.cpp
         src/scripting/lua_l10n.cpp
         src/scripting/lua_paths.cpp
-        src/scripting/lua_script.cpp)
+        src/scripting/lua_script.cpp
+        src/scripting/lua_services.cpp
+        src/scripting/lua_runtime.cpp
+        src/scripting/lua_tasks.cpp)
     add_library(kin::scripting ALIAS kin_scripting)
     target_link_libraries(kin_scripting PUBLIC kin_foundation Lua::Lua sol2::sol2)
     kin_enable_release_optimizations(kin_scripting)
 
-    add_library(kin_scripting_scenes STATIC
+    target_sources(kin_scripting_scenes PRIVATE
         src/scripting/script_engine.cpp
+        src/scripting/script_scene_api.cpp
+        src/scripting/script_scene_bindings.cpp
+        src/scripting/script_reload.cpp
+        src/scripting/lua_state_copy.cpp
+        src/scripting/lua_values.cpp
+        src/scripting/lua_workflows2d.cpp
+        src/scripting/workflows2d.cpp
         src/scripting/script_scene.cpp
-        src/scripting/script_runtime.cpp)
+        src/scripting/script_runtime.cpp
+        src/scripting/entity_scripts.cpp
+        src/scripting/entity_script_bindings.cpp
+        src/scripting/entity_service_bindings.cpp)
     if(KIN_ENABLE_AUDIO)
         target_sources(kin_scripting_scenes PRIVATE src/scripting/lua_audio.cpp)
     endif()
     add_library(kin::scripting_scenes ALIAS kin_scripting_scenes)
     target_link_libraries(kin_scripting_scenes PUBLIC kin_scripting kin_engine)
+    if(KIN_ENABLE_PHYSICS)
+        target_link_libraries(kin_scripting_scenes PUBLIC kin_physics) # entity scripts' `physics`
+    endif()
     kin_enable_release_optimizations(kin_scripting_scenes)
+    kin_configure_scripting_build(kin_scripting_scenes)
     target_link_libraries(kin_engine_components INTERFACE kin_scripting_scenes)
+endif()
+if(KIN_ENABLE_PYTHON)
+    # Experimental Python scripting (kin/scripting/python.hpp). PocketPy is
+    # compiled as C11 through kin's sandbox (src/scripting/pocketpy_sandbox.c),
+    # without kin's warnings; only python_*.cpp see its header. A game links
+    # kin::python_scripts itself: kin::engine does not include it.
+    add_library(kin_pocketpy STATIC src/scripting/pocketpy_sandbox.c)
+    set_target_properties(kin_pocketpy PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_include_directories(kin_pocketpy SYSTEM PUBLIC "${pocketpy_header_SOURCE_DIR}" PRIVATE "${pocketpy_SOURCE_DIR}")
+    # No os, io or debugger (files, sockets); a watchdog, which the sandbox turns into an instruction budget.
+    target_compile_definitions(kin_pocketpy PUBLIC PK_ENABLE_OS=0 PK_ENABLE_WATCHDOG=1)
+    # -ffp-contract=off: its software math gives the same bits where a multiply-add could fuse (determinism).
+    target_compile_options(kin_pocketpy PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w;-ffp-contract=off>" "$<$<C_COMPILER_ID:MSVC>:/w>")
+    kin_enable_release_optimizations(kin_pocketpy)
+
+    add_library(kin_python_scripts STATIC
+        src/scripting/python_api.cpp
+        src/scripting/python_host.cpp
+        src/scripting/python_services.cpp
+        src/scripting/python_values.cpp)
+    add_library(kin::python_scripts ALIAS kin_python_scripts)
+    target_link_libraries(kin_python_scripts PUBLIC kin_engine PRIVATE kin_pocketpy)
+    # The part of the module kin written in Python (tasks, awaitables).
+    kin_embed_files(kin_python_scripts NAME kin_python_embedded NAMESPACE kin::python_detail
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/python_kin.py"
+              "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/python_kin.pyi")
+    if(KIN_ENABLE_PHYSICS)
+        target_link_libraries(kin_python_scripts PUBLIC kin_physics) # bodies moved with their entities
+    endif()
+    kin_enable_release_optimizations(kin_python_scripts)
 endif()
 if(KIN_ENABLE_SCENE_SERVER)
     target_sources(kin_engine PRIVATE
         src/runtime/scene_server.cpp
+        src/runtime/automation.cpp
     )
+endif()
+if(KIN_ENABLE_DEVELOPMENT)
+    target_sources(kin_engine PRIVATE src/runtime/development.cpp)
 endif()
 
 # These usage requirements also reach game sources and their final link.
@@ -265,6 +415,9 @@ target_compile_features(kin_engine PUBLIC cxx_std_23)
 if(MSVC)
     set_source_files_properties(src/scripting/script_engine.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
     set_source_files_properties(src/ecs/ui2.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+    # Every built-in component's registration, and the physics systems' queries.
+    set_source_files_properties(src/scene/scene_asset.cpp ${_kin_scene_component_sources}
+        src/ecs/physics.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
 target_compile_definitions(kin_engine PUBLIC
     "$<$<OR:$<BOOL:${KIN_ENABLE_PROFILING}>,$<AND:$<CONFIG:Release>,$<BOOL:${KIN_ENABLE_RELEASE_PROFILING}>>>:KIN_ENABLE_PROFILING>"
@@ -289,7 +442,6 @@ if(KIN_EXPERIMENTAL_3D)
     if(NOT cgltf_POPULATED)
         FetchContent_Populate(cgltf)
     endif()
-    target_include_directories(kin_engine SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};cgltf.txt|${cgltf_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
     # Levels of detail (kin/render3d/mesh_lod3d.hpp) and clusters (mesh_clusters3d.hpp): the simplifier, the vertex-cache
     # optimiser, the meshlet builder and the cluster partitioner of meshoptimizer (MIT), compiled into the engine;
@@ -309,17 +461,19 @@ if(KIN_EXPERIMENTAL_3D)
     target_sources(kin_engine PRIVATE ${_kin_meshopt_sources})
     set_source_files_properties(${_kin_meshopt_sources} PROPERTIES COMPILE_OPTIONS
         "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
-    target_include_directories(kin_engine SYSTEM PRIVATE "${meshoptimizer_SOURCE_DIR}/src")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
-    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
+    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/material_graph3d.cpp src/render3d/material_import3d.cpp src/render3d/material_import_unity3d.cpp src/render3d/material_import_unreal3d.cpp src/render3d/image_decode3d.cpp src/render3d/import_decode.c src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
     target_sources(kin_engine PRIVATE
-        src/render3d/camera3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
+        src/render3d/camera3d.cpp src/render3d/frame_graph3d.cpp src/render3d/reflection_probes3d.cpp src/render3d/mesh.cpp
+        src/render3d/renderer3d.cpp
         src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
-        src/render3d/environment.cpp src/render3d/hdr_decode.c)
+        src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/hdr_decode.c)
     if(KIN_HAS_GPU_RENDERER)
-        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
+        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
+                                          src/renderer/gpu/gpu_area_lights3d.cpp src/renderer/gpu/gpu_area_lights_ltc.cpp
+                                          src/renderer/gpu/gpu_mesh_pool.cpp)
     elseif(KIN_HAS_WEBGL2_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/webgl2_renderer3d.cpp)
         list(APPEND _kin_webgl_shaders
@@ -331,9 +485,10 @@ if(KIN_EXPERIMENTAL_3D)
     if(KIN_ENABLE_PHYSICS3D)
         target_sources(kin_engine PRIVATE
             src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp
-            src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp
+            src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/ecs/surface_details3d.cpp
             src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp
-            src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp
+            src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/scene/planar_views3d.cpp
+            src/scene/reflection_probes3d.cpp
             src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp)
     endif()
     option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)
@@ -341,9 +496,13 @@ if(KIN_EXPERIMENTAL_3D)
     # translation unit; other engine sources and floating-point flags stay put.
     set_property(SOURCE src/renderer/gpu/gpu_renderer3d.cpp APPEND PROPERTY COMPILE_OPTIONS
         "$<$<AND:$<BOOL:${KIN_RENDERER3D_O3}>,$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O3>")
-    set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
+    set_source_files_properties(src/render3d/hdr_decode.c src/render3d/import_decode.c PROPERTIES COMPILE_OPTIONS
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
-    target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
+    # Both the archive and its optional widget object group retain these
+    # private include directories' system-header classification.
+    set(_kin_engine_private_system_includes
+        "${cgltf_SOURCE_DIR}" "${meshoptimizer_SOURCE_DIR}/src" "${stb_SOURCE_DIR}")
+    target_include_directories(kin_engine SYSTEM PRIVATE ${_kin_engine_private_system_includes})
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
     if(KIN_ENABLE_SCENE3D_RUNTIME)
         # Scene/frame orchestration sits above the engine and its adapters. The
@@ -450,7 +609,14 @@ if(KIN_HAS_GPU_RENDERER)
     include(kin_gpu_shaders)
     # The .spv files stay in the build too, for tests that read every engine shader.
     kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${KIN_GPU_SHADER_SOURCES})
-    kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
+    # Isolate generation so dependency pruning retains the small data target,
+    # rather than the full engine archive, as a build prerequisite.
+    add_library(kin_gpu_shader_data OBJECT)
+    kin_enable_release_optimizations(kin_gpu_shader_data)
+    kin_embed_files(kin_gpu_shader_data NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
+    target_include_directories(kin_engine PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/kin_embed/kin_gpu_shader_data")
+    target_link_libraries(kin_engine PRIVATE kin_gpu_shader_data)
     if(KIN_GLSLC AND NOT KIN_SHIPPING)
         # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
         target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}" KIN_SHADER_INCLUDE_DIR="${KIN_SHADER_INCLUDE_DIR}")
@@ -466,4 +632,46 @@ if(KIN_HAS_GPU_RENDERER)
         message(STATUS "kin_engine: ${_kin_gpu_built} of ${_kin_gpu_wanted} SDL_GPU backend shaders (glslc not found)")
     endif()
 
+endif()
+
+kin_precompile_target(kin_foundation)
+kin_precompile_target(kin_engine ECS)
+if(TARGET kin_audio)
+    kin_precompile_target(kin_audio)
+endif()
+if(TARGET kin_scripting)
+    kin_precompile_target(kin_scripting SCRIPTING)
+    kin_precompile_target(kin_scripting_scenes ECS SCRIPTING)
+endif()
+if(TARGET kin_scene3d_runtime)
+    kin_precompile_target(kin_scene3d_runtime ECS SCRIPTING)
+endif()
+
+# Every file in this group already includes the same private preamble. Keep
+# that PCH local: widget API edits must not invalidate the rest of the engine's
+# standard-library/ECS PCH. The objects still belong to the existing archive.
+if(KIN_ENABLE_PCH AND KIN_ENABLE_WIDGET_PCH)
+    target_compile_features(kin_ui2_widgets PRIVATE cxx_std_23)
+    # Retain the engine's private settings as well as its dependencies' usage
+    # requirements. There is no link back to kin_engine, so no archive cycle.
+    target_link_libraries(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,LINK_LIBRARIES>")
+    target_include_directories(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,INCLUDE_DIRECTORIES>")
+    if(_kin_engine_private_system_includes)
+        target_include_directories(kin_ui2_widgets SYSTEM PRIVATE ${_kin_engine_private_system_includes})
+    endif()
+    target_compile_definitions(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,COMPILE_DEFINITIONS>")
+    target_compile_options(kin_ui2_widgets PRIVATE "$<TARGET_PROPERTY:kin_engine,COMPILE_OPTIONS>")
+    foreach(property POSITION_INDEPENDENT_CODE MSVC_RUNTIME_LIBRARY CXX_VISIBILITY_PRESET VISIBILITY_INLINES_HIDDEN)
+        get_target_property(value kin_engine ${property})
+        if(NOT value STREQUAL "value-NOTFOUND")
+            set_property(TARGET kin_ui2_widgets PROPERTY ${property} "${value}")
+        endif()
+    endforeach()
+    kin_precompile_target(kin_ui2_widgets ECS)
+    target_precompile_headers(kin_ui2_widgets PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui2/widget_chunk_preamble.hpp")
+    get_target_property(_kin_engine_sources kin_engine SOURCES)
+    list(REMOVE_ITEM _kin_engine_sources ${_kin_widget_sources})
+    set_property(TARGET kin_engine PROPERTY SOURCES "${_kin_engine_sources}")
+    target_sources(kin_engine PRIVATE $<TARGET_OBJECTS:kin_ui2_widgets>)
 endif()

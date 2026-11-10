@@ -1,17 +1,18 @@
 #include "gpu_buffer.hpp"
 
+#include "gpu_memory.hpp"
+
 namespace kin::gpu {
 
-GpuBuffer::GpuBuffer(SDL_GPUDevice* device, SDL_GPUBuffer* buffer, u32 size)
-    : _device(device), _buffer(buffer), _size(size) {}
+GpuBuffer::GpuBuffer(SharedDevice device, SDL_GPUBuffer* buffer, u32 size)
+    : _device(std::move(device)), _buffer(buffer), _size(size) {}
 
 GpuBuffer::~GpuBuffer() {
     release();
 }
 
 GpuBuffer::GpuBuffer(GpuBuffer&& other) noexcept
-    : _device(std::exchange(other._device, nullptr)),
-      _buffer(std::exchange(other._buffer, nullptr)),
+    : _device(std::exchange(other._device, nullptr)), _buffer(std::exchange(other._buffer, nullptr)),
       _size(std::exchange(other._size, 0)) {}
 
 GpuBuffer& GpuBuffer::operator=(GpuBuffer&& other) noexcept {
@@ -26,8 +27,8 @@ GpuBuffer& GpuBuffer::operator=(GpuBuffer&& other) noexcept {
 }
 
 void GpuBuffer::release() {
-    if (_device && _buffer) {
-        SDL_ReleaseGPUBuffer(_device, _buffer);
+    if (_device && *_device && _buffer) {
+        tracked_release_buffer(*_device, _buffer);
     }
     _device = nullptr;
     _buffer = nullptr;

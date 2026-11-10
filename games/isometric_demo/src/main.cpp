@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include "iso_draw.hpp"
 #include "iso_math.hpp"
 #include "iso_order.hpp"

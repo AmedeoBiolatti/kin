@@ -10,6 +10,7 @@
 //   Space    pause                Esc   quit
 //   --zoom=Z --turn=DEGREES   start the camera zoomed and turned
 
+#include <kin/platform/window.hpp>
 #include <kin/core/json.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/platform/input.hpp>

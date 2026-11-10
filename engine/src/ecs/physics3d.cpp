@@ -15,6 +15,24 @@
 namespace kin {
 
 namespace {
+// Native transform writers publish only actual pose changes, so tracked rendering
+// does not need a full ECS scan after physics. Resolve again on exit: tables may move.
+struct PublishTransform {
+    flecs::entity entity;
+    std::optional<Transform3D> before;
+    explicit PublishTransform(flecs::entity e) : entity(e) {
+        if (const auto* value = e.get<Transform3D>())
+            before = *value;
+    }
+    ~PublishTransform() {
+        if (!before || !entity.is_alive())
+            return;
+        if (const auto* value = entity.get<Transform3D>();
+            value && (value->position != before->position || value->rotation != before->rotation ||
+                      value->scale != before->scale))
+            entity.modified<Transform3D>();
+    }
+};
 
 // An ancestor chain's world matrix as propagate_transforms makes it (a parent without Transform3D ends the chain),
 // worked out here and now: the world a body is made in is not the render's, which may be a frame old.
@@ -855,6 +873,7 @@ void WorldPhysicsState3D::write_character(BoundCharacter& c, Vec3f feet) {
     if (!e.is_alive()) {
         return;
     }
+    const PublishTransform publish{e};
     Transform3D* t = EcsEntity{e}.get_mut<Transform3D>();
     if (t == nullptr) {
         return;
@@ -874,6 +893,7 @@ void WorldPhysicsState3D::characters_to_world(f32) {
         if (!e.is_alive()) {
             continue;
         }
+        const PublishTransform publish{e};
         Transform3D* t = EcsEntity{e}.get_mut<Transform3D>();
         const CharacterController3D* controller = e.get<CharacterController3D>();
         if (t == nullptr || controller == nullptr) {
@@ -913,6 +933,7 @@ void WorldPhysicsState3D::characters_from_world() {
         if (!e.is_alive()) {
             continue;
         }
+        const PublishTransform publish{e};
         const CharacterState3D state = _physics.character(c.character);
         c.previous_position = c.position;
         c.previous_rotation = c.rotation;
@@ -1108,6 +1129,7 @@ void WorldPhysicsState3D::write_back(Bound& b, Vec3f position, Quatf rotation, b
     }
     // Scene-prefab transforms can be inherited. Own the local pose before
     // writing simulation results; raw Flecs get_mut only accepts owned data.
+    const PublishTransform publish{e};
     Transform3D* t = in_step && b.owns_transform > 0 ? e.get_mut<Transform3D>() : EcsEntity{e}.get_mut<Transform3D>();
     if (t == nullptr) {
         return;
@@ -1145,6 +1167,54 @@ Status3D WorldPhysicsState3D::teleport(flecs::entity entity, Vec3f position, Qua
     if (b == _bound.end() || b->entity != entity.id() || !_physics.contains(b->body))
         return status3d(false, {"entity has no bound rigid body"});
     _physics.teleport(b->body, position, rotation);
+    b->position = b->previous_position = _physics.position(b->body);
+    b->rotation = b->previous_rotation = _physics.rotation(b->body);
+    write_back(*b, b->position, b->rotation);
+    b->stamped = false;
+    return status3d(true, {});
+}
+
+Status3D WorldPhysicsState3D::carry(flecs::entity entity, Vec3f position, Quatf turn) {
+    if (!entity.is_valid() || entity.world().c_ptr() != _ecs.c_ptr() || !entity.is_alive() ||
+        !std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+        !std::isfinite(turn.x) || !std::isfinite(turn.y) || !std::isfinite(turn.z) || !std::isfinite(turn.w))
+        return status3d(false, {"invalid portal carry target or pose"});
+    // A character: its feet there, its velocity and facing turned (teleport_character clears the velocity: given
+    // after it), what this system last wrote made the same, so the next step does not take it for a teleport again.
+    auto c = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
+    if (c != _characters.end() && c->entity == entity.id() && _physics.character_enabled(c->character)) {
+        const Vec3f velocity = _physics.character(c->character).velocity;
+        _physics.teleport_character(c->character, position);
+        _physics.set_character_velocity(c->character, turn.rotate(velocity));
+        if (auto* controller = EcsEntity{entity}.get_mut<CharacterController3D>()) {
+            controller->facing = (turn * controller->facing).normalized();
+            controller->input.forward = turn.rotate(controller->input.forward);
+            // Read before the next step: where it is now, going as it will (the next step takes the velocity).
+            controller->state = _physics.character(c->character);
+            controller->state.velocity = turn.rotate(velocity);
+        }
+        if (Transform3D* t = EcsEntity{entity}.get_mut<Transform3D>()) {
+            const PublishTransform publish{entity};
+            t->rotation = (turn * t->rotation).normalized();
+            c->last_rotation = c->simulation_rotation = t->rotation;
+        }
+        c->position = c->previous_position = position;
+        c->rotation = c->previous_rotation = (turn * c->rotation).normalized();
+        c->hands.clear();
+        write_character(*c, position);
+        return status3d(true, {});
+    }
+    // A dynamic body: its origin there, turned, its velocities turned.
+    auto b = std::ranges::lower_bound(_bound, entity.id(), {}, &Bound::entity);
+    if (b == _bound.end() || b->entity != entity.id() || !_physics.contains(b->body))
+        return status3d(false, {"entity has no character or bound body to carry"});
+    const Vec3f linear = _physics.linear_velocity(b->body), angular = _physics.angular_velocity(b->body);
+    const Quatf rotation = (turn * _physics.rotation(b->body)).normalized();
+    _physics.teleport(b->body, position, rotation);
+    if (b->motion == Body3DMotion::Dynamic) {
+        _physics.set_linear_velocity(b->body, turn.rotate(linear));
+        _physics.set_angular_velocity(b->body, turn.rotate(angular));
+    }
     b->position = b->previous_position = _physics.position(b->body);
     b->rotation = b->previous_rotation = _physics.rotation(b->body);
     write_back(*b, b->position, b->rotation);
@@ -1418,6 +1488,7 @@ void WorldPhysicsState3D::interpolate(f32 alpha) {
     for (BoundCharacter& c : _characters) {
         const flecs::entity e{_ecs, c.entity};
         if (e.is_valid() && e.is_alive()) {
+            const PublishTransform publish{e};
             auto* transform = EcsEntity{e}.get_mut<Transform3D>();
             if (!transform)
                 continue;

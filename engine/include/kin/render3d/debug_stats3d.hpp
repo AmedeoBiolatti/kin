@@ -2,6 +2,7 @@
 
 #include <array>
 #include <kin/core/math3d.hpp>
+#include <kin/render3d/frame_graph3d.hpp>
 #include <kin/render3d/mesh_lod3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/stats3d.hpp>
@@ -13,6 +14,26 @@ namespace kin {
 // Implementation counters can change as the renderer changes. Reading this
 // snapshot never triggers a GPU readback.
 struct RenderDebugStats3D : RenderStats3D {
+    // Explicit shared preparation: build counts belong to prepare(); reused
+    // records and upload savings belong to a consuming operation.
+    u64 preparation_records = 0, preparation_skin_bounds = 0, preparation_cpu_bytes = 0;
+    u64 shared_records = 0, shared_instance_bytes = 0, shared_joint_bytes = 0;
+    u64 joint_upload_bytes = 0, preparation_scratch_bytes = 0;
+    u32 shared_uploads = 0, shared_joint_uploads = 0;
+    // Each stock frame pass's CPU recording time, by its index in stock_frame_graph3d() (0: not run this render).
+    std::array<f64, frame_graph_passes3d> graph_pass_ms{};
+    bool graph_reused = false;
+    u32 graph_passes = 0, graph_culled_passes = 0;
+    f64 graph_compile_ms = 0, graph_record_ms = 0; // CPU, never GPU timestamps
+    bool geometry_graph_reused = false;            // stock prepass geometry subgraph cache
+    u32 surface_colour_copies = 0;                 // explicit out-of-place transparency input copy
+    u32 bloom_draws = 0, output_draws = 0;         // shared stock/public fullscreen recorders
+    u32 exposure_dispatches = 0;                   // ViewOptions3D::auto_exposure's metering and adaptation
+    u32 decals_drawn = 0;                          // Scene3D::decals drawn
+    u32 decal_draws = 0;          // in this many instanced draws (runs of decals sharing their pictures and pipeline)
+    u32 decals_culled = 0;        // and those out of the view, not drawn
+    u32 morph_velocity_draws = 0; // velocity pre-pass draws of meshes whose shape changed since the frame before
+    u32 geometry_draws = 0, geometry_instances = 0; // standalone geometry; stock prepass also keeps ao_* counters
     // Shared small-mesh GPU pages, excluding dedicated meshes and driver allocations. Retired ranges await GPU fences.
     u64 shared_mesh_allocated_bytes = 0, shared_mesh_live_bytes = 0, shared_mesh_retired_bytes = 0;
     u64 shared_mesh_range_reuses = 0;
@@ -25,6 +46,10 @@ struct RenderDebugStats3D : RenderStats3D {
     // Tables given up this render for other batches (least recently drawn first), and draws that wanted one but found
     // no room.
     u32 retained_evictions = 0, retained_refused = 0;
+    // Direct scene records share one table without changing draw/composition order.
+    // These are subsets of the retained/bounds counters above and below.
+    u32 direct_retained_instances = 0, direct_cache_hits = 0;
+    u64 direct_upload_bytes = 0, direct_bounds_rebuilt = 0;
     // Device-wide GPU waits (SDL_WaitForGPUIdle) inside this render(): 0 in an ordinary frame.
     u32 device_waits = 0;
     // CPU sphere storage: resident-table cache (<=4 MiB), compact transient allocation,
@@ -46,6 +71,18 @@ struct RenderDebugStats3D : RenderStats3D {
     // Local preparation vector payload capacities: gather tasks/counts, caster-union slot map,
     // and accepted/upload copy lists (including their simultaneous backing storage).
     u64 local_task_bytes = 0, local_slot_bytes = 0, local_copy_bytes = 0;
+    // CPU-only fixed-light plans. Tests/candidates above count newly gathered
+    // work; cached copies/tests below are reused selections, never GPU map hits.
+    u32 local_gather_cache_hits = 0, local_gather_cache_misses = 0, local_gather_cache_builds = 0;
+    u64 local_gather_cached_tests = 0, local_gather_cached_copies = 0, local_gather_cache_bytes = 0;
+    u32 local_sort_cache_hits = 0, local_sort_cache_misses = 0;
+    u64 local_sort_cached_entries = 0;
+    // Main draw decisions/order retained on the CPU; static direct draws can
+    // share a GPU material table and merge consecutive compatible commands.
+    u32 draw_plan_hits = 0, draw_plan_builds = 0, draw_pipeline_hits = 0, draw_pipeline_misses = 0;
+    u32 main_batched_draws = 0, main_merged_draws = 0;
+    u64 draw_plan_bytes = 0, draw_material_gpu_bytes = 0, draw_material_upload_bytes = 0;
+    u64 draw_index_gpu_bytes = 0, draw_index_upload_bytes = 0;
     // Skinned copies (Scene3D::draw_skinned): those the camera sees (drawn by the main pass), the joint matrices handed
     // to the GPU for all of the frame's skinned copies, and the main pass's draw calls for them (a run of copies of one
     // mesh is one). Also counted in draws, instances and triangles above. 0 for a frame without any.
@@ -56,7 +93,7 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 ao_draws = 0; // draw calls into the depth and normal pre-pass (ambient occlusion or contact shadows; 0: neither
                       // this render)
     u32 ao_instances = 0;       // meshes drawn into it
-    u32 ao_dispatches = 0;      // compute dispatches (the occlusion and its blur)
+    u32 ao_dispatches = 0;      // compute dispatches (occlusion, blur, optional half-size reconstruction)
     u32 contact_dispatches = 0; // compute dispatches of the contact shadows (the march and its blur): 0 when off
     // With both on at one size (the occlusion not at half resolution) the two blurs are one dispatch a direction; these
     // count that dispatch in each of the two numbers above, and this says how many there were (2, else 0).
@@ -72,7 +109,30 @@ struct RenderDebugStats3D : RenderStats3D {
     // geometry pass for it: ao_draws is 0); false with the pre-pass (ambient occlusion, contact shadows, occlusion
     // culling, an opaque mesh with a custom shader) or without temporal anti-aliasing.
     bool taa_main_velocity = false;
+    // The main pass began from the pre-pass's depth (copied: a sample a pixel, no overlay), so that what the pre-pass's
+    // surfaces hide is not shaded.
+    bool main_depth_from_prepass = false;
     u32 taa_reactive_draws = 0; // transient coverage draws; no extra targets, zero without TAA/effects
+    // The GI scene (Scene3D::global_illumination): its voxels (all its levels', 0 without one this render) and levels,
+    // whether this render made any of it again (else it was kept: nothing it is made of changed and its windows
+    // stayed), and, when it did, the blocks of 8 x 8 x 8 voxels it made, the copies and triangles it voxelized and its
+    // compute dispatches.
+    u32 gi_voxels = 0;
+    u32 visibility_draws = 0, visibility_instances = 0;
+    u32 gi_levels = 0;
+    bool gi_built = false;
+    u32 gi_blocks = 0;
+    u32 gi_copies = 0;
+    u64 gi_triangles = 0;
+    u32 gi_dispatches = 0;
+    // Its probes (GiProbes3D): how many there are, how many this render updated (and the rays they cast), whether
+    // their light was in the picture, and whether it was read once a texel on what the pre-pass drew (else each
+    // fragment read the probes).
+    u32 gi_probes = 0, gi_probes_updated = 0;
+    u32 gi_rays = 0;
+    bool gi_lit = false;
+    bool gi_sun_map = false; // the GI's voxels took the sun's light through its own sun map (else their march)
+    bool gi_resolved = false;
     // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal
     // anti-aliasing and occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered
     // buffer too), in bytes, and how many feature groups of them this render gave back: a feature that has not been
@@ -99,12 +159,22 @@ struct RenderDebugStats3D : RenderStats3D {
         0; // submitted to the local and moon maps this render (a clustered copy's: its cut's, from the light)
     bool lights_variant = false;
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
+    // Reflection probes (Lights3D::reflection_probes): those this render read, the captures it filtered into its
+    // array (once a capture), and the captures capture_reflection made (its own stats).
+    u32 reflection_probes = 0, reflection_filters = 0, reflection_captures = 0;
+    u32 reflection_gi_captures = 0; // of those, lit by a view's global illumination (borrowed)
+    // Screen-space reflections (Scene3D::ssr): 1 when this render traced them (and its main pass read them).
+    u32 ssr_traces = 0;
     // Sky, fog and the sky's image-based light (P3a): the sky pass ran; meshes were drawn with the fog's shader
     // variants (or custom kin_output); with Lights3D::sky_lights_scene the environment was made again this
     // render (the sky moved past Sky3D::light_threshold and light_interval renders had passed), how many times so far,
     // and the CPU time spent recording the last one.
     bool sky_drawn = false;
     bool fog_applied = false;
+    bool fog_sun_shadowed = false; // Fog3D::sun_shadows: the share of the fog's air the sun reaches was walked
+    bool fog_volume = false;       // Fog3D::volumetric: the lights' light in the fog's air was lit and added
+    u32 fog_volume_lights = 0;     // the lights it was lit by
+    u32 fog_volume_cells = 0;      // its cells (across x down x slices)
     bool sky_env_regenerated = false;
     u32 sky_env_generations = 0;
     f64 sky_env_cpu_ms = 0.0;
@@ -133,7 +203,12 @@ struct RenderDebugStats3D : RenderStats3D {
     // passes), and the CPU time of the cuts (choosing, compacting, handing over the upload).
     u32 cluster_copies = 0;
     u64 clusters_tested = 0;
+    u32 transparent_draw_runs = 0;   // main colour runs after global mesh/sprite ordering
+    u64 composition_order_bytes = 0; // retained CPU capacity of the compact composition commands
+    f64 transparent_sort_ms = 0;     // CPU scheduling/sort/compaction, never GPU time
     u32 clusters_drawn = 0;
+    u32 cluster_budget_fallbacks = 0;          // submitted copies conservatively using their complete level-zero mesh
+    u64 cluster_budget_reserved_triangles = 0; // worst-case cut storage, including sun views; no readback
     u32 cluster_upload_bytes = 0;
     f64 cluster_ms = 0.0;
     f64 cluster_upload_ms = 0.0; // of which the compaction and handing over the upload (the rest is choosing)

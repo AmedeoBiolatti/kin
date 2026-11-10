@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 #include <kin/render3d/mesh_clusters3d.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 #include <meshoptimizer.h>
 
 namespace kin {
@@ -718,10 +719,7 @@ bool restore_mesh_clusters(std::span<const u8> bytes, MeshClusterBuild3D& out) {
 }
 
 f32 cluster_scale_of(const Mat4f& t) {
-    const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
-    const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
-    const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
-    return std::sqrt(std::max({sx, sy, sz}));
+    return stretch_bound(t);
 }
 
 ClusterCutTest3D::ClusterCutTest3D(const ClusterCutView3D& v) : view(v), scale(cluster_scale_of(v.transform)) {}

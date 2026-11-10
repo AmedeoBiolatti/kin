@@ -1,5 +1,10 @@
 # Assets
 
+For runtime input/scene/pool services see [2D workflows](2d_workflows.md). The
+Assets2D binders also load [2D skeletons](skeleton_2d.md) and
+[normal-mapped sprites](rendering.md#normal-mapped-sprites). Authoring hot imports
+and the processed artifact cache are covered in [2D importing](importing_2d.md).
+
 Kin has two complementary asset APIs that share one cache:
 
 - **`AssetManager`** — synchronous, eager loading. `load<T>(path)` blocks, caches,
@@ -107,6 +112,245 @@ config.asset_server = &server;
 return kin::run_scene_app(config, scenes);
 ```
 
+## Asset lifetime
+
+The cache retains assets by default. `AssetManager::unload_unused()` releases
+entries with no external `AssetHandle` or `shared()` view, keeping every
+transitive dependency declared through `LoadContext::require`. Pending jobs pin
+their storage until they finish applying. Dependency graphs may contain cycles;
+a cycle with no external owner is collected. Call collection on the main thread,
+between frames, after releasing handles that are no longer needed.
+
+`kin::AssetScope` (`kin/assets/asset_scope.hpp`) groups strong references for a
+level, menu or loading screen:
+
+```cpp
+kin::AssetScope level;
+auto hero = level.load_async<kin::Image>(server, "images/hero.png");
+// Or level.load<T>(assets, path), or level.keep(existing_handle).
+server.drain();
+// On leaving the level:
+hero = {};
+level.clear();
+assets.unload_unused();
+```
+
+Destroying the scope also releases its pins. A handle kept elsewhere continues
+to own its asset; `AssetHandle::keepalive()` is the type-erased reference a scope
+holds. Collect after `pump()`/`drain()` once completed jobs have released their
+temporary references: completed parents stay pinned until the server's current
+dependency batch is quiescent. The dependency edges the server records live in
+the manager (`AssetManager::dependencies(key)`). Unload/clear remain explicit
+invalidation operations, including for handles that still exist. A released
+entry's path reports `Discovered`, or `Missing` when its file is gone, unless
+another type still caches it.
+
+Keep a handle or shared view when retaining a loaded value; a borrowed `const T&`
+does not pin it. Dependency retention covers declared async dependencies and
+ordinary strong ownership. It does not break arbitrary shared-pointer cycles
+inside asset values. `Assets2D`, described below, has its own scene-owned cache;
+this collector manages `AssetManager`/`AssetServer` storage.
+
+## Memory budgets and residency
+
+`AssetManager::set_memory_budget(bytes)` enables LRU eviction of unowned storage;
+zero disables the budget. Loads and AssetServer pumps trim automatically when the
+cache is over budget. Call `trim_memory()` between frames after releasing other
+handles; `over_memory_budget()` is a cheap check for per-frame callers. Eviction preserves
+external handles, pending jobs and the complete graph of declared dependencies.
+Unowned reverse dependants are evicted together with a dependency, preventing
+reuse of a partially evicted cached parent. Unowned dependency cycles are evictable.
+
+`memory_report()` returns resident/budget/pinned bytes and `over_budget`;
+`trim_memory()` also returns the number evicted. An overrun is valid when live
+owners prevent eviction. `residency()` returns deterministic rows with payload
+bytes, last access, external reference counts, dependencies and a retaining chain
+from one external root. These are cache-storage references, not heap-wide tracing.
+`summarize_residency(rows, budget)` totals any rows (the CPU and texture reports
+both do), and `least_recent_first` is the order budgets evict in.
+
+Image and skeleton (`.kinskel`) loaders register payload sizers; `Assets2D::image()`
+and `Assets2D::skeleton2d()` read through the manager, so their pixels and rigs
+count toward its budget. For game types, use
+`register_memory_sizer<T>([](const T& value) -> u64 { ... })`; types without a
+sizer use `sizeof(T)` and are marked `size_estimated`. Payload accounting excludes
+allocator/driver overhead and memory allocated outside the registered value.
+
+`Assets2D::set_texture_budget(bytes)`, `texture_memory_report()`,
+`texture_residency()` and `trim_texture_memory()` cover its color and raw material
+texture caches separately. Estimates use base-level format/block size, excluding
+mip chains and driver overhead. Bind trims, after components receive their
+handles, when `over_texture_budget()`. Live components, queued draws and catalogs
+pin textures; catalog pins remain until their owning cache is released. This
+budget does not collect the scene's catalog, font or shader caches, nor GPU
+resources created directly by game code. `set_residency_diagnostics(true)`
+records representative component/asset reasons on bind (pinning never depends
+on it). `for_snapshot()` gives a reload's next `Assets2D` the same binders,
+both budgets and the diagnostics setting.
+
+Lua exposes the same reports under `asset_memory`; the
+[workshop demo](../examples/2d_workflow/README.md) displays residency and applies
+budget pressure while preserving its visible actors and room.
+
+## Importing authoring assets
+
+`tools/import_2d_assets.py` converts Aseprite exports/native documents, PNG sprite
+sets, finite Tiled JSON maps and selected LDtk levels into native content. It
+packs sprites into deterministic atlases and integrates with `kin_game(IMPORTS
+...)`, loose content and `.kinpak` packaging. See [2D imports](importing_2d.md)
+for the manifest, build setup and supported format subsets.
+
+## Assets named by components (2D)
+
+A component names an asset by its path in the game's content, with a
+`ComponentAssetRef` field: what a scene file writes (`"asset": "images/hero.png"`)
+and an editor offers. `kin::Assets2D` (`kin/ecs/assets2d.hpp`) gives components
+what they name: it reads each asset once from a content root, shares it, and
+reads it again when its file changes.
+
+```cpp
+// A scene file's entity:
+//   "components": {"Transform2D": {"pos": {"x": 320, "y": 180}},
+//                  "TextureRenderer": {"asset": "images/hero.png", "pivot": {"x": 0.5, "y": 0.5}}}
+```
+
+`EcsScene` does it for its world before each frame is drawn
+(`EcsSceneRenderConfig::assets`, on by default), from `content_root()` (or
+`asset_root`), checking for changed files every `asset_check_frames` frames: a
+scene that names an image shows it, and an image saved again shows at once.
+
+kin binds its own components' assets:
+
+| Component | `asset` names | It gets |
+| --- | --- | --- |
+| `TextureRenderer` | an image | `texture` |
+| `SpriteRenderer` | a sprite catalog (`.kinsprites`; its images named from the content root) | `sprite.catalog`; `sprite.id` (the `sprite` field) picks the sprite |
+| `AudioEmitter` | a sound file, or an audio catalog (`.kinaudio`) | `catalog`: a sound file's has one cue, named by its path, which an empty `cue` plays; a catalog's `cue` picks one |
+| `ParticleSystemComponent` | a particle catalog (`.kinparticles`) | `system`'s catalog; `effect` picks the effect it bursts (`sprites`, a sprite catalog, gives `sprites`) |
+| `ParticleFieldComponent` | a particle catalog | `state`, made from the catalog's field `field` (`name` in C++), its area moved by where the entity is |
+| `SpriteAnimator` | (none: its `SpriteRenderer`'s catalog) | `animation` names one of the catalog's animations; `update_sprite_animators(world, dt)` sets the renderer's sprite to its frames in turn |
+| `TilemapComponent` | a tilemap (`.kintilemap`) | `tilemap`: the map, with the tileset file it names (`.kintileset`) and that tileset's image cut in frames (`sheet`); read again when any of them changes |
+| `ShapeRenderer` | an SVG-lite file (`.svg`), when its `shape` is `svg` | `mesh`, made from its `spec` (a box, rounded box, ellipse or polygon, or the file's shape) and made again when either changes |
+| `Animator` | an animation file (`.kinanim`) | `library`: its animations (and state machines), and `properties`: the fields its tracks can set; `update_animators(world, dt)` plays `animation` |
+| `TextRenderer` | a font file (`.ttf`, `.otf`) as `font`; empty: the system's UI font | `face`: the font at its `size` |
+
+Sounds still need a game's `AudioEngine`: `update_audio_emitters(world, audio)`
+plays the emitters whose catalogs are bound. Particles move in
+`update_particles(world, dt)`, which also bursts each emitter's `effect` where
+its entity is (`offset` from it): once as it starts (`burst_at_start`), and
+`rate` times a second while `emitting`. An effect that streams (see below)
+streams from the entity instead while `emitting`, follows it and turns with
+it. An emitter with no effect is the game's to emit from, in code, as before.
+
+A particle catalog's `effect` line gives a burst: how many particles, their
+speed and lifetime ranges, start and end sizes and colours, acceleration
+(gravity), layer, order and sprite. The settings after those are optional
+`name=value` words: `direction` and `spread` (degrees, clockwise from right; a
+spread of 360, the default, goes every way); `shape` (`point`, `circle` or
+`box`) and `shape_size`, where the particles start; `drag` (the part of their
+speed they lose each second); `rotation` and `spin` (a degree range, or
+`a,b`); and `mid_at`, `mid_size` and `mid_color`, a size and colour they pass
+through partway through their lives.
+
+Curves over a particle's life win over start, mid and end when they have keys:
+`size_curve`, `color_curve` and `speed_curve` (a multiplier of its speed),
+written as `at:value` keys joined by `;` (`at` from 0, its birth, to 1, its
+end; a colour is `r,g,b,a`). Sub-effects are other effects of the catalog:
+`on_death` bursts where each particle ends, and `trail` bursts along its way
+`trail_rate` times a second (three deep at most, and no more particles than
+`ParticleSystem::set_limit`, 16384 by default).
+
+An effect streams when it has a `rate` (particles a second) or `per_distance`
+(particles a unit moved). `ParticleSystem::start(effect, position, angle)`
+starts one as an emitter, `move` and `jump` move it, and `stop` stops it; it
+lays its particles along the way it went. `duration` stops it by itself
+(seconds; 0 means never), `prewarm` starts it as if it had been running that
+long, `inherit` gives its particles part of its velocity, and `local=1` makes
+them move with it. Each particle is made as the effect's burst makes one,
+turned by the emitter's angle; the effect's `count` is not used.
+
+Only settings that differ from their defaults are written, so effects that
+don't use them read as they always did.
+`parse_particle_catalog` and `serialize_particle_catalog` read and write the
+text, for editors.
+
+```text
+effect fire 14 30 70 0.4 0.8 8 2 255 240 150 255 140 20 10 0 0 -40 300 0 - direction=270 spread=40 shape=circle shape_size=12,6 mid_at=0.4 mid_size=6 mid_color=255,130,30,220
+effect torch 1 20 40 0.5 0.9 6 0 255 255 255 255 255 255 255 0 0 -30 300 0 - direction=270 spread=30 size_curve=0:3;0.3:7;1:0 color_curve=0:255,240,150,255;0.5:255,120,30,200;1:60,20,10,0 on_death=smoke rate=40 prewarm=1
+```
+
+Tilemaps draw with the rest (`WorldRenderState`), their top left where their
+entity is, on `RenderLayer::TileBack` unless their `layer` says otherwise. A
+map's cells are squares, or hexagons (`TileMap::grid`: pointy-top in rows or
+flat-top in columns, every other one shifted, kept as `HexLayout`'s offset
+cells), each box `tile_w` x `tile_h` bounding its hexagon; `world_to_map`,
+`tile_center`, `neighbor_cells` (six), collision, `find_path` and drawing
+follow the shape. A tileset kept in a file of its own (`.kintileset`, format
+`kin.tileset`: its tiles, and the image their `frame`s are cut from) is shared
+by the maps naming it (`"tileset": "tilesets/ground.kintileset"`, read from
+the content root by `load_tilemap(path, content_root)` and `Assets2D`).
+
+A tile can be animated: its `frames` of the image in turn, `frame_seconds`
+each, over and over (`"frames": [4, 5, 6, 7], "frame_seconds": 0.15`), for
+water or a torch. A map draws them at `TilemapRenderOptions::time`; a
+`TilemapComponent` keeps its own (`clock`), which `update_tilemaps(world, dt)`
+plays on each step. A map with an animated tile is drawn each frame, never
+from a scene's static cache; its chunks stay cached, only their animated
+tiles' frames are changed.
+
+Terrain autotiling fits a terrain's cells to their neighbours:
+`set_terrain_connect(layer, cells, terrain)` paints them and
+`clear_terrain_connect(layer, cells)` empties them, and either fits the cells
+around again, each to its own terrain. A tileset's `terrain_variants` say which
+tile a cell is for the sides it joins (`mask`): a square's four
+(`TileTerrainNorth`, `East`, `South`, `West`), or a hexagon's six, side `d`
+toward neighbour direction `d` (`tile_terrain_hex_side(d)`; masks up to 63).
+A cell with no variant of its own takes the one joining most of its sides and
+no other, else the terrain's fallback (`TileSet::terrain_match`; said in
+`terrain_diagnostics`). So a few variants go a long way, a hex terrain's 64
+are not all needed. A tileset says which cells its tiles are drawn for
+(`TileSet::grid`, `"cells": {"shape": "hex", "orientation": "flat"}`), for
+editors.
+
+```json
+"terrain_variants": [
+  {"terrain": "water", "mask": 0, "tile_id": 4, "fallback": true},
+  {"terrain": "water", "mask": 9, "tile_id": 5},
+  {"terrain": "water", "mask": 63, "tile_id": 6}
+]
+```
+
+A component of the game's own gets a binder, a function over the world:
+
+```cpp
+scene.add_asset_binder("Speaker", [](kin::EcsWorld& world, kin::Assets2D& assets) {
+    world.each([&](Speaker& speaker) {
+        if (!speaker.asset.id.empty() && !speaker.sound) {
+            speaker.sound = assets.manager().load<Sound>(speaker.asset.id);
+            assets.changed();
+        }
+    });
+});
+```
+
+- `texture(path)` makes an image a texture (PNG, JPEG, BMP, TGA, QOI, GIF; KTX2
+  and DDS as compressed textures), once. One that cannot be read is invalid, with
+  why in `problems()`, and is tried again when its file changes (or appears).
+  `sprite_catalog(path)` and `audio_catalog(path)` read catalogs the same way; a
+  catalog is read again when it or a file it was made of (a sprite catalog's
+  images) changes, and the one before is kept for what still points at it.
+- `manager()` is an `AssetManager` on the same root, for every other kind (its
+  loaders, and the game's). `reload_changed()` forgets what it read whose files
+  changed too, so the binder's next load reads them again.
+- `reload_changed()` compares each file's time with the one read: call it now
+  and then. Assets in a `.kinpak` never change.
+- A field says what kind of asset it names with `.asset_type("Image")` (a name
+  of `asset_type_name`, or several separated by commas), so editors offer only
+  those; `"asset_type"` in a `.kincomponents` schema. A field naming an entry of
+  that asset (a sprite of a catalog, a cue) says so with `.entry_of("asset")`,
+  the asset field's name, so editors offer the asset's entries. `infer_asset_type` gives a file's kind from its name,
+  among them `Image`, `Audio`, `Font`, `Scene`, `Prefab` and `Model`.
+
 ## Content and packs
 
 `AssetManager`'s root is usually the game's content root, from
@@ -115,6 +359,15 @@ that is the source folder. Once it ships, it is a `.kinpak` archive mounted in
 the folder's place. Every loader reads through the content layer, so the same
 relative paths work either way. `discover()` lists a pack's files as it lists
 a folder's. See [shipping](shipping.md).
+
+A `kin::MemoryContent` is a pack made in memory: `MemoryContent::create(files)`
+takes relative paths and their bytes, and mounts them at the snapshot's own
+`root()` for as long as it lives. Reads under that root (`read_content_file`,
+`view_content_file`, `list_content_files`, `open_content_stream`, ...) serve it
+exactly as they serve a `.kinpak`; views keep their bytes alive after the
+snapshot is gone, and `memory_content_for(path)` returns the snapshot that
+answers for a path. `unmount_all_content_packs()` leaves live snapshots
+mounted. Development reloads and scene preloads read through these snapshots.
 
 ## Compressed textures
 
@@ -228,13 +481,11 @@ config.file_watcher = &files; // run_scene_app polls it once per frame
 ## Scope (V1)
 
 Implemented: async loading, handles, `LoadState`, events, dependency loading,
-deterministic drain, frame integration, and default prefab asset discovery/loading
-for `.kinprefab` files.
+deterministic drain, frame integration, optional unused-asset collection, asset
+scopes, manifest-driven 2D imports/atlas packing, and default prefab loading.
 
-Not yet implemented: ref-counted auto-unload (assets are released via
-`AssetManager::unload`/`clear`), and an asset processing pipeline (`.meta`/import
-settings/cached artifacts/multiple sources). Hot-reload `Modified` events are
-reserved but not yet emitted.
+Imports use an explicit build manifest; there is no editor `.meta` database or
+general artifact cache. Hot-reload `Modified` events are reserved but not yet emitted.
 
 ## Shipping inventory and dependency declarations
 

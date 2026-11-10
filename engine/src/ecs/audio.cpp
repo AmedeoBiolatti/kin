@@ -94,7 +94,7 @@ void update_audio_listeners_raw(flecs::world& world, AudioEngine& audio) {
     bool found = false;
     i32 best_priority = 0;
     Vec2f best_position{};
-    world.each([&](flecs::entity entity, AudioListener& listener, Transform2D& transform) {
+    kin::each(world, [&](flecs::entity entity, AudioListener& listener, Transform2D& transform) {
         if (!found || listener.priority > best_priority) {
             found = true;
             best_priority = listener.priority;
@@ -106,7 +106,7 @@ void update_audio_listeners_raw(flecs::world& world, AudioEngine& audio) {
     bool found_3d = false;
     i32 best_priority_3d = 0;
     Mat4f best_matrix{};
-    world.each([&](flecs::entity, AudioListener& listener, const WorldTransform3D& transform) {
+    kin::each(world, [&](flecs::entity, AudioListener& listener, const WorldTransform3D& transform) {
         if (!found_3d || listener.priority > best_priority_3d) {
             found_3d = true;
             best_priority_3d = listener.priority;
@@ -118,7 +118,7 @@ void update_audio_listeners_raw(flecs::world& world, AudioEngine& audio) {
         // chooses it (the highest priority enabled SceneCamera3D, a tie to the lowest entity id).
         flecs::entity camera;
         i32 priority = std::numeric_limits<i32>::min();
-        world.each([&](flecs::entity entity, const SceneCamera3D& settings, const WorldTransform3D& transform) {
+        kin::each(world, [&](flecs::entity entity, const SceneCamera3D& settings, const WorldTransform3D& transform) {
             if (settings.enabled && (!camera || settings.priority > priority || (settings.priority == priority && entity.id() < camera.id()))) {
                 camera = entity;
                 priority = settings.priority;
@@ -152,7 +152,7 @@ void update_audio_emitters_raw(flecs::world& world, AudioEngine& audio, const Au
     std::vector<AudioHandle> live;
     std::vector<flecs::entity> remove;
     std::vector<flecs::entity> despawn;
-    world.each([&](flecs::entity entity, AudioEmitter& emitter) {
+    kin::each(world, [&](flecs::entity entity, AudioEmitter& emitter) {
         const SoundPlace place = sound_place(entity, {}, emitter.offset_3d);
         if (emitter.handle && audio.playing(emitter.handle)) {
             place_voice(audio, emitter.handle, place);
@@ -174,12 +174,18 @@ void update_audio_emitters_raw(flecs::world& world, AudioEngine& audio, const Au
             }
             return; // Keep: stays silent until the game clears `handle` or sets a new cue
         }
-        if (!emitter.auto_start || emitter.cue.empty() || !place.valid) {
+        // Its own catalog when bound, and a sound file's only cue when it names none.
+        const AudioCatalog& source = emitter.catalog ? *emitter.catalog : catalog;
+        std::string_view cue = emitter.cue;
+        if (cue.empty() && emitter.catalog && emitter.catalog->cues().size() == 1) {
+            cue = emitter.catalog->cues().begin()->first;
+        }
+        if (!emitter.auto_start || cue.empty() || !place.valid) {
             return; // nowhere to sound from yet: it starts once its transform places it
         }
 
-        emitter.handle = audio.play(catalog, {
-            .cue = emitter.cue,
+        emitter.handle = audio.play(source, {
+            .cue = std::string(cue),
             .position = place.position,
             .has_position = !place.is_3d,
             .position_3d = place.position_3d,
@@ -219,7 +225,7 @@ void update_audio_emitters_raw(flecs::world& world, AudioEngine& audio, const Au
 
 void consume_audio_one_shots_raw(flecs::world& world, AudioEngine& audio, const AudioCatalog& catalog) {
     std::vector<flecs::entity> consumed;
-    world.each([&](flecs::entity entity, AudioOneShot& one_shot) {
+    kin::each(world, [&](flecs::entity entity, AudioOneShot& one_shot) {
         const SoundPlace place = sound_place(entity, one_shot.offset, one_shot.offset_3d);
         if (place.valid) { // one with nowhere to sound from is dropped, not played at the listener
             audio.play(catalog, {
@@ -248,6 +254,11 @@ void update_audio_listeners(EcsWorld& world, AudioEngine& audio) {
 
 void update_audio_emitters(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog) {
     update_audio_emitters_raw(world.raw(), audio, catalog);
+}
+
+void update_audio_emitters(EcsWorld& world, AudioEngine& audio) {
+    static const AudioCatalog none;
+    update_audio_emitters_raw(world.raw(), audio, none);
 }
 
 void consume_audio_one_shots(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog) {

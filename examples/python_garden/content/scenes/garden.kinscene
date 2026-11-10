@@ -1,0 +1,500 @@
+{
+  "schema": "kin.scene/1",
+  "name": "Garden",
+  "clear_color": [
+    170,
+    210,
+    235
+  ],
+  "entities": [
+    {
+      "id": "ground",
+      "name": "ground",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 480,
+            "y": 520
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 960,
+            "y": 40
+          },
+          "offset": {
+            "x": -480,
+            "y": -20
+          },
+          "color": {
+            "r": 92,
+            "g": 64,
+            "b": 44,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 480,
+            "y": 20
+          },
+          "category_bits": 2
+        }
+      }
+    },
+    {
+      "id": "left_wall",
+      "name": "left wall",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": -10,
+            "y": 270
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 20,
+            "y": 600
+          },
+          "offset": {
+            "x": -10,
+            "y": -300
+          },
+          "color": {
+            "r": 92,
+            "g": 64,
+            "b": 44,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 10,
+            "y": 300
+          },
+          "category_bits": 2
+        }
+      }
+    },
+    {
+      "id": "right_wall",
+      "name": "right wall",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 970,
+            "y": 270
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 20,
+            "y": 600
+          },
+          "offset": {
+            "x": -10,
+            "y": -300
+          },
+          "color": {
+            "r": 92,
+            "g": 64,
+            "b": 44,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 10,
+            "y": 300
+          },
+          "category_bits": 2
+        }
+      }
+    },
+    {
+      "id": "low_bed_west",
+      "name": "low bed west",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 200,
+            "y": 410
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 160,
+            "y": 16
+          },
+          "offset": {
+            "x": -80,
+            "y": -8
+          },
+          "color": {
+            "r": 120,
+            "g": 156,
+            "b": 72,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 80,
+            "y": 8
+          },
+          "category_bits": 2,
+          "one_sided": true
+        }
+      }
+    },
+    {
+      "id": "low_bed_east",
+      "name": "low bed east",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 760,
+            "y": 410
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 160,
+            "y": 16
+          },
+          "offset": {
+            "x": -80,
+            "y": -8
+          },
+          "color": {
+            "r": 120,
+            "g": 156,
+            "b": 72,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 80,
+            "y": 8
+          },
+          "category_bits": 2,
+          "one_sided": true
+        }
+      }
+    },
+    {
+      "id": "middle_bed",
+      "name": "middle bed",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 480,
+            "y": 330
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 180,
+            "y": 16
+          },
+          "offset": {
+            "x": -90,
+            "y": -8
+          },
+          "color": {
+            "r": 120,
+            "g": 156,
+            "b": 72,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 90,
+            "y": 8
+          },
+          "category_bits": 2,
+          "one_sided": true
+        }
+      }
+    },
+    {
+      "id": "high_bed",
+      "name": "high bed",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 480,
+            "y": 200
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 120,
+            "y": 16
+          },
+          "offset": {
+            "x": -60,
+            "y": -8
+          },
+          "color": {
+            "r": 120,
+            "g": 156,
+            "b": 72,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 60,
+            "y": 8
+          },
+          "category_bits": 2,
+          "one_sided": true
+        }
+      }
+    },
+    {
+      "id": "shed_door",
+      "name": "shed door",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 920,
+            "y": 472
+          }
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 36,
+            "y": 56
+          },
+          "offset": {
+            "x": -18,
+            "y": -28
+          },
+          "color": {
+            "r": 70,
+            "g": 46,
+            "b": 30,
+            "a": 255
+          }
+        },
+        "SceneDoor": {
+          "scene": "scenes/shed.kinscene",
+          "arrive": "garden door",
+          "trigger": "action",
+          "action": "interact",
+          "size": {
+            "x": 48,
+            "y": 60
+          },
+          "exit": {
+            "x": -36,
+            "y": 13
+          },
+          "transition": "fade",
+          "prompt": "Shed (E)"
+        }
+      }
+    },
+    {
+      "id": "shed_door_label",
+      "name": "shed door label",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 920,
+            "y": 426
+          }
+        },
+        "TextRenderer": {
+          "text": "Shed (E)",
+          "size": 16.0,
+          "pivot": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "color": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "outline": 2.0,
+          "outline_color": {
+            "r": 40,
+            "g": 50,
+            "b": 60,
+            "a": 255
+          }
+        }
+      }
+    },
+    {
+      "id": "game",
+      "name": "game",
+      "components": {
+        "Game": {
+          "welcome": "Pick every seed, in the shed too!  Arrows or A/D, W or Space to jump, S to drop, E at a door"
+        }
+      }
+    }
+  ],
+  "prefabs": [
+    {
+      "id": "seed_1",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 140,
+        "y": 380
+      }
+    },
+    {
+      "id": "seed_2",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 260,
+        "y": 380
+      }
+    },
+    {
+      "id": "seed_3",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 700,
+        "y": 380
+      }
+    },
+    {
+      "id": "seed_4",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 820,
+        "y": 380
+      }
+    },
+    {
+      "id": "seed_5",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 430,
+        "y": 300
+      }
+    },
+    {
+      "id": "seed_6",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 530,
+        "y": 300
+      }
+    },
+    {
+      "id": "seed_7",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 480,
+        "y": 170
+      }
+    },
+    {
+      "id": "seed_8",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 60,
+        "y": 480
+      }
+    },
+    {
+      "id": "seed_9",
+      "asset": "prefabs/seed.kinprefab",
+      "name": "seed",
+      "pos": {
+        "x": 840,
+        "y": 480
+      }
+    },
+    {
+      "id": "beetle_ground",
+      "asset": "prefabs/beetle.kinprefab",
+      "name": "beetle",
+      "pos": {
+        "x": 700,
+        "y": 494
+      }
+    },
+    {
+      "id": "beetle_bed",
+      "asset": "prefabs/beetle.kinprefab",
+      "name": "beetle",
+      "pos": {
+        "x": 480,
+        "y": 316
+      },
+      "overrides": {
+        "root": {
+          "Beetle": {
+            "speed": -50.0
+          }
+        }
+      }
+    },
+    {
+      "id": "gardener",
+      "asset": "prefabs/gardener.kinprefab",
+      "name": "gardener",
+      "pos": {
+        "x": 480,
+        "y": 485
+      }
+    },
+    {
+      "id": "hud",
+      "asset": "prefabs/hud.kinprefab",
+      "name": "score",
+      "pos": {
+        "x": 16,
+        "y": 12
+      }
+    }
+  ]
+}

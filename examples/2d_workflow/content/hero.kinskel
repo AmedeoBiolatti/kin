@@ -1,0 +1,377 @@
+{
+  "schema": "kin.skeleton2d/1",
+  "texture_asset": "images/hero.png",
+  "bones": [
+    {
+      "name": "body"
+    },
+    {
+      "name": "arm",
+      "parent": 0,
+      "position": {
+        "x": 8,
+        "y": 0
+      },
+      "length": 18
+    }
+  ],
+  "vertices": [
+    {
+      "position": {
+        "x": -12,
+        "y": -15
+      },
+      "uv": {
+        "x": 0,
+        "y": 0
+      },
+      "influences": [
+        {
+          "bone": 0,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "position": {
+        "x": 12,
+        "y": -15
+      },
+      "uv": {
+        "x": 1,
+        "y": 0
+      },
+      "influences": [
+        {
+          "bone": 0,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "position": {
+        "x": 12,
+        "y": 15
+      },
+      "uv": {
+        "x": 1,
+        "y": 1
+      },
+      "influences": [
+        {
+          "bone": 0,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "position": {
+        "x": -12,
+        "y": 15
+      },
+      "uv": {
+        "x": 0,
+        "y": 1
+      },
+      "influences": [
+        {
+          "bone": 0,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "position": {
+        "x": 8,
+        "y": -4
+      },
+      "uv": {
+        "x": 0,
+        "y": 0
+      },
+      "influences": [
+        {
+          "bone": 1,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "position": {
+        "x": 26,
+        "y": -4
+      },
+      "uv": {
+        "x": 1,
+        "y": 0
+      },
+      "influences": [
+        {
+          "bone": 1,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "position": {
+        "x": 26,
+        "y": 4
+      },
+      "uv": {
+        "x": 1,
+        "y": 1
+      },
+      "influences": [
+        {
+          "bone": 1,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "position": {
+        "x": 8,
+        "y": 4
+      },
+      "uv": {
+        "x": 0,
+        "y": 1
+      },
+      "influences": [
+        {
+          "bone": 1,
+          "weight": 1
+        }
+      ]
+    }
+  ],
+  "indices": [
+    0,
+    1,
+    2,
+    0,
+    2,
+    3,
+    4,
+    5,
+    6,
+    4,
+    6,
+    7
+  ],
+  "attachments": [
+    {
+      "name": "muzzle",
+      "bone": 1,
+      "position": {
+        "x": 18,
+        "y": 0
+      }
+    }
+  ],
+  "clips": {
+    "idle": {
+      "duration": 1,
+      "tracks": []
+    },
+    "left": {
+      "duration": 0.6,
+      "tracks": [
+        {
+          "bone": 0,
+          "keys": [
+            {
+              "time": 0,
+              "rotation": -8
+            },
+            {
+              "time": 0.3,
+              "position": {
+                "x": 0,
+                "y": -3
+              },
+              "rotation": 8
+            },
+            {
+              "time": 0.6,
+              "rotation": -8
+            }
+          ]
+        }
+      ]
+    },
+    "right": {
+      "duration": 0.6,
+      "tracks": [
+        {
+          "bone": 0,
+          "keys": [
+            {
+              "time": 0,
+              "rotation": 8
+            },
+            {
+              "time": 0.3,
+              "position": {
+                "x": 0,
+                "y": -3
+              },
+              "rotation": -8
+            },
+            {
+              "time": 0.6,
+              "rotation": 8
+            }
+          ]
+        }
+      ]
+    },
+    "up": {
+      "duration": 0.6,
+      "tracks": [
+        {
+          "bone": 0,
+          "keys": [
+            {
+              "time": 0,
+              "rotation": -4
+            },
+            {
+              "time": 0.3,
+              "position": {
+                "x": 0,
+                "y": -3
+              },
+              "rotation": 4
+            },
+            {
+              "time": 0.6,
+              "rotation": -4
+            }
+          ]
+        }
+      ]
+    },
+    "down": {
+      "duration": 0.6,
+      "tracks": [
+        {
+          "bone": 0,
+          "keys": [
+            {
+              "time": 0,
+              "rotation": 4
+            },
+            {
+              "time": 0.3,
+              "position": {
+                "x": 0,
+                "y": -3
+              },
+              "rotation": -4
+            },
+            {
+              "time": 0.6,
+              "rotation": 4
+            }
+          ]
+        }
+      ]
+    },
+    "fire": {
+      "duration": 0.3,
+      "tracks": [
+        {
+          "bone": 1,
+          "keys": [
+            {
+              "time": 0,
+              "position": {
+                "x": 8,
+                "y": 0
+              }
+            },
+            {
+              "time": 0.1,
+              "position": {
+                "x": 8,
+                "y": 0
+              },
+              "rotation": -45
+            },
+            {
+              "time": 0.3,
+              "position": {
+                "x": 8,
+                "y": 0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "blend_spaces": {
+    "movement": {
+      "points": [
+        {
+          "position": {
+            "x": 0,
+            "y": 0
+          },
+          "clip": "idle"
+        },
+        {
+          "position": {
+            "x": -1,
+            "y": 0
+          },
+          "clip": "left"
+        },
+        {
+          "position": {
+            "x": 0,
+            "y": -1
+          },
+          "clip": "up"
+        },
+        {
+          "position": {
+            "x": 1,
+            "y": 0
+          },
+          "clip": "right"
+        },
+        {
+          "position": {
+            "x": 0,
+            "y": 1
+          },
+          "clip": "down"
+        }
+      ],
+      "triangles": [
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          0,
+          2,
+          3
+        ],
+        [
+          0,
+          3,
+          4
+        ],
+        [
+          0,
+          4,
+          1
+        ]
+      ]
+    }
+  }
+}

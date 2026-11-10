@@ -1,3 +1,6 @@
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
+#include <kin/assets/image.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/runtime/windowed_app.hpp>
 #include <string>
@@ -13,7 +16,9 @@ AppConfig app_config(const WindowedAppConfig& config) {
             .vsync = config.vsync,
             .yield_when_unpaced = config.yield_when_unpaced,
             .max_fps = config.max_fps,
-            .snap_tolerance = config.snap_tolerance};
+            .snap_tolerance = config.snap_tolerance,
+            .wait_for_events = config.wait_for_events,
+            .max_idle_wait = config.max_idle_wait};
 }
 WindowConfig window_config(const WindowedAppConfig& config) {
     return {.title = config.title,
@@ -47,6 +52,15 @@ struct WindowedAppSession::Impl {
         config.title = title;
         if (config.color_space != ColorSpace::Gamma || config.hdr)
             renderer.set_color_space(config.color_space, config.hdr);
+        if (!config.icon.empty() && !app.headless()) {
+            try {
+                const Image icon = load_image(config.icon); // logs why when it can't
+                if (icon.valid())
+                    window.set_icon(icon);
+            } catch (const std::exception& error) {
+                KIN_LOG_WARN("runtime", std::string("window icon: ") + error.what());
+            }
+        }
         if (!(config.hidden || app.headless()))
             window.show();
         if (config.logical_width > 0 && config.logical_height > 0) {
@@ -57,6 +71,12 @@ struct WindowedAppSession::Impl {
         }
         if (config.input_map)
             app.input().set_map(*config.input_map);
+        app.on_app_event([this](AppEvent event) {
+            if (config.app_event) {
+                auto frame = context((config.fixed_dt > 0 ? config.fixed_dt : default_fixed_dt), 0);
+                config.app_event(frame, event);
+            }
+        });
         app.start_loop([this](f32 dt) { on_update(dt); }, [this](f32 alpha) { on_render(alpha); });
     }
     ~Impl() {
@@ -93,6 +113,7 @@ struct WindowedAppSession::Impl {
         }
         update = {};
         render = {};
+        app.on_app_event({});
     }
 };
 

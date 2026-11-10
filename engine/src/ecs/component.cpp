@@ -1,6 +1,8 @@
 #include <kin/ecs/component.hpp>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <map>
 #include <limits>
 #include <optional>
@@ -139,6 +141,7 @@ std::string field_kind_name(ComponentFieldKind kind) {
     case ComponentFieldKind::AssetRef: return "asset_ref";
     case ComponentFieldKind::Vec3f: return "vec3f";
     case ComponentFieldKind::Quatf: return "quatf";
+    case ComponentFieldKind::Points: return "points";
     }
     return "unknown";
 }
@@ -159,6 +162,7 @@ std::optional<ComponentFieldKind> field_kind_from_name(std::string_view name) {
     if (name == "asset_ref") return ComponentFieldKind::AssetRef;
     if (name == "vec3f") return ComponentFieldKind::Vec3f;
     if (name == "quatf") return ComponentFieldKind::Quatf;
+    if (name == "points") return ComponentFieldKind::Points;
     return std::nullopt;
 }
 
@@ -354,13 +358,14 @@ EcsComponentRegistry::DataComponentBuilder EcsComponentRegistry::data(std::strin
         }
     };
     record->remove = [component_id = record->descriptor.id](EcsEntity entity) {
+        // The tag first: what observes its removal (OnRemove) still reads the values.
+        entity.raw().remove(static_cast<flecs::id_t>(component_id));
         if (detail::DataComponentPayload* payload = entity.get_mut<detail::DataComponentPayload>()) {
             payload->values.erase(component_id);
             if (payload->values.empty()) {
                 entity.remove<detail::DataComponentPayload>();
             }
         }
-        entity.raw().remove(static_cast<flecs::id_t>(component_id));
     };
     record->mutable_ptr = [component_id = record->descriptor.id](EcsEntity entity) -> void* {
         return data_values_for(entity, component_id);
@@ -396,6 +401,36 @@ const ComponentDescriptor* EcsComponentRegistry::find(ComponentId id) const {
 const ComponentDescriptor* EcsComponentRegistry::find(std::string_view name) const {
     const detail::ComponentRecord* record = find_record(name);
     return record ? &record->descriptor : nullptr;
+}
+
+std::vector<ComponentFieldValue>* EcsComponentRegistry::data_values(EcsEntity entity, ComponentId id) {
+    if (!entity) {
+        return nullptr;
+    }
+    const detail::ComponentRecord* record = find_record(id);
+    if (!record || record->descriptor.kind != ComponentKind::Data) {
+        return nullptr;
+    }
+    if (!entity.raw().has(static_cast<flecs::id_t>(id))) {
+        return nullptr;
+    }
+    // A prefab instance's own copy, made from its prefab's the first time
+    // (as every write of the registry does).
+    return data_values_for(entity, id);
+}
+
+std::optional<ComponentFieldAccess> EcsComponentRegistry::field_access(std::string_view component, std::string_view field) const {
+    const detail::ComponentRecord* record = find_record(component);
+    if (!record || record->descriptor.kind != ComponentKind::Native) {
+        return std::nullopt;
+    }
+    for (const detail::ComponentFieldRecord& found : record->fields) {
+        if (found.descriptor.name == field) {
+            return ComponentFieldAccess{.component = record->descriptor.id, .kind = found.descriptor.kind, .read = found.read,
+                                        .write = found.patch};
+        }
+    }
+    return std::nullopt;
 }
 
 std::vector<ComponentDescriptor> EcsComponentRegistry::descriptors() const {
@@ -638,6 +673,25 @@ bool EcsComponentRegistry::patch_field(EcsEntity entity, ComponentId id, std::st
                                     std::string{field_name});
     _last_error.clear();
     return true;
+}
+
+void EcsComponentRegistry::copy_schema_to(EcsComponentRegistry& destination) const {
+    for (const auto& record : _records) {
+        if (destination.find(record->descriptor.name))
+            continue;
+        if (record->copy_schema)
+            record->copy_schema(destination);
+        else {
+            auto builder = destination.data(record->descriptor.name);
+            for (std::size_t i = 0; i < record->fields.size(); ++i)
+                builder.field(record->fields[i].descriptor.name, record->fields[i].descriptor.kind,
+                              record->data_defaults[i]);
+            auto* copied = destination.find_record(record->descriptor.name);
+            copied->descriptor.fields = record->descriptor.fields;
+            for (std::size_t i = 0; i < record->fields.size(); ++i)
+                copied->fields[i].descriptor = record->fields[i].descriptor;
+        }
+    }
 }
 
 bool EcsComponentRegistry::copy_component(EcsEntity source, std::string_view name,
@@ -973,6 +1027,18 @@ EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentB
     return update_last_field([&](ComponentFieldDescriptor& field) { field.units = std::move(value); });
 }
 
+EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::asset_type(std::string value) {
+    return update_last_field([&](ComponentFieldDescriptor& field) { field.asset_type = std::move(value); });
+}
+
+EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::entry_of(std::string field_name) {
+    return update_last_field([&](ComponentFieldDescriptor& field) { field.entry_of = std::move(field_name); });
+}
+
+EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::choices(std::vector<std::string> values) {
+    return update_last_field([&](ComponentFieldDescriptor& field) { field.choices = std::move(values); });
+}
+
 EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::readonly(bool value) {
     return update_last_field([&](ComponentFieldDescriptor& field) { field.readonly = value; });
 }
@@ -1124,14 +1190,30 @@ std::vector<EcsEntity> EcsWorld::query_entities(const EcsQueryPlan& plan) const 
     return result;
 }
 
+namespace {
+
+// An f32 as the shortest number that reads back as it: 0.2f as 0.2, not as
+// the double it widens to (0.20000000298023224).
+f64 as_written(f32 value) {
+    std::array<char, 32> text{};
+    const auto [end, error] = std::to_chars(text.data(), text.data() + text.size(), value);
+    f64 out = value;
+    if (error == std::errc{}) {
+        std::from_chars(text.data(), end, out);
+    }
+    return out;
+}
+
+} // namespace
+
 void write_component_field_value_json(JsonWriter& json, const ComponentFieldValue& value) {
     std::visit([&](const auto& typed) {
         using T = std::decay_t<decltype(typed)>;
         if constexpr (std::is_same_v<T, Vec2f>) {
-            json.begin_object().field("x", static_cast<f64>(typed.x)).field("y", static_cast<f64>(typed.y)).end_object();
+            json.begin_object().field("x", as_written(typed.x)).field("y", as_written(typed.y)).end_object();
         } else if constexpr (std::is_same_v<T, Vec3f> || std::is_same_v<T, Quatf>) {
-            json.begin_object().field("x", f64(typed.x)).field("y", f64(typed.y)).field("z", f64(typed.z));
-            if constexpr (std::is_same_v<T, Quatf>) json.field("w", f64(typed.w));
+            json.begin_object().field("x", as_written(typed.x)).field("y", as_written(typed.y)).field("z", as_written(typed.z));
+            if constexpr (std::is_same_v<T, Quatf>) json.field("w", as_written(typed.w));
             json.end_object();
         } else if constexpr (std::is_same_v<T, Vec2i>) {
             json.begin_object().field("x", typed.x).field("y", typed.y).end_object();
@@ -1153,7 +1235,13 @@ void write_component_field_value_json(JsonWriter& json, const ComponentFieldValu
         } else if constexpr (std::is_same_v<T, std::string>) {
             json.value(std::string_view{typed});
         } else if constexpr (std::is_same_v<T, f32>) {
-            json.value(static_cast<f64>(typed));
+            json.value(as_written(typed));
+        } else if constexpr (std::is_same_v<T, std::vector<Vec2f>>) {
+            json.begin_array();
+            for (Vec2f point : typed) {
+                json.begin_array().value(as_written(point.x)).value(as_written(point.y)).end_array();
+            }
+            json.end_array();
         } else {
             json.value(typed);
         }
@@ -1212,6 +1300,13 @@ void write_world_snapshot_json(JsonWriter& json, const WorldSnapshot& snapshot) 
             if (!field.category.empty()) json.field("category", std::string_view{field.category});
             if (!field.description.empty()) json.field("description", std::string_view{field.description});
             if (!field.units.empty()) json.field("units", std::string_view{field.units});
+            if (!field.asset_type.empty()) json.field("asset_type", std::string_view{field.asset_type});
+            if (!field.entry_of.empty()) json.field("entry_of", std::string_view{field.entry_of});
+            if (!field.choices.empty()) {
+                json.key("choices").begin_array();
+                for (const std::string& choice : field.choices) json.value(std::string_view{choice});
+                json.end_array();
+            }
             if (field.readonly) json.field("readonly", field.readonly);
             if (field.hidden) json.field("hidden", field.hidden);
             if (field.min_value) json.field("min", *field.min_value);
@@ -1364,6 +1459,26 @@ std::optional<ComponentFieldValue> component_field_value_from_json(ComponentFiel
         if (value.is_string()) return ComponentFieldValue{ComponentAssetRef{.id = value.as_string()}};
         if (value.is_object()) return ComponentFieldValue{ComponentAssetRef{.id = value.string_at("id")}};
         break;
+    case ComponentFieldKind::Points: {
+        // [[x, y], ...] (or [{"x": x, "y": y}, ...]).
+        if (!value.is_array()) break;
+        std::vector<Vec2f> points;
+        points.reserve(value.items().size());
+        for (const JsonValue& item : value.items()) {
+            std::string ignored;
+            const std::optional<ComponentFieldValue> point = component_field_value_from_json(ComponentFieldKind::Vec2f, item, ignored);
+            if (!point) {
+                points.clear();
+                break;
+            }
+            points.push_back(std::get<Vec2f>(*point));
+        }
+        ComponentFieldValue result{std::move(points)};
+        if (std::get<std::vector<Vec2f>>(result).size() == value.items().size() && detail::field_value_matches_kind(result, kind)) {
+            return result;
+        }
+        break;
+    }
     }
     error = "invalid JSON value for field kind '" + field_kind_name(kind) + "'";
     return std::nullopt;

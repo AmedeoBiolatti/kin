@@ -1,5 +1,61 @@
 # Rendering And Sprites
 
+## Normal-mapped sprites
+
+Normal-mapped sprites are lit per pixel ("forward" lighting): Lambert diffuse,
+Blinn-Phong specular, point and directional lights, receiver masks, light shapes
+and the same polygon occluders as light maps, in linear light, alpha kept.
+Albedo and light colours are sRGB; normal and specular maps are data. Normals
+encode +X right, +Y down, +Z toward the viewer.
+
+For scenes, use `kin/ecs/normal_sprite2d.hpp`:
+
+```cpp
+world.entity("lighting").set(kin::SceneLighting{
+    .ambient = kin::Color::rgb(40, 44, 64), .forward_sprites = true});
+world.entity("sun").set(kin::DirectionalLight2D{.direction = {-.3f, -.5f}, .elevation = 1});
+actor.set(kin::NormalSpriteRenderer2D{
+    .albedo_asset = {"images/hero.png"}, .normal_asset = {"images/hero_n.png"},
+    .specular_asset = {"images/hero_s.png"}, .specular_strength = .3f});
+```
+
+Assets2D binds the images (`albedo`, `normal`, `specular`; set them yourself
+from C++ otherwise). Normal sprites go through the render queue with the other
+renderers: sorted, culled, placed by their entity's transform, clipped, flipped,
+from atlas source regions. source_pos/source_size are reflected for scene files;
+C++ uses `source`. Maps share normalized atlas UVs and may have different
+resolutions. A missing normal map is a flat surface; specular strength defaults
+to zero. The specular map's red channel scales the highlight; `shininess`
+narrows it. Prefab instances share their prefab's NormalSpriteRenderer2D.
+
+The scene's SceneLighting is its first enabled one, for light maps and forward
+lighting alike: with `forward_sprites` there is no light map, normal sprites are
+lit by its ambient and lights, and other renderers stay unlit; without it, normal
+sprites draw unlit for the light map to shade. Sprites on the UI layer and above
+are always unlit. Point lights are LightComponents (`height` above the sprites,
+`mask`), their shapes' images too (Assets2D binds those only for forward
+lighting). Directional lights (DirectionalLight2D) shine from `direction`,
+turned with their entity, at `elevation`. Only intersecting light/receiver mask
+bits contribute. LightOccluders stop both; a soft light's shadows come from the
+same four points around it as in light maps. Intensity is capped at
+`max_light_intensity` (4), as in light maps. A light with values that can't be
+used (not finite, no radius, negative intensity) is skipped; a negative
+`shadow_softness` is a sharp light. At most 256 lights light a sprite.
+
+The lights are gathered once per collect, not per sprite, and kept while they
+stay the same. On SDL_GPU (`normal_lighting2d_gpu_supported()`), the
+`NormalSprite2D` built-in shader lights each fragment: `pack_surface_lights2d()`
+packs the lights, shadow quads and light shapes into one storage buffer that
+every sprite drawn with them shares (up to 32 MiB), and `draw_normal_sprite2d_gpu()`
+draws a sprite with it. Material images are raw UNORM textures, so normal data
+does not depend on the colour space. Receiver masks keep all 32 bits.
+
+Elsewhere `shade_normal_sprite2d()` shades the sprite on the CPU at source
+resolution (up to 4 million pixels), the reference the GPU path is tested
+against; scenes keep each entity's result until its material, placement or
+lights change. Moving large sprites or lights is expensive there: it is not a
+deferred renderer. Use shade_normal_sprite2d directly to bake lit images.
+
 The experimental [WebGL2 browser target](web.md) implements a subset of this API;
 its capabilities and build instructions are documented separately.
 
@@ -89,9 +145,39 @@ texture actors actors.png
 sheet actors.sheet actors 16 16 0 0
 sheet_sprite hero.walk.0 actors.sheet 0 24 24 0.5 1 0 0
 sprite hero.icon actors 0 0 16 16 24 24 0.5 1 0 0
+animation hero.walk loop 10 hero.walk.0 hero.walk.1 hero.walk.2*2 hero.walk.3
 ```
 
-Use `save_sprite_catalog(...)` and `load_sprite_catalog(...)` for roundtrips.
+Use `save_sprite_catalog(...)` and `load_sprite_catalog(...)` for roundtrips;
+`parse_sprite_catalog(text, out, error)` and `serialize_sprite_catalog(...)`
+work on the text (an editor's), and `remove(...)`, `remove_animation(...)`,
+`remove_sheet(...)` and `remove_texture(...)` change a catalog in code.
+
+### Sprite animations
+
+An `animation` line names the catalog's sprites shown in turn: its id, what
+it does at its end (`loop`: again; `once`: its last frame stays; `pingpong`:
+back to its first, and on), its frames a second, then its frames, each a
+sprite, held longer with `*` (`hero.walk.2*2` shows for two frames).
+`sprite_animation_frame(animation, time)` says which frame shows `time`
+seconds in, and `sprite_animation_length(animation)` how long it plays before
+it starts again.
+
+`SpriteAnimator` plays one on an entity, setting its `SpriteRenderer`'s sprite
+to the frame it is on (`kin/ecs/sprite_animator.hpp`):
+
+```cpp
+hero.set(kin::SpriteRenderer{.asset = {"sprites/hero.kinsprites"}});
+hero.set(kin::SpriteAnimator{.animation = "hero.walk"});
+// each frame: another animation named starts from its first frame
+hero.get_mut<kin::SpriteAnimator>()->animation = moving ? "hero.walk" : "hero.idle";
+kin::update_sprite_animators(world, dt);
+```
+
+`speed` scales its time, `playing = false` holds it on its frame, and `time = 0`
+plays it again; `frame` and `finished` (a `once` animation played through) say
+where it is. Instances of a prefab each get their own animator. For blending,
+state machines and events on frames, see the [animation system](animation_system.md).
 The renderer-backed load overload can create textures from image assets:
 
 ```cpp
@@ -159,6 +245,77 @@ Output-pixel commands and `Text` / `Custom` callbacks draw without the camera
 either way: draw world coordinates in a callback with
 `renderer.scoped_transform(camera.view_transform())`.
 
+#### A camera in the scene
+
+`kin::CameraComponent` (`kin/ecs/camera.hpp`) makes an entity a camera: it
+looks at where its entity is and turns as it turns, `zoom` times as big. Put it
+on a child of the player and it follows the player. `EcsScene` draws through
+the first `current` one when its config has no `camera_callback`
+(`scene_cameras`, on by default). Its viewport is `view_size`, or the window's
+size in points when that is zero. With `limited` it shows nothing past
+`limit_min`..`limit_max`: it stops at a level's edges while its entity goes on.
+`smoothing` (seconds) makes it catch its entity up gradually: call
+`update_cameras(world, dt)` each frame for that.
+
+```cpp
+follow.child_of(player).set(kin::CameraComponent{.zoom = 2.0f, .smoothing = 0.2f});
+kin::update_cameras(world, dt);
+const std::optional<kin::Camera2D> camera = kin::scene_camera(world, {1280, 720}); // to map the mouse, say
+```
+
+Scene files describe it, so editors place and change it.
+
+How it follows its entity, zooms and shakes (all in `update_cameras`):
+- **`dead_zone`:** a box, centred on what the camera looks at, that its entity
+  moves about in without the camera following. The camera moves only as far
+  as keeps the entity inside it. An axis of 0 follows exactly.
+- **`look_ahead`:** how far ahead it looks the way its entity moves, along
+  each axis: the entity's motion over `look_ahead_time` seconds, no further.
+  The lead eases in and out, so turning round does not jerk the view.
+- **`zoom_smoothing`:** a change of `zoom` takes about that long, eased in
+  proportion (1 to 2 takes as long as 2 to 4).
+- **Shake:** `shake_camera(world, trauma)` adds trauma, 0 to 1, to the current
+  cameras (`shake_camera(entity, trauma)` to one); it wears off by
+  `shake_decay` a second. The camera moves by up to `shake_strength` points
+  times the trauma squared, without turning, so a small knock barely shows
+  and a big one throws it about. It jitters
+  `shake_frequency` times a second along smooth noise, the same each run. The
+  shake goes on top of the limits.
+
+```cpp
+follow.set(kin::CameraComponent{.smoothing = 0.15f, .dead_zone = {80, 120}, .look_ahead = {160, 0}});
+kin::shake_camera(world, 0.4f); // a hard landing
+kin::update_cameras(world, dt);
+```
+
+Scripts shake it with `camera.shake(trauma)` ([scripting](scripting.md)).
+
+#### Parallax layers
+
+A `kin::Parallax` on an entity makes it, and every entity under it, a layer
+further away than the world (a background) or nearer (a foreground): it moves
+`factor` as much as the world does as the camera moves (`0.5`: half as much;
+`0`: fixed on the screen; above `1`: nearer). It is where the scene places it
+when the camera looks at `anchor`, and shifted by `(centre - anchor) * (1 -
+factor)` otherwise (`parallax_shift`). `repeat` draws its own sprite, texture,
+rectangle or shape again every so many points along each axis, over the view, so a
+strip `repeat.x` wide goes on for ever; `scroll` moves it by itself, points a
+second (call `update_parallax(world, dt)` each step).
+
+```json
+{"id": "hills", "name": "Hills", "components": {
+  "Transform2D": {"pos": {"x": 640, "y": 300}},
+  "TextureRenderer": {"asset": "images/hills.png"},
+  "Parallax": {"factor": {"x": 0.3, "y": 0.6}, "anchor": {"x": 640, "y": 360}, "repeat": {"x": 1280, "y": 0}}}}
+```
+
+`EcsScene` shifts layers from its camera's centre (the screen's without one);
+an editor's view (`set_view_camera`) draws them where they are placed. The
+shift is in their `WorldTransform` (marked `parallax`), so what is drawn under
+a layer is drawn each frame, never from the static cache.
+`WorldRenderState::set_parallax_view` sets the centre for code drawing a world
+itself.
+
 ## Shapes
 
 ![The shapes demo: an orrery of planets with night sides, moons and an SVG rocket around a star, and a telescope following the rocket](images/shapes_demo.png)
@@ -169,11 +326,13 @@ Vector shapes are drawn anti-aliased, crisp at any zoom or turn, two ways:
   are drawn whole on SDL_GPU: one quad each, the outline computed per pixel
   from its distance, fill and stroke together.
 - **Everything else** is tessellated into triangles: each outline gets a thin
-  soft edge whose vertices carry their distance past it, faded over one
-  screen pixel by the shape shader.
+  soft edge whose vertices carry their distance past it, faded by the shape
+  shader.
 
-The SDL_Renderer fallback tessellates primitives too, pulls soft edges in to a
-pixel on the CPU and fades them with vertex alpha.
+Both are solid up to the outline and fade out over the half screen pixel past
+it ([Shape edges](#shape-edges)). The SDL_Renderer fallback tessellates
+primitives too, pulls soft edges in to half a pixel on the CPU (a whole one on
+SDL's software driver) and fades them with vertex alpha.
 
 ### Drawing as you go
 
@@ -226,8 +385,8 @@ renderer.draw_shape(mesh, kin::Affine2::translation(pos) * kin::Affine2::rotatio
 ```
 
 `ShapeBuildOptions` sets the curve tolerance and the soft edge's width in shape
-units (2 by default, enough for drawing down to half size; the edge stays one
-pixel wide however large the mesh is drawn). `ShapeMesh::append(mesh,
+units (2 by default, enough for drawing down to a quarter size; the fade stays
+half a pixel wide however large the mesh is drawn). `ShapeMesh::append(mesh,
 transform)` merges meshes into one. Stroke widths scale with their element's
 transform, as in SVG.
 
@@ -238,6 +397,54 @@ triangles (`ShapeMesh::runs`). Two strokes stay triangles: a bevelled sharp
 corner, and an ellipse's stroke thicker than half its smaller radius (its
 distance is estimated, close only near the outline). `write_svg` writes
 primitives back as `<rect>`, `<circle>` and `<ellipse>`.
+
+### Shape edges
+
+Every vector shape, tessellated or primitive, filled or stroked, is solid up
+to its outline and fades from half coverage to none over the half pixel past
+it. For the pixels outside the outline that is exact coverage, what Cairo,
+Skia and browsers draw; the half pixel inside the outline is solid, an eighth
+of a pixel of extra ink along each edge at most. In return two shapes that
+share an edge never show a seam: each is solid up to it. The CPU paths (the
+GPU backend without its shape shader, SDL_Renderer) cannot start the fade at
+half on the outline's vertices, which the inside shares, and fade from whole
+to none over the half pixel instead: a quarter of a pixel of extra ink. SDL's
+software driver keeps a whole pixel: its triangles snap their corners to half
+pixels, too coarse for a half pixel band.
+
+Until November 2026 the fade was a whole pixel wide and started whole at the
+outline: every shape half a pixel larger all round, so heavier the smaller it
+was drawn. Measured against exact coverage (the same shapes drawn 8 times
+larger and averaged down 8 x 8):
+
+| | whole pixel past (before) | half pixel past (now) | exact |
+|---|---|---|---|
+| ink of text, 10 px em | 2.4x | 1.4x | 1x |
+| ink of text, 45 px em | 1.37x | 1.09x | 1x |
+| a 1 px line, drawn as | 2.0 px | 1.2 px | 1.05 px |
+| a dot of 2 px radius, area | 1.43x | 1.01x | 1x |
+| two opaque shapes sharing an edge, darkest pixel on it (1: no seam) | 1.0 | 1.0 | 0.77 |
+| two half-transparent shapes sharing an edge (0.5: no line) | 0.72 | 0.59 | 0.5 |
+| mean error per pixel, of 255 | 5.6 | 1.6 | 0 |
+
+**Going to exact coverage**, if it is ever wanted (the fade centred on the
+outline, `clamp(0.5 - d, 0, 1)` from half a pixel inside to half a pixel past,
+as Skia, Cairo and NanoVG draw): the rule is one function for the primitives
+(`kin_edge_cover` in `kin_sdf_shape.inc.glsl`, whose distance is exact on both
+sides) and one line in `shape.frag.glsl`, but the tessellated shapes need their
+distance inside the outline too, which they do not carry. The tessellator's
+outline vertices would get `outward` vectors as the rim's have (zero today) and
+the vertex shader would pull them in by half a pixel along them while the rim
+goes half a pixel out, NanoVG's way; the inside's triangles share those
+vertices and shrink with them. Strips thinner than a pixel need the pull
+clamped so they lose coverage instead of crossing over, and the CPU paths do
+the same pull on the CPU. The price is the seams in the table's last rows:
+shapes that share an edge each cover part of the pixels on it, as in every
+exact renderer, so a per-mesh or per-draw choice would keep both.
+
+A butt or square cap is square to the curve where it ends, not to the last
+straight piece the curve was flattened into (`PathContour::start_tangent` and
+`end_tangent`): arcs drawn end to end meet without a wedge between them.
 
 ### SVG-lite
 
@@ -267,7 +474,17 @@ sprite renderers it takes the whole world transform, so it turns, scales
 unevenly and mirrors (a negative scale) with the entity and its parents. It
 sorts (`layer`, `order`, `y_sort`), culls and follows cameras like the other
 renderers, and many entities can share one mesh. `RenderQueue::draw_shape`
-queues a mesh directly. `games/shapes_demo` is an orrery: planets and moons
+queues a mesh directly.
+
+Scene files give a shape instead of a mesh: `spec` (`ShapeSpec`) names a box, a
+rounded box, an ellipse or a regular polygon `size` big and centred on the
+entity, filled and outlined. It can also be `svg`, an SVG-lite file of the
+content (`asset`), fitted in `size` or drawn at its own size when `size` is
+zero. `Assets2D` makes the mesh (`bind_shape_renderers`) and remakes it when
+the spec or the file changes. With `ShapeKind::None` (the C++ default) the mesh
+is the game's own. `make_shape(spec, svg)` gives the `Shape` itself.
+
+`games/shapes_demo` is an orrery: planets and moons
 turning with their parents, shapes composed in code and a rocket read from
 SVG-lite, a zooming and turning camera.
 
@@ -288,6 +505,26 @@ The token is 1 primitive plus 20 vertices and 28 triangles for the star; as
 triangles alone it was 140 vertices and 206 triangles, and the cached mesh took
 3.5 ms. Tessellating 200 tokens takes 0.54 ms: make meshes once and draw them
 many times.
+
+## Text In The World
+
+`kin::TextRenderer` (`kin/ecs/text.hpp`) draws text at an entity: a name over
+a head, a sign, a score that floats up. It moves, turns and scales with the
+entity and the camera, and sorts by `layer` and `order` among the sprites. Its
+font is a font file of the content (`font`, read by `Assets2D` at `size`
+points from distance fields where the backend has them, so it stays sharp as
+the camera zooms in) or the system's UI font. Lines break at `\n`, and past
+`wrap` wide when that is set. `pivot` is the point of the text's box at the
+entity, `align` places its lines, and `outline` draws an `outline_color` edge
+round each letter.
+
+```cpp
+sign.set(kin::TextRenderer{.text = "Shop", .size = 24.0f, .outline = 2.0f});
+```
+
+Text is always drawn with the dynamic renderers. Its command's callback puts
+the camera back on, since text callbacks draw in screen space. Menus and HUDs
+are ui2's.
 
 ## Animation
 
@@ -443,6 +680,35 @@ shader kept. `kin::compile_glsl()` compiles a file directly, and
 `Renderer2D::reload_shader()` replaces any shader in place. Shipped games load
 precompiled SPIR-V. Kin embeds its built-in shaders in the engine; game-specific
 shader files belong in the game's packaged assets (see [shipping](shipping.md)).
+
+### Shader effects in a scene
+
+A `ShaderEffect` (`kin/ecs/shader_effect.hpp`) draws a fragment shader of the
+content over a box at its entity:
+
+```json
+"ShaderEffect": {"asset": "shaders/water.frag.glsl", "size": {"x": 400, "y": 100},
+                 "params": "speed=3 tint=0.2,0.6,1,1"}
+```
+
+- **Where it draws:** the box is centred on the entity (`offset` from it),
+  turned and scaled with it. It draws among the world's renderers, by `layer`
+  and `order`.
+- **Uniforms:** `params` sets the uniform block's members by name. kin sets
+  `time` (moved on by `update_shader_effects(world, dt)`) and `size` (the
+  box's) itself.
+- **Texture:** `texture` names an image of the content, sampled as `sTexture`
+  at sampler 0.
+- **Loading:** `Assets2D` compiles `.frag.glsl` files with glslc where one is
+  found. Without glslc it loads the `.frag.spv` beside the source, which
+  Kin Studio writes as the shader is saved. A shipped game needs that `.spv`
+  in its content.
+- **Hot reload:** a shader that changes is compiled again and reloaded in
+  place. A version that does not compile keeps the last good one, and the
+  reason is in `Assets2D::problems()`.
+
+Shaders are SPIR-V, so they draw on the Vulkan backend. Elsewhere, and on SDL's
+renderer, nothing is drawn and the problem says why.
 
 ### Pipelines
 
@@ -735,6 +1001,11 @@ window.set(kin::ClipGroup{.clip = kin::ClipRegion::to_path(kin::Path::rounded_re
 Groups below groups nest. Clipped renderers are collected with the dynamic
 ones (`collect_dynamic_world`), whatever their `static_renderable` says.
 
+Scene files give a ClipGroup's clip as a shape: `shape` (`rect`,
+`rounded_rect` or `ellipse`), `size`, `offset` (its centre, from the entity) and
+`radius`. Each described field remakes `clip` as it is set (`reshape_clip`).
+`ClipShape::None` leaves `clip` to the game.
+
 ui2 widgets clip with `Context::push_clip(bounds, corner_radii)`: the list,
 table and tree bodies keep their scrolled rows inside the panel's rounded
 corners (only the corners the body touches).
@@ -820,6 +1091,12 @@ combine with what is under them:
 | `Max` | max(dst, src), each channel and alpha | overlapping shadows, fog of war, coverage, heat maps |
 | `Min` | min(dst, src), each channel and alpha | the reverse |
 
+`SpriteRenderer`, `TextureRenderer`, `RectRenderer`, `ShapeRenderer`,
+`ShaderEffect` and the particle components have a `blend` field (`alpha`,
+`additive`, `multiply`, `max` or `min`). Their queued draws carry
+`blend_material(mode)`, which sets that mode for the draw and restores the
+previous one afterwards.
+
 `Max` and `Min` let overlapping shapes each be drawn on their own, in any order,
 into one target: two shadows that overlap darken it once, not twice. The source
 is not weighted by its alpha. The SDL_GPU backend has them; SDL's software
@@ -881,6 +1158,16 @@ Things that change in linear light:
   clipped at white), before tonemapping and grading; `save_png` of the screen
   returns what is displayed.
 
+`read_rgba` waits for the GPU to draw everything submitted before it: in a
+frame, the CPU stops until the GPU has caught up, and the frame is as long as
+the two together. `request_read_rgba(region)` submits what is drawn so far and
+returns a ticket without waiting; `take_read_rgba(ticket, out, size)` gives the
+pixels once the GPU has copied them (true; the ticket is then spent) and false
+until then, and with `wait` it waits for them. Taking them a set number of
+frames after the request (two or three: by then the GPU has drawn them) keeps a
+deterministic run the same whatever the GPU's speed. A backend that cannot read
+without waiting reads at the request (SDL_GPU can; the others wait).
+
 SDL's renderer keeps its gamma pipeline: `set_color_space(Linear)` returns
 false and changes nothing.
 
@@ -911,6 +1198,17 @@ trilinearly:
 
 The lighting demo makes a look per time of day from the neutral LUT and
 cross-fades between them as the time changes.
+
+A scene can set its own colour output with a `ColorGrade` component
+(`kin/ecs/lighting.hpp`). Its fields are `exposure`, `tonemap` (`none`,
+`reinhard` or `aces`), `look` (a `.cube` file or a LUT image of the content),
+`strength` and `dither`. `EcsScene` sets the colour output each frame while
+the component is there, and resets it when the component goes.
+
+`Renderer2D::draw_color_output(picture, source, dest, output, linear)` draws a
+picture as the output pass would show it, and `LayerOptions::grade` lays a
+layer over that way. An editor uses them to show a graded game in part of its
+window.
 
 ### Colour maths
 
@@ -963,10 +1261,63 @@ draw_ui(renderer);                                // drawn after: not darkened
 - `resolution` (default 0.5) is the light map's size relative to the area. Lights
   are smooth, so half resolution is plenty.
 
+**Shadows.** A light with `shadows` is stopped by occluders, passed to
+`apply()` as `LightOccluder2D`s: closed outlines, wound clockwise on the screen
+(`clockwise(points)` turns one round), what they are made of on the right.
+
+```cpp
+const std::array<kin::LightOccluder2D, 1> walls{{{.points = kin::clockwise(wall_corners)}}};
+lighting.apply(renderer, area, night_ambient, lights, 0.5f, walls);
+```
+
+- What is behind an occluder, seen from the light, gets none of its light. A
+  `lit` occluder (the default) is lit itself, only what is behind it is dark;
+  otherwise it is dark too.
+- `shadow_strength` is how much light the shadows take: 1 all of it, 0.5 half.
+- `shadow_softness` is the light's size: its shadows' edges soften, as four
+  shadows cast from around it are averaged (four times the cost).
+- Each light with shadows is drawn into a target of its own, the shadows
+  (`shadow_quads`: the quads behind the edges facing away from it) filled
+  black there, and the rest added to the light map. A light that casts no
+  shadows costs what it did.
+
 `apply()` needs render targets and blend modes, which the software and GPU
 backends both have; it uses no shaders. Where they are missing it returns
 `false` and leaves the scene unlit. `games/lighting_demo` has lamps, a campfire, a
 coloured crystal and a flashlight, with a day/night cycle.
+
+### Lights in a scene
+
+Scene files and the ECS can do the same with components (`kin/ecs/lighting.hpp`):
+
+```json
+{"id": "night", "components": {"SceneLighting": {"ambient": {"r": 30, "g": 32, "b": 60, "a": 255}}}},
+{"id": "torch", "parent": "player", "components": {"Transform2D": {},
+  "LightComponent": {"color": {"r": 255, "g": 190, "b": 120, "a": 255}, "radius": 160}}}
+```
+
+- A world that has a `SceneLighting` is lit. `EcsScene` draws the world, applies
+  the light map, and then draws what is on the UI layer and above, which stays
+  unlit.
+- A `LightComponent` lights from where its entity is. It turns with its entity,
+  and its radius scales with the entity's scale.
+- `shape` names an image of the content that shapes the light.
+- `shadows` on a `LightComponent` (with `shadow_strength` and
+  `shadow_softness`, the latter scaled with its entity) makes `LightOccluder`s
+  stop it. An occluder is a box (`size`), a circle (`radius`) or a polygon
+  (`points`), turned and scaled with its entity and moved by `offset`; or, on
+  an entity with a `TilemapComponent`, `tiles`: the map's solid cells (those
+  of `layer`; empty: every layer that collides), joined into outlines.
+  `scene_occluders(world, to_screen)` returns them as `LightOccluder2D`s
+  (`occluder_outlines(entity, to_screen)`, one entity's, for editors).
+- `scene_lights(world, to_screen)` returns a world's lights as `Light2D`s, placed
+  through a camera's view transform.
+- `apply_scene_lighting(renderer, layer, world, to_screen, area)` lights the
+  world the way `EcsScene` does, for code that draws its own world.
+- The first `SceneLighting` found is the scene's. Turning it off
+  (`enabled: false`) leaves the scene unlit.
+- `EcsSceneRenderConfig::scene_lighting = false` turns off both the lighting and
+  the colour grade.
 
 ## Performance And Data Layout Notes
 

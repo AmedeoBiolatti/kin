@@ -28,6 +28,7 @@ void register_particle3d_components(EcsWorld& world) {
     b.field("enabled", &ParticleEmitter3D::enabled)
         .field("emitting", &ParticleEmitter3D::emitting)
         .field("texture", &ParticleEmitter3D::texture_asset)
+        .asset_type("Image")
         .field("texture_nearest", &ParticleEmitter3D::texture_nearest)
         .property<u64>(
             "seed", [](const auto& e) { return e.system.seed(); },
@@ -312,7 +313,7 @@ static std::vector<std::string> resolve_particles3d_assets_impl(EcsWorld& world,
         return errors;
     std::vector<EcsEntity> entities;
     if (selected.empty())
-        world.raw().each([&](flecs::entity entity, const ParticleEmitter3D&) { entities.emplace_back(entity); });
+        world.each([&](flecs::entity entity, const ParticleEmitter3D&) { entities.emplace_back(entity); });
     else
         for (auto id : selected)
             if (auto e = world.entity_by_id(id); e && e.has<ParticleEmitter3D>())
@@ -337,9 +338,13 @@ static std::vector<std::string> resolve_particles3d_assets_impl(EcsWorld& world,
             }
         }
         auto* e = entity.get_mut<ParticleEmitter3D>(); // own state before first simulation
-        if (!path.empty() || !e->bound_texture.empty())
+        const bool replaces = !path.empty() || !e->bound_texture.empty();
+        const bool changed = e->bound_texture != path || (replaces && e->system.desc.look.texture != texture);
+        if (replaces)
             e->system.desc.look.texture = std::move(texture);
         e->bound_texture = path;
+        if (changed)
+            entity.modified<ParticleEmitter3D>();
     }
     return errors;
 }

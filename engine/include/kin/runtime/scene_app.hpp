@@ -4,6 +4,8 @@
 #include <functional>
 #include <iosfwd>
 #include <kin/platform/log.hpp>
+#include <kin/platform/services.hpp>
+#include <kin/platform/services_catalog.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <memory>
@@ -42,9 +44,20 @@ struct HeadlessOptions {
     // headless run. server_mode is "driven" (default) or "realtime";
     // server_transport is "stdio" (default) or "http".
     bool server = false;
+    std::string automation_record_path;
     std::string server_mode = "driven";
     std::string server_transport = "stdio";
     i32 server_port = 8080;
+    // --inspect: played in its window as usual, and answering server commands
+    // on stdin/stdout between frames, for a tool watching it (LiveInspector).
+    bool inspect = false;
+    // --services=offline: kin's offline platform services, whatever the game
+    // asks for (no Steam: a run from an editor that must not sign in as whoever
+    // runs it, or a build for no store tried as players get it), keeping what
+    // they keep beside the saves; --services=memory: the same, keeping nothing.
+    // Unset: the game's (Steam with a Steam app id). Services the game started
+    // itself (SceneAppConfig::services) are used as they are.
+    std::string services;
     std::string log_path;
     std::optional<LogLevel> log_level;
     std::optional<LogFormat> log_format;
@@ -84,6 +97,7 @@ struct HeadlessOptions {
     bool fail_on_text_overflow = false;
     // The command line as given, program first (the check runs it again).
     std::vector<std::string> args;
+    bool development = false;
 };
 
 struct SceneAppConfig {
@@ -129,9 +143,34 @@ struct SceneAppConfig {
     // Expose one Renderer3D through SceneContext for normal/headless/server
     // runs. Opt-in: 2D games allocate no 3D renderer. Requires experimental 3D.
     bool rendering_3d = false;
+    // Store or platform services (kin/platform/services.hpp) run_scene_app
+    // starts itself: Steam when services_config (unset: the game info's
+    // steam_app_id) names an app id and Steam answers, else the offline
+    // backend. Headless, server and determinism runs
+    // get the offline backend, in memory, whatever this says. When Steam starts
+    // the game again itself, run_scene_app returns 0 at once.
+    std::optional<ServicesConfig> services_config{};
+    // Or services the game started: borrowed, used as they are.
+    PlatformServices* services = nullptr;
+    // The game's achievements, stats and leaderboards (content/services.kinservices):
+    // its services asked by the game's ids, each turned into the store's
+    // (catalog_services). Null: the ids go to the store as they are.
+    const ServicesCatalog* services_catalog = nullptr;
+    // Show the language the player chose for the game on the platform, when
+    // the localization has it and --locale does not say otherwise. Turn off
+    // when the game restores the player's own saved choice.
+    bool platform_language = true;
+    // On a handheld, show the platform's on-screen keyboard while a text field
+    // takes text (Window::set_text_input_enabled), over its area.
+    bool platform_keyboard = true;
 };
 
 HeadlessOptions parse_headless_options(int argc, char** argv);
+// The platform services run_scene_app starts for `config` (when it gives none
+// of its own): its services_config, else the game info's id and Steam app id;
+// offline and in memory for headless, server and determinism runs; offline as
+// --services asks.
+ServicesConfig scene_app_services_config(const SceneAppConfig& config);
 
 void write_available_actions(std::ostream& out, const std::vector<AvailableInputAction>& actions);
 

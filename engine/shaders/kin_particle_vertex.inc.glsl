@@ -30,6 +30,7 @@ layout(set = 1, binding = 0) uniform ParticleDraw {
     vec4 sun_light;       // rgb: its light
     KinFog fog;
     KinSky sky;
+    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
 } draw;
 layout(set = 1, binding = 1) uniform FogTable {
     vec4 rows[KIN_FOG_ROWS * 4];
@@ -118,6 +119,7 @@ void main() {
                 (draw.right.xyz * -sn + draw.up.xyz * cs) * (c.y * half_size);
     }
     gl_Position = draw.view_projection * vec4(world, 1.0);
+    gl_ClipDistance[0] = dot(draw.clip.xyz, world) + draw.clip.w;
 #ifdef KIN_PARTICLE_TEMPORAL
     const vec4 previous = quads[draw.first.x + uint(gl_InstanceIndex)].corners[CORNER_OF[gl_VertexIndex]];
     vCurrent = (temporal.current * vec4(world, 1.0)).xyw;
@@ -184,7 +186,10 @@ void main() {
         const float opacity = kin_fog_opacity(draw.fog, tau);
         if (opacity > 0.0) {
             const vec3 colour = draw.fog.colour.w > 0.5 ? particle_fog_sky(dir) : draw.fog.colour.rgb;
-            vFog = vec4(kin_fog_sun(draw.fog, colour, dir, draw.sun_direction.xyz, draw.sun_light.rgb), opacity);
+            // (With Fog3D::sun_shadows the sun's share is added after the main pass: fog_sun_apply.frag.)
+            vFog = vec4(draw.fog.view.z > 0.5 ? colour
+                                              : kin_fog_sun(draw.fog, colour, dir, draw.sun_direction.xyz, draw.sun_light.rgb),
+                        opacity);
         }
     }
 }

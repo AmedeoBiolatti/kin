@@ -1,0 +1,48 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "beetle",
+  "name": "beetle",
+  "root": "root",
+  "entities": [
+    {
+      "id": "root",
+      "name": "beetle",
+      "components": {
+        "Transform2D": {},
+        "RectRenderer": {
+          "size": {
+            "x": 22,
+            "y": 12
+          },
+          "offset": {
+            "x": -11,
+            "y": -6
+          },
+          "color": {
+            "r": 60,
+            "g": 40,
+            "b": 90,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static",
+          "sync_to_physics": true
+        },
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 11,
+            "y": 6
+          },
+          "sensor": true
+        },
+        "Beetle": {},
+        "Saved": {
+          "keep": "Transform2D, Beetle",
+          "script": false
+        }
+      }
+    }
+  ]
+}

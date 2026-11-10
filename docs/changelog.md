@@ -7,6 +7,880 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Render graphs for tools: `write_resource_graph_json` writes a compiled graph (`kin.render-graph/1`: resources,
+  passes with their reads and writes by name, the run's order, culled passes, times); the stock 3D frame's recipe is
+  public as `stock_frame_graph3d()`, `RenderDebugStats3D::graph_pass_ms` times each of its passes, and the game server's
+  `render.graph` method (inspect mode too) answers the frame's graph with the last render's times.
+- Lights in the fog (`Fog3D::volumetric`, off by default): the point and spot lights' light scattered by the fog's
+  air, through their shadow maps (beams, a lamp's glow), lit in a volume of cells over the view's near distance with a
+  history, summed along the rays and added after the main pass. Each light's `volumetric` scales its share (0: none).
+  `SceneEnvironment3D`'s `fog_volumetric*`; `debug_stats().fog_volume`. With `sun_and_moon` (on) the sun and the fill light
+  (the moon) scatter in the volume through their shadows too (at the fog's `sun_scatter`), replacing `sun_shadows`' walk.
+  The light is added between the opaque and the blended draws, so glass and smoke dim it as they dim what is behind them,
+  and blended stock and surface materials add the air's light in front of them (the fog variants' new last sampler,
+  `uFogVolume`).
+- Lights in the fog, cheaper at the same picture: cells behind every visible surface are not lit (each column's farthest
+  surface from the pre-pass, `RenderDebugOptions3D::fog_volume_cull` to compare), and `VolumetricFog3D::tile` 0 (the new
+  default) keeps cells of one angle at any size (8 pixels at 720p, 16 at 1440p): at 2560 x 1440 in A Lovely Night of
+  Terror 0.5 to 1.2 ms of GPU less a frame (about 0.1 to 0.3 ms left), and 22 MB of volumes instead of 88.
+- Up to 8 point lights with shadows a frame (`Lights3D::max_shadowed_points`, was 2): the local maps are packed into the
+  array's layers (a 256-texel cube takes six sixteenths of a 1024 layer), and a cube's faces are derived from its light in the
+  shader, which keeps the block under SDL_GPU's 4 KiB.
+- 3D auto exposure, decals and morph targets (native renderers; WebGL2 has morph targets only).
+  `ViewOptions3D::auto_exposure` (`AutoExposure3D`) meters an HDR view on the GPU (a log-luminance histogram with
+  the darkest and brightest shares left out) and adapts its exposure over time, faster toward light than toward dark,
+  with no read-back. `Scene3D::draw_decal(Decal3D)` projects a picture (and optionally a normal map) through a box
+  onto the opaque surfaces in it, lit with them, fading on surfaces that turn away; scenes with decals always run the
+  pre-pass. `MeshData3D::morph_targets` and `Renderer3D::set_morph_weights` blend meshes between shapes (before
+  skinning; `copy_mesh` for a copy with its own weights); glTF morph targets, target names, default weights and weight
+  animations now load (`AnimClip3D::morphs`, `apply_clip_morphs`) instead of rejecting the model. New capabilities
+  `auto_exposure`, `decals`, `morph_targets`; new example `bunker_exit`. Scenes and scripts: `DecalRenderer3D` and
+  `MorphWeights3D` components (scene files, prefabs, inspection, live edits; decal images bound by
+  `resolve_render3d_assets`), `Material3D::receives_decals` (meshes drawn over the decals), `AnimationPlayer3D`
+  blending clips' morph weights (fades, blends, layers, actions) and `WorldRenderState3D::apply_morphs` giving each
+  entity its own shaped copies, Lua `scene3d.set_morph_weight` / `morph_weight` / `clear_morph_weight`.
+  Then: morph targets blended on the GPU (about 5 us of CPU a change, from 0.12-1.3 ms; copies share the targets) with
+  motion vectors for TAA, `Renderer3D::exposure(view)` reading the adapted exposure back without a stall, decals
+  culled to the view, and `kin_render3d_surface_bench` (KIN_BUILD_BENCHMARKS) for the features' GPU and CPU costs.
+  Decals are batched: one buffer of placings a frame and one instanced draw for the decals of one `Decal3D::order`
+  that share their pictures (drawn by order, then picture; previously one draw each, in the order added).
+- A minimal native 2D [starter](../games/starter/README.md) runs inside Kin or as a
+  standalone project. The [project workflow](project_workflow.md) documents reuse,
+  incremental structure and current starting points for native and Lua games.
+- Development presets build tools, games and tests on demand and use
+  `out/build/<preset>/`. `KIN_BUILD_ON_DEMAND` defaults off for other builds;
+  focused testing and output conventions are documented in [testing](testing.md)
+  and [the agent workflow](../AGENTS.md).
+- Mirrors and portals (3D, native renderers). `Camera3D::clip_plane` cuts a view at a plane (clipped in the vertex
+  shaders, so depth, ambient occlusion, fog and TAA are unchanged; copies behind it are culled on the CPU).
+  `mirror_view` and `portal_view` give the camera of a mirror's or a portal's view and the projector its surface reads
+  the view's picture through; `portal_point`/`portal_rotation` move anything else through a pair of portals.
+  `engine/shaders/planar_reflection.surface.glsl` (the picture replaces the environment's reflection, weighed by the
+  surface's Fresnel and roughness, with normal-map ripples) and `planar_window.surface.glsl` (a portal) are surface
+  shaders a game builds with `kin_compile_surface_shader`; `KinSurface::reflection` lets any surface supply its own
+  reflection. A material reading the texture of the view being drawn reads white there. `examples/planar_views`:
+  a mirror, rippled water and two portals facing each other. Portal gameplay helpers: `PortalPose3D::size`,
+  `portal_crossing` (did a step go through, and how far), `ray_through_portal`, `portal_chain` (portals seen through
+  portals, to a depth), `portal_surface_transform` (a box for the surface, so a camera can step into it), and
+  `planar_on_screen` (skip the views no one sees, size them by screen share). The vertex shaders' draw block grew by
+  a `vec4` (compiled surface vertex variants keep working, without clipping, until rebuilt).
+- Mirrors and portals on entities: `Mirror3D` and `Portal3D` components (authored in scenes and prefabs; a portal's
+  `exit` an entity reference), rendered by `PlanarViews3D` (`kin/scene/planar_views3d.hpp`) and by
+  `SceneSession3D::render` given `SceneSession3DOptions::planar_surfaces` (`kin_planar_surfaces` in CMake builds them;
+  `create_planar_surfaces` / `compile_planar_surfaces` make them). `portal_step` (and Lua `scene3d.portal_step`) moves
+  a step through a world's portals. `Scene3D::set_draw_material` and `Scene3D::show_overlay` (the overlay left out of
+  a render) support them.
+- Portals: things half-way through show on both sides (`portal_straddle`; `PlanarViews3D` draws such copies' images at
+  the exit itself), instead of vanishing or showing as a crescent while crossing, and neither half is cut by the
+  pictures' clip planes, so no rim shows where they meet (`DrawClip3D`, `Scene3D::draw_instanced(..., clip)`). Planar pictures cover only where
+  their surface shows (`Camera3D::window`, `crop_planar_view`, `planar_picture`), as sharp as the view and with its
+  samples (`resolution` 1 by default).
+- Reflection probes: `Renderer3D::create_reflection_capture` / `capture_reflection` (the scene all round from a
+  point, six renders into a panorama) and `Lights3D::reflection_probes` (`ReflectionProbeSource3D`: influence box,
+  blend, parallax box, intensity, priority), read by the stock lit shaders, material graphs and surfaces in place of
+  the environment, parallax-corrected (`reflection_probe_weight`, `reflection_probe_direction`). As entities: the
+  `ReflectionProbe3D` component, captured and placed by `ReflectionProbes3D` (`kin/scene/reflection_probes3d.hpp`) and
+  `SceneSession3D` (once, on an interval, or every frame; `hide_self`). Curved mirrors: a live probe at a shiny thing's
+  centre, the thing left out by `Camera3D::hidden_id`. The light variants' binding 6 is now a 2D array (layer 0 the
+  environment's specular); custom material shaders keep the 2D environment.
+- Screen-space reflections (`Scene3D::ssr`; authored `ssr_*` in `SceneEnvironment3D`): each pixel's reflection hit
+  traced through the depth pre-pass at half size; the lit shaders follow their own (normal-mapped) reflection that far
+  into the previous frame's picture, kept as a blur pyramid, read as wide as the reflection's lobe (glossy surfaces get
+  blurred reflections, up to `max_roughness`); in place of the probes' or the environment's where it finds something;
+  fades by the screen's edges, curvature and steep normal maps, and leaves a thing's own probe alone. The light variants' last storage buffer (older compiled surfaces simply do not read it).
+- Reflection probes light what is inside their boxes too (`ReflectionProbeSource3D::diffuse`, the component's
+  `diffuse`, on by default): the probe's irradiance, a level more in its layer, in place of the environment's or the
+  hemisphere's ambient light (global illumination's probes still win where they reach).
+- Reflection probes baked to disk: `Renderer3D::save_reflection_capture` (a Radiance .hdr panorama) and
+  `load_reflection_capture` (any 2:1 panorama, through the content), the component's `baked` (loaded instead of
+  captured) and `ReflectionProbes3D::bake` (captures and writes every probe, setting `baked`).
+- Water you see into: `refraction_view` and `planar_refraction_params` (what is below a planar surface, bent by its
+  ripples, weighed by what its Fresnel does not reflect), and `Mirror3D::refraction`, `refraction_distortion`, `murk`,
+  `murk_depth` (the picture fogged by a height fog under the surface: deeper is murkier).
+- Reflection probes lit by global illumination: `ReflectionCaptureOptions3D::global_illumination` lends a capture a
+  view's GI (its probes, read, not moved; `Renderer3D::global_illumination_lit`), and sessions' probes borrow their
+  view's, captured once more when it has settled (`ReflectionProbes3D::gi_settle`).
+- Characters and instance batches go through portals whole: `Scene3D::draw_again` (a copy drawn again elsewhere, a
+  skinned one in its pose, a batch's as a plain one) and PlanarViews3D drawing every kind of copy half-way through;
+  `portal_straddle` takes things up to the opening's diagonal (a character's T-pose bounds). The atrium has a walking
+  survivor (Kenney, CC0) and `--camera 5`.
+- Physics through portals: `PortalTraveller3D` marks an entity that physics carries through a portal, after each
+  physics step of a `SceneSession3D` (`PortalTravel3D` for a game's own loop), by
+  `WorldPhysicsState3D::carry` (a character's feet, velocity, facing, command and state turned; a body's velocities).
+  Lua's `scene3d.character_input` takes a `facing`. `planar_atrium` plays a physics character (WASD, mouse camera,
+  jump, run) through the portals, and `--autoplay SECONDS` plays it by a bot through the real input and reports falls,
+  escapes, stuck spots, missed portals, frame and GPU times and memory (exit 2 on a gameplay failure, or on memory
+  still growing over the second half of a run of 4 minutes or more).
+- A view can render a part of itself (`View3D::set_render_size`, `render_size`; `Renderer3D::can_render_part`): renders
+  fill only that many pixels from its top-left, where the GPU backend can (no HDR, picking, temporal AA, GI, fog
+  shafts, occlusion culling, contact shadows or overlay). Planar views (mirrors, water, portals) use it: each picture
+  is drawn at its own size into a view that only grows, so a moving eye no longer resizes views (with all their
+  targets) about 13 times a second; after the first seconds, none. It is pixel for pixel the picture of a view of that
+  size. `planar_view_params` / `planar_refraction_params` take the part's `share`, and the planar surfaces keep their
+  reads in it; water's own colour no longer comes from its refraction picture.
+- A portal seen in a mirror (or in water) shows what is beyond it: PlanarViews3D renders it a picture from the mirror's
+  camera through the portal and draws it on the portal in the mirror's picture (it showed its stand-in colour).
+- The sun's highlight is the size of its disc (the specular lobe's alpha at least its angular radius), and a point or
+  spot light's the size it spans (`size` over its distance): a chrome or rippled surface's highlights no longer
+  flicker as the eye or the light moves.
+- Screen-space reflections trace a texel a pixel (a half-size grid stepped every reflected edge in twos, plainly so in
+  a large window), a ray crossing a surface between two steps counts (once its point is checked on the surface), and
+  the reflections' pyramid stays half size. About 0.1 to 0.2 ms more at 1280 x 720.
+- `ViewOptions3D::compress`: a view that is not HDR keeps its light as x / (1 + x), so that what is past white survives
+  an 8-bit picture; planar views' pictures use it and their surfaces take it back (`planar_view_params` /
+  `planar_refraction_params` `compressed`): a sun glint seen in a mirror or through a portal is as bright as seen
+  directly (it was cut to white, then tonemapped grey).
+- planar_atrium: the brass ring's patina and brushing turn with it (its own graph, the pattern from the ring's rest
+  position: it was in world space, so the ring turned through it); both portal lights are the trims' teal (walking
+  through, the light went from teal to magenta).
+- planar_atrium opens on a loading screen (the step under way, a progress bar, the controls) that fades out over the
+  scene's first frames, and its material graphs are cooked at build time (`kin_cook_material_graphs`; `*.kingraph.spv`
+  is git-ignored): it starts in about a second, from about 18 (eight graphs compiled with glslc as it started).
+- `Portal3D::effect` (none, ripples, vortex, glitch, membrane) and `effect_strength`: the planar window surface
+  distorts and lights its picture, answering what goes through the portal (where it went through and when, on both
+  surfaces of the pair). planar_atrium: P cycles them.
+- planar_atrium shows the camera's and the survivor's places at the bottom (centimetres, yaw and pitch; F3 hides it).
+- Checking a scene against Cycles: `write_scene_snapshot` (`kin/render3d/snapshot3d.hpp`) writes a rendered scene
+  (camera, lights, the sky as a panorama, posed meshes, materials baked per copy into texture pages by kin's own
+  shaders, graphs included) and `tools/cycles/compare.py` renders it with Blender's Cycles and compares.
+  `planar_atrium --at X Y Z YAW PITCH --survivor X Y Z YAW --cycles-snapshot DIR` writes one from a given view. New
+  for it: `RenderDebugOptions3D::unwrap` and `surface_channel` (a surface's channel drawn over its UV square),
+  `Renderer3D::read_mesh` and `read_linear_texture`, `SceneSession3D::view_options`; Radiance .hdr files are written
+  with run-length runs (a flat picture is a fraction of the size).
+- Pictures lit by another view's global illumination: `Renderer3D::render(view, scene, lit_by)` (and
+  `can_render_part(view, scene, lit_by)`: such a render may fill part of its view, the GI's light resolved over it).
+  PlanarViews3D renders mirrors' and portals' pictures with the view's GI (`render`'s `lit_by`; SceneSession3D passes
+  its view), and `SurfaceTraits3D::gi` (`SurfaceGi3D`: `Fields` for mirrors and portals, `None` for water) keeps the GI
+  from baking a stand-in of a surface whose look changes every frame, and from taking water as a dark lid (blotches of
+  the pool's dark light that shifted with the view along its rim). The atrium turns GI on: against Cycles (tools/cycles), the west wall's shade
+  and the sun's bounce were missing (mean difference 33 levels in that view, 14 now); about 1.1 to 1.4 ms more GPU.
+- Reflection probes can capture some faces at a time: `ReflectionCaptureOptions3D::faces` and `publish`,
+  `ReflectionProbe3D::faces_per_frame` for live probes (their picture updated when all six faces are new). The atrium's
+  chrome ball renders 2 a frame and its GI updates 512 probes a render: about 1.25 ms of the GPU less (5.1 to 3.8 ms,
+  median of three alternating autoplay runs each), the GI settling a little slower at the start.
+- The material graph's `smoothstep` node is filtered by the pixel's footprint (distant tile seams and terrazzo chips
+  no longer break into crawling dots, plainly so through a portal); the atrium's floor fades its checker and veins to
+  their mean far away too.
+- Where every GI probe round a point is hidden from it (under a ball on a plinth, a crease), it is no longer pitch
+  black: it takes its own surface's GI light from round it, where the probes see it (texels on two rings, by their
+  depth on its plane), and only failing that gives seven tenths of the probes' share to the ambient light.
+- The atrium's GI is one window over the whole room (`gi_side` 176, `gi_height` 64 at 0.15 m): it no longer moves with
+  the camera, so a walk, or a portal that carries the camera across the room, does not start its probes over (seconds
+  of changing light, horizontal bands on the walls while they filled in); about 0.3 ms more GPU.
+- The GI's light on the view takes a texel only from this fragment's own surface by its depth plane (a rim's side next
+  to its top is not its surface, though as deep).
+- Screen-space reflections on rough surfaces fade in over their lobe's width where neighbouring rays hit and miss (a
+  brushed frame's reflection of a figure was a sharp cut-out).
+- Probe and environment reflections are read at least at the roughness of how fast the normal turns across the pixel:
+  curved shiny things (the atrium's iridescent ring) no longer alias what they reflect into shimmering stripes.
+- Portal effects fade out as the camera reaches the opening; water seen in another planar view is its murk, a little
+  see-through, not a dark lid. The atrium's room probe is captured above its brass ring (it filled a quarter of the
+  probe's picture).
+- 3D physics: a step's scratch memory past `World3DConfig::temp_memory_bytes` is kept for the next step instead of
+  allocated and freed each step (Jolt's contact constraint buffer, about 20 MiB with the default capacities, did not
+  fit the default 16 MiB: 1.2 GB a second of allocations at 60 Hz).
+- `SceneSession3D` sets `Scene3D::time` to the seconds it has stepped, so material graphs that read `time` move in
+  authored scenes (they stood still).
+- Optional `KIN_ENABLE_WIDGET_PCH` shortens UI2 widget implementation edit rebuilds
+  with a private six-file cache. It stays off by default because cold/private-header
+  rebuilds cost more; see [measurements](build_times.md#private-widget-implementation-pch).
+- Material graphs for 3D (native renderers; WebGL2 draws a graph material's stock fallback). A surface shader
+  (`Material3D::surface`) is a `kin_surface(inout KinSurface)` function inside the stock mesh shader, lit, fogged,
+  shadowed and GI'd as a stock material, in every pass (cut-outs by its alpha included) and in the batched paths.
+  A material graph (`kin.material-graph/1`, `material_graph3d.hpp`) compiles to one: 53 node types, five map slots,
+  64 floats of parameters, a world-position offset, and surface outputs beyond the stock material's (backlight for
+  two-sided foliage, clear coat, specular, diffuse wrap). `.kinmaterials` files name a `"graph"` and its `"params"`;
+  `Assets3D::load_material_graph` loads a graph cooked at build time (`kin_material_graph cook`, cmake's
+  `kin_cook_material_graph`) or compiles it with glslc, and reloads it on edits. `Scene3D::specular_multiscatter`
+  (on) can be turned off to draw rough metals as Unreal's legacy shading does. The GI scene sees a surface material
+  through a stand-in the renderer draws from it (its base colour and emission over its UV square), not through its
+  maps, which a graph may fill with masks or normal maps; `SurfaceTraits3D` (filled in by the graph compiler) says
+  whether a surface glows by itself and whether its colour reads the vertex colour. `kin_game` cooks a game's
+  graphs at build time (`kin_cook_material_graphs`), and a shipping build that can't (Android's) needs them
+  cooked already. Graphs and their imports run on a stack of their own: chains of nodes up to 1024 deep, deeper
+  ones an error naming the node.
+- `kin_import_material godot|unity|unreal` imports other engines' materials as `.kinmaterials`: the standard PBR
+  materials of all three, and with `--graphs` their node graphs (Unreal material graphs with their Material
+  Functions and static switches, Unity Shader Graph 10+, Godot 4 VisualShaders), noting each node it can't express.
+  `kin_material_lineup` renders the same scene in kin, Godot and Unreal to compare the imports.
+- Material UV transform (`Material3D::uv_scale`, `uv_offset`) in every pass. TIFF and PSD textures decode for
+  imports, and 16-bit greyscale PNGs no longer overflow SDL_image's surface.
+
+- Development PCHs include the standard filesystem API; Charts, Text Edit, Shapes and
+  ECS Parallel precompile more of their stable engine APIs. See the
+  [broader PCH measurements](build_times.md#broader-standard-library-and-game-pchs)
+  for warm-edit gains and cold-build costs.
+
+- Hex Demo precompiles five more stable engine headers when development PCHs are enabled.
+  An isolated C++ module pilot records the comparison and rebuild tradeoffs; see
+  [measurements](build_times.md#cpp-modules-pilot).
+
+- Fixed area-light BVH construction: empty spatial bins no longer corrupt split bounds,
+  reducing traversal work without changing GI budgets. See [measurements and validation](gi_bvh_empty_bins.md).
+
+- Native workflow lifetime and stepping compile separately from Lua registration, reducing
+  service-only edit rebuilds. See [workflow split measurements](build_times.md#split-native-workflow-stepping-from-lua-bindings) for compilation CPU and runtime tradeoffs.
+
+- UI2 widget collection reuses Flecs query cache types and iteration code across widget types,
+  reducing compiler work and peak compiler memory. See [UI2 collection measurements](build_times.md#shared-ui2-record-collection) for timings and runtime tradeoffs.
+
+- Entity scripting separates runtime/reload/scheduling, entity methods and game-service bindings,
+  shortening independent edit rebuilds and exposing parallel compilation. Normal optimization
+  and safety settings remain enabled. See [entity split measurements](build_times.md#split-entity-scripting-translation-unit) for timings and CPU/runtime tradeoffs.
+
+- Scene scripting separates runtime/file loading, native API methods and binding registration into
+  three implementation files, shortening independent edit rebuilds. Shared private userdata types
+  use compact sol registry keys with a regression check. See [scene split measurements](build_times.md#split-scene-scripting-translation-unit).
+
+- Lua API metadata and inspection share one implementation file, reducing repeated registration
+  compilation and narrowing metadata implementation edits from five Lua source files to one.
+  See [Lua API bookkeeping measurements](build_times.md#shared-lua-api-bookkeeping).
+
+- Native ECS fields keep member accessors typed until their stored registry callback, reducing reflected
+  registration compilation and removing redundant `std::function` adapters and allocations. Custom
+  properties retain their callback API. See [field callback measurements](build_times.md#native-component-field-callbacks).
+
+- Lua scripts on many entities call faster: a file's callbacks are looked up once an update, not once an entity
+  (`LuaScript::function` and `call_function` for a host calling one function many times), `self`'s entity methods
+  are bound once each, and the scripts no longer running are found by a sorted search. A scripted foe walking to
+  the player costs 1.1 µs an update instead of 2.4 on a desktop (`kin_entity_scripts_bench`, built on request); a
+  horde game on a Samsung A55 holds 60 fps with about 1215 scripted foes instead of 1050.
+
+- Fixed: spawning a prefab while an earlier copy lived aborted the game when it named its entities (two siblings
+  of one name; the names kin set itself were not in the registry it asked), and copies after the first renamed their
+  children (`Eye.<id>`, so `child("Eye")` found nothing). `Lifetime` and `Timer` given in scene or prefab files
+  are kin's own now, so `update_lifetimes` and `update_timers` count them down (they were data components nothing
+  counted).
+
+- ui2 apps on a phone, from a workout tracker built on it and run on a Samsung A55: a finger dragged across a
+  scroll box scrolls it and a flick glides (`ScrollBoxOptions::touch_drag`, on by default; the drag is then no
+  click). Text fields open the keyboard for what they take: `TextInputKind` (`Text`, `Number`, `Decimal`),
+  `Window::set_text_input_enabled(on, kind)`, `ValueFieldOptions::keyboard`; `number_field` and `NumberInput` show
+  the number pad when their range has no negatives, and numbers take a decimal comma. `ValueFieldOptions::select_all`
+  (`number_field`'s) makes typing replace the value wherever the caret landed. Enter and Esc commit and cancel a
+  one-line field without an input map binding `accept` and `quit`. A value field of a fixed height centres its
+  text in it from top to bottom. `TtfFontOptions::embolden`, used for Android's bold, whose files link to its
+  regular variable font.
+- Fixed: `wait_for_events` on Android spun a whole core (SDL's event wait does there); kin checks for events
+  every 8 to 25 ms instead: idle 101% of a core to 3-4%. The first frames after the loop starts and after
+  coming back to the screen are drawn without waiting (the window stayed blank until touched, and that touch was
+  lost). `WindowedAppConfig::max_idle_wait` (0: never wake without a reason).
+
+- Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
+  precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters
+  (including repeated 2D workflow signatures), and earlier independent runtime compilation with Ninja.
+  See [build-time measurements and setup](build_times.md).
+
+- Optional `KIN_DEV_FAST_SCRIPTING` and Linux `dev-fast`/`dev-clang-fast` presets use `-O1` for scene/entity
+  Lua bindings during development. It is off by default and rejected for shipping builds.
+  See [compilation/runtime measurements](build_times.md#opt-in-optimization-for-the-whole-binding-target).
+
+- Scene and scripting headers forward-declare borrowed services to reduce rebuilds after App, Input,
+  Window and Renderer2D header edits. Consumers calling service methods include their headers directly.
+  See [header dependency measurements](build_times.md#scene-and-scripting-header-dependencies).
+
+- Rendering data headers use Renderer2D forward declarations, reducing renderer-header rebuilds.
+  Code constructing or calling the renderer includes its header directly; `Flip` helpers have a small
+  standalone header. Rendering fields, method bodies and helper behavior are preserved.
+  See [renderer header measurements](build_times.md#renderer-data-header-dependencies).
+
+- Render queues include the lightweight `sprite_instance.hpp` instead of the full backend interface,
+  reducing backend-header rebuilds. The backend still exports `SpriteInstance` with unchanged fields
+  and defaults. See [queue dependency measurements](build_times.md#render-queue-backend-dependency).
+
+- Renderer2D uses shared backend value types and forward declarations for the backend and Window,
+  reducing header rebuilds. Four small backend forwarding methods now live in the implementation;
+  callers using backend or Window definitions include their headers directly.
+  See [renderer interface measurements](build_times.md#renderer-interface-dependencies).
+
+- Window IDs, configuration and cursor/chrome values have a lightweight `window_types.hpp` header.
+  App, Input, UI2, the windowed app interface and GPU device use narrower dependencies, reducing
+  Window-class rebuilds while preserving fields, function bodies and inline definitions.
+  See [Window value measurements](build_times.md#window-value-dependencies).
+
+- 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
+  quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
+  `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D
+  scene plays `kin::Animator`s: `resolve_animators3d` binds them (`SceneSession3D` does, at load, for spawned prefabs
+  and live edits, and watches their files) and `SceneFrame3D` plays them in its animation phase.
+  `update_animators(world, dt, announce)` and `AnimationPlayer::announce` mark the fields they set as set, for a
+  world that watches for changes.
+- Experimental: kin's 2D physics on Box2D 3.2 with `-DKIN_PHYSICS_BOX2D_V3=ON` (off by default; Box2D 2.4 stays
+  the default). The same `PhysicsWorld` API, stepped on Box2D's own threads: `PhysicsWorldDef::workers` (0:
+  `KIN_PHYSICS_WORKERS`, else one per core up to 8), with the same results however many. A packed crowd of 900
+  bodies steps in 0.7 ms instead of 4.3; 20k take 11.5 ms on one thread and about 5 ms on 4 to 8 (2.4 took 3 s
+  for 10k). Differences: joint limits
+  are soft (a motor pushes a few degrees past, a rope pulls without a jerk), capsules are one shape, a contact a
+  one-sided platform refuses never begins touching.
+
+- 3D asset files have types of their own: `AssetType::Animator3D` (`.kinanimator`), `Collider3D` (`.kincollider`)
+  and `Materials3D` (`.kinmaterials`), and `infer_asset_type` names them (they were Unknown). The fields naming them
+  say so (`AnimatorAsset3D.asset`, `Collider3D.asset`, `ModelMaterials3D.asset`), so a tool's picker offers those
+  files alone and a dropped one finds its component.
+
+- Edits in place for a tool's scene view: the scene server's `view.edit {entities: [{id, components}]}` hands the
+  fields a tool changed (each entity by its id in the file, its components' fields written as the file writes them)
+  to the new `Scene::view_edit`, in place of the whole file again (`view.scene`), which reads it all, the world and
+  its scripts made anew. `SceneSession3D::edit_authored` takes such a batch as `edit` does (all or nothing; unknown
+  entities, components or fields, or a value of the wrong kind, fail it with why). Kin Studio sends a dragged
+  handle so: a 26-entity 3D scene with a script took about 30 ms a step read again, 5 ms edited.
+
+- Fixed: a `SceneSession3D` scene now draws in the browser. Its new view is warmed up first (`warm_up`, on by
+  default), and WebGL2 had no warm-up, so `Renderer3D::warm_up` failed ("scene GPU warm-up failed") and no scene
+  loaded. WebGL2 has nothing to make ahead (its programs come with the renderer, its targets with the view), and
+  now says so; the browser fixture checks it.
+
+- Touch ([input](input.md#touch)). Fingers from the system (`SDL_EVENT_FINGER_*`) are `Input::touches()` (id,
+  position, where and when each went down) and `touches_ended()`. The first unclaimed finger is the pointer: it moves
+  the mouse and holds its left button, so ui2 and mouse-reading code work with a finger. Its press lands a frame
+  later, so UI sees it over what it touches first; before, a tap clicked nothing in ui2. The system's mouse events
+  made from touches are dropped. Gestures are `TouchControl`s bound in the input map (`touch jump tap`; double tap,
+  long press, four swipes, two-finger tap): pressed when made, held a step, released. Two fingers' `touch_pinch()`
+  and `touch_pan()` (step and frame readings). `claim_touch(id)` takes a finger for an on-screen control,
+  `pointer_is_touch()` says a finger is the pointer, and `update_touch(now)` (App calls it) times long presses. ui2
+  shows no hover between touches and names touch bindings in prompts (`PromptBindingMode::Device` too). Lua:
+  `input.touches()`, `input.pinch()`, `input.pan()`. Scene server: `input.touch {x, y, id, mode}`.
+
+- 3D scenes drawn through a tool's camera ([agent interface](agent_interface.md)). `view.frame` takes a
+  `camera3d` (`position` [x, y, z], `rotation` as a quaternion [x, y, z, w], `fov`, `near`) in place of a 2D
+  camera's `x`, `y` and `zoom`, and hands it to the new `Scene::set_view_camera3d` (false by default: a scene that
+  draws no 3D world refuses it, with why). Kin Studio's scene view draws a 3D scene with the game's own code so.
+  The 3D components also carry their inspector hints (`ModelRenderer3D.asset` a Model, units, choices, descriptions).
+
+- The game's list of achievements, stats and leaderboards ([platform services](platform_services.md#the-games-list)):
+  `content/services.kinservices` (`kin.services/1`), read by `load_services_catalog`, gives each an id of the game's
+  and its id on each store, with names and descriptions as translation keys, hidden achievements and their
+  progress, stat types, and leaderboards' sort and display. `SceneAppConfig::services_catalog` has the game's
+  services asked by it (`catalog_services`): ids become the store's and events the game's again; ids not listed
+  are refused and logged once; stats are set as their type says; leaderboards are made as listed. Lua's
+  `services.progress(id, current)` takes the listed most.
+
+- A store for each build ([platform services](platform_services.md#steam)). The cache variable `KIN_GAME_STORE`
+  (`auto`, `steam`, `none`) says which store `kin_game` builds a game for: `none` (itch.io, a download of its own)
+  builds in no Steam app id, no `steam_appid.txt` and no Steam library, whatever the game info says; `steam` fails
+  without an app id. Games get `KIN_GAME_STORE` (`"steam"` or `""`). `KIN_STEAM_REDIST` ships Steam's library in
+  every Steam build that gives no `STEAM_REDIST`. A build without an app id takes out a `steam_appid.txt` left by
+  an earlier one. `--services=offline` (or `memory`) runs a game on kin's offline services, not Steam's;
+  `scene_app_services_config` says what `run_scene_app` starts.
+
+- ui2 navigation by the menu actions and per player ([ui](ui.md#controllers)). The map's `menu_up`/`menu_down`/
+  `menu_left`/`menu_right` move the focus as the d-pad does, and `accept`/`quit` accept and back out
+  (`ControllerNavigation::actions`). `ControllerNavigation::player` lets one player's controller navigate. A widget
+  that reads a direction now always uses it up, so the focus no longer moves as well when a key or an action also
+  gave it. Prompts name controller bindings as the controller labels them (`PromptOptions::family`), and
+  `PromptBindingMode::Device` names the binding of what navigates. Fixed: a controller binding in a prompt read as
+  a mouse button.
+
+- Local players in one Input ([input](input.md#local-players)). App gives `Input` each `GamepadPlayers`
+  player's controller (`set_player_gamepad`, `player_gamepad`). `pressed`, `held`, `released`, `frame_pressed`,
+  `frame_released` and `axis` take a player, and so do `binding_held`, `binding_pressed`, `axis_value` and
+  `pad_frame_pressed`; without one they ask about anyone, as before. `Input::set_players` (`InputPlayer`) says
+  who has the keyboard and mouse, and gives a player their own map when two share one keyboard. With no players
+  set, player 0 has the keyboard, and the first controller until someone joins, so one-player games are
+  unchanged. `ScriptComponent::player` says whose input an entity's script reads. Lua's `input.held`/`pressed`/
+  `released`/`axis` take a player, and `input.player()` says whose. The scene server's `input.pad` drives a
+  player's controller. Inside `Input`, keys, mouse buttons and each controller now share one edge type.
+
+- Platform services ([platform services](platform_services.md)). `kin::PlatformServices` is what a store offers a
+  game, the same whichever runs it: the player, their language, achievements, stats, leaderboards, rich presence,
+  the overlay, the on-screen keyboard, DLC and invitations to join (`JoinRequested` events, `join_on_launch`).
+  Steam is the first backend: kin opens Steam's API library at run time, so it builds without the Steamworks SDK
+  and a game runs with or without Steam. The offline backend answers everywhere else, keeping achievements, stats
+  and best scores beside the player's saves. `run_scene_app` starts them from the game info's new `steam_app_id`
+  (or `SceneAppConfig::services_config`), quits when Steam starts the game again, pumps them once a frame, shows
+  Steam's language for the game, and on Steam Deck the floating keyboard follows text fields; scenes get
+  `SceneContext::services`, scripts a `services` table. `kin_game` gains `STEAM_APP_ID` (a `steam_appid.txt` in
+  development builds) and `STEAM_REDIST` (ships the library). `kin::FakeServices` is for games' tests;
+  `kin_steam_abi_check` checks kin's Steam declarations against an SDK (`KIN_STEAMWORKS_SDK_DIR`).
+
+- Tweens and timers ([tweens](animation_system.md#tweens)). `kin::tween(world, entity, {.property =
+  "Transform2D.pos", .to = ..., .seconds, .easing})` moves any described field that animations can set, from what
+  it is when it starts (after its `delay`), `relative`ly, with `repeats` and `yoyo`; a new tween of a field replaces
+  the one before; `update_tweens(world, dt)` runs them (where Lua scripts run, their script services do, once a
+  step), `stop_tween`, `stop_tweens` and `tweening` go with it, and those that got to their end are in
+  `Tweens::ended`. `Easing` gains sine, cubic, back, elastic and bounce, each in, out and in-out, for animation keys
+  too (`easings()` lists them all). `kin::Timers` runs actions `after` or `every` so many seconds. Entity scripts
+  get `self:tween(...)` (a `done` callback among its options), `tweening`, `stop_tween`, `stop_tweens`, and
+  `after`, `every` and `cancel`, which are the entity's tasks: a reload or the entity's end drops them, with its
+  tweens' `done` callbacks.
+- [Lua development](lua_development.md): `kin_lua api` writes typed definitions of what a host binds (functions,
+  properties, callbacks, component aliases and shapes), and `kin_lua.py` checks scripts against them, a test keeping
+  the two in step both ways. Entity state migrates transactionally on reload, with stop hooks. `LuaRuntimeLimits`
+  (instructions and memory) and per-callback profiles are shared by every host; tasks belong to an entity and wait on
+  simulation time, frames, conditions or tweens. An isolated headless module/component test runner writes JSON and
+  JUnit reports, with a runnable [test project](../examples/lua_testing/README.md). `kin/scripting/lua_values.hpp`
+  converts component values and JSON to and from Lua. A reload whose rollback fails halts the script host
+  (`ScriptEngine::halt`) instead of ending the process.
+- [Development sessions](hot_reload.md) (`--dev`; component `KIN_ENABLE_DEVELOPMENT`, off in the shipping and
+  minimal presets): one-command build/import/watch/run targets, stateful Lua migration with staged system
+  declarations, authored scene and prefab patches, immutable asset generations and rollback, with `dev.status` /
+  `dev.reload` automation and recorded revision inputs. Hosts reload assets through one checked step,
+  `EcsScene::prepare_asset_reload` or `prepare_reload_assets`. `ScriptSceneConfig::hot_reload` and
+  `SceneAssetRuntime::reload_if_changed` still work but are deprecated in favour of development sessions.
+- `MemoryContent` mounts files held in memory as a content pack. Memory-backed SDL streams and GLSL include
+  compilation; queued scene reads keep their source snapshot across a reload. Workshop tests cover real source
+  watching, failed edits, active leases and jobs, and recorded replay.
+
+- [Gameplay automation](automation.md): scenarios in Lua (`scenario{...}`, compiled by `kin_lua scenario`) or JSON,
+  with bounded tick conditions, discoverable request/result schemas, scoped semantic UI selectors, targeted world
+  queries, command recording and replay (one header shape whichever side records), declared input identities,
+  JUnit results and offline failure traces. Workshop CTests run the whole process/compiler/recording workflow, and
+  CI uploads what failed.
+- Scene-server reset clears held/queued input while retaining its action map;
+  reset seeds accept decimal strings for the full unsigned 64-bit range.
+
+- [Lua 2D workflows](lua_2d_workflows.md) in both scene and entity scripts, which share one set of services per
+  world (`ScriptWorkflows2D::shared`): property tweens (`tweens.to` returns a handle that `task.await` waits on),
+  input contexts, rebinding and profiles saved per game, prefab leases, staged scene loads, controller ownership
+  and rumble, and memory diagnostics. Includes a [playable workshop](../examples/2d_workflow/README.md) with
+  imported sprites, accessible controls and an automated playthrough for loose and packed content.
+- GPU forward lighting for normal sprites on SDL_GPU: lights gathered once a frame into one shared buffer, raw
+  material textures shared between sprites, shadows and light shapes, and the existing CPU path as the fallback.
+- Skeletal crossfades, interrupted transitions, masked override/additive layers and normalized-phase triangulated
+  blend spaces in native `.kinskel` assets.
+- AssetManager memory budgets (`trim_memory` evicts the least recently used payloads, only when over budget) and
+  dependency/root diagnostics; Assets2D texture budgets, residency estimates and component retention reasons.
+
+- [2D runtime workflows](2d_workflows.md): input contexts that consume or block what is below them
+  (`InputRouter`), rebinding per device with capture and conflicts, and saved overrides; per-player controllers,
+  reconnects, haptics and family prompts; prefab prewarming and reuse (`PrefabPool2D`) with stale lease/script
+  guards; staged async scene preparation, cancellation and bounded image uploads; grid navigation agents with
+  radius clearance, replanning, events and local steering.
+- `kin::game_data_dir(id)` is a game's folder of user data (SaveStore's), and `write_user_file` writes a file
+  there whole or not at all; saves and input profiles use both.
+- [Incremental 2D imports](importing_2d.md#watching-and-incremental-processing): verified content-addressed job
+  caching, debounced watch targets, corrupt-cache recovery, and the last good outputs kept when sources fail or
+  change mid-import.
+- [Accessible UI](ui.md#accessibility): an optional AccessKit desktop bridge, accessible names, announcements,
+  numeric control actions and reduced-motion surface transitions.
+- [Normal-mapped sprites](rendering.md#normal-mapped-sprites): CPU forward diffuse/specular shading, directional
+  lights, receiver masks and polygon shadows.
+- [2D skeletal animation](skeleton_2d.md): native rigs/clips, weighted meshes, attachments, two-bone IK and
+  asset/ECS integration, with textured triangle drawing on SDL, SDL_GPU and WebGL2.
+
+- [Controller UI](ui.md#controllers) navigation and semantic [UI automation](ui.md#automation): spatial focus,
+  repeat, accept/back, modal boundaries, `Scene::ui_context`, `ui.snapshot` and deferred `ui.action` by stable ID,
+  label or `.kinui` key. Live inspection reads UI without consuming player input.
+- Manifest-driven [2D imports](importing_2d.md) for Aseprite, PNG atlases, finite Tiled maps and selected LDtk
+  levels, with native scene/tilemap output and `kin_game(IMPORTS ...)` rebuild/package integration.
+- [Asset lifetime](assets.md#asset-lifetime): `AssetScope`, dependency-aware `unload_unused` and temporary
+  dependency-batch pins that keep in-flight cycles safe.
+
+- Global illumination's emitters are area lights by default (`GlobalIllumination3D::emitters`, `GiEmitters3D::Exact`;
+  [3D rendering](rendering_3d.md), "Global illumination"). An emissive surface the GI numbers lights what the camera
+  sees with its exact form factor and its shadows (every occluder's blocked stretch of each of 4 lines across it,
+  through a bounding volume hierarchy of the copies' triangles made on the CPU) and its reflections (linearly
+  transformed cosines), and the voxels for the bounces; against Cycles the Cornell box's room is 1.8 levels off
+  instead of 4.4, a room lit by three panels 4.8 instead of 18. `GiEmitters3D::Probes` is the previous behaviour, the
+  probes alone: cheaper (0.13 to 0.63 ms less at 1280 x 720 on an RTX 4080 laptop), softer. A scene without such
+  emitters costs the same either way. `area_lights.max_triangles` keeps dense occluders within a budget (coarser
+  shapes past it), `area_lights.interleave` finds one texel in 4 a render with temporal anti-aliasing (2 or 1 for less
+  lag), `area_lights.max_emitters` caps the emitters (64), `area_lights.min_size` leaves the small ones (a candle's
+  flame) to the probes; authored as `SceneEnvironment3D`'s `gi_emitters`, `gi_area_max_triangles`,
+  `gi_area_interleave` and `gi_area_max_emitters`. `kin_reference` takes `--gi-emitters exact|probes`,
+  `--gi-area-interleave N`, `--gi-area-full` and `--gi-area-max-triangles N`.
+
+- 2D characters, shape queries and one-way platforms ([2D physics](physics_2d.md)). `CharacterController2D` moves
+  an entity as its game says, Godot's move-and-slide way: along `velocity` (and its own `gravity`), sliding along
+  what stops it, knowing floors from walls and ceilings by `max_slope`, walking up slopes at its speed, kept on
+  floors going down them (`snap`), carried by what it stands on as that moves or turns, pushing dynamic bodies
+  (`push`); it says `on_floor`, `on_wall`, `on_ceiling` and their normals. `PhysicsWorld::move_character` is the
+  same move without the component; `cast_shape` (the first thing a box, circle, capsule or polygon meets moving)
+  and `query_shape` (what one overlaps) are new queries, `PhysicsFilter::ignore` leaves a body out of any, and
+  `body_of(fixture)`, `point_velocity` and `PhysicsBodyDef::allow_sleep` are new too. `one_sided` makes any
+  collider a platform to jump up through, not only a chain: for characters (`drop_through` lets one fall
+  through), dynamic bodies and casts. Entity scripts get `physics.raycast`, `cast_circle`, `cast_box`,
+  `overlap_point`, `overlap_circle` and `overlap_box` (given `EntityScripts::set_physics`), `on_contact_end`,
+  `self:velocity()`, `set_velocity`, `on_floor()`, `on_wall()` and `on_ceiling()`; `set_position` and `move` move
+  an entity's body too.
+
+- 2D games made with Lua scripts, physics, sounds and saves run in browsers. Every `kin_game` built with Emscripten
+  gets a 1 MiB stack (`KIN_WEB_STACK_SIZE`; the 64 KiB default ran over memory making a flecs world) and Noto Sans'
+  Latin subset as the UI's system font (`/kin/fonts/ui.ttf`; kin's bitmap font has capitals only), and links again
+  when its content changes (its `.data` was left as it was). In a browser `user_data_dir()` is under `/persistent`,
+  so SaveStore's saves and settings are kept in its storage (with `KIN_WEB_PERSISTENCE`): it asks for them to be
+  copied there after each write, as `kin::user_data_written()` does for a game's own files. A shipping game in a
+  browser writes no log file. sol2 is v3.5.0 (3.3.1's `optional<T&>` didn't compile with Emscripten's Clang, nor
+  without a warning switch with GCC 15). CI builds the hex demo for the web with these modules too.
+
+- 2D light shadows: a light with `shadows` (`Light2D`, `LightComponent`; `shadow_strength`, `shadow_softness`) is
+  stopped by occluders: `LightOccluder2D` outlines passed to `LightLayer::apply`, or `LightOccluder` components
+  (a box, a circle, a polygon, or a tilemap's solid cells; `lit` or dark themselves), `scene_occluders`. Each
+  shadowed light is drawn into a target of its own with its shadows (`shadow_quads`) cut out, still with no
+  shaders; softness averages four shadows from around the light.
+
+- Cameras that follow better and shake: `CameraComponent::dead_zone` (a box its entity moves in without the camera
+  following), `look_ahead` and `look_ahead_time` (looking ahead the way its entity moves), `zoom_smoothing`, and a
+  trauma shake (`shake_camera(world, trauma)`, `shake_strength`, `shake_frequency`, `shake_decay`;
+  moved by trauma squared along smooth noise, the same each run). Scripts get `camera.shake(trauma)` and
+  `camera.trauma()`.
+
+- Parallax layers and animated tiles. A `Parallax` entity (and those under it) moves `factor` as much as the world
+  as the camera moves, from where it is placed at `anchor`; it can `repeat` its own sprite, texture, rectangle or shape
+  over the view and `scroll` by itself (`parallax_shift`, `update_parallax`,
+  `WorldRenderState::set_parallax_view`; `WorldTransform::parallax`). A tile's `frames` play in turn,
+  `frame_seconds` each (`TileDefinition::frame_at`, `TilemapRenderOptions::time`, `TilemapComponent::clock`,
+  `update_tilemaps`); cached chunks change only their animated tiles' frames. What is under a layer, and maps with
+  animated tiles, are drawn each frame, never from the static cache.
+
+- Saving games as data ([saving](saving.md)): an entity marked `Saved` keeps the components it names and its
+  script's values while the player is in another scene and in save slots, and stays destroyed once destroyed.
+  `SceneSaves` keeps the scenes left (`enter`, `keep`), the game's own values, and writes and reads slots
+  (`kin.scene_saves/1` payloads in `SaveStore`). Prefab instances a script spawns carry `SpawnedPrefab` and are
+  made again. Entity scripts get a `save` table (`write`, `read`, `exists`, `delete`, `slots`, `get`, `set`) and
+  `on_load(self)` (`EntityScripts::set_saves`).
+
+- Script debugging for an inspected game (`--inspect`): `debug.breakpoints`, `debug.pause`, `debug.state`,
+  `debug.continue` and `debug.step` (into, over, out) stop its Lua scripts at a line and show their frames, locals
+  and upvalues (`ScriptDebugger`, `script_debugger()`). A `LuaScript` loaded from under its `module_root` now
+  names its chunk from there (`scripts/player.lua:12:` in its errors, not `player.lua:12:`).
+
+- Terrain autotiling on hex maps: a cell joins its neighbours across six sides (`tile_terrain_hex_side`, masks up
+  to 63). A cell with no variant of its own now takes the nearest (joining most of its sides and no other) before
+  the fallback (`TileSet::terrain_match`). Painting and the new `clear_terrain_connect` fit the cells around each to
+  its own terrain, not only the one painted, and count only cells that changed. `TileMap::terrain_mask`,
+  `TileSet::terrains`, and `TileSet::grid` (the cells a tileset is for, `"cells"` in its file).
+
+- 2D particles that stream and change over their lives: an effect with a `rate` or `per_distance` streams from
+  an emitter (`ParticleSystem::start`/`move`/`jump`/`stop`, laying particles along the way it went; `duration`,
+  `prewarm`, `inherit`, `local`), and a `ParticleSystemComponent` streams it from its entity, turned with it.
+  `size_curve`, `color_curve` and `speed_curve` give values over a particle's life (`particle_curve_at`,
+  `particle_gradient_at`). The sub-effects `on_death` and `trail` burst other effects where particles end and along
+  their way (three deep at most, held to `set_limit`). All of it is written in `.kinparticles` as optional
+  `name=value` settings. Entity scripts burst particles with `self:emit([effect])` (`emit_particles`).
+
+- 2D physics for whole games: `PhysicsShape` capsules, polygons (any simple one: concave ones in triangles) and
+  chains (lines through points, two- or one-sided, loops), turned by an `angle`; a fixture of several Box2D shapes
+  (`shape_parts`) whose contacts begin and end once, and which queries and rays find once. Joints
+  (`PhysicsWorld::create_joint`: hinge, slider, distance with limits and springs, weld, wheel; `update_joint`,
+  `joint_force`, `joint_value`, `debug_joints`; they go with their bodies). In the ECS, colliders on children with
+  no body of their own are their ancestor's body's (placed, turned and scaled as they are, made again when moved);
+  `PhysicsJointComponent` (breaking past `break_force`); `TilemapCollider` makes a map's solid cells a static body
+  (`TileMap::collision_shapes`: joined one-sided loops, holes too, and cells' polygons). Scene files say all of it:
+  a `points` field kind (`std::vector<Vec2f>`), and native components may hold entity refs. The physics debug view
+  draws chains and joints; Lua `on_contact` names a tilemap's entity.
+
+- Go from scene to scene as data: `SceneDoor` (touch or action, the scene and the entity arrived at, an exit, a
+  transition) and `SceneTraveller` components, `SceneFlow` (doors used, arriving without being sent back), and
+  `scene.go` for entity scripts. `transition_within` plays the shader transitions over a scene that stays while it
+  reads another file; `transition_name`/`transition_from_name`. `PhysicsTeleport` moves a body to its entity once.
+  `world.snapshot` without `scene` reads the topmost scene with a world (under transitions and other overlays).
+
+- Let tools draw a game's scenes as the game does: the scene server's `view.scene` has the top scene show another
+  scene file (`Scene::view_scene`, which a game implements), and `view.frame` draws it through a given camera
+  (`Scene::set_view_camera`, implemented by `EcsScene`) and writes the pixels as raw RGBA. Kin Studio's scene view
+  uses them. `--inspect` refuses `view.*`. `Window::sync()` waits for a window's pending size (X11 sizes it later).
+
+- Patch SDL Vulkan sampler barriers for compute shader reads in a guarded, generated build source. Keep shared
+  dependency sources untouched and enable shader-access analysis in synchronization validation.
+
+- Defer root-motion transform notifications until animation queries unlock their storage, preventing a Debug ECS
+  abort while preserving tracked transform propagation.
+
+- Preserve fractional content-scale pointer mapping alongside rounded logical-size presentation; avoid zero
+  coordinates and division by zero when no explicit logical size is set.
+
+- Run rendering-branch CI with Debug graph coverage, required Vulkan core/synchronization checks and scoped
+  ASAN/UBSAN integration tests. Retain test evidence and document portable 3D build, viewer and validation commands.
+
+- Optional native visibility masks reuse prepared world data across camera graphs, retaining skinning/cutouts
+  without GI, shadows or temporal history. `kin_vision3d` demonstrates budgeted asynchronous observations.
+- Pixel readback can explicitly refuse a synchronous fallback; existing one-argument calls retain their behaviour.
+
+- Add scene-independent rendering evaluation jobs for raw performance, captures,
+  Cycles references, perceptual/temporal scoring and persistent-view memory stress.
+  Include Sponza, Yard, optional external Bistro and custom command adapters;
+  preserve provenance, verified resume, shared truth caching and offline reports.
+  Label baseline-only comparisons and unavailable measurements explicitly.
+
+- Compile attachment load/store declarations and logical colour/depth versions into safe storage handoffs or explicit
+  preservation copies. Distinguish depth testing from shader sampling, report copy/reuse decisions and payload,
+  protect re-imported history, and execute copies through public GPU texture-copy APIs. Remove the normal surface
+  graph's opaque-to-transparent colour copy and second full-size HDR colour allocation.
+
+- Split native public surfaces into opaque and transparent stages with opt-in ordered sprites/weather, explicit
+  soft-depth and sun/local sprite-shadow inputs. Support in-place attachment loads or versioned graph colour copies;
+  retain queued sprite textures and CPU upload ordering. Fix linear HDR surface background clears and extend the
+  surface graph with ordered glass/sprites before bloom/output and ASCII. Preserve stock TAA history when glass
+  splits one sprite source into multiple colour draws.
+
+- Expose stock bloom and view output as native graph operations with explicit inputs, intermediate/output targets,
+  exposure/ACES, alpha handling and output encoding. Allow independent linear HDR surface attachments, share recording
+  with stock views, and extend the surface graph with HDR toon → bloom/output → ASCII.
+
+- Add a standalone slow-light prototype comparing instantaneous and delayed direct illumination, with moving-source
+  and photon-time occluder history, fixed memory bounds, interactive controls and deterministic GPU/CPU checks.
+  Simulation and shaders stay in the example; the engine and stock renderer are unchanged.
+
+- Bind graph-produced textures and read-only buffers to native custom 3D materials through immutable, reflected input
+  sets. Validate shader/device/types/layouts and output feedback; preserve CPU upload ordering and GPU-produced input
+  revisions, reset affected TAA history, and guard resources that outlive the renderer. Extend the surface graph with
+  compute-generated lighting/palette data feeding its toon material.
+
+- Add explicit spot/point mesh-shadow graph operations, complete point cubes and surface-local shadow bindings,
+  preserving stock selection/cache/history ownership. Add an opt-in direct-light material response with separate
+  irradiance/visibility and light position/distance, plus a toon-lighting graph example.
+
+- Expose explicit sun-shadow and mesh-surface operations for custom native 3D graphs, reusing prepared scene data.
+  Add typed array attachments and a shadow → surface → ASCII example, with explicit shadow inputs, stored depth,
+  HDR working colour and independent stock view history/cache ownership.
+
+- Add frame-scoped shared 3D preparation for standalone geometry and stock rendering, with bounded CPU payload,
+  explicit source/pose/batch/frame invalidation, reusable instance/joint uploads and shared local-shadow inputs.
+  Preserve separate camera/shadow visibility and view history; expose preparation/reuse counters and raw-span edit
+  notification. Keep the ordinary streaming path available.
+
+- Expose standalone opaque/cutout geometry passes with sampled reverse-Z depth and signed world normals. Add explicit
+  float/depth graph attachments, a cached typed stock prepass subgraph and a public-API outline renderer. Stable
+  attachments survive working-colour changes; stock lighting and temporal history remain compatible.
+
+- Preserve glTF linear RGB emission and strength, independently of base/vertex/instance colour, through stock/custom
+  shaders, browser rendering, material files and GI. Legacy base-relative glow remains explicit and compatible.
+- Preserve independent wrap, min, mag and mip filters per imported/material map while sharing images by colour/data
+  role. Explicit nearest magnification no longer discards requested mip filtering; sampling participates in shadow,
+  GI and temporal appearance caches.
+- Compose transparent mesh copies and particle sprites in one stable camera-depth order, including additive effects
+  behind alpha foregrounds, and batch only adjacent compatible runs. Expose sort/run/CPU-storage counters.
+- Keep flat-soup LOD UV/colour/alpha seams with seam-aware remapping and attribute simplification, retaining the cheap
+  uniform-attribute path. Version mesh-level bakes so existing unsafe bakes are rebuilt.
+- Preserve complete geometry under cluster storage pressure with a conservative whole-draw level-zero fallback shared
+  by all dependent passes. Publish reservation/fallback counts without debug GPU readback.
+
+- Bound 3D instances and cluster LOD errors conservatively under shear, including a nonuniformly scaled parent with a
+  rotated child. Camera/shadow culling, spatial groups, retained bounds and browser LOD now share the affine stretch
+  bound used by skinned meshes and GI. Finite very small/large scales avoid squared-length underflow/overflow;
+  nonfinite linear transforms produce an unbounded result rather than an undersized sphere.
+
+- 3D global illumination lights its voxels by the sun through a sun map of its own (4096 a side over the GI's area,
+  drawn with the local lights' maps before the GI, kept while nothing in it changes), not by their march toward the
+  sun, which the voxels' conservative, coarser-further-out cover makes close the narrow gaps the sun comes through.
+  Bistro's afternoon (against Cycles): the sun's bounce into the shade from 0.54 of Cycles' to 0.68. The local
+  lights' maps are now drawn before the GI. `debug_stats().gi_sun_map`; `Scene3D::debug.gi_sun_map`.
+- The main pass begins from a copy of the pre-pass's depth (where a pre-pass ran, with one sample a pixel and no
+  overlay) instead of clearing its own, so the fragments the nearest surfaces hide are not shaded. Every mesh vertex
+  shader's position is now `invariant`, which keeps the two passes' depths equal to the bit (the pictures of the two
+  ways are identical; positions may round differently from before by a last bit, which moves a few edge pixels).
+  `debug_stats().main_depth_from_prepass`; `Scene3D::debug.prepass_depth = false` to compare. Bistro at 2404 x 1352
+  (GI, AO, TAA): about 1.4 ms of GPU a frame less at night, 0.75 by day.
+- Add `GlobalIllumination3D::skinned` (`gi_skinned`), on by default: off, the GI scene leaves skinned copies out, as
+  Godot's SDFGI holds static geometry only. An animated character is then lit by the GI but neither shades nor lights
+  it, and its pose no longer makes the blocks round it again every few renders (Bistro's idle mannequin: 0.4 ms of
+  GPU a frame on average).
+- 3D global illumination no longer makes its scene again when an emissive material's strength changes: the voxels
+  keep the emission at a strength of one and their emitter's number (`max_gi_emitters`, 2048), and the GI's light
+  takes each emitter's strength every render. A game that scaled its emissives by its exposure every frame had every
+  lamp's surroundings voxelized again on each level's turn (in nearly half its frames, about 4.9 ms of GPU a frame on
+  average in Bistro's night at 2404 x 1352, 9 ms in those frames). Whether a material emits is still a change.
+- Add the light grid: the main pass's light variants shade a fragment with the point and spot lights whose reach
+  touches its cell of the view (64-pixel tiles by 32 slices of view depth, listed on the CPU each frame and read
+  from two storage buffers), and draw every light in view, up to 256 of each kind a frame where it was 16
+  (`RendererCapabilities3D::max_point_lights` and `::max_spot_lights`). More than 16 point lights in view choose the
+  light variant. The overlay, particles, custom shaders and WebGL2 keep the 16 strongest of each.
+  `Scene3D::debug.light_grid = false` turns it off. Bistro's night: 1.6 ms less GPU a frame at Normal, 3.4 at
+  High (2404 x 1352), with all of its 40 to 60 lights in view drawn.
+- Add `Renderer2D::request_read_rgba` and `take_read_rgba`: a read of the
+  current target that does not wait for the GPU (SDL_GPU; the other backends
+  read at the request). `read_rgba` stops the CPU until the GPU has drawn
+  everything before it: a game reading a small copy of its picture every sixth
+  frame (an auto exposure's) lost a third of its frame rate, and that frame
+  showed as a hitch.
+- Present without vsync on MAILBOX where the swapchain has no IMMEDIATE
+  (NVIDIA's Vulkan on Wayland) instead of falling back to VSYNC, which held
+  frames to whole refreshes of the screen; the log's `gpu backend created`
+  line names the present mode obtained.
+- Settle 3D global illumination's probes faster: a young probe takes the mean
+  of its updates so far until `GiProbes3D::hysteresis` weighs as much, and the
+  windows round the camera share each render's updates 4 : 2 : 1 from the
+  nearest. With a game's three windows, a probe is updated only every so many
+  renders, and new probes and the bounced light building up took most of a
+  minute to settle (the shade 21% short after 480 renders in the `canyon`
+  reference against Cycles; now 9%). And fade a window's probes into the next
+  level's over three probe cells, not one: the step showed as a seam.
+- Add the `canyon` reference scene (a shaded street between warm walls: the
+  bounce against Cycles) and `kin_reference --gi-windows` (global illumination
+  in a game's windows round the camera instead of one level over the scene).
+- Add the fog's sun through the shadows (`Fog3D::sun_shadows`, off by default;
+  `SceneEnvironment3D`'s `fog_sun_shadows`): the sun's in-scattering only
+  where the fog's air is in sunlight, walked along each ray through the sun's
+  shadow map at half the view's size and added once a pixel after the main
+  pass. Fog in shade no longer veils it, and light shafts show where shadows
+  cross the air. The Bistro's daytime views: fine detail from 85% of Godot's
+  to 91% on average. About 0.45 ms at 2404 x 1352; needs a float picture (HDR
+  or TAA) and SDL_GPU.
+- Add specular anti-aliasing for 3D materials (`Scene3D::specular_aa`, 0 to 1,
+  off by default, Godot's 0.25; authored as `SceneEnvironment3D`'s
+  `specular_aa`), on SDL_GPU and WebGL2: the roughness is raised where the
+  normal turns within a pixel, so a glossy highlight thinner than a pixel (a
+  door's bevels) no longer glints from frame to frame, which TAA in motion
+  showed as bright lines.
+- Steady TAA on detail finer than a pixel: still pixels (moving under half a
+  pixel a frame) keep more of their history (`TemporalAA3D::still_blend`, 0.96
+  by default, never below `blend`; authored as `SceneEnvironment3D`'s
+  `taa_still_blend`) with a clip box by the spread of the colours round them,
+  and the sharpening keeps off edges the depth showed in any of the last eight
+  frames, not only this one (a thin thing comes and goes in one frame's depth
+  with the jitter). Such detail (print, a railing's bars) shimmered with the
+  jitter's period. The Bistro's start view at 2404 x 1352: pixels changing by
+  more than 16 levels a frame from 5,566 to 537, and a little sharper.
+- Add 3D global illumination (`Scene3D::global_illumination`, off by default;
+  `RendererCapabilities3D::global_illumination`; authored as
+  `SceneEnvironment3D`'s `gi_*` keys): the scene in voxels with a distance field
+  (every opaque and cut-out copy in its area, skinned ones in their pose; no gap
+  through a wall of no thickness; the same voxels to the byte each time), each
+  surface voxel lit by the sun, the fill, the point and spot lights through rays
+  walked through it, and probes traced through it (`GiProbes3D`, DDGI) that light
+  the picture: the sky's light only where they see it, bounced light and
+  emission, none through walls, and reflections dimmed where the sky is hidden.
+  Sponza against Cycles: from 50 levels off on average to 7.
+  `RenderDebugOptions3D::gi_view` shows the voxels and `Renderer3D::read_gi_scene`
+  reads them back. The voxels are in `levels` windows round the camera
+  (`side` x `height` x `side` each, every level's voxels twice the last's; one
+  fixed over an area it holds), made again only where something changed or a
+  window moved, to the byte as if built afresh; the probes' light is read once a
+  pixel at half the view's size after the depth pre-pass (which global
+  illumination turns on); what keeps moving is made every fourth render. The
+  Bistro at 2844 x 1600: about 1.6 ms of GPU a render (2.35 throttled).
+- Add anisotropic filtering of 3D materials' mipmapped textures
+  (`Scene3D::anisotropy`, 1 to 16, off by default; authored as
+  `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with
+  `EXT_texture_filter_anisotropic`; `RendererCapabilities3D::max_anisotropy`
+  says how far it goes.
+- Add a texture mip bias for 3D materials (`Scene3D::texture_lod_bias`, -2 to
+  2, `RendererCapabilities3D::texture_lod_bias`; authored as
+  `SceneEnvironment3D`'s `texture_lod_bias`): with TAA, sharper textures
+  without sharpening edges.
+- Keep TAA's sharpening (`TemporalAA3D::sharpness`) within surfaces: where the
+  depth bends (a silhouette, a crease) it no longer pushes an anti-aliased
+  outline's blended pixels back into steps.
+- Read 3D normal maps of two channels (BC5, or any whose blue reads 0) as x and
+  y with z rebuilt; they were lit from behind (z read as -1). Maps of three
+  channels are read as before.
+- Keep temporal anti-aliasing on moving edges: the resolve reprojects by the
+  nearest surface's velocity round each pixel (from the main pass's depth) and
+  trusts a history read between pixels more. An edge moving a tenth of a pixel
+  a frame (a character at rest) was 2.3 times as far from a 16-sample picture as
+  a still one, and at a whole pixel 8 times; now both are within a quarter.
+- Bind assets that components name by path in 2D scenes (`Assets2D`, run by
+  `EcsScene`): textures, sprite catalogs, sounds and audio catalogs, and
+  particle catalogs, read again when their files change. Particle emitters
+  burst an authored effect at a rate where their entity is.
+- Describe 2D physics and particle components to scene files and tools, with
+  `choices` for string fields and nested-member fields. Add
+  `PhysicsWorldDef::units_per_meter` for worlds in points. Give prefab
+  instances physics bodies of their own, and remove `EcsPhysicsBridge`'s
+  observers with it (they could reach a destroyed `PhysicsWorld`).
+- Add hex tilemaps (`TileMap::grid`: pointy- or flat-top hexagons in offset
+  cells), drawn, picked, collided, filled and pathed by their hexagons; tileset
+  files (`.kintileset`) that maps name to share, their tiles cut from an image
+  (`TileDefinition::frame`); `TilemapComponent`, bound by `Assets2D` and drawn
+  by `WorldRenderState` where its entity is (`TilemapRenderOptions::origin`).
+- Add sprite animations to sprite catalogs (`animation` lines: frames, frames
+  a second, loop, once or ping-pong, frames held longer), played on an entity
+  by `SpriteAnimator` (`update_sprite_animators`), described to scene files.
+  Add `parse_sprite_catalog`, `serialize_sprite_catalog` and removing from a
+  catalog. `entry_of` may name another component's asset (`SpriteRenderer.asset`).
+- Add scene cameras (`CameraComponent`: zoom, limits, smoothing), drawn
+  through by `EcsScene` (`scene_cameras`, `view_size`; `scene_camera`,
+  `update_cameras`). Describe `ShapeRenderer` (shapes made from a `ShapeSpec`
+  or an SVG file by `Assets2D`), `ClipGroup` (its clip made from a shape) and
+  the new `TextRenderer` (text in the world, in a content font or the system's)
+  to scene files. Add `AssetType::Shape` (`.svg`).
+- Add blend spaces (`blendspace` blocks: animations mixed by a float
+  parameter, kept in step), played by states and `set_base`, and transition
+  blends (`blend` seconds: the state left fades into the next;
+  `AnimationPlayer::fading`).
+- Let an `Animator` run a state machine of its file (`machine`, its `params`
+  set by the game, its `state` told). Add the `finished` condition (a state's
+  animation has played through) and `place` lines (where editors draw states).
+  An any-state transition into the state already running no longer restarts
+  it every step. `.kinanim` files keep a `step` easing (it was written as
+  linear).
+- Add `Animator`, which plays an animation of a `.kinanim` file on an entity
+  from scene files (`update_animators`; `Assets2D` reads the file), its tracks
+  setting any described field (`register_described_properties`,
+  `EcsComponentRegistry::field_access`); instances of prefabs animate their own
+  copies.
+- Give particle effects a direction and spread, an emission shape (point,
+  circle, box), drag, rotation and spin, and a size and colour midway through
+  their lives, written as optional `name=value` settings so older catalogs
+  read unchanged. Add `parse_particle_catalog`, `serialize_particle_catalog`,
+  and `ParticleCatalog::remove_effect`/`remove_field`.
+- Write f32 field values in their shortest form (`0.2`, not `0.20000000298`).
+- Add `input.drop` to the scene server and `App::hold_close` for editors.
+- Add game controller bindings (`pad` lines, `PadControl`: buttons, the d-pad,
+  sticks and triggers pushed past halfway) and axes (`InputAxis`, `axis`
+  lines: bindings for -1 and 1, analog sticks, a dead zone;
+  `Input::axis`) to input maps, read by `parse_input_map` and written by
+  `serialize_input_map`. `App::open_gamepads` polls a controller with the
+  window's events. `binding_held` and `axis_value` let editors try bindings
+  that are not in the map.
+- Rich text (`parse_advanced_text`, the dialogue element) reads `[b]` and
+  `[i]`: in `AdvancedTextMarkupOptions::bold_font` and `italic_font` when
+  given. Before, they showed as text, and a dialogue's line was cut short by
+  their length while it was revealed.
+- Add game icons and project info to games' builds:
+  - `GameInfo::icon` (`icon <png>` in a game info file) and
+    `WindowedAppConfig::icon` set the window's icon; `window_config(info,
+    content)` fills it in. `Window::set_icon` takes an `Image`.
+  - `kin_game(... INFO project.kin)` takes the title, version and icon from a
+    game info file, and uses `<icon>.ico` in the content as the Windows icon.
+  - `kin_game` defines `KIN_GAME_TITLE`, `KIN_GAME_VERSION` and
+    `KIN_GAME_ICON` for the game's code.
+- Translate UI screens and scene text without code:
+  - A `.kinui` label, button or toggle with an id, and no `key` of its own, is
+    translated under `ui.<screen>.<id>` (a text field's hint under
+    `ui.<screen>.<id>.hint`) when the active localization has that key.
+    `screen_name`, `screen_text_key` and `screen_language_file` give the
+    names and a file to start from.
+  - A scene's `TextRenderer` is translated under `scene.<scene>.<entity>`, or
+    its own `key`. `shown_text` and `scene_text_key` give the text and key.
+  - Lua's `l10n` table gets `set_locale()` in scene scripts too.
+- Add dialogue in scenes:
+  - `SceneDialogue` runs one dialogue at a time. It reveals text letter by
+    letter, keeps the game's variables between dialogues, reports events, and
+    saves with snapshots.
+  - `TalkComponent` and `Talker`, with `update_talk`, start a dialogue when
+    the talk action is pressed nearby.
+  - A `dialogue` element in UI screens shows the running dialogue and passes
+    on clicks.
+  - Lua scripts get a `dialogue` table and `on_dialogue_event`.
+  - `.kindialogue` files keep node places, speaker colours and line tags,
+    and list the nodes a game also starts at (`entries`).
+  - Add `dialogue_problems` and `dialogue_targets`.
+- Add UI screens as data: `.kinui` files are trees of boxes, panels, labels,
+  buttons, images, bars, toggles, sliders, text fields and spacers, with sizes,
+  anchors and a theme.
+  - `ui2::UiScreen` draws one, sets elements by id and reports clicks and
+    values.
+  - A `UiScreenComponent` shows a screen in a scene.
+  - `SceneScreens` reads screens and themes and reloads them when they change;
+    entity scripts reach them through `ui`.
+  - Add `AssetType::UiScreen` and `AssetType::UiTheme`.
+- Let `.kintheme` files name a font file (`font`, `bold_font`, `font_size`)
+  and image skins (`image <path> [margin] [x y w h]`), read by
+  `ThemeFile::build`. Add the theme name lists for tools.
+- Add lights to scenes: `LightComponent` lights from its entity, and
+  `SceneLighting` (the ambient colour) makes `EcsScene` light the world, while
+  the UI layer and above stay unlit. Add `scene_lights` and
+  `apply_scene_lighting`.
+- Add `ColorGrade`: a scene's exposure, tonemapping, look (a `.cube` file or a
+  LUT image) and dithering, set as the colour output.
+- Add `Renderer2D::draw_color_output` and `LayerOptions::grade` for graded
+  previews.
+- Add a `blend` field to sprites, textures, rects, shapes and particles
+  (`blend_material`; the renderer applies a material's blend mode).
+- Add `ShaderEffect`: a fragment shader of the content drawn over a box at its
+  entity, with its uniforms set by name from `params`.
+  - `time` and `size` are set by kin.
+  - `Assets2D::shader` compiles the shader with glslc, or loads the `.spv`
+    beside it, and reloads it in place when it changes.
+  - Add `AssetType::Shader` and `AssetType::ColorLut`.
+- Add scripts on entities: `ScriptComponent` names a Lua file, which
+  `EntityScripts` runs with `on_start`, `on_update` and `on_contact`. `self`
+  reaches the entity's components, transform, `Animator`, input actions and
+  axes; scripts can find, spawn and destroy entities. Changed script files are
+  read again while the game runs. Add `check_lua_syntax`.
+
 - Add experimental Emscripten/WebGL2 exports for Hex and Summit, with itch.io
   ZIP packaging, bundled assets/fonts/licenses, browser audio, pointer lock,
   fullscreen and persistent settings with a storage-denied fallback.
@@ -48,11 +922,51 @@ releases may change APIs.
   children's parent paths with the dot escaped (`gem\.<id>`), which no JSON
   reader takes. That backslash is now escaped too, so the path reads back as
   flecs wrote it.
+- Every instance of a prefab draws. Where instances inherit the prefab's renderer (rects, sprites, text,
+  particles, textured renderers), only the first instance in each table was drawn, and the others read past the
+  shared value.
 
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle
   and custom material shaders through the velocity pre-pass. Keep particle-shadow
   history stable across views, and restore Windows compilation of Summit, the
   renderer tests and the reference tool.
+
+- A game run with `--inspect` writes its answers on a thread of its own, so a
+  tool slow to read a large one (a world's snapshot, 219 KB in Lantern Vale)
+  no longer holds the game: watched by the studio, it lost a frame of up to
+  150 ms to each snapshot (31 in 8 s) and now loses none. Its own prints to
+  stdout still never land inside an answer.
+- The SDL_Renderer backend updates textures in place (`update_texture`,
+  `write_texture`): it returned false, and callers made the whole texture
+  again. Draws queued before an update show what the texture held.
+- ui2 text: a DEL byte (0x7F) in otherwise plain text read and wrote past the
+  ASCII kerning table (a heap overflow); it is a control character now, as the
+  others. Shaped runs drawn with distance-field fonts kept pointers into a
+  cache that drawing the next run could move (a use after free).
+- ui2: a double click, a tooltip's delay and a caret's blinking are timed in
+  seconds, not frames (a window that waits for events draws few frames: two
+  clicks seconds apart counted as a double click). A widget hidden by the clips
+  it draws under (a field scrolled out of its panel) is no longer hit there.
+  Tab goes through boxes and text fields in layout order (fields came after
+  every box). The wheel scrolls the box under what is on top, not one under a
+  dialog or a menu. A virtualized list builds the rows for this frame's scroll
+  offset (a thumb dragged, `set_scroll_offset`, `scroll_to_row`), not last
+  frame's (rows were blank for a frame). Enter or Esc leaves a text field and
+  its focus (it took the keys back the next frame). A widget's `state` the app
+  changes after declaring the widget that frame is kept, not undone by the
+  widget's run.
+- ui2: a box that was hovered last frame under a box no longer there was not
+  hovered (a drop target, right after the pointer moved). `MenuBar` no longer
+  highlights a title while idle, and switches an open menu only when the
+  pointer moves onto another title (one resting there took over the menu the
+  keys opened). A virtualized `ListView` scrolls to keep its selection in view
+  only when the keys moved it.
+- ui2: a `TextInput`, `NumberInput` or `TextEdit` being typed in keeps its
+  focused frame under the pointer (it showed the hover colour instead); other
+  controls show the focused frame for the keys' focus only.
+- `rasterize_svg` refuses text without an `<svg>` element before SDL_image
+  parses it, as SDL_image does for files: SDL_image does not free a parse that
+  comes out empty (16 bytes lost per call).
 
 - Bound navmesh boundary-rejection diagnostics to eight face examples plus one
   count/bounds summary per build, including when refinement rejects many faces.
@@ -266,6 +1180,45 @@ releases may change APIs.
 
 ### Changed
 
+- `LuaScriptOptions::instruction_limit` is `LuaScriptOptions::limits.instruction_limit`: a `LuaRuntimeLimits`, which
+  holds the memory limit too and is what every Lua host uses.
+
+- `kin/ui2/widgets.hpp`'s editor widgets (docks, splitters, breadcrumbs, the
+  asset browser, log console, status bar, property inspectors and grids, node
+  graphs) are declared in `kin/ui2/editor.hpp`, and its game screen widgets
+  (prompts, dialogue, nameplates, the reticle and selection rectangle, resource
+  rows, bars and meters, slots, floating text) in `kin/ui2/hud.hpp`.
+  `widgets.hpp` includes both, so code that includes it is unchanged.
+- ui2 timing in seconds: `Context::now()` (the steady clock, or one given to
+  `set_clock`, read at `begin()`), `TooltipOptions::delay`/`warm` (were
+  `delay_frames`/`warm_frames`), `UiTextEditState::last_click_time` and
+  `caret_time`, `State::register_click(id, pos, now)`.
+  `Context::request_redraw(seconds)` keeps the soonest asked and `apply()`
+  passes it on (`redraw_in()`): a focused editor asks for the frame its caret
+  blinks, not every frame.
+- ui2 allocates far less per frame (a studio frame: 6,600 heap allocations to
+  1,500): `SurfaceStyle::shader_params` is a `shared_ptr<const ShaderParams>`
+  (every surface allocated its 16 floats, and a `BoxStyle` holds one a state), the
+  layout nodes' child lists are kept from frame to frame, and what
+  `end_layout()` runs for each node is kept in reused blocks, not a
+  `std::function` each.
+- ui2 keys go only to the focused widget: `ListView`, `TreeView`, `IconGrid`,
+  `TabBar`, `MenuBar` and `NodeGraph` take them while they have focus (a click
+  or Tab gives it; `keys_without_focus` for the old way), `MenuList` and
+  `DialogueView` also while nothing else has focus. The focus ring shows for
+  the keys' focus only, not a click's (`Interaction::quiet_focus`,
+  `State::focus_visible()`).
+- `NumberInput` shows its value until typed in, commits on Enter or leaving,
+  goes back on Esc, steps with Up and Down, and outlines what is not a number
+  in range (`invalid`). Its range defaults to every float (was 0 to 1).
+  `PropertyInspector`'s text rows commit on leaving and go back on Esc.
+- `SvgOptions::oversample` defaults to 0: the renderer's content scale (was 1,
+  blurred icons on high-density displays unless given).
+- `TextStyle::inherit` and `WidgetStyle::inherit` (default true): false keeps a
+  style as given, its default values too, instead of filling them from the
+  theme. Widgets are measured in their themed styles, as they are drawn.
+- `TooltipOptions` tooltips are drawn after layout, over everything.
+
 - Separate mesh temporal `history_id` from picking `id`; assign generation- and
   pooled-lease-aware identities during ECS collection and distinct model-part IDs.
   Zero history IDs preserve direct callers' existing matching behavior.
@@ -374,6 +1327,72 @@ releases may change APIs.
     `kin_render3d_bench` (batch edits, wind) and `kin_physics3d_bench ecs` are added.
 
 ### Added
+
+- `kin/ui2/charts.hpp`: `Plot` (series as lines, areas, grouped bars or points
+  on fitted or given axes, linear or log; the wheel zooms x around the pointer,
+  a drag pans, a double click shows all of it; a readout of every series at
+  the nearest sample, or a bar's value on the bar; a legend for two or more
+  named series; lines of more samples than pixels drawn as each column's
+  lowest and highest), `Sparkline`, and `HeatmapImage` with `Heatmap` (a grid
+  of values as colours in a texture updated where it changed; `push_column()`
+  scrolls it, for a spectrogram). Zoomed in on the newest samples of data that
+  grows, a plot moves on with them. Series take `chart_color()`, eight colours
+  in an order checked for colour-blind readers; `map_color()` has Magma,
+  Viridis and Gray. `games/charts_demo` shows them, with a dial.
+- A game run with `--inspect` records each frame's update, render and present
+  times and the interval since the frame before, and answers `frame.timing`
+  (it was refused); `frame.timing {since}` lists each frame after `since`
+  (`history`), for a profiler to plot. `ServerContext::FrameTiming` has
+  `present_ms`, `interval_ms` and `frame`; `record_frame_timing()` keeps one.
+- `kin/ui2/scale.hpp`: `Scale` (linear or log), `ticks()` (round values to mark,
+  labelled), `tick_label()` ("10k", "1 kHz", "40 ms") and `nice_scale()`.
+- ui2 draws anti-aliased shapes through the Context (`line()` with a width,
+  `polyline`, `fill_polygon`, `fill_circle`, `outline_circle`, `arc`,
+  `fill_pie`, `fill_path`, `stroke_path`, `shape()` for a `ShapeMesh`),
+  checked against draw scopes and recorded (`DrawOp::Kind::Shape`,
+  `Context::draw_ops()`) as the rest. `Context::drag_value()` changes a value by
+  a drag (Shift: finely), the wheel, the arrows and a double click (to a reset
+  value), along a linear or log `Scale`: what a dial or fader is built on.
+  `take_wheel(id)` keeps the wheel from the scroll boxes under a widget that
+  reads it; `double_click(id)` makes any region's clicks double clicks.
+- ui2 boxes with tooltips, drags and drops, drawn in an overlay pass after
+  layout (`Context::overlay`): `BoxStyle::tooltip(text)`,
+  `draggable(type, text, value)` and `accepts_drop(type)` (`BoxResult::drag_started`,
+  `dragging`, `drop_hovered`, `dropped`, the payload in `drag_payload()`).
+  `Context::popup(id, style, PopupPlace)` is a box that opens under an anchor
+  or at a point (`open_popup_at`), closes on a press outside it and its opener,
+  or Esc while on top (`popup_on_top`). `set_tooltip_style` sets every
+  tooltip's look.
+- ui2 value fields: `Context::value_field(id, shown, options, valid)` shows a
+  value until it is typed in, commits on Enter or leaving
+  (`ValueFieldResult::committed`), goes back to the value on Esc (a `live`
+  field commits the value from before the typing again), and outlines what
+  does not validate; `number_field` for numbers in a range (`number_text`,
+  `parse_number`), `edit_value(id)` to start typing in one (a rename),
+  `stop_value_fields()`.
+- ui2 focus traps: `BoxStyle::focus_trap()` keeps Tab and the focus inside a
+  dialog while it is open.
+- ui2 scrolling: `Context::scroll_into_view(id)` (a box, or a widget by the box
+  around it), `ScrollBoxOptions::stick_to_end` (a log follows its last lines
+  while it is at its end), PageUp, PageDown, Home and End in the scroll box
+  the focus is in, else the one under the pointer.
+- ui2 ids from text and paths: `make_id(label, part)` for a part named by text
+  or a number, `make_id(parent, path)` (`make_path_id`) for a file's.
+- `kin/ui2/composed.hpp`: widgets built from boxes, in the look of
+  `ComposedLook` (the theme's colours by default): `menu_bar` (Alt and a
+  title's letter, the arrows, submenus, keys shown), `pick_list` (a searchable
+  list under an anchor; with `free_text`, Enter takes what is typed when
+  nothing matches) and
+  `breadcrumbs`.
+- `Context::measured(widget)`, a widget's size in its themed styles;
+  `theme_styles(theme, widget)` gives a widget its theme's styles where it
+  inherits them; `layout_root()`, `typing()`.
+- ui2 text: Left, Right, Backspace and Delete step over whole graphemes
+  (`utf8_next_grapheme`, `utf8_prev_grapheme`: combining marks, emoji with
+  modifiers and joiners, flags, CR LF). Segoe UI Emoji is a fallback font on
+  Windows. A full bitmap glyph atlas starts over with the text being drawn
+  instead of leaving its new glyphs out; `TtfFontOptions::atlas_pages` caps
+  its pages.
 
 - Tested `kin-gltf/1` export profile with CPU/GPU asset acceptance regressions.
   Reject distinct skin palettes, oversized/unsupported skins, morphs, mixed poses
@@ -1997,3 +3016,16 @@ First public release.
 [0.2.1]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AmedeoBiolatti/kin/releases/tag/v0.1.0
+
+### Rendering foundations
+
+- Add an explicit tracked-mutation mode with dirty hierarchy updates, retained static mesh/model extraction, particle
+  validation revisions and CPU work counters. Keep raw mutable access compatible by default, and publish native
+  physics/root-motion and asset binding changes. Protect deferred observer callbacks during state destruction.
+- Account for Kin-owned SDL_GPU texture, buffer and transfer payload, idle texture pools, peaks and allocation events.
+  Guard buffers that outlive their device, as textures already do.
+- Compile public resource graphs with validation, cached schedules, lifetime slots, payload admission limits and
+  transactional resource binding. Add a GPU ASCII example with Release runtime checks and HDR support.
+- Schedule the native stock renderer's coarse phases with the same compiler and expose fixed-order parity checks.
+  Add reproducible quality-candidate captures, requested/effective settings and independently seeded Cycles references.
+  Quality candidates do not change engine defaults.

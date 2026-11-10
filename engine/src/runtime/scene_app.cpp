@@ -1,4 +1,6 @@
+#include <kin/platform/window.hpp>
 #include <kin/runtime/scene_app.hpp>
+#include "eval_telemetry.hpp"
 #ifdef KIN_EXPERIMENTAL_3D
 #include <kin/render3d/renderer3d.hpp>
 #endif
@@ -51,12 +53,7 @@ bool parse_i32(std::string_view text, i32& value) {
     return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
-bool parse_u64(std::string_view text, u64& value) {
-    const char* begin = text.data();
-    const char* end = begin + text.size();
-    const auto parsed = std::from_chars(begin, end, value);
-    return parsed.ec == std::errc{} && parsed.ptr == end;
-}
+using runtime_detail::parse_u64;
 
 void write_run_report(std::ostream& out,
                       const RunReport& report,
@@ -137,9 +134,10 @@ void configure_runtime_logging(const HeadlessOptions& options, const GameInfo* g
     if (!options.log_path.empty()) {
         config.file_path = options.log_path;
     }
-#ifdef KIN_SHIPPING
+#if defined(KIN_SHIPPING) && !defined(__EMSCRIPTEN__)
     // Players have no console: this run's log, and the one before, go with the
-    // game's saves, where a bug report can find them.
+    // game's saves, where a bug report can find them. (A browser has one; its
+    // storage keeps saves only.)
     if (config.file_path.empty() && game && !game->id.empty()) {
         const std::filesystem::path dir = user_data_dir(game->id);
         std::error_code error;
@@ -165,6 +163,47 @@ void configure_runtime_logging(const HeadlessOptions& options, const GameInfo* g
 
 } // namespace
 
+namespace {
+
+// Whether a run must not depend on the machine it runs on (headless, server and
+// determinism runs): offline services in memory, the base language.
+bool scene_app_machine_independent(const HeadlessOptions& headless) {
+    return headless.enabled || headless.list_actions || headless.profile_render || headless.server ||
+           headless.check_determinism || headless.state_lockstep || headless.print_game_info;
+}
+
+} // namespace
+
+ServicesConfig scene_app_services_config(const SceneAppConfig& config) {
+    // Without a config, the game info's: its id and Steam app id.
+    ServicesConfig wanted = config.services_config.value_or(ServicesConfig{});
+    if (config.game) {
+        if (wanted.game_id.empty()) {
+            wanted.game_id = config.game->id;
+        }
+        if (!config.services_config) {
+            wanted.steam_app_id = config.game->steam_app_id;
+        }
+    }
+    if (wanted.args.empty()) {
+        wanted.args = config.headless.args;
+    }
+    if (scene_app_machine_independent(config.headless)) {
+        wanted.offline_only = true;
+        wanted.offline_in_memory = true;
+    }
+    // Asked for on the command line: offline, kept or not.
+    if (config.headless.services == "offline" || config.headless.services == "memory") {
+        wanted.offline_only = true;
+        wanted.offline_in_memory = wanted.offline_in_memory || config.headless.services == "memory";
+    } else if (!config.headless.services.empty()) {
+        KIN_LOG_WARN_F("services", "unknown --services, the game's are used",
+                       (LogFields{{.name = "services", .value = config.headless.services},
+                                  {.name = "known", .value = "offline, memory"}}));
+    }
+    return wanted;
+}
+
 HeadlessOptions parse_headless_options(int argc, char** argv) {
     HeadlessOptions options;
     bool invalid_log_option = false;
@@ -174,6 +213,14 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
         const std::string_view arg = argv[i];
         if (arg == "--headless") {
             options.enabled = true;
+        } else if (arg == "--dev") {
+            options.development = true;
+        } else if (arg.starts_with("--automation-record=")) {
+            options.automation_record_path = arg.substr(20);
+            options.server = true;
+        } else if (arg == "--automation-record" && i + 1 < argc) {
+            options.automation_record_path = argv[++i];
+            options.server = true;
         } else if (arg == "--render") {
             options.render = true;
         } else if (arg == "--list-actions") {
@@ -273,6 +320,10 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             options.fail_on_text_overflow = true;
         } else if (arg == "--server") {
             options.server = true;
+        } else if (arg == "--inspect") {
+            options.inspect = true;
+        } else if (arg.starts_with("--services=")) {
+            options.services = arg.substr(11);
         } else if (arg.starts_with("--server-mode=")) {
             options.server = true;
             options.server_mode = arg.substr(14);
@@ -418,6 +469,20 @@ struct SceneAppSession::Impl {
                 set_active_localization(prior);
         }
     } localization_reset;
+    // The platform's services (started here from services_config, or the game's).
+    std::unique_ptr<PlatformServices> owned_services;
+    std::unique_ptr<PlatformServices> catalog_wrapper; // over them, by the game's ids (gone first)
+    PlatformServices* services = nullptr;
+    struct ServicesReset {
+        PlatformServices* prior = active_services();
+        PlatformServices* installed = nullptr;
+        ~ServicesReset() {
+            if (installed && active_services() == installed)
+                set_active_services(prior);
+        }
+    } services_reset;
+    bool services_pumped = false; // this frame's services->update() ran
+    bool keyboard_shown = false;  // the platform's on-screen keyboard, for the window's text input
     std::optional<GameInfo> game;
     std::string title;
     std::unique_ptr<SceneManager> owned_scenes;
@@ -467,6 +532,9 @@ struct SceneAppSession::Impl {
     bool want_report = false;
     std::string report_snapshot;
     i32 frames_run = 0;
+    detail::EvalTelemetry eval_telemetry;
+    i64 eval_frame = 0;
+    std::chrono::steady_clock::time_point eval_previous{};
     bool log_frame_stats = false;
     i32 logged_frames = 0;
     i32 windowed_frame_limit = 0;
@@ -485,6 +553,11 @@ struct SceneAppSession::Impl {
     i32 frame_update_steps = 0;
     std::function<void(FrameContext&)> prepare_frame;
     std::function<SceneContext(FrameContext&)> make_scene_context;
+#if KIN_ENABLE_SCENE_SERVER
+    // --inspect: the tool's requests, answered between frames.
+    std::unique_ptr<LiveInspector> inspector;
+    std::unique_ptr<ServerContext> inspector_context;
+#endif
     bool finished = false;
     int result = 0;
     // Destroy the driver first, while every field its shutdown needs still lives.
@@ -504,6 +577,10 @@ struct SceneAppSession::Impl {
         if (config.game) {
             game.emplace(*config.game);
             config.game = &*game;
+            // Input profiles and other per-game files go under its id.
+            if (!game->id.empty()) {
+                set_user_data_game_id(game->id);
+            }
         }
         if (const auto code = dispatch()) {
             result = *code;
@@ -521,6 +598,63 @@ struct SceneAppSession::Impl {
             KIN_LOG_ERROR("runtime", "scene session shutdown failed");
         }
     }
+    // Starts SceneAppConfig::services_config (offline and in memory for runs
+    // that must not depend on the machine), or takes the game's services.
+    // A value: the run is over (the platform starts the game again).
+    std::optional<int> start_services() {
+        const bool machine_independent = scene_app_machine_independent(config.headless);
+        services = config.services;
+        if (!services) {
+            const ServicesConfig wanted = scene_app_services_config(config);
+            ServicesStart started = ServicesStart::Offline;
+            owned_services = start_platform_services(wanted, &started);
+            if (started == ServicesStart::Restarting) {
+                return 0;
+            }
+            services = owned_services.get();
+        }
+        if (!services) {
+            return std::nullopt;
+        }
+        if (config.services_catalog) {
+            catalog_wrapper = catalog_services(*services, *config.services_catalog);
+            services = catalog_wrapper.get();
+        }
+        set_active_services(services);
+        services_reset.installed = services;
+        if (config.localization && config.platform_language && config.headless.locale.empty() &&
+            !machine_independent) {
+            if (const std::string language = services->language(); !language.empty()) {
+                std::vector<std::string> available;
+                for (const LanguageInfo& info : config.localization->languages()) {
+                    available.push_back(info.locale);
+                }
+                const std::vector<std::string> wanted{language};
+                if (const std::string match = match_locale(wanted, available); !match.empty()) {
+                    config.localization->set_locale(match);
+                    KIN_LOG_INFO_F("runtime", "platform language",
+                                   (LogFields{{.name = "language", .value = language},
+                                              {.name = "locale", .value = config.localization->locale()}}));
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    // The platform's on-screen keyboard follows the window's text input.
+    void follow_text_input(Window& window) {
+        if (!services || !config.platform_keyboard) {
+            return;
+        }
+        const bool typing = window.text_input_enabled();
+        if (typing && !keyboard_shown && services->handheld()) {
+            keyboard_shown = services->show_keyboard(KeyboardMode::SingleLine, window.text_input_area());
+        } else if (!typing && keyboard_shown) {
+            services->hide_keyboard();
+            keyboard_shown = false;
+        }
+    }
+
     std::optional<int> dispatch() {
 
         configure_runtime_logging(config.headless, config.game);
@@ -580,6 +714,10 @@ struct SceneAppSession::Impl {
             KIN_LOG_INFO_F("runtime", "locale", (LogFields{{.name = "locale", .value = l10n.locale()}}));
         }
 
+        if (const std::optional<int> code = start_services()) {
+            return code;
+        }
+
         if (config.headless.check_determinism && !config.headless.state_lockstep) {
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
             return runtime_detail::run_determinism_check(config);
@@ -606,6 +744,8 @@ struct SceneAppSession::Impl {
                 .reset_scenes = config.reset_scenes,
                 .asset_server = config.asset_server,
                 .rendering_3d = config.rendering_3d,
+                .automation_record_path = config.headless.automation_record_path,
+                .development = config.headless.development,
             };
             return run_scene_server(server, scenes);
 #endif
@@ -675,6 +815,23 @@ struct SceneAppSession::Impl {
                                     ? config.headless.frames
                                     : ((config.headless.profile_render || config.headless.profile) ? 600 : 1);
         }
+        if (config.headless.inspect) {
+#if KIN_ENABLE_SCENE_SERVER
+            if (window.mode == AppMode::Headless) {
+                KIN_LOG_WARN("runtime", "--inspect watches a game in its window; a headless run ignores it");
+            } else {
+                inspector = std::make_unique<LiveInspector>(std::cin, std::cout);
+            }
+#else
+            KIN_LOG_WARN("runtime", "--inspect requested, but this build has no scene server (KIN_ENABLE_SCENE_SERVER)");
+#endif
+        }
+#if !KIN_ENABLE_DEVELOPMENT
+        if (config.headless.development) {
+            KIN_LOG_WARN("runtime",
+                         "--dev requested, but this build has no development sessions (KIN_ENABLE_DEVELOPMENT)");
+        }
+#endif
 
 #if KIN_ENABLE_RUNTIME_PROFILING
 
@@ -837,6 +994,8 @@ struct SceneAppSession::Impl {
                 .rng = root_key,
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
+                .services = services,
+                .development = config.headless.development,
             };
             try {
                 scenes.shutdown(shutdown_ctx);
@@ -860,6 +1019,7 @@ struct SceneAppSession::Impl {
             }
             frame_start = std::chrono::steady_clock::now();
             frame_prepared = true;
+            services_pumped = false;
             frame_update_total_ms = 0.0;
             frame_update_steps = 0;
             debug_overlay.begin_frame();
@@ -914,7 +1074,18 @@ struct SceneAppSession::Impl {
                 .rng = root_key,
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
+                .services = services,
+                .development = config.headless.development,
             };
+        };
+        // The system's app events (phones: background, foreground, low memory)
+        // go to the game's own handler, if it gave one, then to every scene.
+        window.app_event = [this, user = std::move(window.app_event)](FrameContext& ctx, AppEvent event) {
+            if (user) {
+                user(ctx, event);
+            }
+            kin::SceneContext scene_ctx = make_scene_context(ctx);
+            scenes.app_event(scene_ctx, event);
         };
 
         driver = std::make_unique<WindowedAppSession>(
@@ -937,6 +1108,10 @@ struct SceneAppSession::Impl {
 #endif
 
                 kin::SceneContext scene_ctx = make_scene_context(ctx);
+                if (scene_ctx.development) {
+                    runtime_detail::advance_development(scenes, static_cast<u64>(frames_run),
+                                                        window.mode != AppMode::Headless);
+                }
                 sync_ui_direction();
 #if KIN_ENABLE_RUNTIME_ASSETS
                 runtime_detail::pump_scene_assets(config.asset_server, window.mode != AppMode::Headless);
@@ -944,8 +1119,21 @@ struct SceneAppSession::Impl {
                     config.file_watcher->poll();
                 }
 #endif
+#if KIN_ENABLE_SCENE_SERVER
+                if (inspector && !inspector->admit_update()) {
+                    return; // held by the tool (sim.pause); it still draws
+                }
+#endif
+                // Once a frame, on its first step: the frame's events last
+                // through all its steps, and a frame without steps keeps them
+                // for the next.
+                if (services && !services_pumped) {
+                    services_pumped = true;
+                    services->update();
+                }
                 const auto update_start = std::chrono::steady_clock::now();
                 scenes.update(scene_ctx);
+                follow_text_input(ctx.window);
                 const f64 update_ms = ms_since(update_start);
                 frame_update_total_ms += update_ms;
                 ++frame_update_steps;
@@ -984,6 +1172,21 @@ struct SceneAppSession::Impl {
             },
             [this](FrameContext& ctx) {
                 prepare_frame(ctx);
+#if KIN_ENABLE_SCENE_SERVER
+                if (inspector) {
+                    if (!inspector_context) {
+                        inspector_context = std::make_unique<ServerContext>(
+                            ctx.app, ctx.window, ctx.renderer, scenes, window, root_key,
+                            window.fixed_dt > 0.0f ? window.fixed_dt : default_fixed_dt, false,
+                            config.asset_server, scene_renderer3d);
+                    }
+                    inspector_context->set_renderer3d(scene_renderer3d); // made after the context, or made again
+                    inspector->poll(*inspector_context, config.game);
+                    if (ctx.app.waits_for_events() && !inspector->finished()) {
+                        ctx.app.request_redraw(0.1f); // requests come without events
+                    }
+                }
+#endif
                 kin::SceneContext scene_ctx = make_scene_context(ctx);
                 sync_ui_direction();
                 f64 render_scene_ms = 0.0;
@@ -1021,7 +1224,7 @@ struct SceneAppSession::Impl {
 
                     // GPU frame timing costs a fence and a waiting thread, so only when
                     // someone reads it.
-                    ctx.renderer.set_gpu_timing_enabled(profile_enabled || log_frame_stats ||
+                    ctx.renderer.set_gpu_timing_enabled(profile_enabled || log_frame_stats || bool(eval_telemetry) ||
                                                         config.headless.profile_render || debug_overlay.visible());
                     const auto present_start = std::chrono::steady_clock::now();
                     ctx.renderer.present();
@@ -1068,6 +1271,22 @@ struct SceneAppSession::Impl {
                 const f64 accounted_ms = frame_update_total_ms + render_total_ms;
                 const f64 unaccounted_ms = std::max(0.0, frame_ms - accounted_ms);
                 const AppFrameStats& app_frame = ctx.app.frame_stats();
+                if (eval_telemetry) {
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto interval = eval_previous.time_since_epoch().count()
+                        ? std::chrono::duration<double, std::milli>(now - eval_previous).count() : 0.0;
+                    eval_previous = now;
+                    eval_telemetry.record("main", eval_frame++, interval, frame_ms, frame_update_total_ms,
+                                          render_scene_ms, present_ms, ctx.renderer.backend_stats());
+                }
+#if KIN_ENABLE_SCENE_SERVER
+                if (inspector_context) { // the tool watching it reads these (frame.timing)
+                    inspector_context->record_frame_timing({.update_ms = frame_update_total_ms,
+                                                            .render_ms = render_scene_ms + overlay_ms,
+                                                            .present_ms = present_ms,
+                                                            .interval_ms = static_cast<f64>(app_frame.raw_frame_time) * 1000.0});
+                }
+#endif
                 debug_overlay.record("frame.update_total", frame_update_total_ms);
                 debug_overlay.record("frame.update_steps", static_cast<f64>(frame_update_steps));
                 debug_overlay.record("app.raw_frame", static_cast<f64>(app_frame.raw_frame_time) * 1000.0);

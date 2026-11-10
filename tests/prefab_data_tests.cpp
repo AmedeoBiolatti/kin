@@ -224,6 +224,7 @@ void test_overrides_patch_fields() {
 void test_instantiation_emits_events_and_dirty_state() {
     kin::EcsWorld world;
     register_prefab_components(world);
+    world.events().record(true);
     world.events().clear();
 
     kin::PrefabInstance instance = kin::instantiate_prefab(world, make_hierarchy_prefab(), {}, world.components());

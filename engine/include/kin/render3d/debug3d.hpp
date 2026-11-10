@@ -4,15 +4,49 @@
 
 namespace kin {
 
+// What the view shows of Scene3D::global_illumination's GI scene instead of the picture
+// (RenderDebugOptions3D::gi_view): each pixel traced through its voxels to the first one a surface is in, and that
+// voxel's colour (shaded a little by which way it faces the camera), normal or emission; `Steps` the trace's cost, from
+// blue (a few steps) to red (many); `Radiance` the light leaving the voxel (the lit scene), `Irradiance` the probes'
+// light there (what a white surface facing the camera would show). Off, or with no GI scene, the picture is drawn as
+// ever.
+enum class GiView3D : u8 { Off, Albedo, Normal, Emission, Steps, Radiance, Irradiance };
+// A surface's channel drawn in place of its light (RenderDebugOptions3D::surface_channel: a bake's, as
+// write_scene_snapshot makes them): its base colour (linear); its normal (world, as it is: -1 to 1); its occlusion,
+// roughness and metalness (r, g, b); its emission; its alpha (grey). Each opaque where drawn (a blended or cut-out
+// material's alpha is the Alpha channel's).
+enum class SurfaceChannel3D : u8 { Lit, BaseColor, Normal, OcclusionRoughnessMetallic, Emission, Alpha };
+
 // Explicit diagnostic overrides, separate from visual quality and budgets.
 // Defaults preserve normal rendering and never request a blocking readback.
 // Attach to Scene3D::debug; these are not authored/serialized scene settings.
 struct RenderDebugOptions3D {
-    i32 force_level = -1;          // -1: normal LOD; >=0: force a level/cluster depth
-    bool gpu_culling = true;       // false: compare with the CPU cluster cut
-    bool stats_readback = false;   // waits for GPU cluster counters: profiling only
-    bool gpu_pass_markers = false; // labels for external GPU profilers, no readback
-    bool freeze_jitter = false;    // hold the first TAA jitter sample
+    i32 force_level = -1;                  // -1: normal LOD; >=0: force a level/cluster depth
+    bool gpu_culling = true;               // false: compare with the CPU cluster cut
+    bool stats_readback = false;           // waits for GPU cluster counters: profiling only
+    bool gpu_pass_markers = false;         // labels for external GPU profilers, no readback
+    bool graph_reference = false;          // execute stock phases in fixed reference order for graph parity checks
+    bool retain_scene_instances = true;    // false: stream direct scene draws for CPU/cache parity measurements
+    bool cache_local_shadow_gather = true; // false: rebuild local caster selection and depth batching
+    u32 local_shadow_gather_budget = 4 * 1024 * 1024; // diagnostic CPU payload cap, clamped to 4 MiB
+    bool cache_draw_commands = true;           // false: rebuild main draw decisions/order and issue individual draws
+    u32 draw_command_budget = 4 * 1024 * 1024; // CPU plan and GPU material payload caps, each clamped to 4 MiB
+    bool freeze_jitter = false;                // hold the first TAA jitter sample
+    bool light_grid = true;    // false: every fragment loops over the 16 strongest point and spot lights, as
+                               // before the light grid (to compare with it)
+    bool prepass_depth = true; // false: the main pass clears its depth and draws it all again, instead of starting
+                               // from the pre-pass's (to compare with it)
+    bool gi_sun_map = true;    // false: the GI's voxels take the sun's light by their own march, not its sun map
+    // Fog3D::volumetric: cells behind every surface their pixels (and their neighbours') show are not lit (no ray
+    // reaches them); false lights them all, for comparing (the picture is the same).
+    bool fog_volume_cull = true;
+    GiView3D gi_view = GiView3D::Off;
+    // Bakes (write_scene_snapshot): each lit material draws this channel of its surface instead of its light, and with
+    // `unwrap` each mesh copy is drawn over its UV square (its texture: u right, v down) instead of where the camera
+    // sees it, shaded where it is (its fragments' world places and normals as ever; the surface's own UVs ride in the
+    // vertex colour, 16 bits each over 0 to 1, which the material's uv_scale and uv_offset span: write_scene_snapshot).
+    SurfaceChannel3D surface_channel = SurfaceChannel3D::Lit;
+    bool unwrap = false;
 };
 
 } // namespace kin

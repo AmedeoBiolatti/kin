@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/scene/scene_session3d.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/assets/content.hpp>

@@ -1,0 +1,16 @@
+{
+ "name": "canyon",
+ "purpose": "A shaded street between two warm walls (G5): one wall's face and half the street in the sun, the other face in shade, lit by the sky over the street and by what the sunlit wall and ground bounce, warm. Global illumination's bounce against Cycles where a town's shade gets most of its light.",
+ "models": [{"file": "made/canyon.glb"}],
+ "view": {"samples": 4, "background": [0, 0, 0]},
+ "lights": {
+  "sun": {"direction": [-0.35, 0.9, 0.25], "color": [2.0, 1.8, 1.5]},
+  "ambient": [0.25, 0.32, 0.45],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {"name": "street", "eye": [0.5, 1.7, 30.0], "target": [0.0, 3.0, 0.0], "fov": 60.0},
+  {"name": "shade", "eye": [3.0, 2.0, 2.0], "target": [-4.0, 4.0, 0.0], "fov": 70.0}
+ ],
+ "truth": {"samples": 1024}
+}

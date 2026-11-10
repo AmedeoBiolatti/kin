@@ -17,19 +17,22 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <span>
 #include <vector>
 
 namespace kin {
 
 class Renderer2D;
 
-enum class ShaderStage : u8 { Fragment, Compute };
+enum class ShaderStage : u8 { Fragment, Compute, Vertex };
 
 // Whether glslc can be found (KIN_GLSLC, or the one kin was built with).
 bool shader_compiler_available();
-// SPIR-V for `source`, or nothing, with glslc's messages in `error`.
+// SPIR-V for `source`, or nothing, with glslc's messages in `error`. `defines` (NAME or NAME=VALUE) are glslc's -D;
+// `optimize`, its -O (smaller SPIR-V of the same arithmetic: what cooked material graphs ship).
 std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source, ShaderStage stage,
-                                            std::string* error = nullptr);
+                                            std::string* error = nullptr, std::span<const char* const> defines = {},
+                                            bool optimize = false);
 
 // A fragment shader kept compiled from a GLSL file: poll() recompiles it when
 // the file changes and reloads it in place (the handle stays the same).

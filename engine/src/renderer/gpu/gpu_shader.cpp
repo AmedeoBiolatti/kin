@@ -2,6 +2,7 @@
 #include "embedded_gpu_shader.hpp"
 
 #include "gpu_device.hpp"
+#include "gpu_memory.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -22,25 +23,23 @@ std::runtime_error sdl_error(std::string_view prefix) {
 
 } // namespace
 
-GpuShader::GpuShader(SDL_GPUDevice* device, SDL_GPUShader* shader, u32 samplers, u32 storage_buffers)
-    : _device(device), _shader(shader), _samplers(samplers), _storage_buffers(storage_buffers) {}
+GpuShader::GpuShader(SharedDevice device, SDL_GPUShader* shader, u32 samplers, u32 storage_buffers)
+    : _device(std::move(device)), _shader(shader), _samplers(samplers), _storage_buffers(storage_buffers) {}
 
 GpuShader::~GpuShader() {
     release();
 }
 
 GpuShader::GpuShader(GpuShader&& other) noexcept
-    : _device(std::exchange(other._device, nullptr)),
-      _shader(std::exchange(other._shader, nullptr)),
-      _samplers(std::exchange(other._samplers, 0u)),
-      _storage_buffers(std::exchange(other._storage_buffers, 0u)) {}
+    : _device(std::exchange(other._device, {})), _shader(std::exchange(other._shader, nullptr)),
+      _samplers(std::exchange(other._samplers, 0u)), _storage_buffers(std::exchange(other._storage_buffers, 0u)) {}
 
 GpuShader& GpuShader::operator=(GpuShader&& other) noexcept {
     if (this == &other) {
         return *this;
     }
     release();
-    _device = std::exchange(other._device, nullptr);
+    _device = std::exchange(other._device, {});
     _shader = std::exchange(other._shader, nullptr);
     _samplers = std::exchange(other._samplers, 0u);
     _storage_buffers = std::exchange(other._storage_buffers, 0u);
@@ -67,11 +66,11 @@ GpuShader GpuShader::from_bytes(GpuDevice& device, SDL_GPUShaderStage stage,
     info.num_samplers = samplers;
     info.num_storage_buffers = storage_buffers;
 
-    SDL_GPUShader* shader = SDL_CreateGPUShader(device.handle(), &info);
+    SDL_GPUShader* shader = tracked_create_shader(device.handle(), &info);
     if (!shader) {
         throw sdl_error("SDL_CreateGPUShader failed");
     }
-    return GpuShader{device.handle(), shader, samplers, storage_buffers};
+    return GpuShader{device.shared(), shader, samplers, storage_buffers};
 }
 
 GpuShader GpuShader::from_file(GpuDevice& device, SDL_GPUShaderStage stage,
@@ -94,8 +93,8 @@ GpuShader GpuShader::from_embedded(GpuDevice& device, SDL_GPUShaderStage stage, 
 }
 
 void GpuShader::release() {
-    if (_device && _shader) {
-        SDL_ReleaseGPUShader(_device, _shader);
+    if (_device && *_device && _shader) {
+        tracked_release_shader(*_device, _shader);
     }
     _device = nullptr;
     _shader = nullptr;

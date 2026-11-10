@@ -17,7 +17,7 @@ bool AnimationEventDispatch::dispatch(EcsEntity target, const AnimationEvent& ev
 }
 
 void AnimationEventDispatch::run(EcsWorld& world) {
-    world.raw().each([this](flecs::entity entity, AnimationEventQueue& queue) {
+    world.each([this](flecs::entity entity, AnimationEventQueue& queue) {
         std::vector<AnimationEvent> unknown;
         unknown.reserve(queue.pending.size());
 

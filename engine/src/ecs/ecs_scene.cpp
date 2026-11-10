@@ -1,11 +1,19 @@
 #include <kin/ecs/ecs_scene.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
+#include <kin/assets/content.hpp>
+#include <kin/ecs/camera.hpp>
+#include <kin/ecs/lighting.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/runtime/debug_options.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace kin {
 namespace {
@@ -57,9 +65,138 @@ WorldRenderState& EcsScene::render_state() {
     return *_render_state;
 }
 
+void EcsScene::add_asset_binder(std::string name, Assets2D::Binder binder) {
+    if (_assets) {
+        _assets->add_binder(name, binder);
+    }
+    const auto found = std::ranges::find(_asset_binders, name, &std::pair<std::string, Assets2D::Binder>::first);
+    if (found != _asset_binders.end()) {
+        found->second = std::move(binder);
+    } else {
+        _asset_binders.emplace_back(std::move(name), std::move(binder));
+    }
+}
+
+std::unique_ptr<Assets2D> EcsScene::exchange_assets(std::unique_ptr<Assets2D> assets) {
+    auto old = std::move(_assets);
+    adopt_assets(std::move(assets));
+    return old;
+}
+
+void EcsScene::adopt_assets(std::unique_ptr<Assets2D> assets) {
+    if (assets) {
+        for (const auto& [name, binder] : _asset_binders) {
+            assets->add_binder(name, binder);
+        }
+        _render_config.asset_root = assets->root();
+    }
+    _assets = std::move(assets);
+    _asset_frames = 0;
+    mark_render_cache_dirty("preloaded assets");
+}
+
+std::unique_ptr<DevelopmentChange> EcsScene::prepare_asset_reload(const DevelopmentRevision& revision,
+                                                                  const ScenePatchPreparer& prepare_scene,
+                                                                  std::function<void()> on_finalize,
+                                                                  std::string& error) {
+    if (!_assets) {
+        error = "the scene has no assets to reload";
+        return {};
+    }
+    std::unique_ptr<Assets2D> candidate;
+    const AssetPreviewCheck check = [&](EcsWorld& preview, std::string& failure) {
+        candidate = prepare_reload_assets(*_assets, revision, preview, failure);
+        return candidate != nullptr;
+    };
+    std::shared_ptr<DevelopmentChange> patch;
+    if (prepare_scene) {
+        patch = prepare_scene(check, error);
+        if (!patch) {
+            return {};
+        }
+    } else {
+        EcsWorld preview;
+        ecs().components().copy_schema_to(preview.components());
+        if (!instantiate_scene(preview, scene_document_from_world(ecs()), error) || !check(preview, error)) {
+            return {};
+        }
+    }
+    if (!candidate) {
+        error = "the scene patch did not check the reloaded assets";
+        return {};
+    }
+    struct Swap {
+        std::unique_ptr<Assets2D> next;
+        std::unique_ptr<Assets2D> previous;
+    };
+    auto swap = std::make_shared<Swap>(Swap{.next = std::move(candidate), .previous = {}});
+    return std::make_unique<DevelopmentChange>(DevelopmentChange{
+        .activate =
+            [this, swap, patch](std::string& failure) {
+                if (patch && !patch->activate(failure)) {
+                    return false;
+                }
+                swap->previous = exchange_assets(std::move(swap->next));
+                _assets->bind(ecs());
+                return true;
+            },
+        .rollback =
+            [this, swap, patch] {
+                if (swap->previous) {
+                    swap->next = exchange_assets(std::move(swap->previous));
+                }
+                if (patch) {
+                    patch->rollback();
+                }
+            },
+        .finalize =
+            [this, patch, on_finalize = std::move(on_finalize)] {
+                if (patch && patch->finalize) {
+                    patch->finalize();
+                }
+                if (on_finalize) {
+                    on_finalize();
+                }
+                mark_render_cache_dirty("development reload");
+            },
+    });
+}
+
+void EcsScene::bind_assets(SceneContext& ctx) {
+    if (!_assets) {
+        std::filesystem::path root = _render_config.asset_root;
+        if (root.empty()) {
+            root = content_root();
+        }
+        _assets = std::make_unique<Assets2D>(ctx.renderer, root.empty() ? std::filesystem::path(".") : root);
+        for (const auto& [name, binder] : _asset_binders) {
+            _assets->add_binder(name, binder);
+        }
+    }
+    if (_render_config.asset_check_frames > 0 && ++_asset_frames >= _render_config.asset_check_frames) {
+        _asset_frames = 0;
+        _assets->reload_changed();
+    }
+    if (_assets->bind(ecs())) {
+        _static_render_cache.mark_dirty("assets");
+    }
+}
+
+bool EcsScene::set_view_camera(const Camera2D* camera) {
+    if (camera) {
+        _view_camera = *camera;
+    } else {
+        _view_camera.reset();
+    }
+    return true;
+}
+
 void EcsScene::render(SceneContext& ctx) {
     if (!_render_config.enabled) {
         return;
+    }
+    if (_render_config.assets) {
+        bind_assets(ctx);
     }
 
     RuntimeDebugOptions* debug = ctx.debug_options;
@@ -71,13 +208,53 @@ void EcsScene::render(SceneContext& ctx) {
 
     ctx.renderer.clear(_render_config.clear_color);
 
+    if (_render_config.scene_lighting) {
+        // The colour output a ColorGrade says, while there is one.
+        if (std::optional<ColorOutput> output = scene_color_output(ecs())) {
+            ctx.renderer.set_color_output(std::move(*output));
+            _graded = true;
+        } else if (std::exchange(_graded, false)) {
+            ctx.renderer.set_color_output({});
+        }
+    }
+
+    Vec2f screen = _render_config.view_size;
+    if (screen.x <= 0.0f || screen.y <= 0.0f) {
+        const Vec2i points = ctx.window.size();
+        screen = {static_cast<f32>(points.x), static_cast<f32>(points.y)};
+    }
     Camera2D camera;
     const Camera2D* camera_ptr = nullptr;
-    if (_render_config.camera_callback) {
+    if (_view_camera) {
+        camera = *_view_camera;
+        camera_ptr = &camera;
+    } else if (_render_config.camera_callback) {
         DebugStepTimer timer{timing_debug, "render.scene.camera"};
         camera = _render_config.camera_callback(ecs(), ctx);
         camera_ptr = &camera;
+    } else if (_render_config.scene_cameras) {
+        DebugStepTimer timer{timing_debug, "render.scene.camera"};
+        if (std::optional<Camera2D> found = scene_camera(ecs(), screen)) {
+            camera = *found;
+            camera_ptr = &camera;
+        }
     }
+
+    // Where Parallax layers are shifted from: the camera's centre (the screen's
+    // without one); an editor's view draws them where they are placed.
+    const std::optional<Vec2f> parallax_view =
+        _view_camera ? std::nullopt : std::optional(camera_ptr ? camera_ptr->center() : Vec2f{screen.x * 0.5f, screen.y * 0.5f});
+
+    // Lit: the world (and its effects) drawn first, then lit, then the UI layer and above.
+    const auto* lighting = _render_config.scene_lighting ? scene_lighting(ecs()) : nullptr;
+    const bool lit = lighting && !lighting->forward_sprites;
+    constexpr u64 unlit_passes = render_pass_mask::ui | render_pass_mask::debug | render_pass_mask::editor_overlay;
+    const auto light_world = [&] {
+        DebugStepTimer timer{timing_debug, "render.scene.lighting"};
+        const Rectf area = camera_ptr ? Rectf{0.0f, 0.0f, camera_ptr->viewport.x, camera_ptr->viewport.y}
+                                      : Rectf{0.0f, 0.0f, screen.x, screen.y};
+        apply_scene_lighting(ctx.renderer, _lighting, ecs(), camera_ptr ? camera_ptr->view_transform() : Affine2{}, area);
+    };
 
     RenderProfile profile;
     RenderView view;
@@ -120,6 +297,7 @@ void EcsScene::render(SceneContext& ctx) {
     }
     if (static_cache_enabled) {
         WorldRenderState& state = render_state();
+        state.set_parallax_view(parallax_view);
         {
             DebugStepTimer timer{timing_debug, "render.scene.propagate_transforms"};
             state.propagate_transforms();
@@ -170,10 +348,17 @@ void EcsScene::render(SceneContext& ctx) {
         }
         {
             DebugStepTimer timer{timing_debug, "render.scene.flush_world"};
-            _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask);
+            if (lit) {
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask & ~unlit_passes);
+                light_world();
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask & unlit_passes);
+            } else {
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask);
+            }
         }
     } else {
         WorldRenderState& state = render_state();
+        state.set_parallax_view(parallax_view);
         {
             DebugStepTimer timer{timing_debug, "render.scene.propagate_transforms"};
             state.propagate_transforms();
@@ -204,7 +389,13 @@ void EcsScene::render(SceneContext& ctx) {
         }
         {
             DebugStepTimer timer{timing_debug, "render.scene.flush_world"};
-            _dynamic_render_queue.flush(ctx.renderer, view, pass_mask);
+            if (lit) {
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask & ~unlit_passes);
+                light_world();
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask & unlit_passes);
+            } else {
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask);
+            }
         }
     }
     if (debug) {
@@ -219,6 +410,17 @@ void EcsScene::render(SceneContext& ctx) {
         debug->render_stats = frame_stats;
     }
 
+}
+
+std::unique_ptr<Assets2D> prepare_reload_assets(const Assets2D& current, const DevelopmentRevision& revision,
+                                                EcsWorld& preview, std::string& error) {
+    auto candidate = current.for_snapshot(revision.content);
+    candidate->bind(preview);
+    if (auto problem = candidate->first_problem()) {
+        error = std::move(*problem);
+        return {};
+    }
+    return candidate;
 }
 
 } // namespace kin

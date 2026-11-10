@@ -433,6 +433,26 @@ void WebGL2Renderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
     quad_indices(first);
 }
 
+bool WebGL2Renderer2DBackend::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                                     std::span<const u32> indices) {
+    const auto* gl = _device->texture(texture);
+    if (!gl) {
+        return false;
+    }
+    if (_target.get() == gl) {
+        throw std::logic_error("WebGL2 cannot sample the active render target");
+    }
+    use_texture(texture);
+    const auto first = static_cast<u32>(_vertices.size());
+    for (const auto& v : vertices) {
+        vertex(v.position, {v.uv.x, gl->flip_v ? 1 - v.uv.y : v.uv.y}, v.color);
+    }
+    for (const auto i : indices) {
+        _indices.push_back(first + i);
+    }
+    return true;
+}
+
 void WebGL2Renderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,
                                               u32 base, Color tint) {
     use_texture(_white);

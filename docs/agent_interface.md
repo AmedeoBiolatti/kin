@@ -7,6 +7,9 @@ This is the reference for the headless and server features. For the testing
 workflow, see [testing.md](testing.md); for the design philosophy, see
 [manifest.md](manifest.md).
 
+For JSON/Lua scenarios, bounded conditions, recording/replay and failure traces,
+see [gameplay automation](automation.md).
+
 Every game built on `run_scene_app` gets this interface from the shared runtime
 flags.
 
@@ -31,6 +34,7 @@ an explicit `--seed`.
 | `--seed=N` / `--seed N` | Seed the run's root RNG key (`SceneContext::rng`, default 0). |
 | `--max-fps=N` / `--max-fps N` | Cap a windowed run at N frames a second (0: uncapped), over the game's own setting. Headless runs are never paced. |
 | `--report[=PATH]` | Write the JSON run report to PATH (`-` for stdout). Implies headless. |
+| `--services=offline` / `--services=memory` | Platform services from kin's offline backend, not Steam's, kept beside the saves or in memory only ([platform services](platform_services.md)). Headless runs always get them in memory. |
 | `--list-actions` | Print available input actions and bindings, then quit. |
 | `--game-info` / `--list-info` | Print game metadata, then quit. |
 | `--profile-render` | Run 600 frames and print a render timing table. |
@@ -135,34 +139,112 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 
 | Method | Params | Returns |
 |---|---|---|
+| `server.schema` | none | Versioned `kin.automation/1` request/result schemas, method effects and mode flags. |
+| `server.capabilities` | none | Current scene providers, available methods, renderer, fixed dt and RNG key. |
+| `automation.snapshot` | `{world?}` | Frame/failure status, all scene reports/UI and optional registered ECS state. |
+| `dev.status` | `{scene?}` | Opt-in development generation, revision, pending state, source hashes and last reload diagnostics. |
+| `dev.reload` | `{scene?, changes?, expected_revision?}` | Queue a development reload at the next step; return exact revision edits for replay. Requires `--dev`. |
 | `game.info` | none | Metadata: id, title, version, window, tags, fields. |
 | `scene.stack` | none | All scenes with index, name, flags, and `has_world`. |
 | `scene.current` | none | Top scene name plus its `write_report` state. |
 | `scene.actions` | none | Available input actions and bindings. |
-| `world.snapshot` | `{scene?, animations?}` | Flecs world JSON (its paths escape a `.` inside a name: `gem\.12`) plus animation snapshots unless `animations:false`. ECS scenes only. |
+| `world.snapshot` | `{scene?, animations?}` | Flecs world JSON (its paths escape a `.` inside a name: `gem\.12`) plus animation snapshots unless `animations:false`. ECS scenes only; without `scene`, the topmost scene with a world (under overlays such as transitions). |
+| `world.query` | `{scene?, selector?, limit?}` | Filter by ID/authored ID/name/enabled and all/none registered component names; matching count, truncation and entities with decimal string IDs/64-bit fields. |
 | `animation.diagnostics` | none | Unresolved-reference diagnostics from the scene's animation library. |
-| `ui.snapshot` | `{scene?}` | Unavailable after legacy `kin/ui` removal; use reports or `world.snapshot`. |
+| `ui.snapshot` | `{scene?}` | Semantic ui2 tree from `Scene::ui_context()`: IDs, labels, roles, values, bounds and interaction flags. |
+| `ui.query` | `{scene?, selector?}` | Exact semantic predicates with recursive ancestor `within` scope. |
+| `ui.action` | `{scene?, id?, selector?, action?, text?}` | Queue `click` (default), `focus`, `set_text`, `increment`, `decrement` or `set_number` (`text` holds the number) for the next tick; choose exactly one of an ID lookup or a unique structured selector. |
 | `view.screenshot` | `{path?}` | Render the current scene and save a PNG. Returns path and dimensions. |
+| `view.scene` | `{path, content?}` | The top scene shows the scene file `path` in place of its own, as it reads its own (`Scene::view_scene`; a game says how). |
+| `view.edit` | `{entities: [{id, components}]}` | The scene shown changed in place: each entity named (its id in the file) takes the fields given, written as the file writes them (`Scene::view_edit`; `SceneSession3D::edit_authored` does it for a 3D scene). An error when the scene can't, and the tool sends the file again. |
+| `view.frame` | `{path?, width, height, x?, y?, zoom?, rotation?}` or `{path?, width, height, camera3d: {position?, rotation?, fov?, near?}}` | Draw the top scene at `width`x`height` through a camera centred on world (x, y), `zoom` screen units a world unit (`Scene::set_view_camera`); or, a 3D scene, through a 3D camera at `position` [x, y, z], turned by the quaternion `rotation` [x, y, z, w], `fov` degrees top to bottom (`Scene::set_view_camera3d`). Write its pixels to `path` as raw RGBA rows, top first. Returns path and dimensions. |
 | `sim.tick` | `{count?}` | Advance N fixed frames, default 1. Returns frame counter and failure flag. |
-| `sim.reset` | `{seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |
+| `sim.reset` | `{seed?}` | Rebuild scenes, zero frame/report, clear queued/held input while preserving its map; optionally reseed (decimal string above 2^53-1). |
 | `input.action` | `{name, mode?}` | Queue an action for the next tick. `mode`: `press`, `hold`, or `release`. |
 | `input.mouse` | `{x, y, button?, mode?, wheel?, space?, dx?, dy?}` | Move the pointer; optionally click or scroll. `dx`/`dy` (without `x`/`y` if wanted) move the mouse by that many window pixels, as relative mouse mode reports it: a first-person camera turns. |
 | `input.text` | `{text}` | Deliver text input for the next tick. |
+| `input.drop` | `{path, x?, y?, space?}` | Drop a file on the window at `x`, `y` (or where the pointer is), as from the desktop: `Input::take_dropped_files` has it at the next tick. |
 | `input.key` | `{name, mode?, modifiers?}` | Queue a key by name (`Enter`, `Left`, `PageDown`, `A`, ...), with `modifiers` such as `["ctrl","shift"]` held alongside it. `mode`: `press`, `hold`, or `release`. |
+| `input.touch` | `{x, y, id?, mode?, space?}` | A finger at `x`, `y` (logical UI space, or `space: "window"`): `mode` `down`, `move`, `up`, or `tap` (the default: down this tick, up at the start of the next). `id` tells fingers apart. Touch's time is the ticks' (frame × fixed dt), so a long press is a finger held down over enough ticks. |
+| `input.pad` | `{player?, button?, mode?, left_x?, left_y?, right_x?, right_y?, left_trigger?, right_trigger?, connected?}` | Drive a player's game controller (`player` 0 to 7, default 0) as a real one: a `button` (`a`, `start`, `dpad_left`, ...) with `mode` `press`, `hold` or `release`, and sticks (-1 to 1, y up) and triggers (0 to 1), kept until changed. The game reads it as that player's controller (`Input::player_gamepad`), and the first player's (else the lowest driven) as `Input::gamepad()`. Driven once, it is plugged in until `connected: false` (or `sim.reset`). |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
-| `frame.timing` | `{reset?}` | Update and render wall time over the last 600 ticks: `last`, `mean` and `max`, in ms. `reset` clears the history after reporting. |
+| `frame.timing` | `{since?, reset?}` | Update, render and present wall time over the last 600 ticks (or frames drawn, inspected): `last`, `mean` and `max`, in ms. With `since` (a frame number; -1 for all kept), `history` lists each frame after it, oldest first: `frame`, `update_ms`, `render_ms`, `present_ms`, `interval_ms` (since the frame before began; 0 when ticked). `reset` clears the history after reporting. |
+| `render.graph` | none | The stock 3D frame's graph (`kin.render-graph/1`, [render graphs](render_graph.md#showing-a-graph)) as the renderer compiles and runs it: `available` (false without a 3D renderer), `rendered` (the last render ran it), `record_ms`, `compile_ms`, and `graph`: resources, passes (reads and writes by name, `order` in the run, `ms`: the last render's CPU recording time) and the run's `order`. |
 | `ping` | none | `{"pong": true}`. |
 | `server.shutdown` | none | `{"bye": true}` and stop the server. |
 
-`ui.snapshot` intentionally returns an error:
+Scenes that expose ui2 return their context from `Scene::ui_context()`;
+`MenuScene` does this automatically. Other scenes return an explanatory error.
+Semantic IDs are decimal strings so JSON clients preserve every bit. See
+[UI automation](ui.md#automation) for the tree and supported controls.
 
-```json
-{"message":"ui.snapshot is unavailable after legacy kin/ui removal; use reports or world.snapshot"}
+## Inspecting A Game While It Is Played
+
+`--inspect` runs the game in its window as usual (real time, the player's
+input) and also answers the stdio server's requests between frames: a tool
+such as an editor watches it while it is played. The log stays on stderr, so
+stdout carries only the answers (and whatever the game prints itself).
+
+```text
+game --inspect
+{"id":1,"method":"world.snapshot","params":{"raw":false,"events":false,"animations":false}}
+{"id":2,"method":"sim.pause"}
+{"id":3,"method":"sim.step","params":{"count":1}}
+{"id":4,"method":"sim.resume"}
 ```
+
+It answers what reads the game (`game.info`, `scene.stack`, `scene.current`,
+`scene.actions`, `world.snapshot`, `ui.snapshot`, `animation.diagnostics`, `ping`),
+`frame.timing` for the frames it draws (a profiler asks with `since`),
+`render.graph` for how its 3D frame is made, and
+`server.status` with `paused`. Three methods hold its updates while it keeps
+drawing:
+
+| Method | Params | Effect |
+|---|---|---|
+| `sim.pause` | none | Hold the scenes' updates. Returns the status. |
+| `sim.resume` | none | Update again. |
+| `sim.step` | `{count?}` | Run N more updates (default 1), then hold. |
+
+Answers are written on a thread of their own, in order: a tool slow to read
+a large one holds that thread, not the game.
+
+`server.shutdown` quits the game. What drives a headless server (`sim.tick`,
+`sim.reset`, `input.*`, `view.*`) is refused. When the
+tool closes its end of stdin the game goes on, never left paused. Headless
+runs and builds without the scene server ignore `--inspect`, with a warning.
+
+### Debugging Its Scripts
+
+An inspected game's Lua scripts (`LuaScript`, and so a scene's entity
+scripts) stop where the tool asks. A script file is named as it is under the
+content root, `/` between folders (`scripts/player.lua`).
+
+| Method | Params | Effect |
+|---|---|---|
+| `debug.breakpoints` | `{files: {"scripts/a.lua": [3, 7]}}` | Set every breakpoint, replacing those before. Returns `{breakpoints}`, the lines set. |
+| `debug.pause` | none | Stop at the next line any script runs. |
+| `debug.state` | none | `{stopped}`; when stopped, `serial` (counts stops), `reason` (`breakpoint`, `step`, `pause`) and `frames`, innermost first: `function`, `file`, `line`, `locals` and `upvalues`. |
+| `debug.continue` | none | Go on from a stop, to the next breakpoint. |
+| `debug.step` | `{how?}` | Go on to the next line: `into` a call made there, `over` it (the default), or `out` of the function. |
+
+A value is `{name, value, kind}`: `value` as text (`12.5`, `"text"`,
+`table (3)`, a userdata as its `__tostring` gives it), `kind` Lua's type. A
+table's `fields` follow, two tables deep and 64 fields each (`more` when some
+are left out).
+
+While a script is stopped the game is held inside it: it does not update or
+draw. Only `debug.*`, `server.status` (`stopped: true`), `ping` and
+`server.shutdown` are answered then; the rest wait, and are answered in order
+once it goes on. `debug.breakpoints` and `debug.pause` are taken as soon as
+they are read, before the next frame, so breakpoints sent as the game starts
+stop its first update. Lines are watched only while a breakpoint, a pause or
+a step is set, so a game whose tool sets none runs its scripts at full pace. If the
+tool closes stdin the script goes on and its breakpoints are cleared.
 
 ## Input
 
-Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`) is queued and applied
+Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`, `input.pad`, `input.touch`, `input.drop`) is queued and applied
 on the next `sim.tick`, after `begin_frame`, so the scene observes it that frame.
 A `press` is a tap: held for that tick and released at the start of the next
 one, which sees the release, as with a real button. A ui2 click completes on that
@@ -183,6 +265,7 @@ The server reads a scene through optional hooks:
 | `Scene::write_report(JsonWriter&)` | run report, `scene.current` | Override to expose assertable game state. |
 | `Scene::world() -> EcsWorld*` | `world.snapshot` | `EcsScene` returns its world automatically. |
 | `Scene::animation_library()` | `animation.diagnostics` | Return the scene's animation asset library. |
+| `Scene::ui_context() -> ui2::Context*` | `ui.snapshot`, `ui.action` | Return the scene's active ui2 context; `MenuScene` does so automatically. |
 
 Perception by game style:
 
@@ -203,8 +286,10 @@ sim.tick {count:1}
 scene.stack
 ```
 
-For pointer-driven menu tests, keep button coordinates in `write_report` state or
-use fixed coordinates from the game's logical layout, then send `input.mouse`.
+For semantic menu tests, read `ui.snapshot`, queue a `ui.action` by label/key/ID,
+then tick once and check the scene report. These actions are deferred until a
+tick; intermediate snapshots/screenshots do not activate controls. Only one may
+be pending per step. `input.mouse` remains available for pointer-specific tests.
 
 ## Architecture
 

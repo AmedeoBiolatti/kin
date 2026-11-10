@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.22)
 
 project(kin VERSION 0.2.6 LANGUAGES C CXX)
 
+# On Windows, the Python on PATH (the one `python -m pip install` installs
+# Pillow into) before the newest one in the registry.
+if(NOT DEFINED Python3_FIND_REGISTRY)
+    set(Python3_FIND_REGISTRY LAST)
+endif()
+
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -53,18 +59,29 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+include(kin_build)
 include(kin_release_contract)
 
 # Built by default only when kin is the top-level project: a game that adds
 # kin with add_subdirectory gets the engine alone.
 option(KIN_BUILD_GAMES "Build sample games" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_EXAMPLES "Build interactive performance examples" ${PROJECT_IS_TOP_LEVEL})
+option(KIN_BUILD_2D_WORKFLOW "Build the Lua 2D workshop and its integration test (requires Pillow)" ${KIN_BUILD_EXAMPLES})
 option(KIN_BUILD_BENCHMARKS "Build benchmark executables" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_TESTS "Build kin's tests (with BUILD_TESTING)" ${PROJECT_IS_TOP_LEVEL})
+# "config" registers only the tests whose result depends on how kin is configured
+# (see tests/CMakeLists.txt), for builds that exist to check one option set. The
+# others behave as in the default build and, with link-time optimization, each
+# costs a link of the whole engine.
+set(KIN_TEST_PROFILE "all" CACHE STRING "Tests to register: all, or config (those that depend on the build's options)")
+set_property(CACHE KIN_TEST_PROFILE PROPERTY STRINGS all config)
 option(KIN_ENABLE_PROFILING "Enable Kin manual profiling macros" OFF)
 option(KIN_ENABLE_RELEASE_PROFILING "Enable Kin manual profiling macros in Release builds" ${_kin_developer_default})
 option(KIN_EXPERIMENTAL_3D "Build kin's experimental 3D rendering" OFF)
 option(KIN_ENABLE_PHYSICS3D "Build the experimental Jolt physics and ECS adapters" ON)
+# Experimental: kin's 2D physics on Box2D 3.2 (engine/src/physics/physics_box2d3.cpp)
+# in place of Box2D 2.4. Its source: FETCHCONTENT_SOURCE_DIR_BOX2D3, else fetched.
+option(KIN_PHYSICS_BOX2D_V3 "Experimental: 2D physics on Box2D v3" OFF)
 option(KIN_ENABLE_SCENE3D_RUNTIME "Build the experimental scripted 3D scene runtime" ON)
 option(KIN_BUILD_WEBGL2_FIXTURE "Build the standalone browser 2D/3D rendering fixture" OFF)
 option(KIN_BUILD_WEB_SUMMIT "Build Summit's experimental browser export" OFF)
@@ -89,6 +106,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT KIN_LINUX_VIDEO STREQUAL "auto
     message(FATAL_ERROR "KIN_LINUX_VIDEO=${KIN_LINUX_VIDEO} requires a Linux target")
 endif()
 option(KIN_ENABLE_LTO "Enable interprocedural optimization in optimized configurations" OFF)
+option(KIN_LTO_TESTS "Link-time optimize test executables too (GCC links them without LTO otherwise: a slow link of the whole engine each)" OFF)
 option(KIN_PACKAGE_DEBUG_SYMBOLS "Generate debug information and a separate desktop symbols archive" OFF)
 option(KIN_PACKAGE_STRIP "Strip installed package binaries (keep build originals)" OFF)
 set(KIN_RENDERER "auto" CACHE STRING "Renderer included in this build: auto, software, gpu, compact, webgl2")
@@ -107,6 +125,7 @@ if(EMSCRIPTEN)
     set(_kin_threads_default OFF)
 endif()
 option(KIN_ENABLE_THREADS "Build the native job worker pool" ${_kin_threads_default})
+option(KIN_ENABLE_ACCESSIBILITY "Expose ui2 to native assistive technology through AccessKit C" OFF)
 if(EMSCRIPTEN AND KIN_ENABLE_THREADS)
     message(FATAL_ERROR "The experimental browser profile requires KIN_ENABLE_THREADS=OFF")
 endif()
@@ -177,22 +196,28 @@ if(KIN_BUILD_WEBGL2_FIXTURE OR KIN_BUILD_WEB_SUMMIT)
     if(NOT (KIN_EXPERIMENTAL_3D AND KIN_HAS_WEBGL2_RENDERER))
         message(FATAL_ERROR "The browser 3D examples require the WebGL2 3D renderer")
     endif()
-    add_subdirectory(experimental/webgl2)
+    kin_add_optional_subdirectory(experimental/webgl2)
 endif()
 if(NOT EMSCRIPTEN)
-    add_subdirectory(tools)
+    kin_add_optional_subdirectory(tools)
 endif()
 
 if(KIN_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+    kin_add_optional_subdirectory(examples)
+endif()
+if(KIN_BUILD_2D_WORKFLOW AND KIN_ENABLE_SCRIPTING AND KIN_ENABLE_IMAGE_IO AND KIN_ENABLE_DEVELOPMENT)
+    kin_add_optional_subdirectory(examples/2d_workflow)
+endif()
+if(KIN_ENABLE_PYTHON AND KIN_ENABLE_PHYSICS AND (KIN_BUILD_EXAMPLES OR BUILD_TESTING))
+    kin_add_optional_subdirectory(examples/python_garden)
 endif()
 
 if(KIN_BUILD_GAMES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/CMakeLists.txt")
-    add_subdirectory(games)
+    kin_add_optional_subdirectory(games)
 endif()
 
 if(BUILD_TESTING AND KIN_BUILD_TESTS)
-    add_subdirectory(tests)
+    kin_add_optional_subdirectory(tests)
 endif()
 
 # Include all compiled dependencies, including nested codec/font libraries.

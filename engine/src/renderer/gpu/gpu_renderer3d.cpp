@@ -2,6 +2,7 @@
 
 #include "embedded_gpu_shader.hpp"
 #include "gpu_device.hpp"
+#include "gpu_memory.hpp"
 #include "gpu_renderer2d_backend.hpp"
 #include "gpu_shadow_cull.hpp"
 #include "gpu_shadow_reach.hpp"
@@ -18,10 +19,12 @@
 #include <functional>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/render3d/frame_graph3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -35,6 +38,22 @@
 namespace kin::gpu {
 
 namespace {
+
+// Stay in the existing command buffer: external profilers can time nested
+// operations without introducing submission splits or CPU/GPU waits.
+struct PassMarker {
+    SDL_GPUCommandBuffer* commands;
+    PassMarker(SDL_GPUCommandBuffer* buffer, bool enabled, const char* name) : commands(enabled ? buffer : nullptr) {
+        if (commands)
+            SDL_PushGPUDebugGroup(commands, name);
+    }
+    ~PassMarker() {
+        if (commands)
+            SDL_PopGPUDebugGroup(commands);
+    }
+    PassMarker(const PassMarker&) = delete;
+    PassMarker& operator=(const PassMarker&) = delete;
+};
 
 // Fingerprint the inputs already packed for the GPU. Reject transient history
 // while those inputs or their opaque backdrop change; a paused effect retains
@@ -68,14 +87,40 @@ bool taa_texture_hash(u64& key, const ITextureBackend* texture) {
 
 // Transparent motion and appearance use the same material partition. Reordering
 // anonymous draws with different appearances cannot swap their histories.
+u32 sampler_identity(const std::optional<TextureSampler3D>& sampler) {
+    if (!sampler)
+        return 0;
+    return 1u + (u32(sampler->wrap_u) | u32(sampler->wrap_v) << 2 | u32(sampler->min) << 4 | u32(sampler->mag) << 5 |
+                 u32(sampler->mip) << 6);
+}
 bool taa_material_hash(u64& key, const Material3D& material, const ITextureBackend* texture) {
     taa_hash(key, material.color);
+    taa_hash(key, material.emission_color);
+    taa_hash(key, material.emission_mode);
+    taa_hash(key, material.emissive);
+    for (const auto& sampler : material.texture_samplers)
+        taa_hash(key, sampler_identity(sampler));
     taa_hash(key, material.blend);
-    taa_hash(key, material.shader_params);
+    // The parameters something reads: a surface's, a custom shader's first 16; none of a stock material's (each
+    // draw's, each frame).
+    if (material.surface.backend())
+        taa_hash(key, material.shader_params);
+    else if (material.shader.backend())
+        taa_hash(key, material.shader_params.data(), sizeof(f32) * 16);
     taa_hash(key, material.wrap_u);
     taa_hash(key, material.wrap_v);
+    if (!material.uv_identity()) {
+        taa_hash(key, material.uv_scale.x);
+        taa_hash(key, material.uv_scale.y);
+        taa_hash(key, material.uv_offset.x);
+        taa_hash(key, material.uv_offset.y);
+    }
     const auto shader = material.shader.backend().get();
     taa_hash(key, shader);
+    if (const auto surface = material.surface.backend().get())
+        taa_hash(key, surface);
+    if (const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(material.inputs.backend().get()))
+        taa_hash(key, inputs->signature);
     return taa_texture_hash(key, texture);
 }
 
@@ -101,6 +146,19 @@ public:
 private:
     std::vector<u8>& _bytes;
 };
+
+void shadow_sampler_key(CacheBytes& payload, const Material3D& material, const GpuTextureBackend* texture,
+                        u32 anisotropy, i32 bias) {
+    const auto mode = texture ? texture->scale_mode() : ScaleMode::Linear;
+    const auto sampler =
+        material.texture_samplers[0].value_or(legacy_sampler3d(mode, material.wrap_u, material.wrap_v));
+    const bool quality = texture && texture->mipmapped() && sampler.mip != MipFilter3D::None &&
+                         sampler.min == TextureFilter3D::Linear && sampler.mag == TextureFilter3D::Linear;
+    payload.value(sampler_identity(material.texture_samplers[0]));
+    payload.value(mode);
+    payload.value(quality ? anisotropy : 1u);
+    payload.value(quality ? bias : 0);
+}
 
 struct DepthFormat {
     SDL_GPUTextureFormat format;
@@ -147,6 +205,11 @@ SDL_GPUSampleCount sample_count(u32 samples) {
 }
 
 constexpr SDL_GPUTextureFormat hdr_format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+// ViewOptions3D::auto_exposure's state (exposure_histogram/adapt.comp): 128 bins, then the exposure and its target.
+constexpr u32 exposure_state_bytes = (128 + 4) * sizeof(u32);
+constexpr SDL_GPUBufferUsageFlags exposure_buffer_usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                                                          SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
+                                                          SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
 constexpr SDL_GPUTextureFormat pick_format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT; // position, id
 // Ambient occlusion: the pre-pass's world normals (octahedral, two floats), and the result.
 constexpr SDL_GPUTextureFormat ao_normal_format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
@@ -156,6 +219,16 @@ constexpr u64 ao_chain_min_pixels =
 constexpr u32 ao_chain_levels = 5;                                           // the occlusion's linear depth chain
 constexpr SDL_GPUTextureFormat hiz_format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT; // the depth pyramid (Lod3D::occlusion)
 constexpr u32 max_lights = 16;
+// The light grid (the light variants'): at most this many point and as many spot lights a frame, each fragment looping
+// over those of its cell only, a tile of grid_tile pixels by one of grid_slices slices of view depth (a slice farther
+// than the last by a constant ratio, from grid_near). The fixed blocks (frame.lights, locals.spots: the plain and
+// custom shaders, the overlay, particles) keep the 16 strongest of each.
+constexpr u32 max_grid_lights = 256;
+constexpr u32 grid_tile = 64;
+constexpr u32 grid_slices = 32;
+constexpr f32 grid_near = 0.1f;
+constexpr u32 grid_max_count = 0xfff;      // a cell's lights: 12 bits
+constexpr u32 grid_max_indices = 1u << 20; // all cells' lists: 20 bits of offset
 // Storage buffers' smallest sizes, so that the first frames of a growing scene don't each remake them.
 constexpr u32 min_instance_buffer = 64 * 1024;
 constexpr u32 min_previous_buffer = 32 * 1024;
@@ -181,9 +254,74 @@ constexpr f32 overlay_split = 0.9f;
 // mesh.vert's uniforms, a draw.
 struct DrawUniforms {
     f32 view_projection[16];
-    u32 first[4]; // x: the draw's first instance
+    u32 first[4];                           // x: the draw's first instance
+    f32 clip[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // Camera3D::clip_plane (the default keeps everything: the shadows')
 };
-static_assert(sizeof(DrawUniforms) == 80);
+static_assert(sizeof(DrawUniforms) == 96);
+// A camera pass's clip plane into a draw's uniforms.
+void put_clip(f32 (&clip)[4], const Camera3D& camera) {
+    clip[0] = camera.clip_plane.x;
+    clip[1] = camera.clip_plane.y;
+    clip[2] = camera.clip_plane.z;
+    clip[3] = camera.clip_plane.w;
+}
+// Where the screen-space reflections' buffer keeps what: the trace's grid (half the view's size, three words a texel),
+// then the previous frame's picture as a pyramid from the grid's size down (each level half the one before, at most
+// six), two words a texel.
+// The shaders' output flag (FrameUniforms flags.x): 0 as it is, 1 sRGB-encoded (a gamma target), 2 compressed
+// (ViewOptions3D::compress: x / (1 + x)) then encoded, 3 compressed only.
+f32 output_flag(bool encode, bool compress) {
+    return compress ? (encode ? 2.0f : 3.0f) : (encode ? 1.0f : 0.0f);
+}
+struct SsrLayout {
+    u32 w = 1, h = 1;   // the trace's grid: a texel a pixel of the part rendered
+    u32 pw = 1, ph = 1; // the pyramid's level 0: half that
+    u32 levels = 0, pyramid_word = 0, words = 0;
+};
+// The reflections' buffer for a view `size` rendering `part` of it (View3D::set_render_size): the trace's grid (a texel
+// a pixel: a half-size one stepped every reflected edge in twos) and the pyramid's levels (from half the part: it is
+// read blurred) are the part's, where they sit and the buffer's words the whole's, so that a pyramid kept one frame is
+// where the next reads it whatever part that one renders (it reads it at the grid it was kept at).
+SsrLayout ssr_layout(Vec2i size, Vec2i part) {
+    const auto whole = [](i32 v) { return std::max(1u, static_cast<u32>(v)); };
+    const auto half = [](i32 v) { return std::max(1u, (static_cast<u32>(v) + 1) / 2); };
+    SsrLayout l;
+    l.w = whole(std::min(part.x, size.x));
+    l.h = whole(std::min(part.y, size.y));
+    l.pw = half(std::min(part.x, size.x));
+    l.ph = half(std::min(part.y, size.y));
+    l.pyramid_word = whole(size.x) * whole(size.y) * 3;
+    l.words = l.pyramid_word;
+    for (u32 w = half(size.x), h = half(size.y), levels = 0; levels < 6; ++levels) {
+        l.words += w * h * 2;
+        if (w == 1 && h == 1)
+            break;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    for (u32 w = l.pw, h = l.ph; l.levels < 6;) {
+        ++l.levels;
+        if (w == 1 && h == 1)
+            break;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    return l;
+}
+// A camera pass's hidden copy into a draw's uniforms (the third of `first`: its pick id plus one, as the instances hold
+// theirs; 0: none).
+void put_hidden(u32 (&first)[4], const Camera3D& camera) {
+    first[2] = camera.hidden_id ? camera.hidden_id + 1 : 0;
+}
+void put_hidden(u32 (&first)[4], const Scene3D* scene) {
+    first[2] = scene && scene->camera.hidden_id ? scene->camera.hidden_id + 1 : 0;
+    first[3] = scene && scene->debug.unwrap ? 1u : 0u; // (RenderDebugOptions3D::unwrap: kin_mesh_vertex)
+}
+void put_clip(f32 (&clip)[4], const Scene3D* scene) {
+    if (scene) {
+        put_clip(clip, scene->camera);
+    }
+}
 
 // mesh.frag's: the frame's (slot 0) and the draw's (slot 1). The sizes below
 // are those of the std140 blocks in the GLSL (cascade_end and _blend are vec4s):
@@ -198,7 +336,7 @@ struct FrameUniforms {
     f32 fill_color[4];
     f32 flags[4];                                // encode to sRGB, decode textures, shadows, point lights
     f32 eye[4];                                  // the camera, in the scene's world space
-    f32 environment[4];                          // intensity, the specular's last level, 0, 1 with an environment
+    f32 environment[4];                          // intensity, last specular level, specular_aa, 1: environment
     f32 environment_matrix[16];                  // the scene's space to the environment's
     f32 shadow_matrix[max_shadow_cascades * 16]; // a cascade each (one map: the first)
     f32 shadow[4];                               // cascades, 0, a texel (uv)
@@ -208,19 +346,35 @@ struct FrameUniforms {
     f32 cascade_forward[4];                      // the camera's forward
     f32 occlusion[4];                            // 1 with ambient occlusion, 0, 1 / the view's size
     f32 lights[max_lights * 2 * 4];
+    f32 gi[4]; // x: 1 when global illumination's probes light the scene (gi_resolve.comp read their light on the view)
+    f32 grid[4];      // x: 1 when the light grid lights this pass, y: a tile's side (pixels), z: the first slice's near
+                      // depth, w: slices per unit of the log of depth
+    f32 grid_size[4]; // x, y: tiles across and down, z: slices, w: cells (where the lists start)
+    f32 time[4];      // x: Scene3D::time (seconds), for materials that move (a graph's time); y: 1 without
+                      // Scene3D::specular_multiscatter
+    f32 probes[4];    // x: the reflection probes this pass reads, y: their last level
+    f32 probe[max_reflection_probes3d * 6 * 4]; // six vec4s a probe (prepare_reflections)
+    f32 ssr[4]; // x: 1 when this pass reads screen-space reflections, yz: their grid's size, w: their roughness limit
+    f32 ssr_pyramid[4]; // x: the previous picture's levels, y: its projection's [1][1], z: level 0's first word, w: its
+                        // grid (x + 4096 y)
+    f32 ssr_previous[16]; // world to the previous frame's clip space
 };
-static_assert(sizeof(FrameUniforms) == 1120);
+static_assert(sizeof(FrameUniforms) == 2832);
+// A light of the light grid (as gi_light.comp's): place and reach, colour and the square of the size, a spot's way and
+// the cosine of its outer angle (a point light: -2), 1 / (cos inner - cos outer) and its shadow's layer (a point
+// light's cube's first; -1: none).
+struct GridLight {
+    f32 at[4];
+    f32 colour[4];
+    f32 axis[4];
+    f32 cone[4];
+};
+static_assert(sizeof(GridLight) == 64);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
 };
 static_assert(sizeof(CustomUniforms) == 64);
-struct MaterialUniforms {
-    f32 params[4]; // emissive, unlit, receives the sun's shadow, alpha cutoff (0: none)
-    f32 pbr[4];    // metallic, roughness, normal scale, occlusion strength
-    f32 maps[4];   // has a normal map, has an emissive map, opaque (in the occlusion pre-pass)
-};
-static_assert(sizeof(MaterialUniforms) == 48);
 // gtao.comp's.
 struct OcclusionUniforms {
     f32 view[16];
@@ -255,27 +409,33 @@ struct ContactUniforms {
     f32 shape[4]; // distance, thickness, intensity, steps
 };
 static_assert(sizeof(ContactUniforms) == 208);
-// prepass_velocity.vert's and mesh_velocity.vert's, a draw. DrawUniforms is its first 80 bytes, so that a pipeline with
+// prepass_velocity.vert's and mesh_velocity.vert's, a draw. DrawUniforms is its first 96 bytes, so that a pipeline with
 // mesh.vert (a custom shader's) can be given the same block in the main pass.
 struct VelocityUniforms {
-    f32 view_projection[16]; // jittered: where the pixel is drawn
-    u32 first[4];            // x: the draw's first instance
-    f32 current[16];         // this frame's, without the jitter
-    f32 prior[16];           // the last frame's
+    f32 view_projection[16];                // jittered: where the pixel is drawn
+    u32 first[4];                           // x: the draw's first instance
+    f32 clip[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // Camera3D::clip_plane
+    f32 current[16];                        // this frame's, without the jitter
+    f32 prior[16];                          // the last frame's
 };
-static_assert(sizeof(VelocityUniforms) == 208);
+static_assert(sizeof(VelocityUniforms) == 224);
 // taa.comp's.
 struct TaaUniforms {
     f32 sizes[4];  // the picture's width and height, and 1 over them
     f32 params[4]; // history weight, 1 when there is no history, 1 to sharpen, sharpness
     f32 jitter[4]; // this frame's offset in pixels
+    f32 depth[4];  // x: 1 when the main pass's depth is bound (the nearest surface's velocity is taken at edges);
+                   // y: where the overlay's slice of it starts (2: no overlay); z: 1 when the sharpening follows (the
+                   // resolve keeps where the depth bent, for it)
+    f32 still[4];  // x: the history weight of a still pixel; y: 1 when still pixels keep more than moving ones
 };
-static_assert(sizeof(TaaUniforms) == 48);
+static_assert(sizeof(TaaUniforms) == 80);
 // shadow_mask.frag's and pick_mask.frag's.
 struct CutoffUniforms {
     f32 cutoff[4]; // the alpha below which nothing is drawn
+    f32 uv[4];     // the maps' scale and offset (Material3D::uv_scale, uv_offset)
 };
-static_assert(sizeof(CutoffUniforms) == 16);
+static_assert(sizeof(CutoffUniforms) == 32);
 // The sky's and the fog's (kin_sky.inc.glsl's KinSky and kin_fog.inc.glsl's KinFog, vec4s all, so no padding to get
 // wrong).
 struct AtmosphereUniforms {
@@ -290,9 +450,81 @@ struct FogParamUniforms {
     f32 colour[4];  // the fixed colour, 1 to take it from the sky
     f32 density[4]; // per unit of distance, the height fog's at its base, its fall-off, the base height
     f32 limits[4];  // the start, the greatest opacity, the sun's in-scattering and its anisotropy
-    f32 view[4];    // 1 for an orthographic camera
+    f32 view[4];    // 1 for an orthographic camera, 1 for a custom shader's, 1 to read the fog's sunlit share (fog_sun)
 };
 static_assert(sizeof(FogParamUniforms) == 64);
+// fog_sun.comp's Params.
+struct FogSunUniforms {
+    f32 to_world[16];
+    f32 unproject_xy[4];
+    f32 unproject_zw[4];
+    f32 sizes[4];
+    f32 eye[4];
+    f32 forward[4]; // w: the sun's shadows' strength
+    FogParamUniforms fog;
+    f32 shadow_matrix[4 * 16];
+    f32 cascade_end[4];
+    f32 cascade_bias[4];
+    f32 shadow[4];    // cascades, the view depth the shadows reach, the walk's offset this frame, steps
+    f32 sun[4];       // toward the sun (fog_sun_apply.frag's)
+    f32 sun_light[4]; // its light
+};
+static_assert(sizeof(FogSunUniforms) == 544);
+// The stretches each ray of the fog's sunlit share is walked in (closer together near the camera).
+constexpr u32 fog_sun_steps = 16;
+// fog_volume.comp's Params (Fog3D::volumetric).
+struct FogVolumeUniforms {
+    f32 eye[4];     // w: the volume's depth
+    f32 forward[4]; // w: lights
+    f32 ray00[4];   // the top-left corner's ray at view depth 1
+    f32 ray_x[4];
+    f32 ray_y[4];
+    f32 size[4];   // cells; w: the history's share
+    f32 jitter[4]; // the points' offset in their cells; w: the lobe's anisotropy
+    f32 previous[16];
+    f32 previous_eye[4];
+    f32 previous_forward[4]; // w: 1 with a history
+    FogParamUniforms fog;
+    f32 sun[4];       // toward the sun; w: its shadow's strength
+    f32 sun_light[4]; // 0: the sun not in the volume
+    f32 fill[4];      // toward the fill light
+    f32 fill_light[4];
+    f32 sun_matrix[4 * 16];
+    f32 sun_end[4];
+    f32 sun_bias[4];
+    f32 sun_shadow[4]; // cascades (0: none), the view depth they reach
+};
+static_assert(sizeof(FogVolumeUniforms) == 640);
+// fog_volume_depth.comp's.
+struct FogReachUniforms {
+    f32 unproject_zw[4];
+    f32 sizes[4]; // the columns, the depth's size
+    f32 tile[4];  // pixels a column across and down; 0 the tiles' step, 1 the neighbourhood's
+};
+static_assert(sizeof(FogReachUniforms) == 48);
+// fog_volume_integrate.comp's.
+struct FogIntegrateUniforms {
+    f32 eye[4];
+    f32 ray00[4];
+    f32 ray_x[4];
+    f32 ray_y[4];
+    f32 size[4]; // cells; w: 1 - the fog's greatest opacity
+};
+static_assert(sizeof(FogIntegrateUniforms) == 80);
+// fog_volume_apply.frag's.
+struct FogVolumeApplyUniforms {
+    f32 to_world[16];
+    f32 unproject_xy[4];
+    f32 unproject_zw[4];
+    f32 sizes[4];
+    f32 forward[4]; // w: the volume's depth
+    f32 cells[4];   // w: 1 when the volume holds the sun's in-scattering
+    f32 eye[4];
+    f32 sun[4];
+    f32 sun_light[4];
+    FogParamUniforms fog;
+};
+static_assert(sizeof(FogVolumeApplyUniforms) == 256);
 // mesh_fog.frag's slot 2.
 struct FogBlockUniforms {
     FogParamUniforms fog;
@@ -340,11 +572,17 @@ struct LocalLightUniforms {
     f32 moon_blend[4];
     f32 spots[max_spot_lights * 16];
     f32 point_shadow[max_lights * 4];
-    f32 local_matrix[max_local_shadow_layers * 16];
-    f32 local_a[max_local_shadow_layers * 4];
-    f32 local_b[max_local_shadow_layers * 4];
+    // The local maps (kin_local_lights.inc.glsl): a spot's map's matrix; each shadowed light's numbers (the spots' by
+    // slot, then the point lights'); each map's place in the array; each cube's light (its faces are derived from it).
+    f32 local_matrix[max_spot_shadow_maps * 16];
+    f32 local_a[(max_spot_shadow_maps + max_point_shadow_maps) * 4];
+    f32 local_b[(max_spot_shadow_maps + max_point_shadow_maps) * 4];
+    f32 local_c[max_local_shadow_layers * 4]; // per map: its corner in its layer (uv), its layer
+    f32 local_p[max_point_shadow_maps * 4];   // per cube: the light's position, its faces' half angle's tangent
 };
-static_assert(sizeof(LocalLightUniforms) == 3600);
+// SDL_GPU binds at most 4 KiB of a uniform block (MAX_UBO_SECTION_SIZE).
+static_assert(sizeof(LocalLightUniforms) <= 4096);
+
 // P3c. A sprite in the storage buffer (particle.vert's Particle), and the draw's two blocks (particle.vert's
 // ParticleDraw in vertex slot 0, kin_particle_fragment.inc.glsl's ParticleFrag in fragment slot 0): vec4s and mat4s
 // all, so no padding to get wrong.
@@ -376,8 +614,9 @@ struct ParticleDrawUniforms {
     f32 sun_light[4];
     FogParamUniforms fog;
     AtmosphereUniforms sky;
+    f32 clip[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // Camera3D::clip_plane
 };
-static_assert(sizeof(ParticleDrawUniforms) == 368);
+static_assert(sizeof(ParticleDrawUniforms) == 384);
 struct ParticleFragUniforms {
     f32 tint[4];
     f32 flags[4];     // encode, decode the texture, the blend, 1 with a texture
@@ -497,13 +736,10 @@ f32 to_leave(const Bounds3D& box, Vec3f c, Vec3f down) {
     return std::max(t, 0.0f);
 }
 
-// A copy's bounding sphere: its mesh's, moved and scaled with it. Returns the scale (its largest axis').
+// A copy's bounding sphere: its mesh's, moved and conservatively scaled, including shear from nested TRS.
 f32 sphere_of(const Mat4f& t, Vec3f center, f32 radius, Vec3f& c, f32& r) {
     c = t.apply(center);
-    const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
-    const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
-    const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
-    const f32 scale = std::sqrt(std::max({sx, sy, sz}));
+    const f32 scale = stretch_bound(t);
     r = radius * scale;
     return scale;
 }
@@ -526,6 +762,8 @@ LodView lod_view_of(const Lod3D& lod, const RenderDebugOptions3D& debug, const C
     v.pixels = std::max(lod.error_pixels, 0.0f) / std::max(lod.bias, 1e-3f);
     v.per_unit = v.orthographic ? viewport_height / std::max(camera.height, 1e-6f)
                                 : 0.5f * viewport_height / std::tan(0.5f * camera.fov * (3.14159265358979f / 180.0f));
+    if (camera.windowed() && camera.window.h > 0.0f)
+        v.per_unit /= camera.window.h; // a window's pixels are denser than the frame's
     v.eye = camera.position;
     v.forward = camera.forward();
     return v;
@@ -562,7 +800,8 @@ struct ComputeSpec {
     u32 samplers = 0;
     u32 readonly_buffers = 0, readwrite_buffers = 0;
     u32 readwrite_textures = 1;
-    u32 threads_x = 8, threads_y = 8;
+    u32 threads_x = 8, threads_y = 8, threads_z = 1;
+    u32 uniform_buffers = 1;
 };
 SDL_GPUComputePipeline* make_compute(SDL_GPUDevice* device, std::string_view file, ComputeSpec spec) {
     const std::span<const unsigned char> code = embedded_gpu_shader(file);
@@ -577,10 +816,10 @@ SDL_GPUComputePipeline* make_compute(SDL_GPUDevice* device, std::string_view fil
     info.num_readonly_storage_buffers = spec.readonly_buffers;
     info.num_readwrite_storage_buffers = spec.readwrite_buffers;
     info.num_readwrite_storage_textures = spec.readwrite_textures;
-    info.num_uniform_buffers = 1;
+    info.num_uniform_buffers = spec.uniform_buffers;
     info.threadcount_x = spec.threads_x;
     info.threadcount_y = spec.threads_y;
-    info.threadcount_z = 1;
+    info.threadcount_z = spec.threads_z;
     return SDL_CreateGPUComputePipeline(device, &info);
 }
 
@@ -595,6 +834,45 @@ void put_color(f32* to, LinearRgb color, f32 w) {
     to[1] = color.g;
     to[2] = color.b;
     to[3] = w;
+}
+
+// The light whose numbers (local_a, local_b) map `m` takes (kin_local_light).
+u32 local_light_of(u32 m) {
+    return m < max_spot_shadow_maps ? m : max_spot_shadow_maps + (m - max_spot_shadow_maps) / cube_faces;
+}
+
+// Whether a cube's six projections are the ones the shader derives from its light (cube_face_view's: a right angle and
+// its guard band from `position` along each axis, Mat4f::look_at's up), to a thousandth.
+bool standard_cube(std::span<const LocalShadowView3D, cube_faces> faces, Vec3f position) {
+    static const Vec3f axes[cube_faces] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (u32 f = 0; f < cube_faces; ++f) {
+        const LocalShadowView3D& v = faces[f];
+        const Vec3f up = std::abs(axes[f].y) > 0.99f ? Vec3f{0.0f, 0.0f, -1.0f} : Vec3f{0.0f, 1.0f, 0.0f};
+        const f32 fov = 2.0f * std::atan(v.tan_half) * (180.0f / 3.14159265f);
+        const Mat4f want =
+            Mat4f::perspective(fov, 1.0f, v.near_plane, v.far_plane) * Mat4f::look_at(position, position + axes[f], up);
+        for (u32 i = 0; i < 16; ++i) {
+            if (!(std::abs(want.m[i] - v.view_projection.m[i]) <= 1e-3f * (1.0f + std::abs(want.m[i])))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Map `m`'s entries in the block: its view (a spot's matrix, a cube's light), its light's numbers, its place.
+void put_local_map(LocalLightUniforms& lu, u32 m, const LocalShadowView3D& v, u32 resolution, f32 side, Vec3f position,
+                   f32 bias, f32 normal_offset, f32 softness, f32 fade, u32 layer, u32 x, u32 y) {
+    if (m < max_spot_shadow_maps) {
+        std::memcpy(lu.local_matrix + 16 * m, v.view_projection.m, 16 * sizeof(f32));
+    } else {
+        put(lu.local_p + 4 * ((m - max_spot_shadow_maps) / cube_faces), position, v.tan_half);
+    }
+    const f32 r = static_cast<f32>(resolution);
+    const u32 light = local_light_of(m);
+    put(lu.local_a + 4 * light, {r / side, 2.0f * v.tan_half / r, v.near_plane}, v.far_plane);
+    put(lu.local_b + 4 * light, {bias, normal_offset, softness}, fade);
+    put(lu.local_c + 4 * m, {static_cast<f32>(x) / side, static_cast<f32>(y) / side, static_cast<f32>(layer)}, 0.0f);
 }
 
 void fill_atmosphere(AtmosphereUniforms& a, const Sky3D& sky, Vec3f sun_direction) {
@@ -623,6 +901,13 @@ void fill_fog(FogParamUniforms& f, const Fog3D& fog, const Sky3D& sky, bool orth
     put(f.view, {orthographic ? 1.0f : 0.0f, 0.0f, 0.0f}, 0.0f);
 }
 
+// Whether Fog3D::volumetric has anything to do: the fog on with air in it, a perspective camera, a volume with depth.
+bool fog_volume_possible(const Fog3D& fog, const Camera3D& camera) {
+    const VolumetricFog3D& v = fog.volumetric;
+    return fog.enabled && v.enabled && v.intensity > 0.0f && v.distance > 0.0f && fog.max_opacity > 0.0f &&
+           (fog.density > 0.0f || fog.height_density > 0.0f) && camera.projection == Projection3D::Perspective;
+}
+
 // A depth target cleared to the far plane (reverse Z: 0), whose stencil is not used.
 SDL_GPUDepthStencilTargetInfo depth_target(SDL_GPUTexture* texture, SDL_GPUStoreOp store_op, bool cycle = false,
                                            u32 layer = 0) {
@@ -646,7 +931,8 @@ void set_viewport(SDL_GPURenderPass* pass, u32 width, u32 height, f32 min_depth 
 // One compute pass over `target`'s texels in groups of 8 x 8: `inputs` sampled, the uniforms pushed.
 // False if the pass could not begin (nothing was recorded).
 bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeline, const GpuTexture& target,
-                  std::span<const SDL_GPUTextureSamplerBinding> inputs, const void* uniforms, u32 bytes) {
+                  std::span<const SDL_GPUTextureSamplerBinding> inputs, const void* uniforms, u32 bytes,
+                  Vec2i part = {}) { // (`part`: only so much of it, from the top-left)
     const SDL_GPUStorageTextureReadWriteBinding output{
         .texture = target.handle(), .mip_level = 0, .layer = 0, .cycle = false};
     SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
@@ -656,7 +942,9 @@ bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeli
     SDL_BindGPUComputePipeline(pass, pipeline);
     SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), static_cast<u32>(inputs.size()));
     SDL_PushGPUComputeUniformData(commands, 0, uniforms, bytes);
-    SDL_DispatchGPUCompute(pass, (target.width() + 7) / 8, (target.height() + 7) / 8, 1);
+    const u32 w = part.x > 0 ? static_cast<u32>(part.x) : target.width(),
+              h = part.y > 0 ? static_cast<u32>(part.y) : target.height();
+    SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
     SDL_EndGPUComputePass(pass);
     return true;
 }
@@ -664,7 +952,7 @@ bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeli
 // The same into two textures of one size (ao_blur_both.comp).
 bool compute_pass_two(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeline, const GpuTexture& first,
                       const GpuTexture& second, std::span<const SDL_GPUTextureSamplerBinding> inputs,
-                      const void* uniforms, u32 bytes) {
+                      const void* uniforms, u32 bytes, Vec2i part = {}) {
     const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> outputs{
         SDL_GPUStorageTextureReadWriteBinding{.texture = first.handle(), .mip_level = 0, .layer = 0, .cycle = false},
         SDL_GPUStorageTextureReadWriteBinding{.texture = second.handle(), .mip_level = 0, .layer = 0, .cycle = false}};
@@ -675,7 +963,9 @@ bool compute_pass_two(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pi
     SDL_BindGPUComputePipeline(pass, pipeline);
     SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), static_cast<u32>(inputs.size()));
     SDL_PushGPUComputeUniformData(commands, 0, uniforms, bytes);
-    SDL_DispatchGPUCompute(pass, (first.width() + 7) / 8, (first.height() + 7) / 8, 1);
+    const u32 w = part.x > 0 ? static_cast<u32>(part.x) : first.width(),
+              h = part.y > 0 ? static_cast<u32>(part.y) : first.height();
+    SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
     SDL_EndGPUComputePass(pass);
     return true;
 }
@@ -771,7 +1061,7 @@ public:
 private:
     SDL_GPURenderPass* _pass;
     SDL_GPUGraphicsPipeline* _pipeline = nullptr;
-    std::array<SDL_GPUBuffer*, 6> _storage{}; // largest vertex storage layout is skinned velocity
+    std::array<SDL_GPUBuffer*, 7> _storage{}; // largest vertex storage layout: skinned velocity with morph targets
     u32 _storage_count = 0;
     const GpuMesh3D* _skin_mesh = nullptr;
     SDL_GPUBuffer* _vertices = nullptr;
@@ -786,7 +1076,7 @@ GpuClusterChunk::~GpuClusterChunk() {
     if (device && *device) {
         for (SDL_GPUBuffer* buffer : {indices, table}) {
             if (buffer) {
-                SDL_ReleaseGPUBuffer(*device, buffer);
+                tracked_release_buffer(*device, buffer);
             }
         }
     }
@@ -797,9 +1087,9 @@ GpuMesh3D::~GpuMesh3D() {
         buffer_pool->retire(std::move(allocation));
     if (device && *device) {
         for (SDL_GPUBuffer* buffer :
-             {buffer_pool ? nullptr : vertices, skin, chunk || buffer_pool ? nullptr : indices}) {
+             {buffer_pool ? nullptr : vertices, skin, chunk || buffer_pool ? nullptr : indices, previous}) {
             if (buffer) {
-                SDL_ReleaseGPUBuffer(*device, buffer); // freed once the GPU is done with it
+                tracked_release_buffer(*device, buffer); // freed once the GPU is done with it
             }
         }
     }
@@ -814,6 +1104,7 @@ bool GpuRenderer3D::supported(SDL_GPUDevice* device) {
 }
 
 GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _owner(&owner), _device(&device) {
+    _capabilities.shared_preparation = true;
     for (std::size_t i = 0; i < _srgb_to_linear.size(); ++i) {
         _srgb_to_linear[i] = srgb_to_linear(static_cast<f32>(i) / 255.0f);
     }
@@ -825,9 +1116,19 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     _depth_format = depth->format;
     _capabilities.depth_bits = depth->bits;
+    _capabilities.morph_targets = true; // a vertex buffer rewritten by an upload: every device
+    // And blended on the GPU where compute can write a vertex buffer: morph_blend.comp (else blended on the CPU).
+    _morph_pipeline = make_compute(
+        handle, "morph_blend.comp.spv",
+        {.readonly_buffers = 2, .readwrite_buffers = 1, .readwrite_textures = 0, .threads_x = 64, .threads_y = 1});
     _capabilities.depth_float = depth->floating;
     _capabilities.max_samples = max_samples(handle, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, _depth_format);
     _capabilities.max_samples_hdr = max_samples(handle, hdr_format, _depth_format);
+    // SDL makes its devices with anisotropic filtering (Vulkan's samplerAnisotropy, which promises 16; Direct3D 12's
+    // and Metal's most is 16).
+    _capabilities.max_anisotropy = 16;
+    // Metal's samplers have no mip bias (SDL drops it there).
+    _capabilities.texture_lod_bias = std::string_view(device.driver_name()) != "metal";
     // Shadow maps: a depth format that can also be sampled, as an array (a
     // layer a cascade; one layer is the single map).
     for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREFORMAT_D16_UNORM}) {
@@ -880,6 +1181,21 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    try {
+        _visibility_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "visibility.frag.spv", 2, 0);
+        _visibility_mask_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "visibility_mask.frag.spv", 2, 1);
+        _capabilities.visibility_pass =
+            bool(_visibility_shader) && bool(_visibility_mask_shader) && bool(_vertex_shader) &&
+            SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+            SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: visibility masks unavailable",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
     {
         try {
             _indexed_vertex =
@@ -895,6 +1211,20 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             KIN_LOG_WARN_F("render", "3D: retained instances unavailable",
                            (LogFields{{.name = "reason", .value = e.what()}}));
         }
+    }
+    try {
+        _draw_material_vertex =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "mesh_material.vert.spv", 1, 0, 2);
+        const std::array<const char*, 4> names{"mesh_material.frag.spv", "mesh_material_fog.frag.spv",
+                                               "mesh_material_light.frag.spv", "mesh_material_light_fog.frag.spv"};
+        for (u32 i = 0; i < names.size(); ++i)
+            _draw_material_fragments[i] =
+                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, names[i], 2 + u32(i & 1) + u32(i >= 2),
+                                         (i >= 2 ? 15 : 10) + u32(i & 1), i >= 2 ? 6 : 1); // (a fog one: uFogVolume)
+        _draw_materials_available = true;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: retained draw materials unavailable",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
     }
     {
         try {
@@ -968,6 +1298,9 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                           SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER)) {
             throw std::runtime_error("no two-float colour target");
         }
+        _capabilities.geometry_pass =
+            SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
         if (!SDL_GPUTextureSupportsFormat(handle, ao_format, SDL_GPU_TEXTURETYPE_2D,
                                           SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
             throw std::runtime_error("no R8 storage texture");
@@ -979,6 +1312,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _point_sampler = SDL_CreateGPUSampler(handle, &point);
         _gtao_pipeline = make_compute(handle, "gtao.comp.spv", {.samplers = 2});
         _ao_blur_pipeline = make_compute(handle, "ao_blur.comp.spv", {.samplers = 2});
+        _ao_upsample_pipeline = make_compute(handle, "ao_upsample.comp.spv", {.samplers = 3});
         _ao_blur_both_pipeline =
             make_compute(handle, "ao_blur_both.comp.spv",
                          {.samplers = 3, .readwrite_textures = 2}); // optional: two dispatches without
@@ -1002,9 +1336,67 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
         }
         _ao_available = true;
+        // Decals read the pre-pass's depth and normals: made with it.
+        try {
+            _decal_vertex_shader =
+                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "decal.vert.spv",
+                                         /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
+            _decal_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "decal.frag.spv",
+                                                     /*uniform_buffers=*/4, /*samplers=*/14);
+            _capabilities.decals = true;
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: decals not available", (LogFields{{.name = "reason", .value = e.what()}}));
+        }
     } catch (const std::exception& e) {
         KIN_LOG_INFO_F("render", "3D: ambient occlusion and contact shadows not available",
                        (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    // The fog's sunlight through the sun's shadows (Fog3D::sun_shadows), on what the pre-pass drew: without it, the
+    // sun's in-scattering stays unshadowed.
+    if (_ao_available) {
+        try {
+            _fog_sun_apply_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                             "fog_sun_apply.frag.spv", /*uniform_buffers=*/1,
+                                                             /*samplers=*/2);
+            _fog_sun_pipeline = make_compute(handle, "fog_sun.comp.spv", {.samplers = 2});
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: the fog's shadowed sunlight not available",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+        // The lights' light in the fog's air (Fog3D::volumetric): two volumes of RGBA16F written and sampled.
+        try {
+            constexpr SDL_GPUTextureUsageFlags usage =
+                SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+            if (!SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_3D,
+                                              usage)) {
+                throw std::runtime_error("no RGBA16F storage volume");
+            }
+            _fog_volume_apply_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                                "fog_volume_apply.frag.spv", /*uniform_buffers=*/1,
+                                                                /*samplers=*/2);
+            _fog_volume_pipeline = make_compute(handle, "fog_volume.comp.spv",
+                                                {.samplers = 5,
+                                                 .readonly_buffers = 1,
+                                                 .threads_x = 4,
+                                                 .threads_y = 4,
+                                                 .threads_z = 4,
+                                                 .uniform_buffers = 2});
+            _fog_volume_integrate_pipeline = make_compute(handle, "fog_volume_integrate.comp.spv", {.samplers = 2});
+            _fog_volume_depth_pipeline = make_compute(handle, "fog_volume_depth.comp.spv", {.samplers = 1});
+            if (!_fog_volume_pipeline || !_fog_volume_integrate_pipeline || !_fog_volume_depth_pipeline) {
+                throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
+            }
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: the lights' light in the fog not available",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+            for (SDL_GPUComputePipeline** p :
+                 {&_fog_volume_pipeline, &_fog_volume_integrate_pipeline, &_fog_volume_depth_pipeline}) {
+                if (*p) {
+                    SDL_ReleaseGPUComputePipeline(handle, *p);
+                    *p = nullptr;
+                }
+            }
+        }
     }
     // Temporal anti-aliasing: the velocity pre-pass, four-float colour targets
     // to draw it into and a float storage texture for the history, over what
@@ -1016,6 +1408,18 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                          /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/2);
             _prepass_velocity_shader =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "prepass_velocity.frag.spv");
+            try { // optional: without them a morphing mesh's velocity is its copy's alone
+                _prepass_velocity_morph_vertex_shader =
+                    GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "prepass_velocity_morph.vert.spv",
+                                             /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/3);
+                if (_skinning_available)
+                    _prepass_velocity_morph_skinned_vertex_shader = GpuShader::from_embedded(
+                        device, SDL_GPU_SHADERSTAGE_VERTEX, "prepass_velocity_morph_skinned.vert.spv",
+                        /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/7);
+            } catch (const std::exception& e) {
+                KIN_LOG_INFO_F("render", "3D: morph target velocity not available",
+                               (LogFields{{.name = "reason", .value = e.what()}}));
+            }
             _prepass_velocity_mask_shader =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "prepass_velocity_mask.frag.spv",
                                          /*uniform_buffers=*/1, /*samplers=*/1);
@@ -1032,7 +1436,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                                   SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
                 throw std::runtime_error("no four-float colour target or storage texture");
             }
-            _taa_pipeline = make_compute(handle, "taa.comp.spv", {.samplers = 4});
+            _taa_pipeline = make_compute(handle, "taa.comp.spv", {.samplers = 6, .readwrite_textures = 2});
             if (!_taa_pipeline) {
                 throw std::runtime_error(std::string{"compute pipeline not made: "} + SDL_GetError());
             }
@@ -1041,6 +1445,9 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             _reactive_shader =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "taa_reactive.frag.spv", 1, 1);
             _taa_available = true;
+            _taa_depth_sampled =
+                SDL_GPUTextureSupportsFormat(handle, _depth_format, SDL_GPU_TEXTURETYPE_2D,
+                                             SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
         } catch (const std::exception& e) {
             KIN_LOG_INFO_F("render", "3D: temporal anti-aliasing not available",
                            (LogFields{{.name = "reason", .value = e.what()}}));
@@ -1048,17 +1455,23 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     _capabilities.ambient_occlusion = _capabilities.contact_shadows = _ao_available;
     _capabilities.temporal_aa = _taa_available;
+    // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
+    make_gi();
     // Fog and the sky (P3a): the fog variants of the stock mesh shaders (one more uniform block, in the slot custom
     // parameters have elsewhere), the sky pass's shaders, the panorama pass of the sky's image-based light. Each its
     // own try: a device without them draws as before (said once when a scene asks).
     try {
+        // (One sampler more than the plain variants: the fog volume's sums, uFogVolume.)
         _mesh_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_fog.frag.spv",
-                                                    /*uniform_buffers=*/3, /*samplers=*/10);
+                                                    /*uniform_buffers=*/3, /*samplers=*/11);
         if (_mesh_velocity_shader) {
             _mesh_velocity_fog_shader =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_fog.frag.spv",
-                                         /*uniform_buffers=*/3, /*samplers=*/10);
+                                         /*uniform_buffers=*/3, /*samplers=*/11);
         }
+        // What uFogVolume reads without a volume (never sampled then: the fog block's view.w is 0).
+        _no_fog_volume =
+            _device->create_volume(1, 1, 1, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTUREUSAGE_SAMPLER);
         _fog_available = true;
     } catch (const std::exception& e) {
         KIN_LOG_INFO_F("render", "3D: fog not available", (LogFields{{.name = "reason", .value = e.what()}}));
@@ -1181,8 +1594,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                   SDL_GPU_BUFFERUSAGE_INDEX | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
                   SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ}) {
                 const SDL_GPUBufferCreateInfo probe{.usage = usage, .size = 256, .props = 0};
-                if (SDL_GPUBuffer* buffer = SDL_CreateGPUBuffer(handle, &probe)) {
-                    SDL_ReleaseGPUBuffer(handle, buffer);
+                if (SDL_GPUBuffer* buffer = tracked_create_buffer(handle, &probe)) {
+                    tracked_release_buffer(handle, buffer);
                 } else {
                     usable = false;
                 }
@@ -1262,7 +1675,18 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
                                          SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
             _filter_pipeline = make_compute(handle, "env_filter.comp.spv", {.samplers = 1});
+            if (SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE) &&
+                SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                             SDL_GPU_TEXTURETYPE_2D_ARRAY,
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE))
+                _panorama_pipeline = make_compute(handle, "probe_panorama.comp.spv", {.samplers = 1});
         }
+        _ssr_pipeline = make_compute(handle, "ssr_trace.comp.spv",
+                                     {.samplers = 2, .readwrite_buffers = 1, .readwrite_textures = 0});
+        _ssr_pyramid_pipeline = make_compute(handle, "ssr_pyramid.comp.spv",
+                                             {.samplers = 1, .readwrite_buffers = 1, .readwrite_textures = 0});
     }
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
         // Bilinear comparisons: each tap is itself four, softening the edge.
@@ -1284,44 +1708,122 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         }
     }
     // Spot lights and the shadows of lights that are not the sun (P3b): the light variants of the stock mesh shaders.
-    // They sample two more depth arrays (the dummy `_no_shadow` where there is no map), so they need the shadow format;
+    // They sample two more depth arrays (the dummy `_no_shadow` where there is no map), and global illumination's
+    // light on the view (G5; dummies where there is none), so they need the shadow format;
     // absent, and the features off (said once, when a scene asks).
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow) {
         try {
+            // (And the light grid's two storage buffers: its lights, its cells and their lists.)
+            // (And the area lights' LTC tables and emitters, for their reflections.)
             _mesh_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light.frag.spv",
                                                           /*uniform_buffers=*/3,
-                                                          /*samplers=*/12);
+                                                          /*samplers=*/15, /*storage_buffers=*/5);
             _mesh_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                               "mesh_light_fog.frag.spv", /*uniform_buffers=*/4,
-                                                              /*samplers=*/12);
+                                                              /*samplers=*/16, /*storage_buffers=*/5);
             if (_mesh_velocity_shader) {
                 _mesh_velocity_light_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light.frag.spv",
-                                             /*uniform_buffers=*/3, /*samplers=*/12);
+                                             /*uniform_buffers=*/3, /*samplers=*/15, /*storage_buffers=*/5);
                 _mesh_velocity_light_fog_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light_fog.frag.spv",
-                                             /*uniform_buffers=*/4, /*samplers=*/12);
+                                             /*uniform_buffers=*/4, /*samplers=*/16, /*storage_buffers=*/5);
             }
             _lights_available = true;
+            // What the light variants bind where they read nothing: no screen-space reflections (their last storage
+            // buffer) and no reflection array (binding 6, a 2D array: a one-layer white one, never a 2D texture).
+            _ssr_dummy = std::make_shared<GpuBuffer>(
+                _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, 64));
+            if (!_white_maps) {
+                static constexpr u8 white[4] = {255, 255, 255, 255};
+                const u8* const layer = white;
+                _white_maps = create_map_array({1, 1}, {&layer, 1});
+            }
             _capabilities.local_shadows = true;
+            _capabilities.max_point_lights = _capabilities.max_spot_lights = max_grid_lights;
         } catch (const std::exception& e) {
             KIN_LOG_INFO_F("render", "3D: spot lights and local shadows not available",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+    }
+    _capabilities.surface_pass = _depth_format == SDL_GPU_TEXTUREFORMAT_D32_FLOAT && _vertex_shader && _fragment_shader;
+    _capabilities.sun_shadow_pass =
+        _shadow_format == SDL_GPU_TEXTUREFORMAT_D32_FLOAT && _shadow_shader && _shadow_vertex_shader;
+    _capabilities.local_shadow_pass = _capabilities.sun_shadow_pass && _lights_available;
+    _capabilities.material_inputs = bool(_vertex_shader && _fragment_shader);
+    _capabilities.surface_stages = _capabilities.surface_pass;
+    _capabilities.surface_particles = _capabilities.surface_pass && _particles_available;
+    _capabilities.surface_soft_particles = _capabilities.surface_particles && _soft_particles_available;
+    _capabilities.bloom_pass =
+        _bloom_shader && SDL_GPUTextureSupportsFormat(_device->handle(), hdr_format, SDL_GPU_TEXTURETYPE_2D,
+                                                      SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    _capabilities.output_pass =
+        _output_shader && SDL_GPUTextureSupportsFormat(_device->handle(), hdr_format, SDL_GPU_TEXTURETYPE_2D,
+                                                       SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    // ViewOptions3D::auto_exposure: the metering's two compute pipelines and the output's variants that read it.
+    if (_capabilities.output_pass) {
+        try {
+            _output_auto_shader =
+                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output_auto.frag.spv",
+                                         /*uniform_buffers=*/1, /*samplers=*/2, /*storage_buffers=*/1);
+            if (_output_dither_shader)
+                _output_dither_auto_shader =
+                    GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output_dither_auto.frag.spv",
+                                             /*uniform_buffers=*/1, /*samplers=*/2, /*storage_buffers=*/1);
+            _exposure_histogram_pipeline = make_compute(
+                handle, "exposure_histogram.comp.spv",
+                {.samplers = 1, .readwrite_buffers = 1, .readwrite_textures = 0, .threads_x = 16, .threads_y = 16});
+            _exposure_adapt_pipeline =
+                make_compute(handle, "exposure_adapt.comp.spv",
+                             {.readwrite_buffers = 1, .readwrite_textures = 0, .threads_x = 128, .threads_y = 1});
+            _capabilities.auto_exposure =
+                _output_auto_shader && _exposure_histogram_pipeline && _exposure_adapt_pipeline;
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: auto exposure not available",
                            (LogFields{{.name = "reason", .value = e.what()}}));
         }
     }
 }
 
 GpuRenderer3D::~GpuRenderer3D() {
+    release_gi_pipelines();
     if (_compare_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _compare_sampler);
     }
     if (_environment_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _environment_sampler);
     }
+    for (SDL_GPUComputePipeline* compute : {_filter_pipeline,
+                                            _panorama_pipeline,
+                                            _ssr_pipeline,
+                                            _ssr_pyramid_pipeline,
+                                            _ao_blur_chain_pipeline,
+                                            _ao_blur_both_chain_pipeline,
+                                            _gtao_pipeline,
+                                            _gtao_chain_pipeline,
+                                            _ao_chain_pipeline,
+                                            _ao_blur_pipeline,
+                                            _ao_blur_both_pipeline,
+                                            _ao_upsample_pipeline,
+                                            _contact_pipeline,
+                                            _fog_sun_pipeline,
+                                            _taa_pipeline,
+                                            _gc_cull,
+                                            _gc_scan,
+                                            _gc_args,
+                                            _gc_gather,
+                                            _gc_cull_occ,
+                                            _hiz_depth_pipeline,
+                                            _hiz_reduce_pipeline,
+                                            _exposure_histogram_pipeline,
+                                            _exposure_adapt_pipeline,
+                                            _morph_pipeline}) {
+        if (compute) {
+            SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
+        }
+    }
     for (SDL_GPUComputePipeline* compute :
-         {_filter_pipeline, _ao_blur_chain_pipeline, _ao_blur_both_chain_pipeline, _gtao_pipeline, _gtao_chain_pipeline,
-          _ao_chain_pipeline, _ao_blur_pipeline, _ao_blur_both_pipeline, _contact_pipeline, _taa_pipeline, _gc_cull,
-          _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline, _hiz_reduce_pipeline}) {
+         {_fog_volume_pipeline, _fog_volume_integrate_pipeline, _fog_volume_depth_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
         }
@@ -1329,23 +1831,26 @@ GpuRenderer3D::~GpuRenderer3D() {
     if (_point_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _point_sampler);
     }
-    for (SDL_GPUSampler* sampler : _samplers) {
+    for (const auto& [key, sampler] : _samplers) {
         if (sampler) {
             SDL_ReleaseGPUSampler(_device->handle(), sampler);
         }
     }
 }
 
-SDL_GPUSampler* GpuRenderer3D::sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v) {
-    if (u == Wrap3D::Clamp && v == Wrap3D::Clamp) {
-        return _owner->sampler_for(texture); // as 2D draws it
-    }
-    const ScaleMode scale =
-        texture.scale_mode() == ScaleMode::Mipmapped && !texture.mipmapped() ? ScaleMode::Linear : texture.scale_mode();
-    const std::size_t index =
-        (static_cast<std::size_t>(scale) * 3 + static_cast<std::size_t>(u)) * 3 + static_cast<std::size_t>(v);
-    if (index < _samplers.size() && _samplers[index]) {
-        return _samplers[index];
+SDL_GPUSampler* GpuRenderer3D::sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v,
+                                           std::optional<TextureSampler3D> explicit_sampler) {
+    auto sampling = explicit_sampler.value_or(legacy_sampler3d(texture.scale_mode(), u, v));
+    if (!texture.mipmapped())
+        sampling.mip = MipFilter3D::None;
+    const bool filtered_mips = sampling.mip != MipFilter3D::None && sampling.min == TextureFilter3D::Linear &&
+                               sampling.mag == TextureFilter3D::Linear;
+    const u32 anisotropy = filtered_mips ? _anisotropy : 1;
+    const i32 bias = filtered_mips ? _lod_bias : 0;
+    const u32 key = u32(sampling.wrap_u) | u32(sampling.wrap_v) << 2 | u32(sampling.min) << 4 | u32(sampling.mag) << 5 |
+                    u32(sampling.mip) << 6 | anisotropy << 8 | u32(bias + 64) << 13;
+    if (const auto found = _samplers.find(key); found != _samplers.end()) {
+        return found->second ? found->second : _owner->sampler_for(texture);
     }
     const auto mode = [](Wrap3D wrap) {
         return wrap == Wrap3D::Repeat   ? SDL_GPU_SAMPLERADDRESSMODE_REPEAT
@@ -1353,18 +1858,19 @@ SDL_GPUSampler* GpuRenderer3D::sampler_for(const GpuTextureBackend& texture, Wra
                                         : SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     };
     SDL_GPUSamplerCreateInfo info{};
-    info.address_mode_u = mode(u);
-    info.address_mode_v = mode(v);
+    info.address_mode_u = mode(sampling.wrap_u);
+    info.address_mode_v = mode(sampling.wrap_v);
     info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    const bool nearest = scale == ScaleMode::Nearest;
-    info.min_filter = info.mag_filter = nearest ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
+    info.min_filter = sampling.min == TextureFilter3D::Nearest ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
+    info.mag_filter = sampling.mag == TextureFilter3D::Nearest ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     info.mipmap_mode =
-        scale == ScaleMode::Mipmapped ? SDL_GPU_SAMPLERMIPMAPMODE_LINEAR : SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-    info.max_lod = scale == ScaleMode::Mipmapped ? 1000.0f : 0.0f;
+        sampling.mip == MipFilter3D::Linear ? SDL_GPU_SAMPLERMIPMAPMODE_LINEAR : SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    info.max_lod = sampling.mip == MipFilter3D::None ? 0.0f : 1000.0f;
+    info.enable_anisotropy = anisotropy > 1;
+    info.max_anisotropy = static_cast<f32>(anisotropy);
+    info.mip_lod_bias = static_cast<f32>(bias) / 16.0f;
     SDL_GPUSampler* sampler = SDL_CreateGPUSampler(_device->handle(), &info);
-    if (index < _samplers.size()) {
-        _samplers[index] = sampler;
-    }
+    _samplers.emplace(key, sampler);
     return sampler ? sampler : _owner->sampler_for(texture);
 }
 
@@ -1378,18 +1884,87 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
     return 1;
 }
 
+const GpuSurfaceShader3D* GpuRenderer3D::cutout_surface(const Material3D& material) {
+    if (material.blend != Blend3D::Mask || material.shader.backend())
+        return nullptr;
+    const auto* surface = dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
+    return surface && surface->masks() ? surface : nullptr;
+}
+
+const GpuSurfaceShader3D* GpuRenderer3D::moving_surface(const Material3D& material) {
+    if (material.shader.backend())
+        return nullptr;
+    const auto* surface = dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
+    return surface && surface->offsets() ? surface : nullptr;
+}
+
+void GpuRenderer3D::bind_offset(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material,
+                                bool skinned) {
+    if (skinned || !moving_surface(material))
+        return;
+    struct {
+        f32 surface[surface_param_count3d], time[4], eye[4], forward[4], flags[4], uv[4];
+    } u{};
+    std::memcpy(u.surface, material.shader_params.data(), sizeof(u.surface));
+    u.time[0] = _offset_time[0];
+    u.time[1] = _offset_time[1];
+    u.eye[0] = _offset_eye.x, u.eye[1] = _offset_eye.y, u.eye[2] = _offset_eye.z;
+    u.forward[0] = _offset_forward.x, u.forward[1] = _offset_forward.y, u.forward[2] = _offset_forward.z;
+    u.flags[1] = _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 1.0f : 0.0f;
+    u.uv[0] = material.uv_scale.x, u.uv[1] = material.uv_scale.y;
+    u.uv[2] = material.uv_offset.x, u.uv[3] = material.uv_offset.y;
+    SDL_PushGPUVertexUniformData(commands, 1, &u, sizeof(u));
+    const Texture& maps = material.graph_maps ? material.graph_maps : _white_maps;
+    if (material.graph_maps)
+        _owner->retain(material.graph_maps);
+    const std::array<SDL_GPUTextureSamplerBinding, 6> samplers{
+        texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]),
+        texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v, material.texture_samplers[1]),
+        texture_binding(material.normal, material.wrap_u, material.wrap_v, material.texture_samplers[2]),
+        texture_binding(material.occlusion, material.wrap_u, material.wrap_v, material.texture_samplers[3]),
+        texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v, material.texture_samplers[4]),
+        texture_binding(maps, Wrap3D::Repeat, Wrap3D::Repeat, TextureSampler3D{})};
+    SDL_BindGPUVertexSamplers(pass, 0, samplers.data(), u32(samplers.size()));
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
+                                                          bool skinned, bool indexed,
+                                                          const GpuSurfaceShader3D* surface) const {
+    if (skinned && !_skinning_available)
+        return nullptr;
+    const bool moves = surface && surface->offsets() && !skinned;
+    return _owner->_pipelines.get(GpuPipelineKey{
+        .vertex =
+            moves ? surface->vertex(indexed ? SurfaceVariant3D::VertexPrepassIndexed : SurfaceVariant3D::VertexPrepass)
+            : indexed ? _indexed_prepass_vertex.handle()
+            : skinned ? _prepass_skinned_vertex_shader.handle()
+                      : _prepass_vertex_shader.handle(),
+        .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::PrepassMask)
+                                                        : (mask ? _prepass_mask_shader : _prepass_shader).handle(),
+        .blend = GpuBlendMode::Replace,
+        .format = ao_normal_format,
+        .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
+        .depth_stencil = depth,
+        .depth = GpuDepthTest::TestWrite,
+        .cull = cull ? GpuCull::Back : GpuCull::None});
+}
+
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass,
                                                  bool mask, SDL_GPUShader* custom, bool velocity, bool skinned,
-                                                 bool fog, bool lights, Unlit unlit, bool indexed) const {
+                                                 bool fog, bool lights, Unlit unlit, bool indexed,
+                                                 const GpuSurfaceShader3D* surface) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
     const GpuVertexLayout layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices;
+    // A moving surface's own vertex variants (World Position Offset), in every pass that places its vertices.
+    const bool moves = surface && surface->offsets() && !skinned && !custom && unlit == Unlit::Off;
 
     if (pass == Pass::Reactive || pass == Pass::ReactiveWire) {
         const bool wire = pass == Pass::ReactiveWire;
         return _owner->_pipelines.get(GpuPipelineKey{
-            .vertex = (skinned ? _mesh_skinned_velocity_vertex_shader : _mesh_velocity_vertex_shader).handle(),
+            .vertex = moves ? surface->vertex(SurfaceVariant3D::VertexMeshVelocity)
+                            : (skinned ? _mesh_skinned_velocity_vertex_shader : _mesh_velocity_vertex_shader).handle(),
             .fragment = _reactive_shader.handle(),
             .blend = GpuBlendMode::Replace,
             .format = hdr_format,
@@ -1409,24 +1984,30 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
         // and does nothing else; a cut-out's also carry its UV and alpha to the
         // fragment shader that discards.
         SDL_GPUShader* vertex =
-            skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
-                    : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle();
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = vertex,
-                                                     .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
-                                                     .blend = GpuBlendMode::Replace,
-                                                     .layout = layout,
-                                                     .depth_stencil = _shadow_format,
-                                                     .depth = GpuDepthTest::TestWrite,
-                                                     .cull = cull ? GpuCull::Back : GpuCull::None,
-                                                     .depth_only = true});
+            moves     ? surface->vertex(mask ? SurfaceVariant3D::VertexShadowMask : SurfaceVariant3D::VertexShadow)
+            : skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
+                      : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle();
+        return _owner->_pipelines.get(GpuPipelineKey{
+            .vertex = vertex,
+            .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::ShadowMask)
+                                                            : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
+            .blend = GpuBlendMode::Replace,
+            .layout = layout,
+            .depth_stencil = _shadow_format,
+            .depth = GpuDepthTest::TestWrite,
+            .cull = cull ? GpuCull::Back : GpuCull::None,
+            .depth_only = true});
     }
     if (pass == Pass::Occluder) {
         // Lod3D::occlusion's depth of the frame's opaque meshes, when no pre-pass draws one: the shadow pass's shaders
         // (a cut-out's discard included) into the single-sample depth the pyramid is built from.
         return _owner->_pipelines.get(GpuPipelineKey{
-            .vertex = skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
-                              : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
-            .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
+            .vertex = moves
+                          ? surface->vertex(mask ? SurfaceVariant3D::VertexShadowMask : SurfaceVariant3D::VertexShadow)
+                      : skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
+                                : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
+            .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::ShadowMask)
+                                                            : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
             .blend = GpuBlendMode::Replace,
             .layout = layout,
             .depth_stencil = _ao_depth_format,
@@ -1434,34 +2015,28 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             .cull = cull ? GpuCull::Back : GpuCull::None,
             .depth_only = true});
     }
-    if (pass == Pass::Prepass) {
-        // Depth and the world normal, one sample, in the occlusion's own targets.
-        return _owner->_pipelines.get(
-            GpuPipelineKey{.vertex = (indexed   ? _indexed_prepass_vertex
-                                      : skinned ? _prepass_skinned_vertex_shader
-                                                : _prepass_vertex_shader)
-                                         .handle(),
-                           .fragment = (mask ? _prepass_mask_shader : _prepass_shader).handle(),
-                           .blend = GpuBlendMode::Replace,
-                           .format = ao_normal_format,
-                           .layout = layout,
-                           .depth_stencil = _ao_depth_format,
-                           .depth = GpuDepthTest::TestWrite,
-                           .cull = cull ? GpuCull::Back : GpuCull::None});
-    }
-    if (pass == Pass::Pick) {
+    if (pass == Pass::Prepass)
+        return geometry_pipeline(_ao_depth_format, cull, mask, skinned, indexed, surface);
+    if (pass == Pass::Pick || pass == Pass::Visibility) {
         // The pick fragment shaders read vWorld and vId, which mesh.vert and mesh_skinned.vert both write.
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = (indexed   ? _indexed_vertex
-                                                                : skinned ? _mesh_skinned_vertex_shader
-                                                                          : _vertex_shader)
-                                                                   .handle(),
-                                                     .fragment = (mask ? _pick_mask_shader : _pick_shader).handle(),
-                                                     .blend = GpuBlendMode::Replace,
-                                                     .format = pick_format,
-                                                     .layout = layout,
-                                                     .depth_stencil = _depth_format,
-                                                     .depth = GpuDepthTest::TestWrite,
-                                                     .cull = cull ? GpuCull::Back : GpuCull::None});
+        return _owner->_pipelines.get(GpuPipelineKey{
+            .vertex =
+                moves ? surface->vertex(indexed ? SurfaceVariant3D::VertexMeshIndexed : SurfaceVariant3D::VertexMesh)
+                : indexed ? _indexed_vertex.handle()
+                : skinned ? _mesh_skinned_vertex_shader.handle()
+                          : _vertex_shader.handle(),
+            .fragment = mask && surface && surface->masks()
+                            ? surface->mask(pass == Pass::Visibility ? SurfaceVariant3D::VisibilityMask
+                                                                     : SurfaceVariant3D::PickMask)
+                            : (pass == Pass::Visibility ? (mask ? _visibility_mask_shader : _visibility_shader)
+                                                        : (mask ? _pick_mask_shader : _pick_shader))
+                                  .handle(),
+            .blend = GpuBlendMode::Replace,
+            .format = pass == Pass::Visibility ? format : pick_format,
+            .layout = layout,
+            .depth_stencil = pass == Pass::Visibility ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT : _depth_format,
+            .depth = GpuDepthTest::TestWrite,
+            .cull = cull ? GpuCull::Back : GpuCull::None});
     }
     // Opaque: written over what is there, alpha and all; transparent: blended,
     // tested against the depth but not writing it; wireframes over the faces.
@@ -1472,7 +2047,10 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     // writes nothing there, so its draws are masked too (a frame with an opaque custom shader has its pre-pass
     // instead).
     SDL_GPUShader* vertex =
-        skinned ? (velocity && !custom ? _mesh_skinned_velocity_vertex_shader : _mesh_skinned_vertex_shader).handle()
+        moves     ? surface->vertex(velocity  ? SurfaceVariant3D::VertexMeshVelocity
+                                    : indexed ? SurfaceVariant3D::VertexMeshIndexed
+                                              : SurfaceVariant3D::VertexMesh)
+        : skinned ? (velocity && !custom ? _mesh_skinned_velocity_vertex_shader : _mesh_skinned_vertex_shader).handle()
         : velocity && !custom ? _mesh_velocity_vertex_shader.handle()
         : indexed             ? _indexed_vertex.handle()
                               : _vertex_shader.handle();
@@ -1480,7 +2058,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     const bool fogged = fog && !custom && _fog_available && (!velocity || _mesh_velocity_fog_shader);
     // The light variants (P3b), likewise (they have their own fog variants).
     const bool lit = lights && !custom && _lights_available && (!velocity || _mesh_velocity_light_shader);
-    SDL_GPUShader* fragment = custom ? custom
+    SDL_GPUShader* fragment = custom    ? custom
+                              : surface ? surface->variants[4 * u32(velocity) + 2 * u32(lit) + u32(fogged)].handle()
                               : velocity
                                   ? (lit ? (fogged ? _mesh_velocity_light_fog_shader : _mesh_velocity_light_shader)
                                          : (fogged ? _mesh_velocity_fog_shader : _mesh_velocity_shader))
@@ -1516,18 +2095,52 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
 GpuRenderer3D::MaterialPipeline GpuRenderer3D::material_pipeline(const Material3D& material, bool skinned, bool taa,
                                                                  bool velocity, bool fog) const {
     const auto* custom = dynamic_cast<const GpuMaterialShader3D*>(material.shader.backend().get());
-    const Unlit unlit =
-        _unlit_available && (material.unlit || material.wireframe) && !custom && !skinned && !taa && !velocity && !fog
-            ? (material.texture ? Unlit::Textured : Unlit::Colour)
-            : Unlit::Off;
-    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material)};
+    // A surface shader stands in for the stock shaders (never for a custom one), the unlit ones included.
+    const auto* surface = custom ? nullptr : dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
+    const bool general_emission =
+        material.emits_light() && (material.emission_mode == EmissionMode3D::Independent || material.emissive_texture);
+    // (The unlit shaders read the base map as the UV has it: a material that moves it takes the stock ones.)
+    const Unlit unlit = _unlit_available && (material.unlit || material.wireframe) && !general_emission && !custom &&
+                                !surface && material.uv_identity() && !skinned && !taa && !velocity && !fog
+                            ? (material.texture ? Unlit::Textured : Unlit::Colour)
+                            : Unlit::Off;
+    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material), surface};
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& request) const {
     const auto& m = request.material;
+    if (request.materials) {
+        if (!_draw_materials_available || (m.surface && !m.surface->merges()))
+            return nullptr;
+        const u32 variant = u32(request.fog) + 2 * u32(request.lights);
+        return _owner->_pipelines.get(
+            GpuPipelineKey{.vertex = _draw_material_vertex.handle(),
+                           .fragment = (m.surface ? m.surface->variants[surface_required_variants3d + variant]
+                                                  : _draw_material_fragments[variant])
+                                           .handle(),
+                           .blend = GpuBlendMode::Replace,
+                           .format = request.format,
+                           .layout = GpuVertexLayout::MeshVertices,
+                           .depth_stencil = _depth_format,
+                           .depth = GpuDepthTest::TestWrite,
+                           .cull = m.cull ? GpuCull::Back : GpuCull::None,
+                           .samples = sample_count(request.samples)});
+    }
     return pipeline(request.format, request.samples, m.cull, m.pass, m.mask,
                     m.custom ? m.custom->shader.handle() : nullptr, request.velocity, request.skinned, request.fog,
-                    request.lights, m.unlit, request.indexed);
+                    request.lights, m.unlit, request.indexed, m.custom ? nullptr : m.surface);
+}
+
+GpuRenderer3D::MaterialUniforms GpuRenderer3D::material_uniforms(const Material3D& material, Unlit unlit) {
+    return {{unlit != Unlit::Off && material.emission_mode == EmissionMode3D::Independent ? 0.0f : material.emissive,
+             material.unlit || material.wireframe ? 1.0f : 0.0f, material.receives_shadow ? 1.0f : 0.0f,
+             material.blend == Blend3D::Mask ? std::max(material.alpha_cutoff, 1e-6f) : 0.0f},
+            {material.metallic, material.roughness, material.normal_scale, material.occlusion_strength},
+            {material.normal ? 1.0f : 0.0f, material.emissive_texture ? 1.0f : 0.0f,
+             pass_of(material) == Pass::Opaque ? 1.0f : 0.0f, pass_of(material) == Pass::Additive ? 1.0f : 0.0f},
+            {material.emission_color.r, material.emission_color.g, material.emission_color.b,
+             material.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f},
+            {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const {
@@ -1601,26 +2214,42 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_velocity_pipeline(SDL_GPUTextureForm
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                                          bool skinned) const {
+                                                          bool skinned, const GpuSurfaceShader3D* surface,
+                                                          bool morph) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
     // The pre-pass with velocity: one sample, the normal and the velocity in four floats.
-    return _owner->_pipelines.get(GpuPipelineKey{
-        .vertex = (skinned ? _prepass_velocity_skinned_vertex_shader : _prepass_velocity_vertex_shader).handle(),
-        .fragment = (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
-        .blend = GpuBlendMode::Replace,
-        .format = hdr_format,
-        .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
-        .depth_stencil = depth,
-        .depth = GpuDepthTest::TestWrite,
-        .cull = cull ? GpuCull::Back : GpuCull::None});
+    const bool moves = surface && surface->offsets() && !skinned;
+    const GpuShader& plain =
+        skinned ? (morph ? _prepass_velocity_morph_skinned_vertex_shader : _prepass_velocity_skinned_vertex_shader)
+                : (morph ? _prepass_velocity_morph_vertex_shader : _prepass_velocity_vertex_shader);
+    return _owner->_pipelines.get(
+        GpuPipelineKey{.vertex = moves ? surface->vertex(SurfaceVariant3D::VertexPrepassVelocity) : plain.handle(),
+                       .fragment = mask && surface && surface->masks()
+                                       ? surface->mask(SurfaceVariant3D::PrepassVelocityMask)
+                                       : (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
+                       .blend = GpuBlendMode::Replace,
+                       .format = hdr_format,
+                       .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
+                       .depth_stencil = depth,
+                       .depth = GpuDepthTest::TestWrite,
+                       .cull = cull ? GpuCull::Back : GpuCull::None});
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const {
     return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
                                                  .fragment = fragment,
                                                  .blend = GpuBlendMode::Replace,
+                                                 .format = format,
+                                                 .layout = GpuVertexLayout::None});
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen_additive(SDL_GPUShader* fragment,
+                                                            SDL_GPUTextureFormat format) const {
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                 .fragment = fragment,
+                                                 .blend = GpuBlendMode::PremultipliedAdditive,
                                                  .format = format,
                                                  .layout = GpuVertexLayout::None});
 }
@@ -1653,8 +2282,8 @@ std::shared_ptr<GpuClusterChunk> GpuRenderer3D::allocate_cluster_range(u32 indic
         .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
         .size = static_cast<u32>(static_cast<u64>(chunk->table_capacity) * sizeof(GpuCluster)),
         .props = 0};
-    chunk->indices = SDL_CreateGPUBuffer(_device->handle(), &index_info);
-    chunk->table = SDL_CreateGPUBuffer(_device->handle(), &table_info);
+    chunk->indices = tracked_create_buffer(_device->handle(), &index_info);
+    chunk->table = tracked_create_buffer(_device->handle(), &table_info);
     if (!chunk->indices || !chunk->table) {
         throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
     }
@@ -1668,7 +2297,175 @@ std::shared_ptr<GpuClusterChunk> GpuRenderer3D::allocate_cluster_range(u32 indic
     return chunk;
 }
 
+GpuSharedFence::~GpuSharedFence() {
+    if (fence && device && *device) {
+        SDL_WaitForGPUFences(*device, true, &fence, 1);
+        SDL_ReleaseGPUFence(*device, fence);
+    }
+}
+
+bool GpuSharedFence::signaled() const {
+    return !fence || !device || !*device || SDL_QueryGPUFence(*device, fence);
+}
+
+GpuExposureReadback::~GpuExposureReadback() {
+    fence.reset(); // (waits, if this is its last holder and the GPU is not done)
+    if (transfer && device && *device)
+        SDL_ReleaseGPUTransferBuffer(*device, transfer);
+}
+
+bool GpuExposureReadback::poll() {
+    if (!fence || !device || !*device)
+        return recorded;
+    if (!fence->signaled())
+        return true;
+    fence.reset();
+    if (const auto* mapped = static_cast<const f32*>(SDL_MapGPUTransferBuffer(*device, transfer, false))) {
+        const f32 exposure = mapped[1]; // ev, exposure, target, pad
+        SDL_UnmapGPUTransferBuffer(*device, transfer);
+        if (std::isfinite(exposure) && exposure > 0)
+            value = exposure;
+    }
+    return false;
+}
+
+static_assert(sizeof(GpuMeshVertex) == 9 * sizeof(u32), "morph_blend.comp reads and writes 9 words a vertex");
+
+bool GpuRenderer3D::set_morph_weights(IMeshBackend3D& base, std::span<const f32> weights) {
+    auto* mesh = dynamic_cast<GpuMesh3D*>(&base);
+    if (!mesh || !mesh->morph || !_morph_pipeline || weights.size() != mesh->morph->targets ||
+        weights.size() > max_morph_targets)
+        return false;
+    struct {
+        u32 counts[4];
+        f32 weights[max_morph_targets];
+    } u{};
+    static_assert(sizeof(u) == 16 + 4 * max_morph_targets);
+    u.counts[0] = mesh->morph->vertices;
+    u.counts[1] = static_cast<u32>(weights.size());
+    u.counts[2] = mesh->morph->normals ? 1u : 0u;
+    std::copy(weights.begin(), weights.end(), u.weights);
+    // Into this frame's commands, after the uploads made so far (the mesh's own, when it is new); cycled, so a frame
+    // still drawing the old vertices keeps them.
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+    // The shape the frame before drew, for the velocity pre-pass: kept by this frame's first blend only.
+    if (mesh->previous && mesh->blended_frame != _owner->_frame_serial) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUBufferLocation from{.buffer = mesh->vertices, .offset = 0};
+            const SDL_GPUBufferLocation to{.buffer = mesh->previous, .offset = 0};
+            SDL_CopyGPUBufferToBuffer(copy, &from, &to, mesh->vertex_count * static_cast<u32>(sizeof(GpuMeshVertex)),
+                                      true);
+            SDL_EndGPUCopyPass(copy);
+        }
+    }
+    mesh->blended_frame = _owner->_frame_serial;
+    const SDL_GPUStorageBufferReadWriteBinding out{mesh->vertices, true};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &out, 1);
+    if (!pass) {
+        resume_2d();
+        return false;
+    }
+    SDL_BindGPUComputePipeline(pass, _morph_pipeline);
+    SDL_GPUBuffer* read[2] = {mesh->morph->base.handle(), mesh->morph->deltas.handle()};
+    SDL_BindGPUComputeStorageBuffers(pass, 0, read, 2);
+    SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (mesh->morph->vertices + 63) / 64, 1, 1);
+    SDL_EndGPUComputePass(pass);
+    resume_2d();
+    ++mesh->content; // the shadow caches see that its shape changed
+    return true;
+}
+
+std::shared_ptr<IMeshBackend3D> GpuRenderer3D::copy_mesh(const IMeshBackend3D& base) {
+    const auto* from = dynamic_cast<const GpuMesh3D*>(&base);
+    if (!from || !from->morph || !from->dynamic || from->levels.size() != 1)
+        return {};
+    try {
+        auto mesh = std::make_shared<GpuMesh3D>(_device->shared());
+        mesh->serial = _next_mesh_serial++;
+        mesh->dynamic = true;
+        mesh->vertex_count = from->vertex_count;
+        mesh->index_count = from->index_count;
+        mesh->levels = {{0, from->index_count, 0.0f}};
+        mesh->skin_bounds = from->skin_bounds;
+        mesh->gi_runs = from->gi_runs;
+        mesh->gi_triangles = from->gi_triangles;
+        mesh->morph = from->morph; // shared: the targets on the GPU once
+        const SDL_GPUBufferUsageFlags gi_read =
+            _capabilities.global_illumination ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0;
+        const u32 vertex_bytes = from->vertex_count * static_cast<u32>(sizeof(GpuMeshVertex));
+        const u32 index_bytes = from->index_count * static_cast<u32>(sizeof(u32));
+        const u32 skin_bytes = from->vertex_count * static_cast<u32>(sizeof(GpuSkinVertex));
+        const auto make = [&](SDL_GPUBufferUsageFlags usage, u32 size) {
+            const SDL_GPUBufferCreateInfo info{.usage = usage, .size = size, .props = 0};
+            SDL_GPUBuffer* buffer = tracked_create_buffer(_device->handle(), &info);
+            if (!buffer)
+                throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
+            return buffer;
+        };
+        mesh->vertices = make(SDL_GPU_BUFFERUSAGE_VERTEX | gi_read | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
+                                  SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+                              vertex_bytes);
+        if (from->previous)
+            mesh->previous = make(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, vertex_bytes);
+        mesh->indices = make(SDL_GPU_BUFFERUSAGE_INDEX | gi_read, index_bytes);
+        if (from->skin)
+            mesh->skin = make(SDL_GPU_BUFFERUSAGE_VERTEX | gi_read, skin_bytes);
+        // Copied on the GPU, in this frame's commands: the vertices at rest (the copy's weights are 0), the triangles,
+        // the skin.
+        _owner->ensure_frame();
+        _owner->flush_to_frame();
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(_owner->_frame->command_buffer());
+        if (!copy) {
+            resume_2d();
+            return {};
+        }
+        const auto buffer_copy = [&](SDL_GPUBuffer* src, u32 offset, SDL_GPUBuffer* dst, u32 size) {
+            const SDL_GPUBufferLocation a{.buffer = src, .offset = offset};
+            const SDL_GPUBufferLocation b{.buffer = dst, .offset = 0};
+            SDL_CopyGPUBufferToBuffer(copy, &a, &b, size, false);
+        };
+        buffer_copy(from->morph->base.handle(), 0, mesh->vertices, vertex_bytes);
+        buffer_copy(from->indices, from->index_offset, mesh->indices, index_bytes);
+        if (from->skin)
+            buffer_copy(from->skin, 0, mesh->skin, skin_bytes);
+        SDL_EndGPUCopyPass(copy);
+        resume_2d();
+        return mesh;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: mesh not copied", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+std::optional<f32> GpuRenderer3D::read_exposure(IViewBackend3D& base) {
+    auto* view = dynamic_cast<GpuView3D*>(&base);
+    if (!view || !view->_exposure_read)
+        return std::nullopt;
+    view->_exposure_read->poll();
+    return view->_exposure_read->value;
+}
+
 void GpuRenderer3D::on_frame_submitted() {
+    // Auto exposure's copies recorded in the frame just submitted: one fence after it says when they can be read.
+    if (!_exposure_unfenced.empty()) {
+        std::erase_if(_exposure_unfenced, [](const auto& weak) { return weak.expired(); });
+        if (!_exposure_unfenced.empty()) {
+            if (auto* commands = SDL_AcquireGPUCommandBuffer(_device->handle())) {
+                if (SDL_GPUFence* raw = SDL_SubmitGPUCommandBufferAndAcquireFence(commands)) {
+                    const auto fence = std::make_shared<GpuSharedFence>(_device->shared(), raw);
+                    for (const auto& weak : _exposure_unfenced)
+                        if (auto read = weak.lock()) {
+                            read->fence = fence;
+                            read->recorded = false;
+                        }
+                    _exposure_unfenced.clear();
+                }
+            }
+        }
+    }
     if (!_mesh_buffers || !_mesh_buffers->pending())
         return;
     // An independent fence following the submitted draws/uploads. The frame timer owns its own fence; neither may be
@@ -1750,12 +2547,24 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
         }
         const u32 vertex_bytes = static_cast<u32>((vertex_count + extra_vertices) * sizeof(GpuMeshVertex));
         const u32 index_bytes = static_cast<u32>(index_count * sizeof(u32));
+        // Where global illumination can be had, its compute reads every mesh's vertices, indices and skin.
+        const SDL_GPUBufferUsageFlags gi_read =
+            _capabilities.global_illumination ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0;
+        // (A mesh with morph targets blended on the GPU: its vertices written by compute too.)
+        const SDL_GPUBufferUsageFlags blended =
+            source.morphed() && _morph_pipeline
+                ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ
+                : 0;
         const SDL_GPUBufferCreateInfo vertex_info{
-            .usage = SDL_GPU_BUFFERUSAGE_VERTEX, .size = vertex_bytes, .props = 0};
-        const SDL_GPUBufferCreateInfo index_info{.usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = index_bytes, .props = 0};
-        if (!clusters && !source.skinned()) {
+            .usage = SDL_GPU_BUFFERUSAGE_VERTEX | gi_read | blended, .size = vertex_bytes, .props = 0};
+        const SDL_GPUBufferCreateInfo index_info{
+            .usage = SDL_GPU_BUFFERUSAGE_INDEX | gi_read, .size = index_bytes, .props = 0};
+        // A mesh with morph targets has a vertex buffer of its own, which update_mesh_vertices rewrites (cycled).
+        mesh->dynamic = source.morphed();
+        mesh->vertex_count = static_cast<u32>(vertex_count);
+        if (!clusters && !source.skinned() && !mesh->dynamic) {
             if (!_mesh_buffers)
-                _mesh_buffers = std::make_shared<GpuMeshBufferPool>(_device->shared());
+                _mesh_buffers = std::make_shared<GpuMeshBufferPool>(_device->shared(), gi_read);
             mesh->allocation = _mesh_buffers->allocate(vertex_bytes, index_bytes);
             if (mesh->allocation) {
                 mesh->buffer_pool = _mesh_buffers;
@@ -1766,8 +2575,8 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
             }
         }
         if (!mesh->buffer_pool) {
-            mesh->vertices = SDL_CreateGPUBuffer(_device->handle(), &vertex_info);
-            mesh->indices = mesh->chunk ? mesh->chunk->indices : SDL_CreateGPUBuffer(_device->handle(), &index_info);
+            mesh->vertices = tracked_create_buffer(_device->handle(), &vertex_info);
+            mesh->indices = mesh->chunk ? mesh->chunk->indices : tracked_create_buffer(_device->handle(), &index_info);
         }
         if (!mesh->vertices || !mesh->indices) {
             throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
@@ -1819,10 +2628,10 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
         if (!clusters && !chain && source.skinned() && source.skin.size() == vertex_count) {
             // The skin stream: a second vertex buffer, 8 bytes a vertex. A joint whose weight came to nothing points at
             // joint 0 (always there), so that the shader never reads a matrix that is not.
-            const SDL_GPUBufferCreateInfo skin_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+            const SDL_GPUBufferCreateInfo skin_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX | gi_read,
                                                     .size = static_cast<u32>(vertex_count * sizeof(GpuSkinVertex)),
                                                     .props = 0};
-            mesh->skin = SDL_CreateGPUBuffer(_device->handle(), &skin_info);
+            mesh->skin = tracked_create_buffer(_device->handle(), &skin_info);
             if (!mesh->skin) {
                 throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
             }
@@ -1843,6 +2652,16 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                        }
                    });
             mesh->skin_bounds = compute_skin_bounds(source, source.skin_joint_count());
+            if (mesh->dynamic) {
+                // The morph targets can take a vertex as far as the sum of their largest offsets from where it is now.
+                const Bounds3D reach = morph_bounds(source), rest = source.bounds();
+                const f32 grow =
+                    std::max({rest.min.x - reach.min.x, rest.min.y - reach.min.y, rest.min.z - reach.min.z,
+                              reach.max.x - rest.max.x, reach.max.y - rest.max.y, reach.max.z - rest.max.z});
+                for (SkinBound3D& b : mesh->skin_bounds)
+                    if (b.radius >= 0.0f)
+                        b.radius += 2.0f * std::sqrt(3.0f) * grow;
+            }
         }
         upload(
             mesh->indices, index_count, sizeof(u32),
@@ -1924,6 +2743,71 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                 },
                 static_cast<std::size_t>(table_first) * sizeof(GpuCluster));
         }
+        // For global illumination: the box of each run of level 0's triangles.
+        if (_capabilities.global_illumination) {
+            const std::size_t triangles = level0_count / 3;
+            mesh->gi_runs.resize((triangles + gi_run_triangles - 1) / gi_run_triangles);
+            for (std::size_t r = 0; r < mesh->gi_runs.size(); ++r) {
+                constexpr f32 far = std::numeric_limits<f32>::max();
+                Bounds3D box{{far, far, far}, {-far, -far, -far}};
+                const std::size_t end = std::min<std::size_t>(level0_count, (r + 1) * gi_run_triangles * 3);
+                for (std::size_t i = r * gi_run_triangles * 3; i < end; ++i) {
+                    const std::size_t v = data.indices.empty() ? i : data.indices[i];
+                    if (v < vertex_count) {
+                        const Vec3f q = data.vertices[v].position;
+                        box.min = {std::min(box.min.x, q.x), std::min(box.min.y, q.y), std::min(box.min.z, q.z)};
+                        box.max = {std::max(box.max.x, q.x), std::max(box.max.y, q.y), std::max(box.max.z, q.z)};
+                    }
+                }
+                mesh->gi_runs[r] = box;
+            }
+            mesh->gi_triangles.reserve(triangles * 3);
+            for (std::size_t i = 0; i < triangles * 3; ++i) {
+                const std::size_t v = data.indices.empty() ? i : data.indices[i];
+                mesh->gi_triangles.push_back(v < vertex_count ? data.vertices[v].position : Vec3f{});
+            }
+        }
+        if (mesh->dynamic && _morph_pipeline) {
+            // What the GPU blends from: the vertices at rest, and each target's offsets (zeros where it has none).
+            auto morph = std::make_shared<GpuMorphSource>();
+            morph->vertices = static_cast<u32>(vertex_count);
+            morph->targets = static_cast<u32>(source.morph_targets.size());
+            for (const MorphTarget3D& target : source.morph_targets)
+                morph->normals = morph->normals || !target.normals.empty();
+            constexpr SDL_GPUBufferUsageFlags read = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ;
+            const std::size_t delta_count = std::size_t{morph->targets} * vertex_count;
+            if (delta_count * 6 * sizeof(f32) > std::numeric_limits<u32>::max())
+                throw std::runtime_error("morph targets too big for one buffer");
+            morph->base = _device->create_buffer(read, nullptr, static_cast<u32>(vertex_count * sizeof(GpuMeshVertex)));
+            morph->deltas =
+                _device->create_buffer(read, nullptr, static_cast<u32>(std::max<std::size_t>(1, delta_count) * 24));
+            upload(morph->base.handle(), vertex_count, sizeof(GpuMeshVertex),
+                   [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+                       auto* to = reinterpret_cast<GpuMeshVertex*>(out);
+                       for (std::size_t i = begin; i < end; ++i) {
+                           const MeshVertex3D& v = data.vertices[first + i];
+                           to[i] = {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z,
+                                    v.uv.x,       v.uv.y,       v.color.r,    v.color.g,  v.color.b,  v.color.a};
+                       }
+                   });
+            if (delta_count > 0)
+                upload(morph->deltas.handle(), delta_count, 6 * sizeof(f32),
+                       [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+                           auto* to = reinterpret_cast<f32*>(out);
+                           for (std::size_t i = begin; i < end; ++i) {
+                               const std::size_t g = first + i, t = g / vertex_count, v = g % vertex_count;
+                               const MorphTarget3D& target = source.morph_targets[t];
+                               const Vec3f p = target.positions[v],
+                                           n = target.normals.empty() ? Vec3f{} : target.normals[v];
+                               f32* o = to + i * 6;
+                               o[0] = p.x, o[1] = p.y, o[2] = p.z, o[3] = n.x, o[4] = n.y, o[5] = n.z;
+                           }
+                       });
+            mesh->morph = std::move(morph);
+            const SDL_GPUBufferCreateInfo previous_info{
+                .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = vertex_bytes, .props = 0};
+            mesh->previous = tracked_create_buffer(_device->handle(), &previous_info);
+        }
         mesh->clusters = std::move(clusters);
         mesh->index_count = static_cast<u32>(level0_count);
         mesh->levels.push_back({index_first, static_cast<u32>(level0_count), 0.0f});
@@ -1941,6 +2825,32 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
 }
 
 namespace {
+
+// The float an IEEE half holds.
+f32 from_half(u16 h) {
+    const u32 sign = static_cast<u32>(h >> 15) << 31;
+    const u32 exponent = (h >> 10) & 31u, mantissa = h & 1023u;
+    u32 bits;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else { // subnormal: normalised
+            u32 e = 113, m = mantissa;
+            while (!(m & 1024u)) {
+                m <<= 1;
+                --e;
+            }
+            bits = sign | (e << 23) | ((m & 1023u) << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7F800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    }
+    f32 x;
+    std::memcpy(&x, &bits, sizeof(x));
+    return x;
+}
 
 // An IEEE half of `x` (round to nearest, clamped to what a half holds).
 u16 to_half(f32 x) {
@@ -1970,20 +2880,319 @@ constexpr u32 irradiance_samples = 512;
 
 } // namespace
 
+bool GpuRenderer3D::update_mesh_vertices(IMeshBackend3D& base, std::span<const MeshVertex3D> vertices) {
+    auto* mesh = dynamic_cast<GpuMesh3D*>(&base);
+    if (!mesh || !mesh->dynamic || !mesh->vertices || vertices.size() != mesh->vertex_count || vertices.empty())
+        return false;
+    try {
+        const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
+            auto* to = reinterpret_cast<GpuMeshVertex*>(out.data());
+            for (std::size_t i = 0; i < vertices.size(); ++i) {
+                const MeshVertex3D& v = vertices[i];
+                to[i] = {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z,
+                         v.uv.x,       v.uv.y,       v.color.r,    v.color.g,  v.color.b,  v.color.a};
+            }
+        };
+        // Cycled: a frame still drawing the old vertices keeps them.
+        _device->upload_storage_buffer(mesh->vertices, 0, static_cast<u32>(vertices.size() * sizeof(GpuMeshVertex)),
+                                       nullptr, /*cycle=*/true, &fill);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: mesh vertices not updated", (LogFields{{.name = "reason", .value = e.what()}}));
+        return false;
+    }
+    ++mesh->content; // the shadow caches see that its shape changed
+    return true;
+}
+
 std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(std::span<const u8> spirv) {
     try {
         auto shader = std::make_shared<GpuMaterialShader3D>();
-        // Frame, material, custom parameters with fog, and local lights;
-        // all twelve material samplers (kin_material.inc.glsl).
-        shader->shader =
-            GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV, spirv,
-                                  /*uniform_buffers=*/4, /*samplers=*/12);
+        std::string error;
+        const auto layout = reflect_spirv({spirv.data(), static_cast<u32>(spirv.size())}, &error);
+        if (!layout || layout->execution_model != 4)
+            throw std::runtime_error("material shader must be a reflected fragment module: " + error);
+        u32 samplers = 12;
+        for (const auto& r : layout->resources)
+            if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2) {
+                if (r.binding >= 16)
+                    throw std::runtime_error("material sampled binding exceeds fifteen");
+                samplers = std::max(samplers, r.binding + 1);
+            }
+        if (samplers > 16)
+            throw std::runtime_error("material sampler limit is sixteen (twelve reserved)");
+        shader->textures.resize(samplers - 12);
+        std::array<bool, 4> texture_slots{};
+        std::array<bool, 16> sampled_bindings{};
+        std::array<bool, 8> buffer_slots{};
+        u32 buffer_count = 0;
+        for (const auto& r : layout->resources) {
+            if (r.elements != 1)
+                throw std::runtime_error("material descriptor arrays unsupported; use individual bindings");
+            if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2) {
+                if (sampled_bindings[r.binding])
+                    throw std::runtime_error("duplicate sampled material binding");
+                sampled_bindings[r.binding] = true;
+                if (r.dimensions != 2 || r.multisampled || r.sample_type == ShaderSampleType::Unknown ||
+                    r.sample_type == ShaderSampleType::Sint)
+                    throw std::runtime_error("material sampled inputs require float/unsigned 2D or 2D-array images");
+                if (r.binding < 12) {
+                    const bool shadow = r.binding == 1 || r.binding == 10 || r.binding == 11;
+                    if (r.arrayed != shadow || r.comparison != shadow || r.sample_type != ShaderSampleType::Float)
+                        throw std::runtime_error("reserved material sampler layout mismatch");
+                } else {
+                    texture_slots[r.binding - 12] = true;
+                    shader->textures[r.binding - 12] = r;
+                }
+            } else if (r.kind == ShaderResourceKind::StorageBuffer && r.set == 2) {
+                if (r.binding < samplers || r.binding >= samplers + 8 || !r.read_only || !r.min_bytes)
+                    throw std::runtime_error("material buffers must be read-only, bounded, and follow all samplers");
+                if (buffer_slots[r.binding - samplers])
+                    throw std::runtime_error("duplicate material storage binding");
+                buffer_slots[r.binding - samplers] = true;
+                buffer_count = std::max(buffer_count, r.binding - samplers + 1);
+            } else if (r.kind == ShaderResourceKind::UniformBuffer && r.set == 3 && r.binding < 4 &&
+                       r.min_bytes <= 4096) {
+                // Existing frame/material/custom+fog/local blocks, including legacy prefixes.
+            } else
+                throw std::runtime_error("unsupported material descriptor set, kind or uniform slot");
+        }
+        for (u32 i = 0; i < samplers - 12; ++i)
+            if (!texture_slots[i])
+                throw std::runtime_error("extra sampled texture bindings must be dense from twelve");
+        shader->buffers.resize(buffer_count);
+        for (u32 i = 0; i < buffer_count; ++i)
+            if (!buffer_slots[i])
+                throw std::runtime_error("material storage bindings must be dense after samplers");
+        for (const auto& r : layout->resources)
+            if (r.kind == ShaderResourceKind::StorageBuffer)
+                shader->buffers[r.binding - samplers] = r;
+        shader->device = _device->shared();
+        shader->shader = GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                               spirv, 4, samplers, buffer_count);
         _material_shaders.push_back(shader); // kept: pipelines name it for good
         return shader;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: material shader not made", (LogFields{{.name = "reason", .value = e.what()}}));
         return {};
     }
+}
+
+std::shared_ptr<ISurfaceShaderBackend3D>
+GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) {
+    try {
+        auto shader = std::make_shared<GpuSurfaceShader3D>();
+        bool layout_known = false; // whether a variant so far has shown which layout the shader has
+        // First which layout (the graph maps' or not), from any variant that shows it; then each variant made.
+        for (u32 pass = 0; pass < 2; ++pass)
+            for (u32 i = 0; i < surface_variant_count3d; ++i) {
+                if (i >= surface_required_variants3d && spirv[i].empty())
+                    continue; // a merged draws' variant it lacks
+                std::string error;
+                const auto layout = reflect_spirv({spirv[i].data(), static_cast<u32>(spirv[i].size())}, &error);
+                if (i >= surface_vertex_variant3d) { // a vertex variant (an offset): its maps, storage and blocks
+                    if (pass == 0)
+                        continue;
+                    if (!layout || layout->execution_model != 0)
+                        throw std::runtime_error("surface vertex variants must be reflected vertex modules: " + error);
+                    u32 samplers = 0, storage = 0, uniforms = 0;
+                    for (const auto& r : layout->resources) {
+                        if (r.kind == ShaderResourceKind::SampledTexture && r.set == 0 && r.binding < 6)
+                            samplers = std::max(samplers, r.binding + 1);
+                        else if (r.kind == ShaderResourceKind::StorageBuffer && r.set == 0 && r.binding >= 6)
+                            storage = std::max(storage, r.binding - 6 + 1);
+                        else if (r.kind == ShaderResourceKind::UniformBuffer && r.set == 1 && r.binding < 2)
+                            uniforms = std::max(uniforms, r.binding + 1);
+                        else
+                            throw std::runtime_error("surface vertex variant " + std::to_string(i) +
+                                                     " binds beyond kin's vertex layout");
+                    }
+                    // (All six map slots and both blocks: what a draw binds, whether the offset reads them or not.)
+                    shader->variants[i] =
+                        GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
+                                              spirv[i], 2, 6, std::max(storage, u32(1)));
+                    (void)samplers;
+                    (void)uniforms;
+                    continue;
+                }
+                if (!layout || layout->execution_model != 4)
+                    throw std::runtime_error("surface shader variants must be reflected fragment modules: " + error);
+                // The stock variant's layout (mesh.frag ... mesh_velocity_light_fog.frag, as made above): the light
+                // variants' 15 samplers and 4 storage buffers (shadows, GI, the light grid, the area lights), one
+                // uniform block more with fog; the velocity variants the same as the others; the merged draws' (as
+                // mesh_material.frag's) their draws' records after them, and the surface's parameters after those.
+                const bool lights = (i & 2) != 0, fog = (i & 1) != 0,
+                           merged = i >= surface_required_variants3d && i < surface_mask_variant3d,
+                           mask = i >= surface_mask_variant3d;
+                // A cut-out's: the five maps and the cut-out block (the visibility pass's query block too).
+                const u32 uniforms =
+                    mask ? 1 + u32(i == u32(SurfaceVariant3D::VisibilityMask)) : (lights ? 3 : 2) + u32(fog);
+                u32 samplers = mask ? 5 : lights ? 15 : 10;
+                // (the light variants' last: the screen-space reflections, which older SPIR-V does not read)
+                const u32 storage = mask ? 0 : (lights ? 5 : 0) + (merged ? 2 : 0);
+                // Material3D::graph_maps, the sampler after the stock ones in every variant but the cut-outs (shaders
+                // made with kin_material.inc.glsl since graph maps; older SPIR-V has the stock layout): seen by that
+                // sampler, or by storage buffers that start one binding later (a variant that reads no graph map has
+                // none of it).
+                // The fog variants' last sampler since volumetric fog (uFogVolume, the only 3D one; older SPIR-V has
+                // none, and its blended surfaces add none of the volume's light).
+                bool volume = false;
+                if (!mask) {
+                    std::optional<bool> shifted;
+                    u32 first_storage = ~0u;
+                    for (const auto& r : layout->resources) {
+                        if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2 && r.dimensions == 3)
+                            volume = true;
+                        else if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2 && r.binding == samplers)
+                            shifted = true;
+                        if (r.kind == ShaderResourceKind::StorageBuffer && r.set == 2)
+                            first_storage = std::min(first_storage, r.binding);
+                    }
+                    if (!shifted && first_storage != ~0u)
+                        shifted = first_storage == samplers + 1 + u32(volume);
+                    if (shifted) {
+                        if (layout_known && *shifted != shader->graph_maps)
+                            throw std::runtime_error("surface shader variant " + std::to_string(i) +
+                                                     " differs from the others on the graph maps' sampler");
+                        shader->graph_maps = *shifted;
+                        layout_known = true;
+                    }
+                }
+                if (pass == 0)
+                    continue;
+                if (!mask)
+                    samplers += u32(shader->graph_maps);
+                if (fog && !mask) {
+                    (lights ? shader->fog_volume_lit : shader->fog_volume) = volume;
+                    samplers += u32(volume);
+                }
+                for (const auto& r : layout->resources)
+                    if ((r.kind == ShaderResourceKind::SampledTexture && (r.set != 2 || r.binding >= samplers)) ||
+                        (r.kind == ShaderResourceKind::StorageBuffer &&
+                         (r.set != 2 || r.binding < samplers || r.binding >= samplers + storage)) ||
+                        (r.kind == ShaderResourceKind::UniformBuffer && (r.set != 3 || r.binding >= uniforms)))
+                        throw std::runtime_error("surface shader variant " + std::to_string(i) +
+                                                 " binds beyond kin's mesh shader layout");
+                shader->variants[i] =
+                    GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV, spirv[i],
+                                          uniforms, samplers, storage);
+            }
+        shader->device = _device->shared();
+        if (shader->graph_maps && !_white_maps) {
+            static constexpr u8 white[4] = {255, 255, 255, 255};
+            const u8* const layer = white;
+            _white_maps = create_map_array({1, 1}, {&layer, 1});
+            if (!_white_maps)
+                throw std::runtime_error("the graph maps' white layer cannot be made");
+        }
+        _surface_shaders.push_back(shader); // kept: pipelines name its variants for good
+        return shader;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: surface shader not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+Texture GpuRenderer3D::create_map_array(Vec2i size, std::span<const u8* const> layers) {
+    try {
+        auto texture = _device->create_texture_array(u32(size.x), u32(size.y), layers);
+        return Texture{std::make_shared<GpuTextureBackend>(std::move(texture), false, ScaleMode::Mipmapped,
+                                                           TextureFormat::Rgba8, true, u32(layers.size()))};
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: map array not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+Result3D<MaterialInputs3D> GpuRenderer3D::create_material_inputs(const MaterialShader3D& source,
+                                                                 std::span<const Texture> textures,
+                                                                 std::span<const DataBuffer> buffers) {
+    const auto fail = [](const char* reason) { return Result3D<MaterialInputs3D>{std::nullopt, {reason}}; };
+    const auto shader = std::dynamic_pointer_cast<GpuMaterialShader3D>(source.backend());
+    if (!shader || !shader->valid() || !shader->shader.belongs_to(_device->handle()))
+        return fail("shader belongs to another backend/device or expired");
+    if (textures.size() != shader->textures.size() || buffers.size() != shader->buffers.size())
+        return fail("material input counts differ from shader layout");
+    for (std::size_t i = 0; i < textures.size(); ++i) {
+        const auto& texture = textures[i];
+        const auto* gpu = dynamic_cast<const GpuTextureBackend*>(texture.backend().get());
+        const auto& type = shader->textures[i];
+        if (!gpu || !gpu->texture() || !gpu->texture().belongs_to(_device->handle()) ||
+            !(gpu->texture().usage() & SDL_GPU_TEXTUREUSAGE_SAMPLER))
+            return fail("sampled input is not a texture of this device");
+        const bool integer = texture.format() == TextureFormat::R16Uint || texture.format() == TextureFormat::Rg16Uint;
+        const bool depth =
+            texture.format() == TextureFormat::Depth32Float || texture.format() == TextureFormat::Depth24Unorm;
+        if (type.arrayed != bool(texture.array_layers()) || integer != (type.sample_type == ShaderSampleType::Uint) ||
+            (type.comparison && (!depth || !_compare_sampler)))
+            return fail("material sampled input array/numeric/comparison type mismatch");
+    }
+    for (std::size_t i = 0; i < buffers.size(); ++i) {
+        const auto* gpu = dynamic_cast<const GpuDataBuffer*>(buffers[i].backend().get());
+        if (!gpu || !gpu->buffer() || !gpu->buffer().belongs_to(_device->handle()) ||
+            buffers[i].size() < shader->buffers[i].min_bytes)
+            return fail("material buffer is foreign, invalid or smaller than its reflected block");
+    }
+    auto inputs = std::make_shared<GpuMaterialInputs3D>();
+    inputs->device = _device->shared();
+    inputs->shader = shader;
+    inputs->input_textures.assign(textures.begin(), textures.end());
+    inputs->input_buffers.assign(buffers.begin(), buffers.end());
+    return {MaterialInputs3D{std::move(inputs)}, {}};
+}
+
+bool GpuRenderer3D::validate_material_inputs(const Scene3D& scene, std::span<const Texture> outputs,
+                                             u64* signature) const {
+    const u64 epoch = ++_input_validation_epoch;
+    u64 key = 0;
+    for (const auto* source : {&scene, scene.overlay_if_any()})
+        if (source)
+            for (const auto& draw : source->draws()) {
+                const auto* shader = dynamic_cast<const GpuMaterialShader3D*>(draw.material.shader.backend().get());
+                const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(draw.material.inputs.backend().get());
+                if (draw.material.shader.backend() &&
+                    (!shader || !shader->valid() || !shader->shader.belongs_to(_device->handle())))
+                    return false;
+                if (const auto& surface = draw.material.surface.backend()) {
+                    const auto* gpu = dynamic_cast<const GpuSurfaceShader3D*>(surface.get());
+                    if (!gpu || !gpu->valid() || !gpu->variants[0].belongs_to(_device->handle()))
+                        return false;
+                }
+                if (draw.material.inputs.backend() && (!inputs || !inputs->valid() || inputs->shader.get() != shader ||
+                                                       *inputs->device != _device->handle()))
+                    return false;
+                if (shader && (!shader->textures.empty() || !shader->buffers.empty()) && !inputs)
+                    return false;
+                if (!inputs || inputs->validation_epoch == epoch)
+                    continue;
+                inputs->validation_epoch = epoch;
+                // Pending 2D target writes must publish their content revisions
+                // before the stock temporal signature observes these inputs.
+                if (signature && _owner->_frame && _owner->_batch.has_writes())
+                    _owner->flush_to_frame();
+                u64 value = 1469598103934665603ull;
+                taa_hash(value, shader);
+                for (const auto& texture : inputs->input_textures) {
+                    for (const auto& output : outputs)
+                        if (texture == output)
+                            return false;
+                    const auto* backend = static_cast<const GpuTextureBackend*>(texture.backend().get());
+                    taa_hash(value, backend);
+                    taa_hash(value, backend->version());
+                    taa_hash(value, backend->scale_mode());
+                }
+                for (const auto& buffer : inputs->input_buffers) {
+                    const auto* backend = buffer.backend().get();
+                    taa_hash(value, backend);
+                    taa_hash(value, backend->version());
+                }
+                inputs->signature = value;
+                if (key == 0)
+                    key = 1469598103934665603ull;
+                taa_hash(key, value);
+            }
+    if (signature)
+        *signature = key;
+    return true;
 }
 
 std::shared_ptr<GpuEnvironment3D> GpuRenderer3D::allocate_environment(u32 w, u32 h) {
@@ -1999,7 +3208,7 @@ std::shared_ptr<GpuEnvironment3D> GpuRenderer3D::allocate_environment(u32 w, u32
         info.layer_count_or_depth = 1;
         info.num_levels = levels;
         info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-        SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device->handle(), &info);
+        SDL_GPUTexture* texture = tracked_create_texture(_device->handle(), &info);
         if (!texture) {
             throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
         }
@@ -2088,6 +3297,172 @@ void GpuRenderer3D::filter_environment(SDL_GPUCommandBuffer* commands, GpuEnviro
     }
     filter(environment.irradiance, 0, 2, 1.0f, irradiance_samples);
     environment.filtered = true;
+    ++environment.generation;
+}
+
+namespace {
+// A float texture of `layers` (an array when more than one) and `levels`, for the reflections.
+GpuTexture reflection_texture(GpuDevice& device, u32 w, u32 h, u32 layers, u32 levels, SDL_GPUTextureUsageFlags usage) {
+    constexpr SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    SDL_GPUTextureCreateInfo info{};
+    info.type = layers > 1 ? SDL_GPU_TEXTURETYPE_2D_ARRAY : SDL_GPU_TEXTURETYPE_2D;
+    info.format = format;
+    info.usage = usage;
+    info.width = w;
+    info.height = h;
+    info.layer_count_or_depth = layers;
+    info.num_levels = levels;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = tracked_create_texture(device.handle(), &info);
+    if (!texture)
+        throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
+    device.poison_texture(texture, format, w, h, layers, levels, usage);
+    return GpuTexture{device.shared(), texture, w, h, format};
+}
+} // namespace
+
+std::shared_ptr<IReflectionCaptureBackend3D> GpuRenderer3D::create_reflection_capture(u32 side) {
+    if (!_panorama_pipeline || !_filter_pipeline || !_environment_sampler || !_lights_available)
+        return {};
+    try {
+        auto capture = std::make_shared<GpuReflectionCapture3D>();
+        capture->side = side;
+        ViewOptions3D options;
+        options.samples = 1;
+        options.hdr = true;
+        options.background = colors::black;
+        capture->view = create_view({static_cast<i32>(side), static_cast<i32>(side)}, options);
+        if (!capture->view)
+            return {};
+        capture->faces = reflection_texture(*_device, side, side, 6, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        const u32 w = 4 * side, h = 2 * side;
+        capture->source = reflection_texture(*_device, w, h, 1, GpuDevice::complete_mip_levels(w, h),
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        return capture;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: reflection capture not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+bool GpuRenderer3D::global_illumination_lit(IViewBackend3D& base) const {
+    const auto* view = dynamic_cast<const GpuView3D*>(&base);
+    return view && view->_gi.lit && view->_gi.irradiance;
+}
+
+bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3D& scene, Vec3f position,
+                                       const ReflectionCaptureOptions3D& options, IViewBackend3D* lighting,
+                                       RenderDebugStats3D& stats) {
+    auto* capture = dynamic_cast<GpuReflectionCapture3D*>(&base);
+    if (!capture)
+        return false;
+    // A capture loaded from a picture (create_reflection_capture_from) gets its view and faces the first time it is
+    // captured: a face a quarter of its panorama's width.
+    if (!capture->view) {
+        try {
+            const u32 side = std::max(16u, capture->source.width() / 4);
+            ViewOptions3D view_options;
+            view_options.samples = 1;
+            view_options.hdr = true;
+            view_options.background = colors::black;
+            capture->view = create_view({static_cast<i32>(side), static_cast<i32>(side)}, view_options);
+            capture->faces = reflection_texture(*_device, side, side, 6, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            capture->side = side;
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: reflection capture's views not made",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+            return false;
+        }
+    }
+    auto* view = dynamic_cast<GpuView3D*>(capture->view.get());
+    if (!view)
+        return false;
+    // Six square views, 90 degrees each, without the overlay or temporal anti-aliasing (each face would be one
+    // jittered frame). Global illumination only borrowed from `lighting`'s view (its probes, as they stand): a view's
+    // own is made over frames, and a capture's would start dark.
+    const Camera3D camera = scene.camera;
+    const bool overlay = scene.show_overlay;
+    const bool taa = scene.taa.enabled;
+    const bool gi = scene.global_illumination.enabled;
+    const auto* lit_by = dynamic_cast<const GpuView3D*>(lighting);
+    const bool borrow = gi && lit_by && lit_by != view && lit_by->_gi.lit && lit_by->_gi.irradiance;
+    scene.show_overlay = false;
+    scene.taa.enabled = false;
+    scene.global_illumination.enabled = borrow;
+    _gi_borrowed = borrow ? lit_by : nullptr;
+    struct Face {
+        Vec3f forward, up;
+    };
+    static constexpr std::array<Face, 6> faces{{{{1, 0, 0}, {0, 1, 0}},
+                                                {{-1, 0, 0}, {0, 1, 0}},
+                                                {{0, 1, 0}, {0, 0, 1}},
+                                                {{0, -1, 0}, {0, 0, -1}},
+                                                {{0, 0, 1}, {0, 1, 0}},
+                                                {{0, 0, -1}, {0, 1, 0}}}};
+    struct Params {
+        f32 size[4];
+        f32 right[6][4], up[6][4], forward[6][4];
+    } params{};
+    const u32 side = capture->side;
+    params.size[0] = static_cast<f32>(capture->source.width());
+    params.size[1] = static_cast<f32>(capture->source.height());
+    bool ok = true;
+    for (u32 f = 0; f < 6 && ok; ++f) {
+        Camera3D eye = Camera3D::look_at(position, position + faces[f].forward, 90.0f, faces[f].up);
+        eye.z_near = options.z_near;
+        eye.z_far = options.z_far > 0.0f ? options.z_far : camera.z_far;
+        eye.hidden_id = options.hidden_id;
+        put(params.right[f], eye.right(), 0.0f);
+        put(params.up[f], eye.up(), 0.0f);
+        put(params.forward[f], eye.forward(), 0.0f);
+        if (!((options.faces >> f) & 1u))
+            continue; // (kept as last captured)
+        scene.camera = eye;
+        ok = render(*view, scene, stats) && view->_scene;
+        if (!ok)
+            break;
+        _owner->ensure_frame();
+        _owner->flush_to_frame();
+        SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUTextureLocation from{.texture = view->_scene.handle()};
+            const SDL_GPUTextureLocation to{.texture = capture->faces.handle(), .layer = f};
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, side, side, 1, false);
+            SDL_EndGPUCopyPass(copy);
+        } else {
+            ok = false;
+        }
+    }
+    scene.camera = camera;
+    scene.show_overlay = overlay;
+    scene.taa.enabled = taa;
+    scene.global_illumination.enabled = gi;
+    _gi_borrowed = nullptr;
+    if (borrow)
+        ++stats.reflection_gi_captures;
+    if (!ok)
+        return false;
+    if (!options.publish) {
+        ++stats.reflection_captures;
+        return true; // (the faces kept for a later capture to publish)
+    }
+    // The faces into the panorama, then its mips (the filter reads them as an environment's).
+    SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+    const SDL_GPUStorageTextureReadWriteBinding output{.texture = capture->source.handle()};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+    if (!pass)
+        return false;
+    SDL_BindGPUComputePipeline(pass, _panorama_pipeline);
+    const SDL_GPUTextureSamplerBinding source{capture->faces.handle(), _owner->_sampler_linear};
+    SDL_BindGPUComputeSamplers(pass, 0, &source, 1);
+    SDL_PushGPUComputeUniformData(commands, 0, &params, sizeof(params));
+    SDL_DispatchGPUCompute(pass, (capture->source.width() + 7) / 8, (capture->source.height() + 7) / 8, 1);
+    SDL_EndGPUComputePass(pass);
+    SDL_GenerateMipmapsForGPUTexture(commands, capture->source.handle());
+    ++capture->captured;
+    ++stats.reflection_captures;
+    return true;
 }
 
 bool GpuRenderer3D::make_targets(GpuView3D& view) {
@@ -2158,6 +3533,20 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
     if (hdr) {
         fullscreen(_bloom_shader.handle(), hdr_format);
         fullscreen(_output_shader.handle(), output);
+        if (view._options.auto_exposure.enabled && _output_auto_shader)
+            fullscreen(_output_auto_shader.handle(), output);
+    }
+    // Auto exposure's buffer now, not in the middle of a render (a new buffer's debug fill is an upload, which must
+    // not land after the first metering).
+    if (view._options.auto_exposure.enabled && _capabilities.auto_exposure && !view._exposure) {
+        try {
+            view._exposure = std::make_shared<GpuBuffer>(
+                _device->create_buffer(exposure_buffer_usage, nullptr, exposure_state_bytes));
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: auto exposure buffer not made",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+        view._exposure_valid = false;
     }
     return true;
 }
@@ -2183,7 +3572,37 @@ bool GpuRenderer3D::resize_view(IViewBackend3D& base, Vec2i size) {
         view->_size = old;
         return false;
     }
+    view->_extent = {};      // (the whole again)
+    view->_ssr_seen = false; // (its pyramid's place moved with the size)
     return true;
+}
+
+// The passes that render a part of a view (its extent, from the top-left of its targets): the pre-pass, the ambient
+// occlusion, the light grid, the main pass with its sky and fog, the screen-space reflections. The others read and
+// write whole targets (the temporal resolve's history, the HDR output and bloom, GI's screen probes, the fog's sun
+// shafts, the occlusion pyramid, picking, the contact shadows, the overlay's velocity).
+bool GpuRenderer3D::renders_part(const IViewBackend3D& base, const Scene3D& scene, const IViewBackend3D* lit_by) const {
+    const auto* view = dynamic_cast<const GpuView3D*>(&base);
+    if (!view || view->_hdr || view->_options.pick)
+        return false;
+    const Scene3D* overlay = scene.overlay_if_any();
+    // (A GI of its own builds windows round the view's whole picture; one borrowed is resolved over the part.)
+    const bool gi = scene.global_illumination.enabled && (!lit_by || lit_by == &base);
+    return !scene.taa.enabled && !gi && !(scene.fog.enabled && scene.fog.sun_shadows) && !scene.lod.occlusion.enabled &&
+           !scene.contact_shadows.enabled && !(overlay && !overlay->draws().empty());
+}
+
+bool GpuRenderer3D::render_lit_by(IViewBackend3D& base, const Scene3D& scene, const IViewBackend3D& lit_by,
+                                  RenderDebugStats3D& stats) {
+    const auto* source = dynamic_cast<const GpuView3D*>(&lit_by);
+    const bool gi = scene.global_illumination.enabled && source != &base;
+    const bool borrow = gi && source && source->_gi.lit && source->_gi.irradiance;
+    _gi_borrowed = borrow ? source : nullptr;
+    _gi_off = gi && !borrow;
+    const bool ok = render(base, scene, stats);
+    _gi_borrowed = nullptr;
+    _gi_off = false;
+    return ok;
 }
 
 u32 GpuRenderer3D::ensure_shadow_map(u32 resolution, u32 layers) {
@@ -2233,8 +3652,14 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
     const bool have_base =
         sized(view._ao_depth, w, h) && view._ao_normals && view._ao_normals.format() == normals_format;
     const bool have_ao = !want_ao || (sized(view._ao_raw, aw, ah) && view._ao_across);
+    const bool reconstruct = want_ao && (aw != w || ah != h) && _ao_upsample_pipeline;
+    const bool have_upsample = !reconstruct || sized(view._ao_upsampled, w, h);
+    if (want_ao && !reconstruct) {
+        view._ao_upsampled = {};
+        view._ao_upsampled_ready = false;
+    }
     const bool have_contact = !want_contact || (sized(view._contact_raw, w, h) && view._contact_across);
-    if (have_base && have_ao && have_contact) {
+    if (have_base && have_ao && have_contact && have_upsample) {
         return true;
     }
     try {
@@ -2256,6 +3681,10 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
             view._ao_raw = std::move(raw);
             view._ao_across = std::move(across);
         }
+        if (!have_upsample) {
+            view._ao_upsampled = _device->create_target(w, h, ao_format, stored);
+            view._ao_upsampled_ready = false;
+        }
         if (!have_contact) {
             GpuTexture raw = _device->create_target(w, h, ao_format, stored);
             GpuTexture across = _device->create_target(w, h, ao_format, stored);
@@ -2266,9 +3695,10 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
         KIN_LOG_WARN_F("render", "3D: ambient occlusion targets not made",
                        (LogFields{{.name = "reason", .value = e.what()}}));
         for (GpuTexture* texture : {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw,
-                                    &view._ao_across, &view._contact_raw, &view._contact_across}) {
+                                    &view._ao_across, &view._ao_upsampled, &view._contact_raw, &view._contact_across}) {
             *texture = {};
         }
+        view._ao_upsampled_ready = false;
         return false;
     }
     // Made now rather than on the first draw, as the view's own.
@@ -2313,14 +3743,17 @@ bool GpuRenderer3D::ensure_velocity_target(GpuView3D& view) {
 // size changes. False when it cannot be made or built: the caller then reads the depth itself.
 bool GpuRenderer3D::build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection,
                                    f32 radius) {
+    const PassMarker marker{commands, _gpu_markers, "kin3d.ao_depth_chain"};
     if (!_gtao_chain_pipeline || !_ao_chain_pipeline) {
         return false;
     }
-    const u32 w = view._ao_depth.width(), h = view._ao_depth.height();
-    if (!view._ao_chain || view._ao_chain.width() != w || view._ao_chain.height() != h) {
+    // (Made the targets' size; built over the part renders fill.)
+    const u32 tw = view._ao_depth.width(), th = view._ao_depth.height();
+    const u32 w = std::min(tw, static_cast<u32>(view.extent().x)), h = std::min(th, static_cast<u32>(view.extent().y));
+    if (!view._ao_chain || view._ao_chain.width() != tw || view._ao_chain.height() != th) {
         try {
             view._ao_chain = _device->create_target(
-                w, h, hiz_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE,
+                tw, th, hiz_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE,
                 SDL_GPU_SAMPLECOUNT_1, ao_chain_levels);
         } catch (const std::exception& e) {
             KIN_LOG_WARN_F("render", "3D: the occlusion's depth chain not made",
@@ -2362,16 +3795,23 @@ bool GpuRenderer3D::build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& vi
 void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera,
                                       const Mat4f& projection, const AmbientOcclusion3D& ao, RenderDebugStats3D& stats,
                                       bool blur_too) {
+    const PassMarker marker{commands, _gpu_markers, "kin3d.ao"};
+    view._ao_upsampled_ready = false;
     const Unprojection unproject = unproject_coefficients(projection);
-    const f32 w = static_cast<f32>(view._ao_raw.width()), h = static_cast<f32>(view._ao_raw.height());
-    const f32 depth_w = static_cast<f32>(view._ao_depth.width()), depth_h = static_cast<f32>(view._ao_depth.height());
+    // Over the part renders fill (the view's extent; half of it at half resolution), in targets the view's size.
+    const bool half =
+        view._ao_raw.width() != view._ao_depth.width() || view._ao_raw.height() != view._ao_depth.height();
+    const Vec2i full = view.extent();
+    const Vec2i part = half ? Vec2i{std::max(1, (full.x + 1) / 2), std::max(1, (full.y + 1) / 2)} : full;
+    const f32 w = static_cast<f32>(part.x), h = static_cast<f32>(part.y);
+    const f32 depth_w = static_cast<f32>(full.x), depth_h = static_cast<f32>(full.y);
     _chain_ready = false;
     SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler};
     const auto dispatch = [&](SDL_GPUComputePipeline* pipeline, const GpuTexture& target, const GpuTexture& second,
                               const void* uniforms, u32 bytes) {
         const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
             depth, SDL_GPUTextureSamplerBinding{second.handle(), _point_sampler}};
-        if (compute_pass(commands, pipeline, target, inputs, uniforms, bytes)) {
+        if (compute_pass(commands, pipeline, target, inputs, uniforms, bytes, part)) {
             ++stats.ao_dispatches;
         }
     };
@@ -2388,11 +3828,12 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     std::memcpy(u.shape, shape, sizeof(shape));
     const bool use_chain = static_cast<u64>(depth_w) * static_cast<u64>(depth_h) >= ao_chain_min_pixels;
     if (use_chain && build_ao_chain(commands, view, projection, u.shape[0])) {
+        const PassMarker gtao_marker{commands, _gpu_markers, "kin3d.ao_horizons"};
         // The chain stands in for the depth as the first input.
         const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
             SDL_GPUTextureSamplerBinding{view._ao_chain.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler}};
-        if (compute_pass(commands, _gtao_chain_pipeline, view._ao_raw, inputs, &u, sizeof(u))) {
+        if (compute_pass(commands, _gtao_chain_pipeline, view._ao_raw, inputs, &u, sizeof(u), part)) {
             ++stats.ao_dispatches;
             stats.ao_chain_built = 1;
             // The blurs (this one's, the contact shadows', the merged) read the chain's first level instead of the
@@ -2403,6 +3844,7 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
             }
         }
     } else {
+        const PassMarker gtao_marker{commands, _gpu_markers, "kin3d.ao_horizons"};
         dispatch(_gtao_pipeline, view._ao_raw, view._ao_normals, &u, sizeof(u));
     }
     if (!blur_too) {
@@ -2414,10 +3856,27 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     std::memcpy(blur.depth, unproject.zw, sizeof(unproject.zw));
     blur.step[0] = 1.0f;
     SDL_GPUComputePipeline* const blur_pipeline = _chain_ready ? _ao_blur_chain_pipeline : _ao_blur_pipeline;
-    dispatch(blur_pipeline, view._ao_across, view._ao_raw, &blur, sizeof(blur));
+    {
+        const PassMarker blur_marker{commands, _gpu_markers, "kin3d.ao_blur_x"};
+        dispatch(blur_pipeline, view._ao_across, view._ao_raw, &blur, sizeof(blur));
+    }
     blur.step[0] = 0.0f;
     blur.step[1] = 1.0f;
-    dispatch(blur_pipeline, view._ao_raw, view._ao_across, &blur, sizeof(blur));
+    {
+        const PassMarker blur_marker{commands, _gpu_markers, "kin3d.ao_blur_y"};
+        dispatch(blur_pipeline, view._ao_raw, view._ao_across, &blur, sizeof(blur));
+    }
+    if (_ao_upsample_pipeline && view._ao_upsampled && half) {
+        const PassMarker upsample_marker{commands, _gpu_markers, "kin3d.ao_upsample"};
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._ao_raw.handle(), _point_sampler}};
+        view._ao_upsampled_ready =
+            compute_pass(commands, _ao_upsample_pipeline, view._ao_upsampled, inputs, &u, sizeof(u), full);
+        if (view._ao_upsampled_ready)
+            ++stats.ao_dispatches;
+    }
 }
 
 void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera,
@@ -2497,69 +3956,286 @@ void GpuRenderer3D::blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuVi
     dispatch(view._ao_raw, view._ao_across, view._contact_raw, view._contact_across);
 }
 
-void GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
-                                bool dither) {
-    const auto pass_into = [&](const GpuTexture& target, SDL_GPUGraphicsPipeline* p,
-                               std::span<const SDL_GPUTexture* const> sources, const f32(&params)[4]) {
-        if (!p) {
-            return;
-        }
-        SDL_GPUColorTargetInfo colour{};
-        colour.texture = target.handle();
-        colour.load_op = SDL_GPU_LOADOP_DONT_CARE; // all of it is written
-        colour.store_op = SDL_GPU_STOREOP_STORE;
-        colour.cycle = true;
-        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
-        if (!pass) {
-            return;
-        }
-        set_viewport(pass, target.width(), target.height());
-        SDL_BindGPUGraphicsPipeline(pass, p);
-        std::array<SDL_GPUTextureSamplerBinding, 2> bindings{};
-        for (std::size_t i = 0; i < sources.size(); ++i) {
-            bindings[i] = {.texture = const_cast<SDL_GPUTexture*>(sources[i]), .sampler = _owner->_sampler_linear};
-        }
-        SDL_BindGPUFragmentSamplers(pass, 0, bindings.data(), static_cast<u32>(sources.size()));
-        SDL_PushGPUFragmentUniformData(commands, 0, params, sizeof(params));
-        SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
-        SDL_EndGPURenderPass(pass);
+bool GpuRenderer3D::post_pass(SDL_GPUCommandBuffer* commands, const GpuTexture& target, SDL_GPUShader* shader,
+                              std::span<const SDL_GPUTexture* const> sources, const std::array<f32, 4>& params,
+                              SDL_GPUBuffer* storage) {
+    auto* pipeline = fullscreen(shader, target.format());
+    if (!pipeline)
+        return false;
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = target.handle();
+    colour.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    auto* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
+    if (!pass)
+        return false;
+    set_viewport(pass, target.width(), target.height());
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    std::array<SDL_GPUTextureSamplerBinding, 2> bindings{};
+    for (std::size_t i = 0; i < sources.size(); ++i)
+        bindings[i] = {.texture = const_cast<SDL_GPUTexture*>(sources[i]), .sampler = _owner->_sampler_linear};
+    SDL_BindGPUFragmentSamplers(pass, 0, bindings.data(), static_cast<u32>(sources.size()));
+    if (storage)
+        SDL_BindGPUFragmentStorageBuffers(pass, 0, &storage, 1);
+    SDL_PushGPUFragmentUniformData(commands, 0, params.data(), sizeof(params));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+bool GpuRenderer3D::record_bloom(SDL_GPUCommandBuffer* commands, const GpuTexture& source, const GpuTexture& result,
+                                 const GpuTexture& scratch, f32 threshold, RenderDebugStats3D& stats) {
+    const auto pass = [&](const GpuTexture& target, const GpuTexture& from, const std::array<f32, 4>& params) {
+        const SDL_GPUTexture* image = from.handle();
+        if (!post_pass(commands, target, _bloom_shader.handle(), std::span{&image, 1}, params))
+            return false;
+        ++stats.bloom_draws;
+        return true;
     };
-    const bool bloom = !plain && view._options.bloom > 0.0f && view._bloom_a && view._bloom_b;
-    if (bloom) {
-        SDL_GPUGraphicsPipeline* p = fullscreen(_bloom_shader.handle(), hdr_format);
-        const SDL_GPUTexture* scene = source.handle();
-        const SDL_GPUTexture* a = view._bloom_a.handle();
-        const SDL_GPUTexture* b = view._bloom_b.handle();
-        const f32 w = static_cast<f32>(view._bloom_a.width()), h = static_cast<f32>(view._bloom_a.height());
-        const f32 extract[4] = {0.0f, view._options.bloom_threshold, 1.0f / static_cast<f32>(view._size.x),
-                                1.0f / static_cast<f32>(view._size.y)};
-        pass_into(view._bloom_a, p, std::span{&scene, 1}, extract);
-        // Twice across and down, the second with taps twice as far apart: a
-        // wider, smoother glow for little more work.
-        for (int i = 0; i < 2; ++i) {
-            const f32 step = static_cast<f32>(i + 1);
-            const f32 across[4] = {1.0f, 0.0f, step / w, 0.0f};
-            const f32 down[4] = {1.0f, 0.0f, 0.0f, step / h};
-            pass_into(view._bloom_b, p, std::span{&a, 1}, across);
-            pass_into(view._bloom_a, p, std::span{&b, 1}, down);
+    const f32 w = static_cast<f32>(result.width()), h = static_cast<f32>(result.height());
+    if (!pass(result, source, {0, threshold, 1.f / source.width(), 1.f / source.height()}))
+        return false;
+    // Exactly the stock extraction plus two across/down Gaussian rounds.
+    for (int i = 0; i < 2; ++i) {
+        const f32 step = static_cast<f32>(i + 1);
+        if (!pass(scratch, result, {1, 0, step / w, 0}) || !pass(result, scratch, {1, 0, 0, step / h}))
+            return false;
+    }
+    return true;
+}
+
+bool GpuRenderer3D::record_output(SDL_GPUCommandBuffer* commands, const GpuTexture& source, const GpuTexture& target,
+                                  const GpuTexture* bloom, const OutputOptions3D& options, RenderDebugStats3D& stats,
+                                  SDL_GPUBuffer* exposure) {
+    const auto output = target.format();
+    const bool plain = !options.tone_map_sdr;
+    const f32 mode = plain ? (output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 3.f : 2.f)
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM      ? 0.f
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.f
+                                                                           : 2.f;
+    const std::array<const SDL_GPUTexture*, 2> sources{source.handle(), bloom ? bloom->handle() : source.handle()};
+    // With an adapted exposure (auto exposure, tonemapped): the variants that multiply it in.
+    const bool adapted = exposure && !plain && _output_auto_shader;
+    SDL_GPUShader* const shader =
+        adapted ? (options.dither && _output_dither_auto_shader ? _output_dither_auto_shader.handle()
+                                                                : _output_auto_shader.handle())
+        : options.dither && _output_dither_shader ? _output_dither_shader.handle()
+                                                  : _output_shader.handle();
+    if (!post_pass(commands, target, shader, sources,
+                   {bloom ? options.bloom_strength : 0.f, plain ? 1.f : options.exposure, mode, 0},
+                   adapted ? exposure : nullptr))
+        return false;
+    ++stats.output_draws;
+    return true;
+}
+
+bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
+                                bool dither, f32 time, RenderDebugStats3D& stats) {
+    const bool bloom = !plain && view._options.bloom > 0 && view._bloom_a && view._bloom_b;
+    if (bloom && !record_bloom(commands, source, view._bloom_a, view._bloom_b, view._options.bloom_threshold, stats))
+        return false;
+    // Auto exposure meters the picture before the bloom is added (the glow follows the exposure as the scene does).
+    // An HDR 2D pipeline (mode 2) tonemaps itself: there is nothing to expose here.
+    const bool tonemapped = !plain && view._output_format != hdr_format;
+    const bool metered =
+        view._options.auto_exposure.enabled && tonemapped && meter_exposure(commands, view, source, time, stats);
+    return record_output(commands, source, view._resolved->texture(), bloom ? &view._bloom_a : nullptr,
+                         {.bloom_strength = bloom ? view._options.bloom : 0.f,
+                          .exposure = view._options.exposure,
+                          .tone_map_sdr = !plain,
+                          .dither = dither},
+                         stats, metered ? view._exposure->handle() : nullptr);
+}
+
+bool GpuRenderer3D::meter_exposure(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, f32 time,
+                                   RenderDebugStats3D& stats) {
+    if (!_capabilities.auto_exposure) {
+        warn_once(_auto_exposure_warned, "3D: auto exposure asked for, but this device cannot do it: off");
+        return false;
+    }
+    const AutoExposure3D& options = view._options.auto_exposure;
+    // The histogram's range: 28 stops of luminance from 2^-14 (a moonless night) in 127 bins (bin 0 is black).
+    constexpr f32 lowest_log = -14.0f, bins_per_stop = 127.0f / 28.0f;
+    if (!view._exposure) {
+        try {
+            view._exposure = std::make_shared<GpuBuffer>(
+                _device->create_buffer(exposure_buffer_usage, nullptr, exposure_state_bytes));
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: auto exposure buffer not made",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+            return false;
+        }
+        view._exposure_valid = false;
+    }
+    // The step since the view's last metered render: Scene3D::time's when it moved forward (at most a second), else
+    // the wall clock's (at most a quarter of a second, so a pause does not snap it).
+    const auto now = std::chrono::steady_clock::now();
+    f32 dt = 0.0f;
+    if (view._exposure_valid) {
+        const f32 step = time - view._exposure_time;
+        dt = view._exposure_time_seen && step > 0.0f && step <= 1.0f
+                 ? step
+                 : std::min(0.25f, std::chrono::duration<f32>(now - view._exposure_wall).count());
+    }
+    view._exposure_time = time;
+    view._exposure_time_seen = true;
+    view._exposure_wall = now;
+    const bool reset = !view._exposure_valid;
+    const f32 low = std::clamp(options.low, 0.0f, 1.0f), high = std::clamp(options.high, low, 1.0f);
+    const f32 min_ev = std::min(options.min_ev, options.max_ev), max_ev = std::max(options.min_ev, options.max_ev);
+    const f32 params[12] = {lowest_log,
+                            bins_per_stop,
+                            low,
+                            high,
+                            std::log2(std::max(options.key, 1e-6f)),
+                            min_ev,
+                            max_ev,
+                            reset ? 1.0f : 0.0f,
+                            1.0f - std::exp(-dt * std::max(options.speed_up, 0.0f)),
+                            1.0f - std::exp(-dt * std::max(options.speed_down, 0.0f)),
+                            1.0f,
+                            options.compensation_ev};
+    const SDL_GPUStorageBufferReadWriteBinding state{view._exposure->handle(), false};
+    // A new buffer holds nothing yet: cleared first (the adapt shader's mode 0), so the histogram starts at zero.
+    if (reset) {
+        if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &state, 1)) {
+            SDL_BindGPUComputePipeline(pass, _exposure_adapt_pipeline);
+            f32 clear[12];
+            std::memcpy(clear, params, sizeof(clear));
+            clear[10] = 0.0f;
+            SDL_PushGPUComputeUniformData(commands, 0, clear, sizeof(clear));
+            SDL_DispatchGPUCompute(pass, 1, 1, 1);
+            SDL_EndGPUComputePass(pass);
+            ++stats.exposure_dispatches;
+        } else {
+            return false;
         }
     }
-    // Out to the 2D pipeline's format: tonemapped and encoded for a gamma
-    // one, tonemapped for an sRGB-stored one, left HDR for a float one.
-    const SDL_GPUTextureFormat output = view._output_format;
-    // A plain (8-bit) view has no exposure or tonemap: its light is cut off at white, as drawn without
-    // temporal anti-aliasing, and only encoded for a gamma target.
-    const f32 mode = plain ? (output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 3.0f : 2.0f)
-                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM      ? 0.0f
-                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.0f
-                                                                           : 2.0f;
-    const std::array<const SDL_GPUTexture*, 2> sources{source.handle(),
-                                                       bloom ? view._bloom_a.handle() : source.handle()};
-    const f32 params[4] = {bloom ? view._options.bloom : 0.0f, plain ? 1.0f : view._options.exposure, mode, 0.0f};
-    pass_into(
-        view._resolved->texture(),
-        fullscreen(dither && _output_dither_shader ? _output_dither_shader.handle() : _output_shader.handle(), output),
-        sources, params);
+    if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &state, 1)) {
+        const u32 blocks_x = (source.width() + 1) / 2, blocks_y = (source.height() + 1) / 2;
+        SDL_BindGPUComputePipeline(pass, _exposure_histogram_pipeline);
+        const SDL_GPUTextureSamplerBinding picture{source.handle(), _owner->_sampler_linear};
+        SDL_BindGPUComputeSamplers(pass, 0, &picture, 1);
+        const f32 meter[8] = {1.0f / static_cast<f32>(source.width()),
+                              1.0f / static_cast<f32>(source.height()),
+                              lowest_log,
+                              bins_per_stop,
+                              std::clamp(options.centre_weight, 0.0f, 1.0f),
+                              static_cast<f32>(blocks_x),
+                              static_cast<f32>(blocks_y),
+                              0.0f};
+        SDL_PushGPUComputeUniformData(commands, 0, meter, sizeof(meter));
+        SDL_DispatchGPUCompute(pass, (blocks_x + 15) / 16, (blocks_y + 15) / 16, 1);
+        SDL_EndGPUComputePass(pass);
+        ++stats.exposure_dispatches;
+    } else {
+        return false;
+    }
+    // A pass of its own: SDL_GPU orders writes between passes, not between the dispatches of one.
+    if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &state, 1)) {
+        SDL_BindGPUComputePipeline(pass, _exposure_adapt_pipeline);
+        SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, 1, 1, 1);
+        SDL_EndGPUComputePass(pass);
+        ++stats.exposure_dispatches;
+    } else {
+        return false;
+    }
+    view._exposure_valid = true;
+    // Out to the CPU (Renderer3D::exposure), once the last copy has come back: ev, exposure, target, a 16-byte copy.
+    if (!view._exposure_read) {
+        auto read = std::make_shared<GpuExposureReadback>();
+        read->device = _device->shared();
+        const SDL_GPUTransferBufferCreateInfo info{
+            .usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, .size = 16, .props = 0};
+        read->transfer = SDL_CreateGPUTransferBuffer(_device->handle(), &info);
+        if (read->transfer)
+            view._exposure_read = std::move(read);
+    }
+    if (view._exposure_read && !view._exposure_read->poll()) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUBufferRegion from{.buffer = view._exposure->handle(), .offset = 128 * sizeof(u32), .size = 16};
+            const SDL_GPUTransferBufferLocation to{.transfer_buffer = view._exposure_read->transfer, .offset = 0};
+            SDL_DownloadFromGPUBuffer(copy, &from, &to);
+            SDL_EndGPUCopyPass(copy);
+            view._exposure_read->recorded = true;
+            _exposure_unfenced.push_back(view._exposure_read);
+        }
+    }
+    return true;
+}
+
+const GpuTextureBackend* GpuRenderer3D::post_texture(const Texture& texture, bool attachment) const {
+    const auto* gpu = dynamic_cast<const GpuTextureBackend*>(texture.backend().get());
+    const auto usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | (attachment ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0);
+    return gpu && gpu->texture() && gpu->texture().belongs_to(_device->handle()) && !texture.array_layers() &&
+                   gpu->texture().format() == hdr_format && (gpu->texture().usage() & usage) == usage
+               ? gpu
+               : nullptr;
+}
+
+bool GpuRenderer3D::render_bloom(const BloomTargets3D& targets, const Texture& source, const BloomOptions3D& options,
+                                 RenderDebugStats3D& stats) {
+    const auto* input = post_texture(source, false);
+    const auto* result = post_texture(targets.result, true);
+    const auto* scratch = post_texture(targets.scratch, true);
+    if (!_capabilities.bloom_pass || !input || !result || !scratch || result->size() != scratch->size() ||
+        source == targets.result || source == targets.scratch || targets.result == targets.scratch ||
+        !std::isfinite(options.threshold) || options.threshold < 0)
+        return false;
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    for (const auto& t : {source, targets.result, targets.scratch})
+        _owner->retain(t);
+    input->mark_material_read(_owner->_frame_serial);
+    // Both intermediates are read as well as written within the operation.
+    result->mark_material_read(_owner->_frame_serial);
+    scratch->mark_material_read(_owner->_frame_serial);
+    const bool ok = record_bloom(_owner->_frame->command_buffer(), input->texture(), result->texture(),
+                                 scratch->texture(), options.threshold, stats);
+    result->bump_version();
+    scratch->bump_version(); // conservative after a recording failure/partial write too
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return ok;
+}
+
+bool GpuRenderer3D::render_output(const RenderTarget& target, const Texture& source, const OutputOptions3D& options,
+                                  RenderDebugStats3D& stats) {
+    const auto* input = post_texture(source, false);
+    const auto* bloom = options.bloom ? post_texture(options.bloom, false) : nullptr;
+    const auto* output = dynamic_cast<const GpuTextureBackend*>(target.texture().backend().get());
+    if (!_capabilities.output_pass || !input || !output || !output->texture() ||
+        !output->texture().belongs_to(_device->handle()) || output->texture().format() != _owner->_target_format ||
+        !(output->texture().usage() & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET) || source == target.texture() ||
+        (options.bloom && (!bloom || options.bloom == target.texture())) || !std::isfinite(options.exposure) ||
+        options.exposure < 0 || !std::isfinite(options.bloom_strength) || options.bloom_strength < 0 ||
+        (options.bloom_strength > 0 && !bloom))
+        return false;
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    _owner->retain(source);
+    _owner->retain(target.texture());
+    // A later CPU upload must not overtake this queued write, either.
+    output->mark_material_read(_owner->_frame_serial);
+    input->mark_material_read(_owner->_frame_serial);
+    if (options.bloom_strength > 0) {
+        _owner->retain(options.bloom);
+        bloom->mark_material_read(_owner->_frame_serial);
+    }
+    const bool ok = record_output(_owner->_frame->command_buffer(), input->texture(), output->texture(),
+                                  options.bloom_strength > 0 ? &bloom->texture() : nullptr, options, stats);
+    output->bump_version();
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return ok;
 }
 
 void GpuRenderer3D::suspend_taa(GpuView3D& view) {
@@ -2583,19 +4259,52 @@ u64 texture_bytes(const GpuTexture& t) {
 u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     u64 bytes = 0;
     for (const GpuTexture* t :
-         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw,
-          &view._contact_across, &view._taa_depth, &view._taa_in, &view._taa_sharp, &view._taa_motion,
-          &view._taa_history[0], &view._taa_history[1], &view._occ_depth}) {
+         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._ao_upsampled,
+          &view._contact_raw, &view._contact_across, &view._fog_sun, &view._taa_depth, &view._taa_in, &view._taa_sharp,
+          &view._taa_motion, &view._taa_history[0], &view._taa_history[1], &view._taa_dilated[0], &view._taa_dilated[1],
+          &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
         bytes += texture_bytes(t);
+    }
+    // The fog's volumes (Fog3D::volumetric): three of four halves a cell.
+    if (view._fog_volume_sum) {
+        bytes += 3ull * 8ull * view._fog_volume_cells[0] * view._fog_volume_cells[1] * view._fog_volume_cells[2];
     }
     for (const std::shared_ptr<GpuBuffer>& h : view._occ_history) {
         bytes += h ? h->size() : 0u;
     }
     for (const std::shared_ptr<GpuBuffer>& b :
          {_gcb[1].scan, _gcb[1].blocks, _gcb[1].args, _gcb[1].list, _gcb[1].counts, _gcb[1].indices, _gc_job_history}) {
+        bytes += b ? b->size() : 0u;
+    }
+    // The GI scene, every level's: a half, two 8-bit texels and four halves a voxel, and the build's two words (in
+    // owners and seeds); the lit scene's four halves on each side; the probes' atlases (8 x 8 of four halves, 16 x 16
+    // of two, four halves of data a probe), their rays and lists; their light on the view (four halves a texel, twice).
+    const GpuView3D::Gi& gi = view._gi;
+    const u64 voxels = static_cast<u64>(gi.size[0]) * gi.size[1] * gi.size[2] * gi.levels;
+    bytes += gi.distance ? voxels * (2 + 4 + 4 + 8) : 0u;
+    bytes += gi.radiance ? voxels * 16 : 0u;
+    bytes += gi.irradiance ? static_cast<u64>(gi.probe_counts[0]) * gi.probe_counts[1] * gi.probe_counts[2] *
+                                 gi.probe_levels * (64 * 8 + 256 * 4 + 8)
+                           : 0u;
+    bytes += gi.light ? static_cast<u64>(gi.light.width()) * gi.light.height() * 16 : 0u;
+    bytes += gi.last_light ? static_cast<u64>(gi.last_light.width()) * gi.last_light.height() * 16 : 0u;
+    bytes += gi.coverage ? static_cast<u64>(gi.coverage.width()) * gi.coverage.height() * 2 : 0u;
+    for (const std::shared_ptr<GpuBuffer>& b :
+         {gi.owners, gi.seeds, gi.rays, gi.place_list, gi.batch_list, gi.light_list}) {
+        bytes += b ? b->size() : 0u;
+    }
+    // The area lights': each voxel's light from them, their light on the view and the render before's, and their
+    // hierarchies, emitters and lists.
+    bytes += gi.area_cache ? voxels * 8 : 0u;
+    for (const GpuTexture* t : {&gi.area, &gi.area_before}) {
+        bytes += *t ? static_cast<u64>(t->width()) * t->height() * 8 : 0u;
+    }
+    for (const std::shared_ptr<GpuBuffer>& b :
+         {gi.area_triangles, gi.area_nodes, gi.area_emitters, gi.area_explicit, gi.area_scene, gi.area_shading,
+          gi.area_retry_args, gi.area_retry_list}) {
         bytes += b ? b->size() : 0u;
     }
     return bytes;
@@ -2612,6 +4321,7 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
     view._taa_sharp = {};
     view._taa_motion = {};
     view._taa_history = {};
+    view._taa_dilated = {};
     view._taa_valid = false;
     view._taa_coverage_key = 0;
     view._taa_reactive = false;
@@ -2628,13 +4338,22 @@ bool GpuRenderer3D::ensure_taa_targets(GpuView3D& view, bool sharpen) {
         constexpr SDL_GPUTextureUsageFlags stored =
             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
         if (!sized(view._taa_depth)) {
-            view._taa_depth = _device->create_target(w, h, _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
+            view._taa_depth = _device->create_target(w, h, _depth_format,
+                                                     SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                                                         (_taa_depth_sampled ? SDL_GPU_TEXTUREUSAGE_SAMPLER : 0));
             made = true;
         }
         for (GpuTexture& history : view._taa_history) {
             if (!sized(history)) {
                 history = _device->create_target(w, h, hdr_format, stored);
                 view._taa_valid = false; // nothing in it
+                made = true;
+            }
+        }
+        for (GpuTexture& dilated : view._taa_dilated) {
+            if (!sized(dilated)) {
+                dilated = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R32_UINT, stored);
+                view._taa_valid = false;
                 made = true;
             }
         }
@@ -2992,21 +4711,40 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
 
 const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
                                              const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive,
-                                             bool reject, bool fixed_jitter, RenderDebugStats3D& stats) {
+                                             bool reject, bool fixed_jitter, const GpuTexture* depth, bool overlaid,
+                                             RenderDebugStats3D& stats) {
     const f32 w = static_cast<f32>(view._size.x), h = static_cast<f32>(view._size.y);
     const GpuTexture& past_motion = reset ? view._ao_normals : view._taa_motion;
+    const f32 sharpness = std::clamp(taa.sharpness, 0.0f, 1.0f);
+    const bool sharpened = sharpness > 0.0f && view._taa_sharp;
+    // A still pixel's history weight: the mean of the frames the history holds while they are few (it reads them
+    // exactly; kept at still_blend, a cut's first frames would weigh for long), then still_blend. At blend or below
+    // (or with a blend of 0, no history anywhere), still pixels are treated as moving ones.
+    const f32 blend = std::clamp(taa.blend, 0.0f, 0.98f);
+    const f32 most = std::clamp(taa.still_blend, 0.0f, 0.98f);
+    const bool hold = blend > 0.0f && most > blend;
+    const u32 held = reset ? 0u : view._taa_held;
+    const f32 still_blend = std::min(most, 1.0f - 1.0f / static_cast<f32>(held + 1));
     const auto dispatch = [&](const GpuTexture& target, const GpuTexture& current, const GpuTexture& history,
-                              f32 sharpen, f32 sharpness) {
-        const std::array<SDL_GPUTextureSamplerBinding, 4> inputs{
+                              f32 sharpen, f32 amount) {
+        const std::array<SDL_GPUTextureSamplerBinding, 6> inputs{
             SDL_GPUTextureSamplerBinding{current.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{history.handle(), _owner->_sampler_linear},
             SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler},
-            SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler}};
-        const TaaUniforms u{{w, h, 1.0f / w, 1.0f / h},
-                            {std::clamp(taa.blend, 0.0f, 0.98f), reset ? 1.0f : 0.0f, sharpen, sharpness},
-                            {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
-                             reject ? 1.0f : 0.0f}};
-        if (!compute_pass(commands, _taa_pipeline, target, inputs, &u, sizeof(u))) {
+            SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{depth ? depth->handle() : _owner->_white.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler}};
+        const TaaUniforms u{
+            {w, h, 1.0f / w, 1.0f / h},
+            {blend, reset ? 1.0f : 0.0f, sharpen, amount},
+            {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
+             reject ? 1.0f : 0.0f},
+            {depth ? 1.0f : 0.0f, overlaid ? overlay_split : 2.0f, depth && sharpened ? 1.0f : 0.0f, 0.0f},
+            {still_blend, hold ? 1.0f : 0.0f, 0.0f, 0.0f}};
+        // (The sharpening dispatch binds this frame's velocities as its second output too, and writes nothing there;
+        // it reads them, with where the depth bent, as its last input.)
+        if (!compute_pass_two(commands, _taa_pipeline, target, view._taa_dilated[1 - view._taa_read], inputs, &u,
+                              sizeof(u))) {
             return false;
         }
         ++stats.taa_dispatches;
@@ -3019,9 +4757,9 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
     }
     view._taa_read = write;
     view._taa_reactive = reactive;
+    view._taa_held = reset ? 1u : std::min(view._taa_held + 1u, 1000u);
     const GpuTexture* shown = &view._taa_history[write];
-    const f32 sharpness = std::clamp(taa.sharpness, 0.0f, 1.0f);
-    if (sharpness > 0.0f && view._taa_sharp && dispatch(view._taa_sharp, *shown, *shown, 1.0f, sharpness)) {
+    if (sharpened && dispatch(view._taa_sharp, *shown, *shown, 1.0f, sharpness)) {
         shown = &view._taa_sharp;
     }
     return shown;
@@ -3033,6 +4771,15 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
 struct GpuRenderer3D::FrameCtx {
     FrameCtx(GpuView3D* v, const Scene3D& s, RenderDebugStats3D& st) : view(v), scene(s), stats(st) {}
     GpuView3D* view;
+    GpuPreparedScene3D* prepared = nullptr;
+    bool geometry_only = false, surface_only = false, public_shadow = false, public_local = false;
+    SurfaceStage3D surface_stage = SurfaceStage3D::All;
+    const GpuTexture* particle_depth = nullptr;
+    const GpuTexture* sun_depth = nullptr;
+    u32 sun_size = 0, sun_layers = 0;
+    const GpuTexture* surface_depth = nullptr;
+    const GpuTexture* local_depth = nullptr;
+    u64 input_signature = 0;
     const Scene3D& scene;
     RenderDebugStats3D& stats;
 
@@ -3042,7 +4789,9 @@ struct GpuRenderer3D::FrameCtx {
     std::array<Mat4f, 2> view_projections{}; // exact
     std::array<Mat4f, 2> drawn{};            // with the temporal anti-aliasing's jitter
     std::array<GpuFrustum, 2> frustums{};
+    std::array<GpuFrustum, 2> whole_frustums{}; // without the clip plane: for draws it does not cut (DrawClip3D)
     bool sun_shines = false;
+    bool decals = false; // Scene3D::decals to draw (they need the pre-pass)
     bool contact_wanted =
         false; // contact shadows asked for, with a sun that shines and casts (sun_shadow_strength > 0)
 
@@ -3076,6 +4825,14 @@ struct GpuRenderer3D::FrameCtx {
     // local views' skinned casters).
     std::vector<u32> spots;
     bool lights_variant = false;
+    // The light grid: possible (the light variants made, Scene3D::debug.light_grid), and then every point and spot
+    // light in view is chosen (up to max_grid_lights each) and build_light_grid lists them by cell. Their shadows'
+    // layers (-1: none), as ctx.chosen and ctx.spots. The grid's slicing, for the frame block.
+    bool grid_possible = false;
+    std::vector<f32> point_layers, spot_layers;
+    std::array<u32, 3> grid_tiles{}; // across, down, slices
+    u32 grid_cells = 0;
+    f32 grid_scale = 0.0f;
     LocalLightUniforms lu{};
     u32 moon_cascades = 0;
     ShadowCascades3D moon_plan;
@@ -3083,6 +4840,10 @@ struct GpuRenderer3D::FrameCtx {
     u32 joint_total = 0;
     std::array<u32, 2> joint_base{};
     GpuEnvironment3D* environment = nullptr; // null: the hemisphere ambient
+    // The reflection array (prepare_reflections; null: none) and the probes' records the light variants read.
+    const GpuTexture* reflections = nullptr;
+    u32 probe_count = 0;
+    std::array<f32, max_reflection_probes3d * 24> probe_records{};
     bool sky_env_used =
         false; // `environment` is the sky's own (Lights3D::sky_lights_scene): in world space, no rotation
     // The sky and the fog (P3a): asked for and possible; `sky_pass` once the image sky's environment is known to be
@@ -3104,7 +4865,17 @@ struct GpuRenderer3D::FrameCtx {
     bool contacted = false;      // and contact shadows
     bool velocity_drawn = false; // the pre-pass (or the main pass) began, so _ao_normals holds this frame's velocity
     bool prepass_ran = false;    // the depth and normal pre-pass began this render
-    bool main_velocity = false;  // the main pass writes the velocity (taa with nothing else to need a pre-pass)
+    bool fog_sun_wanted = false; // Fog3D::sun_shadows asks for the fog's sunlit share (which needs the pre-pass)
+    bool ssr_wanted = false;     // Scene3D::ssr asks for screen-space reflections (which need the pre-pass)
+    bool ssr = false;            // and this frame's trace is there for the main pass
+    bool fog_sun = false;        // and it was walked this render (fog_sun): the main pass leaves the sun's out
+    FogSunUniforms fog_sun_uniforms{}; // what fog_sun walked with, for fog_sun_apply
+    bool fog_volume_wanted = false;    // Fog3D::volumetric asks for the lights' light in the fog (and the pre-pass)
+    bool fog_volume = false;           // and it was lit this render (fog_volume): fog_volume_apply adds it
+    bool fog_volume_applied = false;   // in the main pass, before the blended draws (else after it)
+    bool fog_volume_sun = false; // with the sun's in-scattering (the main pass, the sky and particles leave it out)
+    FogVolumeApplyUniforms fog_volume_uniforms{};
+    bool main_velocity = false;        // the main pass writes the velocity (taa with nothing else to need a pre-pass)
     const GpuTexture* shown = nullptr; // the picture after the temporal resolve
     std::array<LodView, 2> lod{};      // Scene3D::lod's choosing, for the scene and the overlay
     bool gpu_clusters = false;         // clustered meshes are cut in compute this render
@@ -3119,7 +4890,638 @@ struct GpuRenderer3D::FrameCtx {
     // main pass.
     bool soft_particles = false;
     bool particles = false;
+    bool gi = false;          // the view has a GI scene for this render (Scene3D::global_illumination)
+    bool gi_lit = false;      // and its probes light the scene (the light variants read them)
+    bool gi_resolved = false; // and their light on what the pre-pass drew was read (gi_resolve)
 };
+
+bool GpuRenderer3D::preparation_live(u64 frame) const {
+    return frame == _owner->_frame_serial;
+}
+bool GpuPreparedScene3D::valid() const {
+    if (!device || !*device || !owner || !owner->preparation_live(frame))
+        return false;
+    for (const auto& source : sources) {
+        if (!source.scene)
+            continue;
+        const auto stamp = source.lifetime.lock();
+        if (!stamp || *stamp != source.identity || source.scene->draw_identity() != source.identity ||
+            source.scene->draw_revision() != source.revision || source.scene->pose_revision() != source.pose ||
+            !source.scene->diagnostics().empty())
+            return false;
+    }
+    if (sources[0].scene->overlay_if_any() != sources[1].scene)
+        return false;
+    for (const auto& batch : batches)
+        if (batch.batch->revision() != batch.revision)
+            return false;
+    return true;
+}
+u64 GpuPreparedScene3D::cpu_bytes() const {
+    u64 bytes = sizeof(*this) + records.capacity() * sizeof(GpuInstance3D) + spheres.capacity() * sizeof(Vec4f) +
+                scales.capacity() * sizeof(f32) +
+                (uploaded_rows.capacity() + uploaded_local_rows.capacity()) * sizeof(u32) +
+                batches.capacity() * sizeof(Batch);
+    for (const auto& source : sources)
+        bytes += source.first.capacity() * sizeof(u32);
+    return bytes;
+}
+std::shared_ptr<IPreparedSceneBackend3D> GpuRenderer3D::prepare(const Scene3D& scene, const PrepareOptions3D& options,
+                                                                RenderDebugStats3D& stats) {
+    if (!validate_material_inputs(scene))
+        return {};
+    const std::array sources{&scene, scene.overlay_if_any()};
+    u64 count = 0, draws = 0, joints = 0;
+    for (const auto* source : sources)
+        if (source) {
+            constexpr u64 max_joints = std::numeric_limits<u32>::max() / sizeof(Mat4f);
+            if (source->joint_matrices().size() > max_joints - joints)
+                return {};
+            joints += source->joint_matrices().size();
+            draws += source->draws().size();
+            for (const auto& draw : source->draws()) {
+                const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+                if (!mesh || !mesh->device || *mesh->device != _device->handle() ||
+                    (draw.skinned && !_skinning_available))
+                    return {};
+                for (const auto* value :
+                     {&draw.material.texture, &draw.material.metallic_roughness, &draw.material.normal,
+                      &draw.material.occlusion, &draw.material.emissive_texture}) {
+                    if (!*value)
+                        continue;
+                    const auto* texture = dynamic_cast<const GpuTextureBackend*>(value->backend().get());
+                    if (!texture || !texture->texture() || !texture->texture().belongs_to(_device->handle()) ||
+                        value->array_layers())
+                        return {};
+                }
+                if (draw.material.graph_maps) { // (an array: Renderer3D::create_map_array's)
+                    const auto* maps = dynamic_cast<const GpuTextureBackend*>(draw.material.graph_maps.backend().get());
+                    if (!maps || !maps->texture() || !maps->texture().belongs_to(_device->handle()) ||
+                        !draw.material.graph_maps.array_layers())
+                        return {};
+                }
+                count += draw.count;
+            }
+        }
+    constexpr u64 row_bytes = sizeof(GpuInstance3D) + sizeof(Vec4f) + sizeof(f32) + 3 * sizeof(u32);
+    if (count > std::numeric_limits<u32>::max() / sizeof(GpuInstance3D) || draws > std::numeric_limits<u32>::max() ||
+        sizeof(GpuPreparedScene3D) + count * row_bytes + draws * (sizeof(u32) + sizeof(GpuPreparedScene3D::Batch)) >
+            options.max_cpu_bytes)
+        return {};
+    auto prepared = std::make_shared<GpuPreparedScene3D>();
+    prepared->owner = this;
+    prepared->device = _device->shared();
+    prepared->frame = _owner->_frame_serial;
+    prepared->records.resize(count);
+    prepared->spheres.resize(count);
+    prepared->scales.resize(count);
+    prepared->batches.reserve(draws);
+    u32 first = 0;
+    for (u32 s = 0; s < 2; ++s) {
+        if (!sources[s])
+            continue;
+        const auto& source = *sources[s];
+        auto& captured = prepared->sources[s];
+        captured.scene = &source;
+        captured.lifetime = source.draw_lifetime();
+        captured.identity = source.draw_identity();
+        captured.revision = source.draw_revision();
+        captured.pose = source.pose_revision();
+        captured.first.reserve(source.draws().size());
+        for (const auto& draw : source.draws()) {
+            captured.first.push_back(first);
+            if (draw.batch)
+                prepared->batches.push_back({&draw.batch, draw.batch.revision()});
+            const auto* mesh = static_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+            const auto instances =
+                draw.batch ? draw.batch.instances() : source.instances().subspan(draw.first, draw.count);
+            const auto bounds = draw.mesh.bounds();
+            const auto fill = [&](u32 begin, u32 end) {
+                for (u32 i = begin; i < end; ++i) {
+                    const auto& instance = instances[i];
+                    Vec3f centre = bounds.center(), world{};
+                    f32 radius = bounds.radius(), world_radius = 0;
+                    if (draw.skinned)
+                        skin_sphere(mesh->skin_bounds,
+                                    source.joint_matrices().subspan(source.skin_offsets()[draw.skin_first + i],
+                                                                    mesh->skin_bounds.size()),
+                                    centre, radius);
+                    prepared->scales[first + i] = sphere_of(instance.transform, centre, radius, world, world_radius);
+                    prepared->spheres[first + i] = {world.x, world.y, world.z, world_radius};
+                    prepared->records[first + i] = pack_instance(instance, draw.material.color, draw.clip);
+                }
+            };
+            constexpr u32 chunk = 1024;
+            if (_owner->_jobs && draw.count >= 2048) {
+                _owner->_jobs->parallel_for(static_cast<i32>((draw.count + chunk - 1) / chunk), [&](i32 part) {
+                    const u32 begin = static_cast<u32>(part) * chunk;
+                    fill(begin, std::min(begin + chunk, draw.count));
+                });
+            } else
+                fill(0, draw.count);
+            first += draw.count;
+            stats.preparation_skin_bounds += draw.skinned ? draw.count : 0;
+        }
+    }
+    stats.preparation_records = count;
+    stats.preparation_cpu_bytes = prepared->cpu_bytes();
+    return prepared;
+}
+bool GpuRenderer3D::render_prepared(IViewBackend3D& view, IPreparedSceneBackend3D& input, RenderDebugStats3D& stats) {
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    return prepared && prepared->owner == this && prepared->valid() &&
+           render_scene(view, *prepared->sources[0].scene, stats, prepared);
+}
+bool GpuRenderer3D::render_geometry_prepared(const GeometryTargets3D& targets, IPreparedSceneBackend3D& input,
+                                             RenderDebugStats3D& stats) {
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    return prepared && prepared->owner == this && prepared->valid() &&
+           render_geometry_scene(targets, *prepared->sources[0].scene, stats, prepared);
+}
+
+Result3D<SunShadow3D> GpuRenderer3D::render_sun_shadow(const Texture& target, IPreparedSceneBackend3D& input,
+                                                       Vec2i receiver, RenderDebugStats3D& stats) {
+    const auto fail = [] {
+        return Result3D<SunShadow3D>{std::nullopt, {"incompatible/expired shadow inputs or GPU recording failed"}};
+    };
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    const auto* depth = dynamic_cast<const GpuTextureBackend*>(target.backend().get());
+    constexpr auto usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    if (!_capabilities.sun_shadow_pass || !prepared || prepared->owner != this || !prepared->valid() || !depth ||
+        !depth->texture() || !depth->texture().belongs_to(_device->handle()) ||
+        depth->texture().format() != SDL_GPU_TEXTUREFORMAT_D32_FLOAT || (depth->texture().usage() & usage) != usage ||
+        !target.array_layers() || target.array_layers() > max_shadow_cascades || target.size().x != target.size().y ||
+        receiver.x <= 0 || receiver.y <= 0)
+        return fail();
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    collect_mesh_buffers();
+    if (!preparation_live(prepared->frame))
+        return fail();
+    GpuView3D scratch;
+    scratch._size = receiver;
+    FrameCtx ctx{&scratch, *prepared->sources[0].scene, stats};
+    ctx.prepared = prepared;
+    ctx.geometry_only = true;
+    ctx.public_shadow = true;
+    ctx.sun_depth = &depth->texture();
+    ctx.sun_size = static_cast<u32>(target.size().x);
+    ctx.sun_layers = target.array_layers();
+    _local_views.clear();
+    _particle_batches.clear();
+    setup_frame(ctx);
+    fit_sun_shadow(ctx);
+    cull_and_upload(ctx);
+    order_draws(ctx);
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    ctx.commands = _owner->_frame->command_buffer();
+    ctx.storage = _instances ? _instances->handle() : nullptr;
+    ctx.joints = _joints ? _joints->handle() : nullptr;
+    ctx.joint_offsets = _joint_offsets ? _joint_offsets->handle() : nullptr;
+    _owner->retain(target);
+    cluster_pass_gpu(ctx, 0);
+    const bool complete = shadow_pass(ctx);
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    if (!complete)
+        return fail();
+    depth->bump_version();
+    SunShadow3D result{target, ctx.plan};
+    result.projection.count = ctx.cascades;
+    if (ctx.cascades == 1) {
+        result.projection.cascade[0].view_projection = ctx.light_vp;
+        result.projection.cascade[0].texel_world = ctx.texel_world;
+        result.projection.cascade[0].depth_range = ctx.depth_range;
+    }
+    return {std::move(result), {}};
+}
+
+namespace {
+bool valid_local_maps(const LocalShadows3D& shadows, const Scene3D& scene) {
+    const auto layers = shadows.depth.array_layers();
+    if (!layers || layers > max_local_shadow_layers || shadows.depth.size().x != shadows.depth.size().y ||
+        shadows.maps.size() > max_spot_shadow_maps + max_point_shadow_maps)
+        return false;
+    u32 occupied = 0, spots = 0, points = 0;
+    for (std::size_t i = 0; i < shadows.maps.size(); ++i) {
+        const auto& map = shadows.maps[i];
+        const auto& source = map.source;
+        const bool spot = source.kind == LocalShadowKind3D::Spot;
+        if (!spot && source.kind != LocalShadowKind3D::Point)
+            return false;
+        if (source.light >= (spot ? scene.lights.spots.size() : scene.lights.points.size()) || !source.resolution ||
+            source.resolution > static_cast<u32>(shadows.depth.size().x))
+            return false;
+        if ((spot && ++spots > max_spot_shadow_maps) || (!spot && ++points > max_point_shadow_maps))
+            return false;
+        for (std::size_t j = 0; j < i; ++j)
+            if (source.kind == shadows.maps[j].source.kind && source.light == shadows.maps[j].source.light)
+                return false;
+        const u32 count = spot ? 1u : cube_faces;
+        if (layers < count || source.first_layer > layers - count)
+            return false;
+        const u32 mask = ((1u << count) - 1) << source.first_layer;
+        if (occupied & mask)
+            return false;
+        occupied |= mask;
+        if (!std::isfinite(map.bias) || map.bias < 0 || !std::isfinite(map.normal_offset) || map.normal_offset < 0 ||
+            !std::isfinite(map.softness) || map.softness < .25f || map.softness > 4 ||
+            !std::isfinite(map.fade_distance) || map.fade_distance <= 0)
+            return false;
+        for (u32 face = 0; face < count; ++face) {
+            const auto& v = map.projection[face];
+            for (const auto value : v.view_projection.m)
+                if (!std::isfinite(value))
+                    return false;
+            if (!std::isfinite(v.tan_half) || v.tan_half <= 0 || !std::isfinite(v.near_plane) || v.near_plane <= 0 ||
+                !std::isfinite(v.far_plane) || v.far_plane <= v.near_plane)
+                return false;
+        }
+    }
+    return true;
+}
+} // namespace
+Result3D<LocalShadows3D> GpuRenderer3D::render_local_shadows(const Texture& target, IPreparedSceneBackend3D& input,
+                                                             std::span<const LocalShadowRequest3D> requests,
+                                                             Vec2i receiver, RenderDebugStats3D& stats) {
+    const auto fail = [](const char* reason) { return Result3D<LocalShadows3D>{std::nullopt, {reason}}; };
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    const auto* depth = dynamic_cast<const GpuTextureBackend*>(target.backend().get());
+    constexpr auto usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    if (!_capabilities.local_shadow_pass || !prepared || prepared->owner != this || !prepared->valid() || !depth ||
+        !depth->texture() || !depth->texture().belongs_to(_device->handle()) ||
+        depth->texture().format() != SDL_GPU_TEXTUREFORMAT_D32_FLOAT || (depth->texture().usage() & usage) != usage ||
+        !target.array_layers() || target.array_layers() > max_local_shadow_layers ||
+        target.size().x != target.size().y || receiver.x <= 0 || receiver.y <= 0 ||
+        requests.size() > max_spot_shadow_maps + max_point_shadow_maps)
+        return fail("incompatible or expired local shadow inputs");
+    const auto& scene = *prepared->sources[0].scene;
+    LocalShadows3D result{target, {}};
+    result.maps.reserve(requests.size());
+    const auto finite = [](Vec3f v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    for (const auto& request : requests) {
+        const bool spot = request.kind == LocalShadowKind3D::Spot;
+        if ((!spot && request.kind != LocalShadowKind3D::Point) ||
+            request.light >= (spot ? scene.lights.spots.size() : scene.lights.points.size()))
+            return fail("invalid local shadow light index or kind");
+        LocalShadowMap3D map;
+        map.source = request;
+        if (!map.source.resolution)
+            map.source.resolution = static_cast<u32>(target.size().x);
+        if (map.source.resolution > static_cast<u32>(target.size().x))
+            return fail("local shadow viewport exceeds array extent");
+        const auto fit = [&](const auto& light) {
+            if (!finite(light.position) || !std::isfinite(light.radius) || light.radius <= 0 ||
+                !std::isfinite(light.shadow_bias) || !std::isfinite(light.shadow_normal_offset) ||
+                !std::isfinite(light.shadow_softness) || !std::isfinite(light.shadow_distance) ||
+                !std::isfinite(light.shadow_near_plane))
+                return false;
+            map.bias = std::max(light.shadow_bias, 0.f);
+            map.normal_offset = std::max(light.shadow_normal_offset, 0.f);
+            map.softness = std::clamp(light.shadow_softness, .25f, 4.f);
+            map.fade_distance = local_shadow_far(light.shadow_distance, light.radius);
+            return true;
+        };
+        if (spot) {
+            const auto& light = scene.lights.spots[request.light];
+            if (!fit(light) || !finite(light.direction) || length_squared(light.direction) == 0 ||
+                !std::isfinite(light.inner_angle) || !std::isfinite(light.outer_angle))
+                return fail("invalid spot light shadow settings");
+            map.projection[0] = spot_shadow_view(light, map.source.resolution);
+        } else {
+            const auto& light = scene.lights.points[request.light];
+            if (!fit(light))
+                return fail("invalid point light shadow settings");
+            for (u32 face = 0; face < cube_faces; ++face)
+                map.projection[face] = cube_face_view(light, face, map.source.resolution);
+        }
+        result.maps.push_back(map);
+    }
+    if (!valid_local_maps(result, scene))
+        return fail("invalid local shadow layer layout or fitted projection");
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    collect_mesh_buffers();
+    if (!preparation_live(prepared->frame))
+        return fail("prepared frame expired during mesh collection");
+    GpuView3D scratch;
+    scratch._size = receiver;
+    FrameCtx ctx{&scratch, scene, stats};
+    ctx.prepared = prepared;
+    ctx.geometry_only = true;
+    ctx.public_local = true;
+    _particle_batches.clear();
+    _local_views.clear();
+    setup_frame(ctx);
+    static constexpr Vec3f axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    u64 used = 0;
+    for (const auto& map : result.maps) {
+        const bool spot = map.source.kind == LocalShadowKind3D::Spot;
+        Vec3f centre, eye, axis{};
+        f32 radius;
+        if (spot) {
+            const auto& light = scene.lights.spots[map.source.light];
+            spot_bounding_sphere(light, centre, radius);
+            eye = light.position;
+            axis = spot_cone(light).axis;
+        } else {
+            const auto& light = scene.lights.points[map.source.light];
+            centre = eye = light.position;
+            radius = light.radius;
+        }
+        for (u32 face = 0; face < (spot ? 1u : cube_faces); ++face) {
+            const auto& projection = map.projection[face];
+            LocalView view;
+            view.view_projection = projection.view_projection;
+            view.frustum = frustum_of(projection.view_projection);
+            view.texture = depth->texture().handle();
+            view.layer = map.source.first_layer + face;
+            view.size = map.source.resolution;
+            view.eye = eye;
+            view.axis = spot ? axis : axes[face];
+            view.near_plane = projection.near_plane;
+            view.per_unit = .5f * static_cast<f32>(view.size) / std::max(projection.tan_half, 1e-3f);
+            view.kind = spot ? 0 : 1;
+            view.owner = map.source.light;
+            view.centre = centre;
+            view.radius = radius;
+            view.bounded = true;
+            used |= u64{1} << view.layer;
+            _local_views.push_back(view);
+        }
+    }
+    cull_and_upload(ctx);
+    build_local_shadows(ctx);
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    ctx.commands = _owner->_frame->command_buffer();
+    ctx.joints = _joints ? _joints->handle() : nullptr;
+    ctx.joint_offsets = _joint_offsets ? _joint_offsets->handle() : nullptr;
+    _owner->retain(target);
+    bool complete = local_shadow_pass(ctx);
+    for (u32 layer = 0; layer < target.array_layers(); ++layer)
+        if (!(used & (u64{1} << layer))) {
+            const auto clear = depth_target(depth->texture().handle(), SDL_GPU_STOREOP_STORE, false, layer);
+            if (auto* pass = SDL_BeginGPURenderPass(ctx.commands, nullptr, 0, &clear))
+                SDL_EndGPURenderPass(pass);
+            else
+                complete = false;
+        }
+    resume_2d();
+    stats.local_shadow_bytes = u64(target.size().x) * target.size().y * target.array_layers() * 4;
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    if (!complete)
+        return fail("GPU local shadow recording failed");
+    depth->bump_version();
+    return {std::move(result), {}};
+}
+
+namespace {
+bool scene_has_soft_particles(const Scene3D& scene);
+}
+
+bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSceneBackend3D& input,
+                                   const SurfaceOptions3D& options, RenderDebugStats3D& stats) {
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    const auto& colour_texture = targets.linear_colour ? targets.linear_colour : targets.colour.texture();
+    const auto* colour = dynamic_cast<const GpuTextureBackend*>(colour_texture.backend().get());
+    const auto* depth = dynamic_cast<const GpuTextureBackend*>(targets.depth.backend().get());
+    const auto valid = [&](const GpuTextureBackend* t, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage) {
+        return t && t->texture() && t->texture().belongs_to(_device->handle()) && t->texture().format() == format &&
+               (t->texture().usage() & usage) == usage;
+    };
+    if (!_capabilities.surface_pass || !prepared || prepared->owner != this || !prepared->valid() ||
+        bool(targets.colour) == bool(targets.linear_colour) || targets.depth.array_layers() ||
+        colour_texture.array_layers() ||
+        !valid(colour, targets.linear_colour ? hdr_format : _owner->_target_format,
+               SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        !valid(depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+               SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        colour->size() != depth->size())
+        return false;
+    const auto& scene = *prepared->sources[0].scene;
+    const std::array material_outputs{colour_texture, targets.depth};
+    if (!validate_material_inputs(scene, material_outputs))
+        return false;
+    if (!_lights_available && !scene.lights.spots.empty())
+        return false;
+    if (const auto* env = dynamic_cast<const GpuEnvironment3D*>(scene.lights.environment.backend().get());
+        scene.lights.environment && (!env || !env->source.belongs_to(_device->handle())))
+        return false;
+    // Reject attachment feedback before recording, including overlay/custom materials.
+    for (const auto& source : prepared->sources)
+        if (source.scene)
+            for (const auto& draw : source.scene->draws())
+                for (const auto* t :
+                     {&draw.material.texture, &draw.material.metallic_roughness, &draw.material.normal,
+                      &draw.material.occlusion, &draw.material.emissive_texture, &draw.material.graph_maps})
+                    if (*t && (*t == colour_texture || *t == targets.depth))
+                        return false;
+    const auto* shadow = options.sun_shadow;
+    const GpuTextureBackend* shadow_depth = nullptr;
+    if (shadow) {
+        if (shadow->projection.count > max_shadow_cascades)
+            return false;
+        if (shadow->projection.count) {
+            shadow_depth = dynamic_cast<const GpuTextureBackend*>(shadow->depth.backend().get());
+            if (!valid(shadow_depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+                shadow->depth.array_layers() < shadow->projection.count ||
+                shadow->depth.array_layers() > max_shadow_cascades || shadow->depth.size().x != shadow->depth.size().y)
+                return false;
+        }
+        for (u32 k = 0; k < shadow->projection.count; ++k) {
+            const auto& c = shadow->projection.cascade[k];
+            for (const auto value : c.view_projection.m)
+                if (!std::isfinite(value))
+                    return false;
+            if (!std::isfinite(c.texel_world) || c.texel_world <= 0 || !std::isfinite(c.depth_range) ||
+                c.depth_range <= 0 || !std::isfinite(c.slice_near) || !std::isfinite(c.slice_far) ||
+                !std::isfinite(c.blend_from))
+                return false;
+            if (shadow->projection.count > 1 &&
+                (c.slice_near < 0 || c.slice_far <= c.slice_near || c.blend_from < c.slice_near ||
+                 c.blend_from > c.slice_far || (k && c.slice_far <= shadow->projection.cascade[k - 1].slice_far)))
+                return false;
+        }
+    }
+    const auto* local = options.local_shadows;
+    const GpuTextureBackend* local_depth = nullptr;
+    if (local && !local->maps.empty()) {
+        local_depth = dynamic_cast<const GpuTextureBackend*>(local->depth.backend().get());
+        if (!_capabilities.local_shadow_pass ||
+            !valid(local_depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+            !valid_local_maps(*local, scene))
+            return false;
+    }
+    const auto* colour_input =
+        options.colour_input ? dynamic_cast<const GpuTextureBackend*>(options.colour_input.backend().get()) : nullptr;
+    if (options.colour_input && (options.stage != SurfaceStage3D::Transparent ||
+                                 options.colour_input == colour_texture || options.colour_input.array_layers() ||
+                                 !valid(colour_input, colour->texture().format(), SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+                                 colour_input->size() != colour->size()))
+        return false;
+    const auto* soft_depth =
+        options.soft_depth ? dynamic_cast<const GpuTextureBackend*>(options.soft_depth.backend().get()) : nullptr;
+    if (options.soft_depth &&
+        (!options.particles || options.soft_depth == targets.depth || options.soft_depth.array_layers() ||
+         !valid(soft_depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+         soft_depth->size() != colour->size()))
+        return false;
+    if (options.particles) {
+        if (!_capabilities.surface_particles || options.stage == SurfaceStage3D::Opaque ||
+            (scene_has_soft_particles(scene) && (!soft_depth || !_capabilities.surface_soft_particles)))
+            return false;
+        const auto particle_texture = [&](const ParticleLook3D& look) {
+            if (!look.texture)
+                return true;
+            const auto* image = dynamic_cast<const GpuTextureBackend*>(look.texture.backend().get());
+            return image && image->texture() && image->texture().belongs_to(_device->handle()) &&
+                   (image->texture().usage() & SDL_GPU_TEXTUREUSAGE_SAMPLER) && !look.texture.array_layers() &&
+                   (look.texture.format() == TextureFormat::Rgba8 ||
+                    texture_format_compressed(look.texture.format())) &&
+                   look.texture != colour_texture && look.texture != targets.depth;
+        };
+        for (const auto& draw : scene.particle_draws())
+            if (!particle_texture(draw.look))
+                return false;
+        for (const auto* layer : {&scene.weather.rain, &scene.weather.snow, &scene.weather.dust, &scene.weather.mist})
+            if (layer->intensity > 0 && !particle_texture(layer->look))
+                return false;
+    }
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    collect_mesh_buffers();
+    if (!preparation_live(prepared->frame))
+        return false;
+    GpuView3D scratch;
+    scratch._size = colour->size();
+    scratch._options.background = options.background;
+    scratch._format = scratch._output_format = colour->texture().format();
+    scratch._resolved = std::static_pointer_cast<GpuTextureBackend>(colour_texture.backend());
+    FrameCtx ctx{&scratch, scene, stats};
+    ctx.prepared = prepared;
+    ctx.surface_only = true;
+    ctx.surface_stage = options.stage;
+    ctx.particle_depth = soft_depth ? &soft_depth->texture() : nullptr;
+    ctx.surface_depth = &depth->texture();
+    _particle_batches.clear();
+    setup_frame(ctx);
+    choose_point_lights(ctx);
+    choose_local_lights(ctx);
+    if (local_depth) {
+        ctx.local_depth = &local_depth->texture();
+        ctx.lu.local[0] = 1.f / static_cast<f32>(local->depth.size().x);
+        ctx.lights_variant = true;
+        // The maps in the block's order (a spot's by the spots' count, a cube's six by the cubes'), each its own layer
+        // of the given array, whole. A cube's faces are derived from its light in the shader; one whose projections
+        // are not those (the caller's own) has its six matrices in the spots' slots left over, and where they are
+        // too few the surface is not drawn.
+        u32 spot_maps = 0, cubes = 0;
+        for (const auto& map : local->maps) {
+            spot_maps += map.source.kind == LocalShadowKind3D::Spot ? 1u : 0u;
+        }
+        u32 free_matrix = spot_maps;
+        spot_maps = 0;
+        for (const auto& map : local->maps) {
+            const bool spot = map.source.kind == LocalShadowKind3D::Spot;
+            const u32 first = spot ? spot_maps++ : max_spot_shadow_maps + cube_faces * cubes++;
+            const Vec3f position =
+                spot ? scene.lights.spots[map.source.light].position : scene.lights.points[map.source.light].position;
+            for (u32 face = 0; face < (spot ? 1u : cube_faces); ++face) {
+                put_local_map(ctx.lu, first + face, map.projection[face], map.source.resolution,
+                              static_cast<f32>(local->depth.size().x), position, map.bias, map.normal_offset,
+                              map.softness, map.fade_distance, map.source.first_layer + face, 0, 0);
+            }
+            if (!spot && !standard_cube(map.projection, position)) {
+                if (free_matrix + cube_faces > max_spot_shadow_maps) {
+                    return false;
+                }
+                for (u32 face = 0; face < cube_faces; ++face) {
+                    std::memcpy(ctx.lu.local_matrix + 16 * (free_matrix + face), map.projection[face].view_projection.m,
+                                16 * sizeof(f32));
+                }
+                put(ctx.lu.local_p + 4 * (cubes - 1), {static_cast<f32>(free_matrix), 0.0f, 0.0f}, -1.0f);
+                free_matrix += cube_faces;
+            }
+            if (spot) {
+                for (u32 k = 0; k < ctx.spots.size(); ++k)
+                    if (ctx.spots[k] == map.source.light) {
+                        ctx.spot_layers[k] = static_cast<f32>(first);
+                        if (k < max_spot_lights)
+                            ctx.lu.spots[16 * k + 13] = ctx.spot_layers[k];
+                    }
+            } else {
+                for (u32 k = 0; k < ctx.chosen.size(); ++k)
+                    if (ctx.chosen[k].second == &scene.lights.points[map.source.light]) {
+                        ctx.point_layers[k] = static_cast<f32>(first);
+                        if (k < max_lights)
+                            ctx.lu.point_shadow[4 * k] = ctx.point_layers[k];
+                    }
+            }
+            stats.local_shadow_maps += spot ? 1 : cube_faces;
+        }
+    }
+    build_light_grid(ctx);
+    cull_and_upload(ctx);
+    if (options.particles)
+        prepare_particles(ctx);
+    order_draws(ctx);
+    begin_commands(ctx);
+    _owner->retain(colour_texture);
+    _owner->retain(targets.depth);
+    colour->mark_material_read(_owner->_frame_serial);
+    depth->mark_material_read(_owner->_frame_serial);
+    if (local_depth)
+        _owner->retain(local->depth);
+    if (soft_depth) {
+        _owner->retain(options.soft_depth);
+        soft_depth->mark_material_read(_owner->_frame_serial);
+    }
+    if (colour_input) {
+        _owner->retain(options.colour_input);
+        colour_input->mark_material_read(_owner->_frame_serial);
+    }
+    // The surface culls only its camera. Shadow membership was already recorded
+    // by its producer; injecting the supplied projection must not add GPU views.
+    cluster_pass_gpu(ctx, 0);
+    if (shadow_depth) {
+        _owner->retain(shadow->depth);
+        ctx.sun_depth = &shadow_depth->texture();
+        ctx.sun_size = static_cast<u32>(shadow->depth.size().x);
+        ctx.sun_layers = shadow->depth.array_layers();
+        ctx.cascades = shadow->projection.count;
+        ctx.plan = shadow->projection;
+        ctx.light_vp = ctx.plan.cascade[0].view_projection;
+        ctx.texel_world = ctx.plan.cascade[0].texel_world;
+        ctx.depth_range = ctx.plan.cascade[0].depth_range;
+        ctx.shadows = ctx.sun_shines && scene.lights.sun_shadow_strength > 0;
+    }
+    stats.lights_variant = ctx.lights_variant;
+    bool complete = true;
+    if (colour_input) {
+        if (auto* copy = SDL_BeginGPUCopyPass(ctx.commands)) {
+            const SDL_GPUTextureLocation from{.texture = colour_input->texture().handle()};
+            const SDL_GPUTextureLocation to{.texture = colour->texture().handle()};
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, colour->texture().width(), colour->texture().height(), 1,
+                                        true);
+            SDL_EndGPUCopyPass(copy);
+            ++stats.surface_colour_copies;
+        } else
+            complete = false;
+    }
+    if (complete)
+        complete = main_pass(ctx);
+    colour->bump_version(); // conservatively publish partial recording too
+    if (options.stage != SurfaceStage3D::Transparent)
+        depth->bump_version();
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return complete;
+}
 
 void GpuRenderer3D::age_targets(FrameCtx& ctx) {
     GpuView3D& v = *ctx.view;
@@ -3137,9 +5539,11 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             idle = 0;
         }
     };
-    age(v._idle_ao, ctx.occluded, v._ao_raw || v._ao_across, [&] {
+    age(v._idle_ao, ctx.occluded, v._ao_raw || v._ao_across || v._ao_upsampled, [&] {
         v._ao_raw = {};
         v._ao_across = {};
+        v._ao_upsampled = {};
+        v._ao_upsampled_ready = false;
     });
     age(v._idle_contact, ctx.contacted, v._contact_raw || v._contact_across, [&] {
         v._contact_raw = {};
@@ -3165,6 +5569,7 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             v._occ_words = 0;
             v._occ_reset = true;
         });
+    age(v._idle_gi, ctx.gi, static_cast<bool>(v._gi.distance), [&] { release_gi(v); });
     // The renderer's second gathered buffer (occlusion culling's 12 bytes a triangle of the room) goes when no view has
     // used it.
     const bool second_held = _gcb[1].indices || _gcb[1].scan || _gc_job_history;
@@ -3307,9 +5712,9 @@ void GpuRenderer3D::prepare_weather(FrameCtx& ctx) {
         }
     }
     const std::array weather_layers{&scene.weather.rain, &scene.weather.snow, &scene.weather.dust, &scene.weather.mist};
-    const bool weather_casts =
-        has_weather && std::any_of(weather_layers.begin(), weather_layers.end(),
-                                   [](const auto* l) { return l->intensity > 0 && l->look.casts_shadow; });
+    const bool weather_casts = !ctx.surface_only && has_weather &&
+                               std::any_of(weather_layers.begin(), weather_layers.end(),
+                                           [](const auto* l) { return l->intensity > 0 && l->look.casts_shadow; });
     std::vector<GpuFrustum> caster_frustums;
     if (weather_casts && scene.cull) {
         const auto map = [&](const Mat4f& matrix) {
@@ -3514,7 +5919,7 @@ u32 GpuRenderer3D::select_particles(FrameCtx& ctx, std::span<const ParticleSourc
                 continue;
             }
         }
-        if (src.look->sort && src.look->blend != ParticleBlend3D::Additive) {
+        if (src.look->sort) {
             // Furthest first; equal depths in the order they were given (a stable radix sort on the depth's bits: three
             // passes of 11 bits, O(n), and the same order every run).
             radix_sort_far_first(_particle_keys, _particle_scratch);
@@ -3649,44 +6054,29 @@ void GpuRenderer3D::upload_particles(FrameCtx& ctx, u32 total) {
     _device->upload_storage_buffer(_particle_buffer->handle(), 0, bytes, nullptr, /*cycle=*/true, &fill);
 }
 
-void GpuRenderer3D::order_particle_batches() {
-    // Drawn far to near by the batch's mean depth (the instances stay where they were written); equal depths in
-    // submission order.
-    std::vector<u32> by_depth(_particle_batches.size());
-    for (u32 b = 0; b < by_depth.size(); ++b) {
-        by_depth[b] = b;
-    }
-    std::stable_sort(by_depth.begin(), by_depth.end(),
-                     [&](u32 a, u32 b) { return _particle_batches[a].depth > _particle_batches[b].depth; });
-    std::vector<ParticleBatch> ordered;
-    ordered.reserve(by_depth.size());
-    for (const u32 b : by_depth) {
-        ordered.push_back(std::move(_particle_batches[b]));
-    }
-    _particle_batches = std::move(ordered);
-}
-
 void GpuRenderer3D::prepare_particles(FrameCtx& ctx) {
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
     _particle_batches.clear();
-    _particle_history_now.clear();
-    if (++_particle_taa_idle >= _release_after) {
-        _particle_previous.reset();
-        std::vector<u32>().swap(_particle_history_lookup);
-        decltype(_particle_history_now)().swap(_particle_history_now);
-        _particle_taa_idle = _release_after;
+    if (!ctx.surface_only) {
+        _particle_history_now.clear();
+        if (++_particle_taa_idle >= _release_after) {
+            _particle_previous.reset();
+            std::vector<u32>().swap(_particle_history_lookup);
+            decltype(_particle_history_now)().swap(_particle_history_now);
+            _particle_taa_idle = _release_after;
+        }
+        _particle_cast_batches.clear();
+        _particle_cast_views.clear();
+        _particle_cast_sprites.clear();
+        _particle_cast_order.clear();
+        if (_particle_cast_buffer && ++_particle_cast_idle >= _release_after) {
+            _particle_cast_buffer.reset();
+            std::vector<ParticleSprite3D>().swap(_particle_cast_sprites);
+            std::vector<u32>().swap(_particle_cast_order);
+        }
+        stats.particle_shadow_bytes = _particle_cast_buffer ? _particle_cast_buffer->size() : 0;
     }
-    _particle_cast_batches.clear();
-    _particle_cast_views.clear();
-    _particle_cast_sprites.clear();
-    _particle_cast_order.clear();
-    if (_particle_cast_buffer && ++_particle_cast_idle >= _release_after) {
-        _particle_cast_buffer.reset();
-        std::vector<ParticleSprite3D>().swap(_particle_cast_sprites);
-        std::vector<u32>().swap(_particle_cast_order);
-    }
-    stats.particle_shadow_bytes = _particle_cast_buffer ? _particle_cast_buffer->size() : 0;
     ctx.particles = false;
     if (scene.particle_draws().empty() && !scene.weather.active()) {
         ctx.view->_taa_particles.clear();
@@ -3700,7 +6090,8 @@ void GpuRenderer3D::prepare_particles(FrameCtx& ctx) {
     const auto started = std::chrono::steady_clock::now();
     prepare_weather(ctx);
     const auto sources = particle_sources(scene);
-    prepare_particle_casts(ctx, sources);
+    if (!ctx.surface_only)
+        prepare_particle_casts(ctx, sources);
     const u32 total = select_particles(ctx, sources);
     if (total == 0) {
         ctx.view->_taa_particles.clear();
@@ -3713,7 +6104,7 @@ void GpuRenderer3D::prepare_particles(FrameCtx& ctx) {
     if (ctx.taa)
         match_particles(ctx, total);
     upload_particles(ctx, total);
-    order_particle_batches();
+    // Main composition orders individual sprites together with mesh copies.
     ctx.particles = true;
     stats.particle_cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
@@ -3889,7 +6280,8 @@ bool GpuRenderer3D::draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass
     return true;
 }
 
-void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive) {
+void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive, u32 selected_batch, u32 first,
+                                   u32 count) {
     const GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
@@ -3900,7 +6292,10 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     const bool orthographic = scene.camera.projection == Projection3D::Orthographic;
     const bool encode = !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     const bool decode = _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    const bool depth_ready = ctx.prepass_ran && view->_ao_depth && _soft_particles_available;
+    const GpuTexture* soft_depth = ctx.particle_depth                   ? ctx.particle_depth
+                                   : ctx.prepass_ran && view->_ao_depth ? &view->_ao_depth
+                                                                        : nullptr;
+    const bool depth_ready = soft_depth && _soft_particles_available;
     const LinearRgb light_tint = particle_light_tint(scene.lights);
     const Camera3D& camera = scene.camera;
     const Unprojection un = unproject_coefficients(camera.projection_matrix(ctx.aspect));
@@ -3908,8 +6303,8 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     const bool any_local =
         (!ctx.chosen.empty() || ctx.lu.counts[0] > 0) &&
         std::any_of(_particle_batches.begin(), _particle_batches.end(), [](const auto& b) { return b.look.lit > 0; });
-    const bool maps =
-        ctx.shadows || ctx.moon_cascades > 0 || (ctx.lights_variant && _local_map && !_local_views.empty());
+    const bool maps = ctx.shadows || ctx.moon_cascades > 0 || ctx.local_depth ||
+                      (!ctx.surface_only && ctx.lights_variant && _local_map && !_local_views.empty());
     const bool wants_shadows = std::any_of(_particle_batches.begin(), _particle_batches.end(),
                                            [](const auto& b) { return b.look.receives_shadow && b.look.lit > 0; });
     if (wants_shadows && !_capabilities.particle_shadows)
@@ -3919,9 +6314,10 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     local_lights.counts[0] = local_lights.counts[1] = 0;
     if (any_local) {
         local_lights = {};
-        local_lights.counts[0] = static_cast<f32>(ctx.chosen.size());
+        const std::size_t points = std::min<std::size_t>(ctx.chosen.size(), max_lights);
+        local_lights.counts[0] = static_cast<f32>(points);
         local_lights.counts[1] = ctx.lu.counts[0];
-        for (std::size_t i = 0; i < ctx.chosen.size(); ++i) {
+        for (std::size_t i = 0; i < points; ++i) {
             const auto& light = *ctx.chosen[i].second;
             put(local_lights.points + i * 8, light.position, light.radius);
             const f32 size = std::max(light.size, .01f);
@@ -3931,6 +6327,7 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     }
     ParticleDrawUniforms v{};
     std::memcpy(v.view_projection, ctx.drawn[0].m, sizeof(v.view_projection));
+    put_clip(v.clip, camera);
     put(v.right, camera.right(), 0.0f);
     put(v.up, camera.up(), 0.0f);
     put(v.eye, camera.position, orthographic ? 1.0f : 0.0f);
@@ -3939,6 +6336,7 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     put_color(v.sun_light, scene.lights.sun.color, 0.0f);
     if (ctx.fog) {
         fill_fog(v.fog, scene.fog, scene.sky, orthographic);
+        v.fog.view[2] = ctx.fog_sun || ctx.fog_volume_sun ? 1.0f : 0.0f; // the sun's share added after the main pass
         fill_atmosphere(v.sky, scene.sky, scene.lights.sun.direction);
         if (v.fog.colour[3] > 0.5f)
             _fog_table.update(scene.sky, scene.lights.sun.direction);
@@ -3953,7 +6351,10 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         SDL_PushGPUVertexUniformData(commands, 3, temporal.data(), sizeof(temporal));
     }
     u32 draws = 0, soft_draws = 0, shadow_draws = 0;
-    for (const ParticleBatch& batch : _particle_batches) {
+    for (u32 index = 0; index < _particle_batches.size(); ++index) {
+        if (selected_batch != ~0u && index != selected_batch)
+            continue;
+        const ParticleBatch& batch = _particle_batches[index];
         const bool soft = batch.soft && depth_ready;
         const ParticleLook3D& look = batch.look;
         const bool receive = shadowed && look.receives_shadow && look.lit > 0;
@@ -3984,15 +6385,23 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         put(v.atlas, {static_cast<f32>(columns), static_cast<f32>(rows), static_cast<f32>(frames)},
             look.blend_frames ? 1.0f : 0.0f);
         put(v.stretch, {look.stretch, look.stretch_min, 0.0f}, 0.0f);
-        v.first[0] = batch.first;
+        v.first[0] = selected_batch == ~0u ? batch.first : first;
         v.first[1] = ctx.fog && look.fogged ? 1u : 0u;
         SDL_PushGPUVertexUniformData(commands, 0, &v, sizeof(v));
+        if (const auto* image = dynamic_cast<const GpuTextureBackend*>(batch.texture.backend().get());
+            image && image->texture().belongs_to(_device->handle())) {
+            if (image->used_in_frame() != _owner->_frame_serial)
+                _owner->retain(batch.texture);
+            image->mark_material_read(_owner->_frame_serial);
+        }
         const SDL_GPUTextureSamplerBinding picture = texture_binding(batch.texture, Wrap3D::Clamp, Wrap3D::Clamp);
         const bool textured = picture.texture != _owner->_white.handle();
         ParticleFragUniforms f{};
         const LinearRgb tint = mix(LinearRgb{1.0f, 1.0f, 1.0f}, light_tint, std::clamp(look.lit, 0.0f, 1.0f));
         put_color(f.tint, tint, reactive && (receive || lit_locally) ? (ctx.shadow_changed ? 1.f : 0.f) : 1.f);
-        put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, static_cast<f32>(static_cast<u32>(look.blend))},
+        put(f.flags,
+            {output_flag(encode, ctx.view->_options.compress && !ctx.view->_hdr), decode ? 1.0f : 0.0f,
+             static_cast<f32>(static_cast<u32>(look.blend))},
             textured ? 1.0f : 0.0f);
         put(f.disc, {look.softness, look.ring, soft ? look.soft_distance : 0.0f},
             receive ? std::clamp(look.lit, 0.0f, 1.0f) : 0.0f);
@@ -4000,13 +6409,15 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         SDL_PushGPUFragmentUniformData(commands, 0, &f, sizeof(f));
         const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
             picture,
-            SDL_GPUTextureSamplerBinding{soft ? view->_ao_depth.handle() : _owner->_white.handle(), _point_sampler}};
+            SDL_GPUTextureSamplerBinding{soft ? soft_depth->handle() : _owner->_white.handle(), _point_sampler}};
         if (receive) {
             const std::array<SDL_GPUTextureSamplerBinding, 5> shadow_samplers{
                 samplers[0], samplers[1],
-                SDL_GPUTextureSamplerBinding{ctx.shadows ? _shadow_map.handle() : _no_shadow.handle(),
+                SDL_GPUTextureSamplerBinding{ctx.shadows ? ctx.sun_depth->handle() : _no_shadow.handle(),
                                              _compare_sampler},
-                SDL_GPUTextureSamplerBinding{ctx.lights_variant && _local_map && !_local_views.empty()
+                SDL_GPUTextureSamplerBinding{ctx.local_depth ? ctx.local_depth->handle()
+                                             : !ctx.surface_only && ctx.lights_variant && _local_map &&
+                                                     !_local_views.empty()
                                                  ? _local_map.handle()
                                                  : _no_shadow.handle(),
                                              _compare_sampler},
@@ -4016,7 +6427,7 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         } else {
             SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), soft ? 2u : 1u);
         }
-        SDL_DrawGPUPrimitives(pass, 6, batch.count, 0, 0);
+        SDL_DrawGPUPrimitives(pass, 6, selected_batch == ~0u ? batch.count : count, 0, 0);
         ++draws;
         soft_draws += soft ? 1u : 0u;
         shadow_draws += receive ? 1u : 0u;
@@ -4024,9 +6435,9 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     if (reactive) {
         stats.taa_reactive_draws += draws;
     } else {
-        stats.particle_batches = draws;
-        stats.particle_soft = soft_draws;
-        stats.particle_shadow_batches = shadow_draws;
+        stats.particle_batches += draws;
+        stats.particle_soft += soft_draws;
+        stats.particle_shadow_batches += shadow_draws;
         stats.draws += draws;
     }
 }
@@ -4035,21 +6446,44 @@ void GpuRenderer3D::resume_2d() {
     _owner->_batch.begin(_owner->current_target(), _owner->_clear_color, /*do_clear=*/false);
 }
 
-SDL_GPUTextureSamplerBinding GpuRenderer3D::texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v) {
+SDL_GPUTextureSamplerBinding GpuRenderer3D::texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v,
+                                                            std::optional<TextureSampler3D> sampler) {
     const ITextureBackend* backend = texture.backend().get();
     const auto* gpu = backend && backend->kind() == ITextureBackend::Kind::Gpu
                           ? static_cast<const GpuTextureBackend*>(backend)
                           : nullptr;
-    return gpu && gpu->texture()
-               ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), sampler_for(*gpu, wrap_u, wrap_v)}
+    return gpu && gpu->texture() && gpu->texture().handle() != _drawn_picture
+               ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), sampler_for(*gpu, wrap_u, wrap_v, sampler)}
                : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear};
 }
 
 // What a pass with cut-outs binds for one: the base colour's alpha, and the cutoff.
 void GpuRenderer3D::bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material) {
-    const SDL_GPUTextureSamplerBinding base = texture_binding(material.texture, material.wrap_u, material.wrap_v);
+    if (cutout_surface(material)) {
+        // A surface's cut-out: all five maps, and its parameters, the sRGB decoding and the time after the cutoff.
+        const std::array<SDL_GPUTextureSamplerBinding, 5> maps{
+            texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]),
+            texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v,
+                            material.texture_samplers[1]),
+            texture_binding(material.normal, material.wrap_u, material.wrap_v, material.texture_samplers[2]),
+            texture_binding(material.occlusion, material.wrap_u, material.wrap_v, material.texture_samplers[3]),
+            texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v, material.texture_samplers[4])};
+        SDL_BindGPUFragmentSamplers(pass, 0, maps.data(), u32(maps.size()));
+        struct {
+            f32 cutoff[4], uv[4], surface[surface_param_count3d];
+        } u{{material.alpha_cutoff, _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 1.0f : 0.0f,
+             _cutout_time, 0.0f},
+            {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y},
+            {}};
+        std::memcpy(u.surface, material.shader_params.data(), sizeof(u.surface));
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+        return;
+    }
+    const SDL_GPUTextureSamplerBinding base =
+        texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]);
     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
-    const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f}};
+    const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f},
+                           {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
     SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
 }
 
@@ -4081,17 +6515,48 @@ bool scene_has_soft_particles(const Scene3D& scene) {
 } // namespace
 
 void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
+    _cutout_time = ctx.scene.time;
+    // (The time of the view's frame before, for a moving surface's previous position: its first frame has none.)
+    if (!ctx.view->_offset_clock_seen) {
+        ctx.view->_offset_clock[0] = ctx.view->_offset_clock[1] = ctx.scene.time;
+        ctx.view->_offset_clock_seen = true;
+    } else if (ctx.scene.time != ctx.view->_offset_clock[0]) {
+        ctx.view->_offset_clock[1] = ctx.view->_offset_clock[0];
+        ctx.view->_offset_clock[0] = ctx.scene.time;
+    }
+    _offset_time[0] = ctx.view->_offset_clock[0];
+    _offset_time[1] = ctx.view->_offset_clock[1];
+    _offset_eye = ctx.scene.camera.position;
+    _offset_forward = ctx.scene.camera.forward();
     GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
-    ctx.aspect = static_cast<f32>(view->_size.x) / static_cast<f32>(view->_size.y);
+    ctx.aspect = static_cast<f32>(view->extent().x) / static_cast<f32>(view->extent().y);
     const Scene3D* overlay = scene.overlay_if_any();
-    ctx.scenes = {&scene, overlay && !overlay->draws().empty() ? overlay : nullptr};
+    ctx.scenes = {&scene, !ctx.geometry_only && overlay && !overlay->draws().empty() ? overlay : nullptr};
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s]) {
             ctx.view_projections[s] = ctx.scenes[s]->camera.view_projection(ctx.aspect);
-            ctx.frustums[s] = frustum_of(ctx.view_projections[s]);
+            ctx.frustums[s] = ctx.whole_frustums[s] = frustum_of(ctx.view_projections[s]);
+            const Camera3D& camera = ctx.scenes[s]->camera;
+            if (const f32 n = length(camera.clip_plane.xyz()); camera.clipped() && n > 0 && std::isfinite(n))
+                ctx.frustums[s].planes[ctx.frustums[s].count++] = {camera.clip_plane.x / n, camera.clip_plane.y / n,
+                                                                   camera.clip_plane.z / n, camera.clip_plane.w / n};
         }
+    }
+    // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy and mip bias.
+    _anisotropy = std::clamp(scene.anisotropy, 1u, _capabilities.max_anisotropy);
+    _lod_bias = _capabilities.texture_lod_bias && std::isfinite(scene.texture_lod_bias)
+                    ? static_cast<i32>(std::lround(std::clamp(scene.texture_lod_bias, -2.0f, 2.0f) * 16.0f))
+                    : 0;
+
+    if (ctx.geometry_only || ctx.surface_only) {
+        ctx.sun_shines = scene.lights.sun.color.r + scene.lights.sun.color.g + scene.lights.sun.color.b > 0;
+        _gpu_markers = scene.debug.gpu_pass_markers;
+        ctx.drawn = ctx.view_projections;
+        ctx.main_projection = scene.camera.projection_matrix(ctx.aspect);
+        stats.samples = 1;
+        return;
     }
 
     // Temporal anti-aliasing (Scene3D::taa): every pass that draws the picture
@@ -4118,8 +6583,42 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     // Soft particles read the pre-pass's depth: it is made for them where nothing else needs it (and the velocity then
     // comes from it).
     ctx.soft_particles = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
-    const bool needs_prepass =
-        scene.ambient_occlusion.enabled || ctx.contact_wanted || scene.lod.occlusion.enabled || ctx.soft_particles;
+    // Global illumination's probes are read on what the pre-pass drew (gi_resolve).
+    const bool gi_wanted =
+        scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available && !_gi_off;
+    // The fog's sunlit share (Fog3D::sun_shadows) is walked on what the pre-pass drew.
+    const Fog3D& asked_fog = scene.fog;
+    ctx.fog_sun_wanted = _fog_sun_pipeline && _fog_available && asked_fog.enabled && asked_fog.sun_shadows &&
+                         asked_fog.sun_scatter > 0.0f && asked_fog.max_opacity > 0.0f &&
+                         (asked_fog.density > 0.0f || asked_fog.height_density > 0.0f) &&
+                         scene.camera.projection == Projection3D::Perspective &&
+                         scene.lights.sun_shadow_strength > 0.0f && scene.lights.shadow_area.size().x > 0.0f;
+    // The lights' light in the fog (Fog3D::volumetric) is added at the depth the pre-pass drew.
+    ctx.fog_volume_wanted = _fog_volume_pipeline && _fog_available && fog_volume_possible(asked_fog, scene.camera);
+    // A volume that holds the sun's in-scattering, through its shadow, does the walk's work.
+    if (ctx.fog_volume_wanted && asked_fog.volumetric.sun_and_moon) {
+        ctx.fog_sun_wanted = false;
+    }
+    if (!ctx.fog_sun_wanted && view->_fog_sun) {
+        view->_fog_sun = {};
+    }
+    if (!ctx.fog_volume_wanted && view->_fog_volume_sum) {
+        view->_fog_volume = {};
+        view->_fog_volume_sum = {};
+        view->_fog_volume_reach = {};
+        view->_fog_volume_valid = false;
+        view->_fog_volume_cells = {};
+    }
+    // Screen-space reflections trace through what the pre-pass drew, for the light variants (as the probes').
+    ctx.ssr_wanted = scene.ssr.enabled && _ssr_pipeline && _ssr_dummy && _ao_available && _lights_available &&
+                     scene.camera.projection == Projection3D::Perspective;
+    if (!ctx.ssr_wanted && view->_ssr_buffer) {
+        view->_ssr_buffer.reset();
+        view->_ssr_seen = false;
+    }
+    const bool needs_prepass = scene.ambient_occlusion.enabled || ctx.contact_wanted || scene.lod.occlusion.enabled ||
+                               ctx.soft_particles || gi_wanted || ctx.fog_sun_wanted || ctx.fog_volume_wanted ||
+                               ctx.ssr_wanted;
     if (ctx.taa &&
         !(ensure_taa_targets(*view, taa_settings.sharpness > 0.0f) &&
           (needs_prepass ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution,
@@ -4137,14 +6636,16 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
         ctx.jitter = {raw.x * taa_settings.jitter_scale, raw.y * taa_settings.jitter_scale};
         for (u32 s = 0; s < 2; ++s) {
             if (ctx.scenes[s]) {
-                ctx.drawn[s] = jitter_projection(ctx.view_projections[s], ctx.jitter, view->_size);
+                ctx.drawn[s] = jitter_projection(ctx.view_projections[s], ctx.jitter, view->extent());
             }
         }
-        ctx.main_projection = jitter_projection(scene.camera.projection_matrix(ctx.aspect), ctx.jitter, view->_size);
+        ctx.main_projection = jitter_projection(scene.camera.projection_matrix(ctx.aspect), ctx.jitter, view->extent());
         // The history is of no use after a resize, a cut, or a change of the kind of camera
         // (its pixels no longer line up).
         const bool ortho = scene.camera.projection == Projection3D::Orthographic;
         ctx.taa_reset = !view->_taa_valid || view->_taa_reset_asked || ortho != view->_taa_ortho;
+        ctx.taa_reset = ctx.taa_reset || view->_taa_material_inputs != ctx.input_signature;
+        view->_taa_material_inputs = ctx.input_signature;
         view->_taa_ortho = ortho;
         view->_taa_reset_asked = false;
     }
@@ -4172,12 +6673,20 @@ void GpuRenderer3D::fit_sun_shadow(FrameCtx& ctx) {
     const Bounds3D& area = lights.shadow_area;
     const Vec3f area_size = area.size();
     ctx.cascades = 0;
-    ctx.shadows = ctx.sun_shines && lights.sun_shadow_strength > 0.0f && area_size.x > 0 && area_size.y >= 0 &&
-                  area_size.z > 0 && length_squared(lights.sun.direction) > 0 &&
-                  (ctx.cascades = ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades)) > 0;
+    ctx.shadows =
+        ctx.sun_shines && lights.sun_shadow_strength > 0.0f && area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 &&
+        length_squared(lights.sun.direction) > 0 &&
+        (ctx.cascades =
+             (ctx.public_shadow ? std::clamp(lights.shadow_cascades, 1u, std::min(ctx.sun_layers, max_shadow_cascades))
+                                : ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades))) > 0;
+    if (!ctx.public_shadow) {
+        ctx.sun_depth = &_shadow_map;
+        ctx.sun_size = _shadow_size;
+        ctx.sun_layers = _shadow_layers;
+    }
     if (ctx.shadows && ctx.cascades > 1) {
         ctx.plan = fit_shadow_cascades(scene.camera, ctx.aspect, normalize(lights.sun.direction), area, ctx.cascades,
-                                       lights.shadow_distance, _shadow_size);
+                                       lights.shadow_distance, ctx.sun_size);
         ctx.cascades = ctx.plan.count;
         for (u32 k = 0; k < ctx.cascades; ++k) {
             ctx.cascade_frustums[k] = frustum_of(ctx.plan.cascade[k].view_projection);
@@ -4190,37 +6699,30 @@ void GpuRenderer3D::fit_sun_shadow(FrameCtx& ctx) {
         ctx.light_vp =
             Mat4f::orthographic(box.lo.x, box.hi.x, box.lo.y, box.hi.y, box.z_near, box.z_far) * box.light_view;
         ctx.light_frustum = frustum_of(ctx.light_vp);
-        ctx.texel_world = std::max(box.hi.x - box.lo.x, box.hi.y - box.lo.y) / static_cast<f32>(_shadow_size);
+        ctx.texel_world = std::max(box.hi.x - box.lo.x, box.hi.y - box.lo.y) / static_cast<f32>(ctx.sun_size);
         ctx.depth_range = std::max(box.z_far - box.z_near, 0.01f);
     }
 }
 
-bool GpuRenderer3D::ensure_local_map(u32 side, u32 spot_layers, u32 point_slots) {
-    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || spot_layers + point_slots == 0) {
+bool GpuRenderer3D::ensure_local_map(u32 side, u32 layers) {
+    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || layers == 0) {
         return false;
     }
     side = std::clamp(side, 64u, 4096u);
-    spot_layers = std::min(spot_layers, max_spot_shadow_maps);
-    point_slots = std::min(point_slots, max_point_shadow_maps);
-    // The layers: the spots' first, then six a point light's. Only ever more of either at one side (a light going out
-    // of view does not shrink the array, and coming back does not make it again), as the array's layout is part of what
-    // the cache keeps.
+    layers = std::min(layers, max_local_shadow_layers);
+    // Only ever more layers at one side (a light going out of view does not shrink the array, and coming back does
+    // not make it again), as the array is part of what the cache keeps.
     if (_local_map && _local_side == side) {
-        spot_layers = std::max(spot_layers, _local_spot_layers);
-        point_slots = std::max(point_slots, _local_point_slots);
-        if (spot_layers == _local_spot_layers && point_slots == _local_point_slots) {
+        if (layers <= _local_layers) {
             return true;
         }
     }
-    const u32 layers = spot_layers + cube_faces * point_slots;
     try {
         _local_map =
             _device->create_target_array(side, side, layers, _shadow_format,
                                          SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
         _local_side = side;
         _local_layers = layers;
-        _local_spot_layers = spot_layers;
-        _local_point_slots = point_slots;
         ++_local_generation; // a new array: nothing cached is in it
         return true;
     } catch (const std::exception& e) {
@@ -4231,7 +6733,7 @@ bool GpuRenderer3D::ensure_local_map(u32 side, u32 spot_layers, u32 point_slots)
     }
     _local_map = {};
     _local_side = 0;
-    _local_layers = _local_spot_layers = _local_point_slots = 0;
+    _local_layers = 0;
     ++_local_generation;
     return false;
 }
@@ -4265,12 +6767,87 @@ u32 GpuRenderer3D::ensure_moon_map(u32 side, u32 layers) {
     return 0;
 }
 
+bool GpuRenderer3D::ensure_gi_sun_map() {
+    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID) {
+        return false;
+    }
+    if (_gi_sun_map) {
+        return true;
+    }
+    try {
+        _gi_sun_map =
+            _device->create_target_array(gi_sun_map_side, gi_sun_map_side, 1, _shadow_format,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        _gi_sun_side = gi_sun_map_side;
+        ++_gi_sun_generation;
+        return true;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: no sun map for global illumination: its voxels' sunlight marched instead",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    _gi_sun_map = {};
+    _gi_sun_side = 0;
+    ++_gi_sun_generation;
+    return false;
+}
+
 namespace {
 
 // A shadow-casting light's map side: its own, or the default; at most what the array is made for.
 u32 local_resolution(const auto& light, const Lights3D& lights) {
     return std::clamp(light.shadow_resolution != 0 ? light.shadow_resolution : lights.local_shadow_resolution, 64u,
                       4096u);
+}
+
+// A map's side in the array: its light's resolution rounded up to a power of two, at most the array's `side`.
+u32 local_map_size(u32 resolution, u32 side) {
+    return std::min(std::bit_ceil(std::max(resolution, 1u)), side);
+}
+
+// Where a local map is in the array: its layer and its square's corner (texels) and side.
+struct LocalPlace {
+    u32 layer = 0, x = 0, y = 0, size = 0;
+};
+
+// Places `maps` (each its index in `places` and its power-of-two side, at most `side`) in an array of `side` x `side`
+// layers: the largest first (then by index, so that the same maps land in the same places from frame to frame), each
+// layer filled in Z order by squares of the map's side at multiples of it, so none overlap and a layer is full before
+// the next is begun. Returns the layers used.
+u32 pack_local_maps(u32 side, std::span<const std::pair<u32, u32>> maps, std::span<LocalPlace> places) {
+    if (maps.empty()) {
+        return 0;
+    }
+    std::vector<std::pair<u32, u32>> order(maps.begin(), maps.end());
+    std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+    });
+    const auto spread = [](u64 v) { // every other bit of a Morton code
+        v &= 0x5555555555555555ull;
+        v = (v | (v >> 1)) & 0x3333333333333333ull;
+        v = (v | (v >> 2)) & 0x0f0f0f0f0f0f0f0full;
+        v = (v | (v >> 4)) & 0x00ff00ff00ff00ffull;
+        v = (v | (v >> 8)) & 0x0000ffff0000ffffull;
+        v = (v | (v >> 16)) & 0x00000000ffffffffull;
+        return static_cast<u32>(v);
+    };
+    u32 layer = 0, unit = side;
+    u64 cursor = 0; // squares of `unit` used in `layer`, in Z order
+    for (const auto& [index, size] : order) {
+        while (unit > size && unit > 1) {
+            unit /= 2;
+            cursor *= 4;
+        }
+        const u64 per_layer = static_cast<u64>(side / unit) * (side / unit);
+        if (cursor >= per_layer) {
+            ++layer;
+            cursor = 0;
+        }
+        if (index < places.size()) {
+            places[index] = {layer, spread(cursor) * unit, spread(cursor >> 1) * unit, size};
+        }
+        ++cursor;
+    }
+    return layer + 1;
 }
 
 // Whether a mesh's draw casts into the extra shadow maps: as the sun's `caster` says, apart from the sun being on.
@@ -4338,13 +6915,34 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         }
         std::stable_sort(reaching.begin(), reaching.end(),
                          [](const auto& a, const auto& b) { return a.first > b.first; });
-        reaching.resize(std::min<std::size_t>(reaching.size(), max_spot_lights));
+        reaching.resize(std::min<std::size_t>(reaching.size(), ctx.grid_possible ? max_grid_lights : max_spot_lights));
         for (const auto& [strength, i] : reaching) {
             ctx.spots.push_back(i);
         }
         stats.spots = static_cast<u32>(ctx.spots.size());
     }
 
+    if (ctx.surface_only) {
+        ctx.spot_layers.assign(ctx.spots.size(), -1.f);
+        ctx.point_layers.assign(ctx.chosen.size(), -1.f);
+        for (u32 k = 0; k < std::min<u32>(static_cast<u32>(ctx.spots.size()), max_spot_lights); ++k) {
+            const auto& light = lights.spots[ctx.spots[k]];
+            const auto cone = spot_cone(light);
+            auto* o = lu.spots + 16 * k;
+            put(o, light.position, light.radius);
+            const f32 size = std::max(light.size, .01f);
+            put_color(o + 4, light.color, size * size);
+            put(o + 8, cone.axis, cone.cos_outer);
+            put(o + 12, {cone.scale, -1.f, 0}, 0);
+        }
+        for (u32 i = 0; i < max_lights; ++i)
+            lu.point_shadow[4 * i] = -1.f;
+        lu.counts[0] = static_cast<f32>(std::min<std::size_t>(ctx.spots.size(), max_spot_lights));
+        lu.counts[3] = std::clamp(lights.sun_shadow_strength, 0.f, 1.f);
+        ctx.lights_variant = _lights_available && (!ctx.spots.empty() || ctx.chosen.size() > max_lights ||
+                                                   (lights.sun_shadow_strength > 0 && lights.sun_shadow_strength < 1));
+        return;
+    }
     // Which of them, and of the point lights in view, have a shadow map: the most important, kept while they stay among
     // them.
     const bool maps_possible =
@@ -4403,13 +7001,6 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
     for (const i32 s : point_slot_of) {
         any_point_map = any_point_map || s >= 0;
     }
-    u32 spot_layers = 0, point_slots = 0;
-    for (const i32 s : spot_slot_of) {
-        spot_layers = std::max(spot_layers, static_cast<u32>(s + 1));
-    }
-    for (const i32 s : point_slot_of) {
-        point_slots = std::max(point_slots, static_cast<u32>(s + 1));
-    }
     // The array's side: the largest map of the lights that have one this render, not of every light that asks (one out
     // of view kept a 4096 array for 1024 maps). It grows at once, and shrinks (made again) once a smaller one has done
     // for _release_after renders in a row, so lights coming and going do not remake it.
@@ -4428,7 +7019,28 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
     } else if (any_spot_map || any_point_map) {
         _local_smaller = 0;
     }
-    if ((any_spot_map || any_point_map) && !ensure_local_map(side, spot_layers, point_slots)) {
+    // The maps: a spot's is the map of its slot, a point light's cube the six from max_spot_shadow_maps + 6 x its
+    // slot; each placed in the array by pack_local_maps (the largest first, several to a layer when smaller than it).
+    side = std::bit_ceil(std::clamp(side, 64u, 4096u));
+    std::vector<std::pair<u32, u32>> wanted_maps;
+    for (u32 k = 0; k < ctx.spots.size(); ++k) {
+        if (spot_slot_of[k] >= 0) {
+            wanted_maps.push_back({static_cast<u32>(spot_slot_of[k]),
+                                   local_map_size(local_resolution(lights.spots[ctx.spots[k]], lights), side)});
+        }
+    }
+    for (u32 j = 0; j < ctx.chosen.size(); ++j) {
+        if (point_slot_of[j] >= 0) {
+            const u32 size = local_map_size(local_resolution(*ctx.chosen[j].second, lights), side);
+            for (u32 f = 0; f < cube_faces; ++f) {
+                wanted_maps.push_back(
+                    {max_spot_shadow_maps + cube_faces * static_cast<u32>(point_slot_of[j]) + f, size});
+            }
+        }
+    }
+    std::array<LocalPlace, max_local_shadow_layers> places{};
+    const u32 layers = pack_local_maps(side, wanted_maps, places);
+    if ((any_spot_map || any_point_map) && !ensure_local_map(side, layers)) {
         // Not made: no local shadows this render (the lights still light).
         std::fill(spot_slot_of.begin(), spot_slot_of.end(), -1);
         std::fill(point_slot_of.begin(), point_slot_of.end(), -1);
@@ -4438,15 +7050,19 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
     // The shader's block: the spots, and each layer's matrix and numbers.
     const f32 side_f = static_cast<f32>(std::max(_local_side, 1u));
     lu.local[0] = any_spot_map || any_point_map ? 1.0f / side_f : 0.0f;
+    ctx.spot_layers.assign(ctx.spots.size(), -1.0f);
     for (u32 k = 0; k < ctx.spots.size(); ++k) {
-        const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
-        const SpotCone3D cone = spot_cone(l);
-        f32* o = lu.spots + 16 * k;
-        put(o, l.position, l.radius);
-        const f32 size = std::max(l.size, 0.01f);
-        put_color(o + 4, l.color, size * size);
-        put(o + 8, cone.axis, cone.cos_outer);
-        put(o + 12, {cone.scale, static_cast<f32>(spot_slot_of[k]), 0.0f}, 0.0f);
+        ctx.spot_layers[k] = static_cast<f32>(spot_slot_of[k]);
+        if (k < max_spot_lights) {
+            const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
+            const SpotCone3D cone = spot_cone(l);
+            f32* o = lu.spots + 16 * k;
+            put(o, l.position, l.radius);
+            const f32 size = std::max(l.size, 0.01f);
+            put_color(o + 4, l.color, size * size);
+            put(o + 8, cone.axis, cone.cos_outer);
+            put(o + 12, {cone.scale, static_cast<f32>(spot_slot_of[k]), 0.0f}, 0.0f);
+        }
         if (ctx.spots[k] < RenderDebugStats3D::max_reported_lights) {
             stats.spot_slot[ctx.spots[k]] = spot_slot_of[k];
         }
@@ -4454,29 +7070,31 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
     for (u32 i = 0; i < max_lights; ++i) {
         lu.point_shadow[4 * i] = -1.0f;
     }
-    const auto set_layer = [&](u32 layer, const LocalShadowView3D& v, u32 res, const auto& light, f32 radius) {
-        std::memcpy(lu.local_matrix + 16 * layer, v.view_projection.m, 16 * sizeof(f32));
-        const f32 r = static_cast<f32>(res);
-        const f32 fade_end = local_shadow_far(light.shadow_distance, radius);
-        put(lu.local_a + 4 * layer, {r / side_f, 2.0f * v.tan_half / r, v.near_plane}, v.far_plane);
-        put(lu.local_b + 4 * layer,
-            {std::max(light.shadow_bias, 0.0f), std::max(light.shadow_normal_offset, 0.0f),
-             std::clamp(light.shadow_softness, 0.25f, 4.0f)},
-            fade_end);
+    ctx.point_layers.assign(ctx.chosen.size(), -1.0f);
+    const auto set_layer = [&](u32 map, const LocalShadowView3D& v, u32 res, const auto& light, f32 radius) {
+        const LocalPlace& at = places[map];
+        put_local_map(lu, map, v, res, side_f, light.position, std::max(light.shadow_bias, 0.0f),
+                      std::max(light.shadow_normal_offset, 0.0f), std::clamp(light.shadow_softness, 0.25f, 4.0f),
+                      local_shadow_far(light.shadow_distance, radius), at.layer, at.x, at.y);
     };
-    const auto add_view = [&](const LocalShadowView3D& v, u32 layer, u32 res, u32 kind, u32 owner, Vec3f centre,
+    const auto add_view = [&](const LocalShadowView3D& v, u32 map, u32 res, u32 kind, u32 owner, Vec3f centre,
                               f32 radius, Vec3f eye, Vec3f axis) {
         LocalView view;
         view.eye = eye;
         view.axis = axis;
         view.near_plane = v.near_plane;
-        view.per_unit = 0.5f * static_cast<f32>(std::min(res, std::max(_local_side, 1u))) / std::max(v.tan_half, 1e-3f);
+        view.per_unit = 0.5f * static_cast<f32>(res) / std::max(v.tan_half, 1e-3f);
         view.view_projection = v.view_projection;
         view.frustum = frustum_of(v.view_projection);
         view.texture = _local_map.handle();
-        view.layer = layer;
-        view.cache = layer;
-        view.size = std::min(res, std::max(_local_side, 1u));
+        view.layer = places[map].layer;
+        view.x = places[map].x;
+        view.y = places[map].y;
+        // (A map that fills its layer clears it whole on load, as before packing: no load of the layer, no clearing
+        // draw, which a tiled GPU pays for.)
+        view.packed = places[map].x != 0 || places[map].y != 0 || res < _local_side;
+        view.cache = map;
+        view.size = res;
         view.kind = kind;
         view.owner = owner;
         view.centre = centre;
@@ -4490,12 +7108,12 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
             continue;
         }
         const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
-        const u32 res = std::min(local_resolution(l, lights), _local_side);
+        const u32 layer = static_cast<u32>(spot_slot_of[k]); // (its map)
+        const u32 res = places[layer].size;
         const LocalShadowView3D v = spot_shadow_view(l, res);
         Vec3f c;
         f32 r;
         spot_bounding_sphere(l, c, r);
-        const u32 layer = static_cast<u32>(spot_slot_of[k]);
         set_layer(layer, v, res, l, l.radius);
         add_view(v, layer, res, 0, ctx.spots[k], c, r, l.position, kin::spot_cone(l).axis);
     }
@@ -4505,9 +7123,12 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         }
         const PointLightSource3D& l = *ctx.chosen[j].second;
         const u32 index = static_cast<u32>(&l - lights.points.data());
-        const u32 res = std::min(local_resolution(l, lights), _local_side);
-        const u32 base = _local_spot_layers + cube_faces * static_cast<u32>(point_slot_of[j]);
-        lu.point_shadow[4 * j] = static_cast<f32>(base);
+        const u32 base = max_spot_shadow_maps + cube_faces * static_cast<u32>(point_slot_of[j]);
+        const u32 res = places[base].size;
+        ctx.point_layers[j] = static_cast<f32>(base);
+        if (j < max_lights) {
+            lu.point_shadow[4 * j] = static_cast<f32>(base);
+        }
         if (index < RenderDebugStats3D::max_reported_lights) {
             stats.point_slot[index] = point_slot_of[j];
         }
@@ -4584,11 +7205,49 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         }
     }
     stats.moon_cascades = ctx.moon_cascades;
-    lu.counts[0] = static_cast<f32>(ctx.spots.size());
+
+    // The GI's sun map: the sun's view over the GI's whole area (not only what the camera sees: the GI's voxels are
+    // all round it), drawn and kept as the moon's, for the GI's light to read its voxels' sunlight by (gi_light.comp);
+    // the voxels' own march, which their conservative cover makes close narrow gaps, is left for what it misses.
+    _gi_sun_on = false;
+    const GlobalIllumination3D& gi = scene.global_illumination;
+    const Bounds3D& gi_area = gi.area;
+    if (maps_possible && scene.debug.gi_sun_map && gi.enabled && gi.probes.enabled && _gi_available && ctx.sun_shines &&
+        lights.sun_shadow_strength > 0.0f && length_squared(lights.sun.direction) > 0.0f && gi_area.size().x > 0 &&
+        gi_area.size().y > 0 && gi_area.size().z > 0 && ensure_gi_sun_map()) {
+        const Vec3f to_sun = normalize(lights.sun.direction);
+        const SunBox3D box = fit_sun_box(gi_area, to_sun);
+        const Mat4f vp =
+            Mat4f::orthographic(box.lo.x, box.hi.x, box.lo.y, box.hi.y, box.z_near, box.z_far) * box.light_view;
+        const f32 texel = std::max(box.hi.x - box.lo.x, box.hi.y - box.lo.y) / static_cast<f32>(_gi_sun_side);
+        _gi_sun_matrix = vp;
+        _gi_sun_texel = texel;
+        _gi_sun_bias = 2.0f * texel / std::max(box.z_far - box.z_near, 0.01f);
+        _gi_sun_on = true;
+        LocalView view;
+        view.view_projection = vp;
+        view.frustum = frustum_of(vp);
+        view.texture = _gi_sun_map.handle();
+        view.layer = 0;
+        view.cache = gi_sun_cache;
+        view.size = _gi_sun_side;
+        view.gi_sun = true;
+        view.single_map = true;
+        view.down = to_sun * -1.0f;
+        view.axis = view.down;
+        view.eye = scene.camera.position;
+        view.per_unit = 1.0f / std::max(texel, 1e-6f);
+        view.kind = 2;
+        _local_views.push_back(std::move(view));
+    }
+    stats.gi_sun_map = _gi_sun_on;
+    lu.counts[0] = static_cast<f32>(std::min<std::size_t>(ctx.spots.size(), max_spot_lights));
     lu.counts[3] = std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f);
+    // (More point lights than the plain shaders loop over: the grid's, in the light variants, draws them all.)
     ctx.lights_variant =
-        _lights_available && (!ctx.spots.empty() || any_spot_map || any_point_map || ctx.moon_cascades > 0 ||
-                              (lights.sun_shadow_strength < 1.0f && lights.sun_shadow_strength > 0.0f));
+        _lights_available &&
+        (!ctx.spots.empty() || any_spot_map || any_point_map || ctx.moon_cascades > 0 ||
+         (lights.sun_shadow_strength < 1.0f && lights.sun_shadow_strength > 0.0f) || ctx.chosen.size() > max_lights);
 
     // Idle arrays go back after a while, as the view's targets do.
     const bool local_used = any_spot_map || any_point_map;
@@ -4596,7 +7255,7 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         _local_idle = 0;
     } else if (_local_map && ++_local_idle >= _release_after) {
         _local_map = {};
-        _local_side = _local_layers = _local_spot_layers = _local_point_slots = 0;
+        _local_side = _local_layers = 0;
         ++_local_generation;
         _local_idle = 0;
     }
@@ -4615,6 +7274,14 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
 
 void GpuRenderer3D::upload_joints(FrameCtx& ctx) {
     const u32 joint_bytes = ctx.joint_total * static_cast<u32>(sizeof(Mat4f));
+    const u32 mask = (ctx.scenes[0] ? 1u : 0u) | (ctx.scenes[1] ? 2u : 0u);
+    if (ctx.prepared && ctx.prepared->joints_generation && ctx.prepared->joints_generation == _joints_generation &&
+        ctx.prepared->joint_mask == mask && _joints && _joints->size() >= joint_bytes) {
+        ctx.joints_uploaded = true;
+        ++ctx.stats.shared_joint_uploads;
+        ctx.stats.shared_joint_bytes += joint_bytes;
+        return;
+    }
     ensure_buffer(_joints, joint_bytes, min_joint_buffer);
     const std::function<void(std::span<u8>)> fill_joints = [&](std::span<u8> out) {
         for (u32 s = 0; s < 2; ++s) {
@@ -4626,6 +7293,12 @@ void GpuRenderer3D::upload_joints(FrameCtx& ctx) {
         }
     };
     _device->upload_storage_buffer(_joints->handle(), 0, joint_bytes, nullptr, /*cycle=*/true, &fill_joints);
+    ++_joints_generation;
+    if (ctx.prepared) {
+        ctx.prepared->joints_generation = _joints_generation;
+        ctx.prepared->joint_mask = mask;
+    }
+    ctx.stats.joint_upload_bytes += joint_bytes;
     ctx.joints_uploaded = true;
 }
 
@@ -4633,9 +7306,254 @@ void GpuRenderer3D::upload_joints(FrameCtx& ctx) {
 // face, a moon cascade as the sun's are tested), the exact bytes each draw is a function of when the cache is on (a
 // view whose bytes are those of the render before is not drawn again), and what the others draw: the union of their
 // copies as instances, a list of them for each (view, draw, level), and the posed ones' joint offsets.
+void GpuRenderer3D::build_light_grid(FrameCtx& ctx) {
+    ctx.grid_cells = 0;
+    if (!_lights_available) {
+        return;
+    }
+    const Scene3D& scene = ctx.scene;
+    const Lights3D& lights = scene.lights;
+    // The lights: the points, then the spots, as the fixed blocks have them (a cell's list in that order adds up their
+    // light as the fixed loops do), each with its bounding sphere.
+    std::vector<GridLight> list;
+    std::vector<std::pair<Vec3f, f32>> spheres;
+    if (ctx.grid_possible) {
+        list.reserve(ctx.chosen.size() + ctx.spots.size());
+        spheres.reserve(list.capacity());
+        for (std::size_t j = 0; j < ctx.chosen.size(); ++j) {
+            const PointLightSource3D& l = *ctx.chosen[j].second;
+            GridLight g{};
+            put(g.at, l.position, l.radius);
+            const f32 size = std::max(l.size, 0.01f);
+            put_color(g.colour, l.color, size * size);
+            put(g.axis, {}, -2.0f);
+            put(g.cone, {0.0f, ctx.point_layers[j], 0.0f}, 0.0f);
+            list.push_back(g);
+            spheres.push_back({l.position, l.radius});
+        }
+        for (std::size_t k = 0; k < ctx.spots.size(); ++k) {
+            const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
+            const SpotCone3D cone = spot_cone(l);
+            GridLight g{};
+            put(g.at, l.position, l.radius);
+            const f32 size = std::max(l.size, 0.01f);
+            put_color(g.colour, l.color, size * size);
+            put(g.axis, cone.axis, cone.cos_outer);
+            put(g.cone, {cone.scale, ctx.spot_layers[k], 0.0f}, 0.0f);
+            list.push_back(g);
+            Vec3f c;
+            f32 r;
+            spot_bounding_sphere(l, c, r);
+            spheres.push_back({c, r});
+        }
+    }
+
+    // The cells: tiles of the view by slices of the depth along the camera's forward (as the fragment measures it),
+    // the last slice ending where the farthest light's reach does. A light's cells are those of the box round its
+    // sphere: the tiles its corners fall in (with the jittered matrix the pass draws with, a pixel more each way; all
+    // of them when a corner is behind the camera) by the slices its depth spans. The lists are filled in the lights'
+    // order.
+    const Vec2i size = ctx.view->extent();
+    const u32 across = (static_cast<u32>(std::max(size.x, 1)) + grid_tile - 1) / grid_tile;
+    const u32 down = (static_cast<u32>(std::max(size.y, 1)) + grid_tile - 1) / grid_tile;
+    const u32 cells = across * down * grid_slices;
+    const Vec3f eye = scene.camera.position, forward = scene.camera.forward();
+    f32 far = 2.0f * grid_near;
+    for (const auto& [c, r] : spheres) {
+        far = std::max(far, dot(c - eye, forward) + r);
+    }
+    const f32 scale = static_cast<f32>(grid_slices) / std::log(far / grid_near);
+    const auto slice = [&](f32 depth) {
+        const f32 x = std::log(std::max(depth, grid_near) / grid_near) * scale;
+        return std::min(static_cast<u32>(std::max(x, 0.0f)), grid_slices - 1);
+    };
+    struct Box {
+        u32 x0, x1, y0, y1, z0, z1;
+    };
+    std::vector<Box> boxes(list.size(), Box{1, 0, 1, 0, 1, 0}); // empty: x0 > x1
+    const Mat4f& vp = ctx.drawn[0];
+    for (std::size_t i = 0; i < spheres.size(); ++i) {
+        const auto& [c, r] = spheres[i];
+        const f32 depth = dot(c - eye, forward);
+        if (depth + r <= 0.0f) {
+            continue;
+        }
+        f32 px0 = 0.0f, px1 = static_cast<f32>(size.x), py0 = 0.0f, py1 = static_cast<f32>(size.y);
+        bool behind = false;
+        f32 lo_x = std::numeric_limits<f32>::max(), hi_x = -lo_x, lo_y = lo_x, hi_y = -lo_x;
+        for (u32 corner = 0; corner < 8 && !behind; ++corner) {
+            const Vec4f p = vp * Vec4f{c.x + ((corner & 1) ? r : -r), c.y + ((corner & 2) ? r : -r),
+                                       c.z + ((corner & 4) ? r : -r), 1.0f};
+            if (p.w <= 1e-6f) {
+                behind = true;
+                break;
+            }
+            // SDL_GPU's clip space has +Y up; the window's pixels, as gl_FragCoord, count down from the top.
+            const f32 x = (p.x / p.w * 0.5f + 0.5f) * static_cast<f32>(size.x);
+            const f32 y = (0.5f - p.y / p.w * 0.5f) * static_cast<f32>(size.y);
+            lo_x = std::min(lo_x, x);
+            hi_x = std::max(hi_x, x);
+            lo_y = std::min(lo_y, y);
+            hi_y = std::max(hi_y, y);
+        }
+        if (!behind) {
+            px0 = std::max(px0, lo_x - 1.0f);
+            px1 = std::min(px1, hi_x + 1.0f);
+            py0 = std::max(py0, lo_y - 1.0f);
+            py1 = std::min(py1, hi_y + 1.0f);
+            if (px0 >= px1 || py0 >= py1) {
+                continue; // beside the view
+            }
+        }
+        const auto tile = [](f32 p, u32 n) { return std::min(static_cast<u32>(std::max(p, 0.0f)) / grid_tile, n - 1); };
+        boxes[i] = {tile(px0, across), tile(px1, across), tile(py0, down),
+                    tile(py1, down),   slice(depth - r),  slice(depth + r)};
+    }
+    std::vector<u32>& data = _grid_scratch;
+    data.assign(cells, 0);
+    u64 total = 0;
+    for (const Box& b : boxes) {
+        for (u32 z = b.z0; z <= b.z1 && b.x0 <= b.x1; ++z) {
+            for (u32 y = b.y0; y <= b.y1; ++y) {
+                for (u32 x = b.x0; x <= b.x1; ++x) {
+                    u32& count = data[(z * down + y) * across + x];
+                    count = std::min(count + 1, grid_max_count);
+                    ++total;
+                }
+            }
+        }
+    }
+    const bool fits = total < grid_max_indices;
+    if (!fits) {
+        warn_once(_grid_warned, "3D: the light grid's lists overflowed: the 16 strongest of each kind light the view");
+    }
+    if (fits && !list.empty()) {
+        // Each cell: the first of its list << 12 | its count; then the lists.
+        u32 offset = 0;
+        for (u32 c = 0; c < cells; ++c) {
+            const u32 count = data[c];
+            data[c] = offset << 12 | count;
+            offset += count;
+        }
+        data.resize(cells + offset);
+        std::vector<u32> filled(cells, 0);
+        for (u32 i = 0; i < boxes.size(); ++i) {
+            const Box& b = boxes[i];
+            for (u32 z = b.z0; z <= b.z1 && b.x0 <= b.x1; ++z) {
+                for (u32 y = b.y0; y <= b.y1; ++y) {
+                    for (u32 x = b.x0; x <= b.x1; ++x) {
+                        const u32 c = (z * down + y) * across + x;
+                        if (filled[c] < (data[c] & grid_max_count)) {
+                            data[cells + (data[c] >> 12) + filled[c]++] = i;
+                        }
+                    }
+                }
+            }
+        }
+        ctx.grid_tiles = {across, down, grid_slices};
+        ctx.grid_cells = cells;
+        ctx.grid_scale = scale;
+    } else {
+        data.assign(1, 0);
+        list.assign(1, GridLight{});
+    }
+    // The light variants read both whether the grid lights the pass or not (bound with their samplers).
+    const u32 light_bytes = static_cast<u32>(list.size() * sizeof(GridLight));
+    ensure_buffer(_grid_lights, light_bytes, 64 * sizeof(GridLight), SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+    _device->upload_storage_buffer(_grid_lights->handle(), 0, light_bytes, list.data(), /*cycle=*/true);
+    const u32 cell_bytes = static_cast<u32>(data.size() * sizeof(u32));
+    ensure_buffer(_grid_cells, cell_bytes, 64 * 1024, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+    _device->upload_storage_buffer(_grid_cells->handle(), 0, cell_bytes, data.data(), /*cycle=*/true);
+}
+
+void GpuRenderer3D::clear_local_gather(LocalGatherCache& cache) {
+    _local_gather_bytes -= cache.bytes();
+    std::vector<LocalGatherCache::Row>().swap(cache.rows);
+    std::vector<u32>().swap(cache.copies);
+    std::vector<u64>().swap(cache.sort_keys);
+    std::vector<u8>().swap(cache.sort_order);
+    std::vector<u16>().swap(cache.sort_counts);
+    cache.valid = false;
+}
+
+void GpuRenderer3D::trim_local_gather(u64 budget) {
+    for (auto& cache : _local_gather_cache) {
+        if (!cache.observed)
+            continue;
+        const auto life = cache.lifetime.lock();
+        if (!life || *life != cache.key.scene) {
+            clear_local_gather(cache);
+            cache = {};
+        }
+    }
+    while (_local_gather_bytes > budget) {
+        LocalGatherCache* oldest = nullptr;
+        for (auto& cache : _local_gather_cache)
+            if (cache.bytes() && (!oldest || cache.frame < oldest->frame))
+                oldest = &cache;
+        if (!oldest)
+            break;
+        clear_local_gather(*oldest);
+    }
+}
+
+bool GpuRenderer3D::same_local_gather_key(const LocalGatherKey& a, const LocalGatherKey& b) {
+    return a.scene == b.scene && a.revision == b.revision && a.refs == b.refs && a.kind == b.kind &&
+           a.bounded == b.bounded && a.radius == b.radius && a.centre.x == b.centre.x && a.centre.y == b.centre.y &&
+           a.centre.z == b.centre.z && std::memcmp(a.projection.m, b.projection.m, sizeof(a.projection.m)) == 0 &&
+           a.frustum.count == b.frustum.count &&
+           std::memcmp(a.frustum.planes.data(), b.frustum.planes.data(), a.frustum.count * sizeof(Vec4f)) == 0;
+}
+
+GpuRenderer3D::LocalGatherCache* GpuRenderer3D::local_gather_plan(const FrameCtx& ctx, const LocalView& view, u32 refs,
+                                                                  bool& ready) {
+    ready = false;
+    if (ctx.public_local || view.moon || view.gi_sun || !view.wanted)
+        return nullptr;
+    const auto& source = ctx.scene;
+    const LocalGatherKey key{source.draw_identity(),
+                             source.draw_revision(),
+                             refs,
+                             view.kind,
+                             view.view_projection,
+                             view.frustum,
+                             view.centre,
+                             view.radius,
+                             view.bounded};
+    LocalGatherCache* cell = nullptr;
+    const u64 frame = _owner->_frame_serial;
+    for (auto& cache : _local_gather_cache) {
+        if (cache.observed && cache.key.scene == key.scene && cache.slot == view.cache) {
+            cell = &cache;
+            break;
+        }
+        // Keep active scenes/slots independent. A full set falls back to fresh
+        // gathering instead of evicting another view of this/last GPU frame.
+        if (!cache.observed || (cache.frame + 1 < frame && (!cell || cache.frame < cell->frame)))
+            cell = &cache;
+    }
+    if (!cell)
+        return nullptr;
+    ready = cell->observed && cell->slot == view.cache && same_local_gather_key(cell->key, key);
+    if (!ready) {
+        clear_local_gather(*cell);
+        cell->key = key;
+        cell->lifetime = source.draw_lifetime();
+        cell->slot = view.cache;
+        cell->observed = true;
+    }
+    cell->frame = frame;
+    return cell;
+}
+
 void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     const Lights3D& lights = ctx.scene.lights;
+    const u64 gather_budget = ctx.scene.debug.cache_local_shadow_gather
+                                  ? std::min<u32>(ctx.scene.debug.local_shadow_gather_budget, 4 * 1024 * 1024)
+                                  : 0;
+    trim_local_gather(gather_budget);
+    stats.local_gather_cache_bytes = _local_gather_bytes;
     if (_local_views.empty()) {
         return;
     }
@@ -4647,9 +7565,12 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     std::vector<u8> caster(_refs.size(), 0);
     constexpr u32 local_chunk = 2048;
     JobSystem* jobs = _owner->_jobs;
-    bool any_skinned = false;
+    bool any_skinned = false, direct = false;
+    u32 main_refs = 0;
     for (u32 r = 0; r < _refs.size(); ++r) {
         const DrawRef& ref = _refs[r];
+        main_refs += ref.scene == 0;
+        direct = direct || (ref.scene == 0 && ref.direct);
         if (ref.scene != 0 || !casts_into_local(ref.draw->material)) {
             continue;
         }
@@ -4659,24 +7580,54 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         caster[r] = 1;
         any_skinned = any_skinned || ref.skinned;
     }
+    constexpr u32 view_limit = max_local_shadow_layers + max_shadow_cascades + 1;
+    std::array<LocalGatherCache*, view_limit> plans{};
+    std::array<u8, view_limit> ready{}, hits{};
+    u32 fresh_views = 0, cached_views = 0;
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        if (!_local_views[v].wanted)
+            continue;
+        if (gather_budget && direct) {
+            bool stable = false;
+            plans[v] = local_gather_plan(ctx, _local_views[v], main_refs, stable);
+            ready[v] = stable;
+            if (plans[v]) {
+                hits[v] = plans[v]->valid;
+                if (hits[v]) {
+                    ++stats.local_gather_cache_hits;
+                    stats.local_gather_cached_tests += plans[v]->tests;
+                    stats.local_gather_cached_copies += plans[v]->copies.size();
+                } else {
+                    ++stats.local_gather_cache_misses;
+                }
+            }
+        }
+        hits[v] ? ++cached_views : ++fresh_views;
+    }
     // Preserve draw/copy order for packing, but schedule ranges containing many copies,
     // not one job for each tiny draw (terrain commonly has thousands of one-copy draws).
     struct Piece2 {
         u32 ref, begin, end, group;
     };
-    std::vector<Piece2> sphere_pieces;
+    std::vector<Piece2> sphere_pieces, dynamic_pieces;
     for (const Piece& p : _pieces) {
         if (!caster[p.ref])
             continue;
-        if (!sphere_pieces.empty()) {
-            Piece2& last = sphere_pieces.back();
-            if (last.ref == p.ref && last.group == p.group && last.end == p.begin &&
-                p.end - last.begin <= local_chunk) {
-                last.end = p.end;
-                continue;
+        const auto append = [&](std::vector<Piece2>& pieces) {
+            if (!pieces.empty()) {
+                Piece2& last = pieces.back();
+                if (last.ref == p.ref && last.group == p.group && last.end == p.begin &&
+                    p.end - last.begin <= local_chunk) {
+                    last.end = p.end;
+                    return;
+                }
             }
-        }
-        sphere_pieces.push_back({p.ref, p.begin, p.end, p.group});
+            pieces.push_back({p.ref, p.begin, p.end, p.group});
+        };
+        if (fresh_views)
+            append(sphere_pieces);
+        if (cached_views && !_refs[p.ref].direct)
+            append(dynamic_pieces);
     }
     const bool cache_on = lights.cache_shadows;
     const GpuFrustum& camera = ctx.frustums[0];
@@ -4707,6 +7658,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     std::vector<u8> seen;
     std::vector<u32> stack;
     std::vector<std::vector<Found>> found(_local_views.size());
+    std::array<u64, view_limit> static_tests{};
     // What each view can see of each caster draw, in tasks of a piece of a draw: all of them in one call to the workers
     // when there are many copies. One classification byte per candidate copy instead of an allocating vector per
     // task/level. Workers own disjoint byte ranges and counts. A flat copy list is packed after they finish; Found only
@@ -4737,18 +7689,16 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             return task.count_bucket == bucket ? task.counts : 0u;
         };
         std::vector<GatherTask> tasks;
-        const std::size_t wanted =
-            std::count_if(_local_views.begin(), _local_views.end(), [](const LocalView& v) { return v.wanted; });
-        tasks.reserve(wanted * sphere_pieces.size());
+        tasks.reserve(fresh_views * sphere_pieces.size() + cached_views * dynamic_pieces.size());
         std::size_t candidates = 0, classified = 0;
         std::vector<u32> batches{0};
         u32 in_batch = 0;
         for (u32 v = 0; v < _local_views.size(); ++v) {
             if (!_local_views[v].wanted)
                 continue;
-            for (const Piece2& piece : sphere_pieces) {
+            for (const Piece2& piece : hits[v] ? dynamic_pieces : sphere_pieces) {
                 const CullGroup* group = piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
-                if (group && !(group->local_mask & (1u << v))) {
+                if (group && !(group->local_mask & (u64{1} << v))) {
                     stats.local_group_rejected += piece.end - piece.begin;
                     continue;
                 }
@@ -4756,7 +7706,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 const DrawRef& ref = _refs[piece.ref];
                 const u32 n = piece.end - piece.begin;
                 const u8 planes = group ? group->local_planes[v] : static_cast<u8>((1u << view.frustum.count) - 1);
-                const bool radius_inside = group && (group->local_radius_inside & (1u << v));
+                const bool radius_inside = group && (group->local_radius_inside & (u64{1} << v));
                 const bool accept_all = group && !planes && (!view.bounded || radius_inside) &&
                                         (!view.moon || !culled) && ref.levels == 1 && !ref.clustered;
                 const bool clustered = ref.clustered && ctx.lod[0].on;
@@ -4786,6 +7736,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 else {
                     classified += n;
                     in_batch += n;
+                    if (ref.direct)
+                        static_tests[v] += n;
                 }
                 stats.local_plane_budget += static_cast<u64>(group ? std::popcount(planes) : view.frustum.count) * n;
                 if (view.bounded && !radius_inside)
@@ -4946,78 +7898,131 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             for (u32 l = 0; l <= max_mesh_levels; ++l)
                 accepted += count_of(task, l);
         }
+        for (u32 v = 0; v < _local_views.size(); ++v)
+            if (hits[v])
+                accepted += plans[v]->copies.size();
         stats.local_task_bytes =
             tasks.capacity() * sizeof(GatherTask) + level_counts.capacity() * sizeof(level_counts[0]);
         found_copies.resize(accepted);
         std::size_t next = 0;
-        for (std::size_t t = 0; t < tasks.size();) {
-            const std::size_t begin = t;
-            const u32 v = tasks[t].view, r = tasks[t].ref;
-            {
-                // Most meshes (including cluster cuts) use one bucket. Avoid nine counters
-                // and their reductions/prefixes for every tiny terrain draw/view pair.
-                if (tasks[t].count_bucket != rejected) {
-                    u32 count = 0;
-                    for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t)
-                        count += tasks[t].counts;
-                    if (!count)
-                        continue;
-                    found[v].push_back(
-                        {r, 0, {found_copies.data() + next, count}, tasks[begin].count_bucket == cut_bucket, {}});
-                    for (std::size_t k = begin; k < t; ++k) {
-                        const GatherTask& task = tasks[k];
-                        if (!task.counts)
-                            continue;
-                        if (task.counts == task.end - task.begin) {
-                            std::iota(found_copies.begin() + next, found_copies.begin() + next + task.counts,
-                                      task.begin);
-                            next += task.counts;
-                        } else {
-                            for (u32 i = task.begin; i < task.end; ++i)
-                                if (buckets[task.first + i - task.begin] != rejected)
-                                    found_copies[next++] = i;
-                        }
-                    }
-                    continue;
-                }
-            }
-            std::array<u32, max_mesh_levels + 1> counts{};
-            for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t) {
-                for (u32 l = 0; l <= max_mesh_levels; ++l)
-                    counts[l] += count_of(tasks[t], l);
-            }
-            std::array<std::size_t, max_mesh_levels + 1> cursor{};
-            const auto add = [&](u32 bucket, bool clustered) {
-                cursor[bucket] = next;
-                if (!counts[bucket])
+        std::size_t t = 0;
+        for (u32 v = 0; v < _local_views.size(); ++v) {
+            u32 row = 0;
+            const auto append_cached = [&](u32 before) {
+                if (!hits[v])
                     return;
-                found[v].push_back(
-                    {r, clustered ? 0u : bucket, {found_copies.data() + next, counts[bucket]}, clustered, {}});
-                next += counts[bucket];
-            };
-            add(cut_bucket, true);
-            for (u32 l = 0; l < std::max(_refs[r].levels, 1u); ++l)
-                add(l, false);
-            for (std::size_t k = begin; k < t; ++k) {
-                const GatherTask& task = tasks[k];
-                if (task.flags & 2u) {
-                    const u32 n = task.end - task.begin;
-                    std::iota(found_copies.begin() + cursor[0], found_copies.begin() + cursor[0] + n, task.begin);
-                    cursor[0] += n;
-                    continue;
+                const auto& plan = *plans[v];
+                while (row < plan.rows.size() && plan.rows[row].ref < before) {
+                    const auto& cached = plan.rows[row++];
+                    found[v].push_back({cached.ref, 0, {found_copies.data() + next, cached.count}, false, {}});
+                    std::copy_n(plan.copies.data() + cached.first, cached.count, found_copies.data() + next);
+                    next += cached.count;
                 }
-                for (u32 i = task.begin; i < task.end; ++i) {
-                    const u8 bucket = buckets[task.first + i - task.begin];
-                    if (bucket != rejected)
-                        found_copies[cursor[bucket]++] = i;
+            };
+            while (t < tasks.size() && tasks[t].view == v) {
+                const std::size_t begin = t;
+                const u32 r = tasks[t].ref;
+                append_cached(r);
+                {
+                    // Most meshes (including cluster cuts) use one bucket. Avoid nine counters
+                    // and their reductions/prefixes for every tiny terrain draw/view pair.
+                    if (tasks[t].count_bucket != rejected) {
+                        u32 count = 0;
+                        for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t)
+                            count += tasks[t].counts;
+                        if (!count)
+                            continue;
+                        found[v].push_back(
+                            {r, 0, {found_copies.data() + next, count}, tasks[begin].count_bucket == cut_bucket, {}});
+                        for (std::size_t k = begin; k < t; ++k) {
+                            const GatherTask& task = tasks[k];
+                            if (!task.counts)
+                                continue;
+                            if (task.counts == task.end - task.begin) {
+                                std::iota(found_copies.begin() + next, found_copies.begin() + next + task.counts,
+                                          task.begin);
+                                next += task.counts;
+                            } else {
+                                for (u32 i = task.begin; i < task.end; ++i)
+                                    if (buckets[task.first + i - task.begin] != rejected)
+                                        found_copies[next++] = i;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                std::array<u32, max_mesh_levels + 1> counts{};
+                for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t) {
+                    for (u32 l = 0; l <= max_mesh_levels; ++l)
+                        counts[l] += count_of(tasks[t], l);
+                }
+                std::array<std::size_t, max_mesh_levels + 1> cursor{};
+                const auto add = [&](u32 bucket, bool clustered) {
+                    cursor[bucket] = next;
+                    if (!counts[bucket])
+                        return;
+                    found[v].push_back(
+                        {r, clustered ? 0u : bucket, {found_copies.data() + next, counts[bucket]}, clustered, {}});
+                    next += counts[bucket];
+                };
+                add(cut_bucket, true);
+                for (u32 l = 0; l < std::max(_refs[r].levels, 1u); ++l)
+                    add(l, false);
+                for (std::size_t k = begin; k < t; ++k) {
+                    const GatherTask& task = tasks[k];
+                    if (task.flags & 2u) {
+                        const u32 n = task.end - task.begin;
+                        std::iota(found_copies.begin() + cursor[0], found_copies.begin() + cursor[0] + n, task.begin);
+                        cursor[0] += n;
+                        continue;
+                    }
+                    for (u32 i = task.begin; i < task.end; ++i) {
+                        const u8 bucket = buckets[task.first + i - task.begin];
+                        if (bucket != rejected)
+                            found_copies[cursor[bucket]++] = i;
+                    }
                 }
             }
+            append_cached(~0u);
         }
     };
     find_copies();
 
+    // Keep source-relative copy indices. Later packing rewrites its backing
+    // spans to current GPU table slots, and must never mutate the saved plan.
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        if (!plans[v] || hits[v] || !ready[v])
+            continue;
+        auto& plan = *plans[v];
+        u32 rows = 0, copies = 0;
+        for (const auto& f : found[v])
+            if (_refs[f.ref].direct) {
+                ++rows;
+                copies += static_cast<u32>(f.copies.size());
+            }
+        const u64 bytes = u64(rows) * sizeof(LocalGatherCache::Row) + u64(copies) * sizeof(u32);
+        if (bytes > gather_budget - _local_gather_bytes)
+            continue;
+        std::vector<LocalGatherCache::Row>(rows).swap(plan.rows);
+        std::vector<u32>(copies).swap(plan.copies);
+        u32 row = 0, next = 0;
+        for (const auto& f : found[v])
+            if (_refs[f.ref].direct) {
+                const u32 count = static_cast<u32>(f.copies.size());
+                plan.rows[row++] = {f.ref, next, count};
+                std::copy(f.copies.begin(), f.copies.end(), plan.copies.begin() + next);
+                next += count;
+            }
+        plan.tests = static_tests[v];
+        plan.valid = true; // an empty selection is also reusable
+        _local_gather_bytes += plan.bytes();
+        ++stats.local_gather_cache_builds;
+    }
+    stats.local_gather_cache_bytes = _local_gather_bytes;
+
     // Exact: the bytes a view's draw is a function of. The same bytes as in the cache, the same picture.
-    const u64 generation_local = _local_generation, generation_moon = _moon_generation;
+    const u64 generation_local = _local_generation, generation_moon = _moon_generation,
+              generation_gi = _gi_sun_generation;
     u32 drawing = 0;
     for (u32 v = 0; v < _local_views.size(); ++v) {
         LocalView& view = _local_views[v];
@@ -5025,15 +8030,23 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         if (!view.wanted) {
             continue;
         }
+        if (ctx.public_local) {
+            view.drawn = true;
+            ++drawing;
+            continue;
+        }
         LocalCache& cache = _local_cache[view.cache];
         const auto* particles = particle_cast_view(view.view_projection);
-        bool cacheable = (cache_on || ctx.shadow_history) && (!particles || !particles->unstable);
+        // (The GI's sun map always: the GI's own, and the map kept is the one it would draw again.)
+        bool cacheable = (cache_on || ctx.shadow_history || view.gi_sun) && (!particles || !particles->unstable);
         if (cacheable) {
             std::vector<u8>& bytes = _local_payload;
             bytes.clear();
             CacheBytes payload{bytes};
-            payload.value(view.moon ? generation_moon : generation_local);
+            payload.value(view.moon ? generation_moon : view.gi_sun ? generation_gi : generation_local);
             payload.value(view.layer);
+            payload.value(view.x);
+            payload.value(view.y);
             payload.value(view.size);
             payload.value(particles ? particles->key : u64{0});
             payload.append(view.view_projection.m, sizeof(view.view_projection.m));
@@ -5046,15 +8059,26 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                     break;
                 }
                 payload.value(ref.mesh->serial);
+                payload.value(ref.mesh->content);
                 payload.value(f.level);
                 payload.value(static_cast<u32>(f.copies.size()));
                 payload.value(ref.skinned);
                 payload.value(m.double_sided);
                 payload.value(m.blend);
+                if (const auto* moving = moving_surface(m);
+                    moving && !ref.skinned) { // its vertices move: its offset's inputs
+                    payload.value(reinterpret_cast<std::uintptr_t>(moving));
+                    payload.value(ctx.scene.time);
+                    payload.append(m.shader_params.data(), sizeof(m.shader_params));
+                    for (const Texture* t : {&m.texture, &m.metallic_roughness, &m.normal, &m.occlusion,
+                                             &m.emissive_texture, &m.graph_maps})
+                        payload.value(reinterpret_cast<std::uintptr_t>(t->backend().get()));
+                }
                 if (m.blend == Blend3D::Mask) {
                     payload.value(m.alpha_cutoff);
                     payload.value(m.wrap_u);
                     payload.value(m.wrap_v);
+                    shadow_sampler_key(payload, m, texture, _anisotropy, _lod_bias);
                     payload.value(texture);
                     payload.value(texture ? texture->version() : u64{0});
                 }
@@ -5119,7 +8143,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 cv.transform = ref.instances[i].transform;
                 cv.eye = view.eye;
                 cv.forward = view.axis;
-                cv.orthographic = view.moon;
+                cv.orthographic = view.moon || view.gi_sun;
                 cv.per_unit = view.per_unit;
                 cv.pixels = lv.pixels;
                 cv.nearest = view.near_plane;
@@ -5183,7 +8207,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     std::size_t written = 0;
     const auto slot_of = [&](u32 r, u32 i) {
         if (_refs[r].retained != ~0u)
-            return i;
+            return _refs[r].retained_first + i;
         u32& slot = _local_slot[base[r] + i];
         if (slot == ~0u) {
             const DrawRef& ref = _refs[r];
@@ -5198,7 +8222,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     struct BatchKey {
         u64 mesh;
         std::uintptr_t texture;
-        u32 retained, cutoff, state;
+        u32 retained, cutoff, state, sampling;
         bool operator==(const BatchKey&) const = default;
     };
     struct BatchHash {
@@ -5207,6 +8231,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             h = (h ^ k.retained) * 0x9e3779b97f4a7c15ull;
             h = (h ^ k.cutoff) * 0x9e3779b97f4a7c15ull;
             h = (h ^ k.state) * 0x9e3779b97f4a7c15ull;
+            h = (h ^ k.sampling) * 0x9e3779b97f4a7c15ull;
             return static_cast<std::size_t>(h ^ (h >> 32));
         }
     };
@@ -5224,9 +8249,11 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         // cutoff must match; tint alpha is already in each instance's record.
         const BatchKey key{ref.mesh->serial,
                            cutout ? reinterpret_cast<std::uintptr_t>(material.texture.backend().get()) : 0,
-                           ref.retained, cutout ? std::bit_cast<u32>(material.alpha_cutoff) : 0,
+                           ref.retained,
+                           cutout ? std::bit_cast<u32>(material.alpha_cutoff) : 0,
                            u32(material.double_sided) | (u32(ref.skinned) << 1) | (u32(cutout) << 2) |
-                               (cutout ? (u32(material.wrap_u) << 8) | (u32(material.wrap_v) << 16) : 0)};
+                               (cutout ? (u32(material.wrap_u) << 8) | (u32(material.wrap_v) << 16) : 0),
+                           cutout ? sampler_identity(material.texture_samplers[0]) : 0};
         batch = batch_refs.try_emplace(key, r).first->second;
         return batch;
     };
@@ -5248,7 +8275,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             {
                 // Found spans are in packing order. Cached views and cluster cuts only
                 // remove copies, so the write cursor never overtakes unread input.
-                if (_refs[f.ref].retained != ~0u) {
+                if (_refs[f.ref].retained != ~0u && _refs[f.ref].retained_first == 0) {
                     std::memmove(found_copies.data() + written, f.copies.data(), f.copies.size_bytes());
                     written += f.copies.size();
                 } else {
@@ -5275,7 +8302,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     };
     _local_batch_list.resize(_local_list.size());
     u32 batches = 0, copies = 0;
-    for (LocalView& view : _local_views) {
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        LocalView& view = _local_views[v];
         if (!view.entry_count) {
             view.entry_first = batches;
             continue;
@@ -5285,9 +8313,56 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         // Keep nearby source draws together: sorting the entire map by mesh
         // destroys caster locality and can increase GPU depth-pass work.
         constexpr std::ptrdiff_t batch_window = 128;
+        LocalGatherCache* sort_plan = plans[v] && plans[v]->valid ? plans[v] : nullptr;
+        if (sort_plan && sort_plan->sort_keys.empty()) {
+            // Each source ref contributes at most one entry with LOD disabled.
+            // Size once for the source, so dynamic visibility causes no growth.
+            const u32 windows = (main_refs + batch_window - 1) / batch_window;
+            const u64 bytes = u64(main_refs) * (sizeof(u64) + sizeof(u8)) + u64(windows) * sizeof(u16);
+            if (bytes <= gather_budget - _local_gather_bytes) {
+                const u64 before = sort_plan->bytes();
+                std::vector<u64>(main_refs).swap(sort_plan->sort_keys);
+                std::vector<u8>(main_refs).swap(sort_plan->sort_order);
+                std::vector<u16>(windows).swap(sort_plan->sort_counts);
+                _local_gather_bytes += sort_plan->bytes() - before;
+            }
+        }
+        if (sort_plan && sort_plan->sort_keys.size() < view.entry_count)
+            sort_plan = nullptr;
+        u32 offset = 0, window = 0;
         for (auto block = first; block != last;) {
             const auto end = block + std::min(batch_window, last - block);
-            std::stable_sort(block, end, shadow_less);
+            const u32 count = static_cast<u32>(end - block);
+            if (sort_plan) {
+                std::array<u64, batch_window> keys;
+                std::array<u8, batch_window> order;
+                std::array<LocalEntry, batch_window> sorted;
+                for (u32 i = 0; i < count; ++i)
+                    keys[i] = (u64(_local_batch_refs[block[i].ref]) << 32) | block[i].level;
+                const bool same = sort_plan->sort_counts[window] == count &&
+                                  std::equal(keys.begin(), keys.begin() + count, sort_plan->sort_keys.begin() + offset);
+                if (same) {
+                    std::copy_n(sort_plan->sort_order.data() + offset, count, order.data());
+                    ++stats.local_sort_cache_hits;
+                    stats.local_sort_cached_entries += count;
+                } else {
+                    // The original position breaks ties exactly as stable_sort.
+                    std::iota(order.begin(), order.begin() + count, u8{0});
+                    std::sort(order.begin(), order.begin() + count,
+                              [&](u8 a, u8 b) { return keys[a] != keys[b] ? keys[a] < keys[b] : a < b; });
+                    std::copy_n(keys.data(), count, sort_plan->sort_keys.data() + offset);
+                    std::copy_n(order.data(), count, sort_plan->sort_order.data() + offset);
+                    sort_plan->sort_counts[window] = static_cast<u16>(count);
+                    ++stats.local_sort_cache_misses;
+                }
+                for (u32 i = 0; i < count; ++i)
+                    sorted[i] = block[order[i]];
+                std::copy_n(sorted.data(), count, block);
+            } else {
+                std::stable_sort(block, end, shadow_less);
+            }
+            offset += count;
+            ++window;
             block = end;
         }
         view.entry_first = batches;
@@ -5310,19 +8385,24 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         }
     }
     _local_entries.resize(batches);
+    stats.local_gather_cache_bytes = _local_gather_bytes;
     _local_batch_list.swap(_local_list);
     stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity() + _local_batch_list.capacity() +
                               _local_batch_refs.capacity()) *
                              sizeof(u32);
     if (union_count > 0) {
         const u32 instance_bytes = union_count * static_cast<u32>(sizeof(GpuInstance3D));
-        ensure_buffer(_local_instances, instance_bytes, min_instance_buffer);
         // No CPU mirror of the 128-byte GPU records: build each once in disjoint staging ranges.
         const std::function<void(std::span<u8>)> fill_instances = [&](std::span<u8> out) {
             const auto fill = [&](u32 begin, u32 end) {
                 for (u32 slot = begin; slot < end; ++slot) {
                     const auto [r, i] = _local_copies[slot];
                     const DrawRef& ref = _refs[r];
+                    if (ref.prepared_records) {
+                        std::memcpy(out.data() + std::size_t(slot) * sizeof(GpuInstance3D), &ref.prepared_records[i],
+                                    sizeof(GpuInstance3D));
+                        continue;
+                    }
                     GpuInstance3D g{};
                     std::memcpy(g.model, ref.instances[i].transform.m, sizeof(g.model));
                     const Color m = ref.draw->material.color, tint = ref.instances[i].tint;
@@ -5339,9 +8419,56 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 fill(0, union_count);
             }
         };
-        _device->upload_storage_buffer(_local_instances->handle(), 0, instance_bytes, nullptr, /*cycle=*/true,
-                                       &fill_instances);
-        stats.instance_upload_bytes += instance_bytes;
+        bool reused = false;
+        if (ctx.prepared) {
+            _preparation_rows.resize(union_count);
+            for (u32 slot = 0; slot < union_count; ++slot) {
+                const auto [r, i] = _local_copies[slot];
+                _preparation_rows[slot] = _refs[r].prepared_first + i;
+            }
+            reused = ctx.prepared->local_upload_generation &&
+                     ctx.prepared->local_upload_generation == _local_instance_generation &&
+                     ctx.prepared->uploaded_local_rows == _preparation_rows;
+            if (!reused && ctx.prepared->upload_generation && ctx.prepared->upload_generation == _instance_generation &&
+                ctx.prepared->uploaded_rows == _preparation_rows) {
+                // The camera already uploaded this exact union. Both roles can
+                // read that buffer; writers detach before replacing its bytes.
+                if (_local_instances && _local_instances != _instances &&
+                    (!_spare_instances || _spare_instances->size() < _local_instances->size()))
+                    _spare_instances = _local_instances;
+                _local_instances = _instances;
+                ++_local_instance_generation;
+                ctx.prepared->local_upload_generation = _local_instance_generation;
+                ctx.prepared->uploaded_local_rows.assign(_preparation_rows.begin(), _preparation_rows.end());
+                reused = true;
+            }
+        }
+        if (reused) {
+            ++stats.shared_uploads;
+            stats.shared_instance_bytes += instance_bytes;
+        } else {
+            if (_local_instances == _instances)
+                _local_instances = std::move(_spare_instances);
+            ensure_buffer(_local_instances, instance_bytes, min_instance_buffer,
+                          SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+                              (_gpu_clusters ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0u));
+            _device->upload_storage_buffer(_local_instances->handle(), 0, instance_bytes, nullptr, true,
+                                           &fill_instances);
+            ++_local_instance_generation;
+            stats.instance_upload_bytes += instance_bytes;
+            if (ctx.prepared) {
+                auto& prepared = *ctx.prepared;
+                prepared.local_upload_generation = _local_instance_generation;
+                if (_preparation_rows.capacity() <= prepared.records.size())
+                    prepared.uploaded_local_rows.swap(_preparation_rows);
+                else
+                    prepared.uploaded_local_rows.assign(_preparation_rows.begin(), _preparation_rows.end());
+            }
+        }
+        if (ctx.prepared) {
+            stats.preparation_cpu_bytes = ctx.prepared->cpu_bytes();
+            stats.preparation_scratch_bytes = _preparation_rows.capacity() * sizeof(u32);
+        }
     }
     const u32 list_bytes = static_cast<u32>(_local_list.size() * sizeof(u32));
     ensure_buffer(_local_lists, std::max(list_bytes, 4u), min_caster_list_buffer);
@@ -5364,12 +8491,15 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     }
 }
 
-void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
+bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     SDL_GPUCommandBuffer* commands = ctx.commands;
-    if (_local_views.empty() || !_local_lists) {
-        return;
-    }
+    // Cached or camera-culled maps need no caster buffers, even on first use.
+    if (std::none_of(_local_views.begin(), _local_views.end(), [](const LocalView& view) { return view.drawn; }))
+        return true;
+    if (!_local_lists)
+        return false;
+    bool complete = true;
     SDL_GPUBuffer* instances = _local_instances ? _local_instances->handle() : nullptr;
     SDL_GPUBuffer* lists = _local_lists ? _local_lists->handle() : instances;
     SDL_GPUBuffer* joint_offsets = _local_joint_offsets ? _local_joint_offsets->handle() : nullptr;
@@ -5380,15 +8510,49 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
         if (!view.drawn) {
             continue;
         }
-        // Not cycled, as the sun's: the frames before are done with it in queue order.
-        const SDL_GPUDepthStencilTargetInfo depth =
+        // Not cycled, as the sun's: the frames before are done with it in queue order. A packed map shares its layer
+        // with others (some kept from the frames before): the layer is loaded, and its square alone cleared to the far
+        // plane (reverse Z: 0) by a triangle over it.
+        SDL_GPUDepthStencilTargetInfo depth =
             depth_target(view.texture, SDL_GPU_STOREOP_STORE, /*cycle=*/false, view.layer);
+        SDL_GPUGraphicsPipeline* clear = nullptr;
+        if (view.packed) {
+            depth.load_op = SDL_GPU_LOADOP_LOAD;
+            clear = _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                          .fragment = _shadow_shader.handle(),
+                                                          .layout = GpuVertexLayout::None,
+                                                          .depth_stencil = _shadow_format,
+                                                          .depth = GpuDepthTest::Overwrite,
+                                                          .depth_only = true});
+            if (!clear) {
+                _local_cache[view.cache].valid = false;
+                complete = false;
+                continue;
+            }
+        }
         SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
         if (!pass) {
-            _local_cache[view.cache].valid = false;
+            if (!ctx.public_local)
+                _local_cache[view.cache].valid = false;
+            complete = false;
             continue;
         }
-        set_viewport(pass, view.size, view.size);
+        if (view.packed) {
+            const SDL_GPUViewport square{static_cast<f32>(view.x),
+                                         static_cast<f32>(view.y),
+                                         static_cast<f32>(view.size),
+                                         static_cast<f32>(view.size),
+                                         0.0f,
+                                         1.0f};
+            SDL_SetGPUViewport(pass, &square);
+            const SDL_Rect scissor{static_cast<int>(view.x), static_cast<int>(view.y), static_cast<int>(view.size),
+                                   static_cast<int>(view.size)};
+            SDL_SetGPUScissor(pass, &scissor);
+            SDL_BindGPUGraphicsPipeline(pass, clear);
+            SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+        } else {
+            set_viewport(pass, view.size, view.size);
+        }
         DrawUniforms u{};
         std::memcpy(u.view_projection, view.view_projection.m, sizeof(u.view_projection));
         DrawBinder binder{pass};
@@ -5398,14 +8562,23 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             const Material3D& caster = ref.draw->material;
             const bool cutout = caster.blend == Blend3D::Mask;
             if (ref.skinned && (!ctx.joints || !joint_offsets)) {
+                complete = false;
                 continue;
             }
             const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
-            SDL_GPUGraphicsPipeline*& p = pipelines[variant];
-            if (!p)
-                p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
-                             false, ref.skinned);
+            // (A surface's own cut-out, or its vertices moved, is its pipeline, not one of the pass's few.)
+            const GpuSurfaceShader3D* own = pass_surface(caster);
+            SDL_GPUGraphicsPipeline* surfaced =
+                own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                               false, ref.skinned, false, false, Unlit::Off, false, own)
+                    : nullptr;
+            SDL_GPUGraphicsPipeline*& cached = pipelines[variant];
+            if (!own && !cached)
+                cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                                  false, ref.skinned);
+            SDL_GPUGraphicsPipeline* p = own ? surfaced : cached;
             if (!p) {
+                complete = false;
                 continue;
             }
             SDL_GPUBuffer* const plain[2] = {ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : instances,
@@ -5415,6 +8588,7 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             // A clustered mesh's copies are drawn from the cut the light's map made of each (a run of the compacted
             // indices); else the mesh whole.
             if (entry.clustered && !_local_index_buffer) {
+                complete = false;
                 continue;
             }
             binder.bind_mesh(ref.mesh, entry.clustered ? _local_index_buffer->handle() : nullptr);
@@ -5424,6 +8598,7 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             if (cutout) {
                 bind_cutout(commands, pass, caster);
             }
+            bind_offset(commands, pass, caster, ref.skinned);
             if (entry.clustered) {
                 for (u32 n = 0; n < entry.count; ++n) {
                     const std::array<u32, 2>& run = _local_runs[entry.run_first + n];
@@ -5447,10 +8622,15 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             stats.local_shadow_casters += entry.count;
             stats.local_shadow_triangles += static_cast<u64>(level.index_count / 3) * entry.count;
         }
-        if (!draw_particle_shadows(ctx, pass, view.view_projection, true))
+        if (!ctx.public_local && !draw_particle_shadows(ctx, pass, view.view_projection, true)) {
+            _local_cache[view.cache].valid = false;
+            complete = false;
+        }
+        if (!complete && !ctx.public_local)
             _local_cache[view.cache].valid = false;
         SDL_EndGPURenderPass(pass);
     }
+    return complete;
 }
 
 // The light variants' block for scene `s`, into `slot`. The overlay's lights are carried into its space and have no
@@ -5475,7 +8655,7 @@ void GpuRenderer3D::push_local_lights(const FrameCtx& ctx, u32 s, u32 slot) {
     SDL_PushGPUFragmentUniformData(ctx.commands, slot, &u, sizeof(u));
 }
 
-GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color material) const {
+GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color material, DrawClip3D clip) const {
     const Color m = material;
     GpuInstance3D g;
     std::memcpy(g.model, instance.transform.m, sizeof(g.model));
@@ -5486,7 +8666,8 @@ GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color
     const Vec3f x = cross(c1, c2);
     const f32 sign = dot(c0, x) < 0.0f ? -1.0f : 1.0f;
     const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
-    f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
+    // (the second column's w: how the clip plane meets the copy, kin_clip_distance)
+    f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, f32(clip), n2.x, n2.y, n2.z, 0.0f};
     const u32 id = instance.id + 1; // 0: nothing there
     std::memcpy(&normal[3], &id, sizeof(id));
     std::memcpy(g.normal, normal, sizeof(g.normal));
@@ -5517,7 +8698,7 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
     u32 slot = ~0u, idle = ~0u;
     for (u32 i = 0; i < _retained.size(); ++i) {
         const RetainedTable& t = _retained[i];
-        if (!t.buffer || t.id != id)
+        if (!t.buffer || t.direct || t.id != id)
             continue;
         if (t.color == color) {
             slot = i;
@@ -5579,7 +8760,8 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
             const auto pack = [&](u32 first, u32 end) {
                 if (!partial) {
                     for (u32 i = first; i < end; ++i) {
-                        const auto record = pack_instance(ref.instances[i], color);
+                        const auto record =
+                            ref.prepared_records ? ref.prepared_records[i] : pack_instance(ref.instances[i], color);
                         std::memcpy(out.data() + static_cast<std::size_t>(i) * sizeof(record), &record, sizeof(record));
                     }
                     return;
@@ -5592,7 +8774,10 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
                     while (r + 1 < _retained_starts.size() && _retained_starts[r + 1] <= k)
                         ++r;
                     const auto record =
-                        pack_instance(ref.instances[_retained_ranges[r].first + (k - _retained_starts[r])], color);
+                        ref.prepared_records
+                            ? ref.prepared_records[_retained_ranges[r].first + (k - _retained_starts[r])]
+                            : pack_instance(ref.instances[_retained_ranges[r].first + (k - _retained_starts[r])],
+                                            color);
                     std::memcpy(out.data() + static_cast<std::size_t>(k) * sizeof(record), &record, sizeof(record));
                 }
             };
@@ -5632,6 +8817,145 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
     table.used = ++_retained_claims;
     ref.retained = slot;
     ctx.stats.retained_instances += draw.count;
+}
+
+void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
+    // Share storage, not draw order: material changes and equal-depth surfaces
+    // must keep exactly the same order as the streamed path.
+    if (!_retained_enabled || ctx.prepared || ctx.taa || ctx.scene.lod.occlusion.enabled ||
+        !ctx.scene.debug.retain_scene_instances)
+        return;
+    const auto eligible = [](const DrawRef& ref) {
+        const auto& draw = *ref.draw;
+        return !ref.batch && !ref.skinned && !ref.clustered && ref.levels == 1 && !draw.material.shader.backend() &&
+               !draw.material.wireframe &&
+               (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask);
+    };
+    for (u32 s = 0; s < ctx.scenes.size(); ++s) {
+        const auto* source = ctx.scenes[s];
+        if (!source || source->instances_exposed() || source->lod.enabled || !source->debug.retain_scene_instances)
+            continue;
+        const u64 id = source->draw_identity();
+        const u64 revision = source->draw_revision();
+        const auto previous = std::exchange(_direct_sources[s], std::array{id, revision});
+        const u64 bytes = source->instances().size() * sizeof(GpuInstance3D);
+        u32 slot = ~0u;
+        for (u32 i = 0; i < _retained.size(); ++i)
+            if (_retained[i].buffer && _retained[i].direct && _retained[i].id == id) {
+                slot = i;
+                break;
+            }
+        if (slot == ~0u && previous != std::array{id, revision})
+            continue;
+        const bool current = slot != ~0u && _retained[slot].revision == revision &&
+                             _retained[slot].buffer->size() == bytes && !_retained[slot].bounds.empty();
+        u32 copies = current ? _retained[slot].direct_instances : 0;
+        if (!current) {
+            u32 draws = 0;
+            for (const auto& ref : _refs)
+                if (ref.scene == s && eligible(ref)) {
+                    ++draws;
+                    copies += ref.draw->count;
+                }
+            // One/few draws already have a compact streaming path. Stable scene
+            // revisions reuse this admission count as well as their records.
+            if (draws < 32 || copies < 256)
+                continue;
+        }
+        const u64 serial = _owner->_frame_serial;
+        if (slot != ~0u) {
+            const auto& table = _retained[slot];
+            const bool dirty = table.revision != revision || table.buffer->size() != bytes || table.bounds.empty();
+            // As with explicit batches, never overwrite an upload already used
+            // in this GPU frame. Later consumers stream their current records.
+            if (dirty && (table.claimed == _retained_epoch || table.upload_frame == serial))
+                continue;
+            if (table.buffer->size() != bytes) {
+                drop_table(_retained[slot]);
+                slot = ~0u;
+            }
+        }
+        if (slot == ~0u) {
+            // ID zero cannot consume a reservation made for an explicit batch.
+            if (!make_room(0, bytes, false, ctx.stats)) {
+                ++ctx.stats.retained_refused;
+                continue;
+            }
+            auto buffer = std::make_shared<GpuBuffer>(
+                _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, static_cast<u32>(bytes)));
+            slot = 0;
+            while (slot < _retained.size() && _retained[slot].buffer)
+                ++slot;
+            if (slot == _retained.size())
+                _retained.emplace_back();
+            auto& table = _retained[slot];
+            table.id = id;
+            table.direct = true;
+            table.scene_lifetime = source->draw_lifetime();
+            table.lifetime = table.scene_lifetime;
+            table.buffer = std::move(buffer);
+            _retained_bytes += static_cast<u32>(bytes);
+        }
+        auto& table = _retained[slot];
+        // A moved scene can contain commands at revision zero. Empty bounds
+        // distinguish a fresh table from a valid table holding that revision.
+        if (table.revision != revision || table.bounds.empty()) {
+            const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
+                // Unused (skinned/transparent/custom) rows are never indexed.
+                std::memset(out.data(), 0, out.size());
+                for (const auto& ref : _refs)
+                    if (ref.scene == s && eligible(ref))
+                        for (u32 i = 0; i < ref.draw->count; ++i) {
+                            const auto record =
+                                pack_instance(ref.instances[i], ref.draw->material.color, ref.draw->clip);
+                            std::memcpy(out.data() + std::size_t(ref.draw->first + i) * sizeof(record), &record,
+                                        sizeof(record));
+                        }
+            };
+            _device->upload_storage_buffer(table.buffer->handle(), 0, table.buffer->size(), nullptr, true, &fill);
+            table.revision = revision;
+            table.upload_frame = serial;
+            ctx.stats.retained_upload_bytes += bytes;
+            ctx.stats.direct_upload_bytes += bytes;
+        } else {
+            ++ctx.stats.direct_cache_hits;
+        }
+        if (table.bounds_revision != revision || table.bounds.empty()) {
+            const u64 old_bytes = table.bounds.capacity() * sizeof(Vec4f);
+            if (table.bounds.size() != source->instances().size())
+                std::vector<Vec4f>(source->instances().size()).swap(table.bounds);
+            _bounds_cache_bytes -= static_cast<u32>(old_bytes);
+            _bounds_cache_bytes += static_cast<u32>(table.bounds.capacity() * sizeof(Vec4f));
+            _bounds_cache_grew = true;
+            for (const auto& ref : _refs)
+                if (ref.scene == s && eligible(ref))
+                    for (u32 i = 0; i < ref.draw->count; ++i) {
+                        Vec3f centre;
+                        f32 radius;
+                        sphere_of(ref.instances[i].transform, ref.center, ref.radius, centre, radius);
+                        table.bounds[ref.draw->first + i] = {centre.x, centre.y, centre.z, radius};
+                    }
+            table.bounds_revision = revision;
+            ctx.stats.bounds_cache_rebuilt += copies;
+            ctx.stats.bounds_instance_tests += copies;
+            ctx.stats.direct_bounds_rebuilt += copies;
+        }
+        table.claimed = _retained_epoch;
+        table.frame = _retained_frames;
+        table.serial = serial;
+        table.used = ++_retained_claims;
+        table.direct_instances = copies;
+        for (auto& ref : _refs)
+            if (ref.scene == s && eligible(ref)) {
+                ref.retained = slot;
+                ref.retained_first = ref.draw->first;
+                ref.direct = true;
+                ref.cached_spheres = table.bounds.data() + ref.draw->first;
+            }
+        ctx.stats.retained_instances += copies;
+        ctx.stats.direct_retained_instances += copies;
+        ctx.stats.bounds_cache_instances += copies;
+    }
 }
 
 void GpuRenderer3D::drop_table(RetainedTable& table) {
@@ -5703,7 +9027,7 @@ void GpuRenderer3D::cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stat
     u32 holder = ~0u;
     for (u32 i = 0; i < _retained.size(); ++i) {
         const RetainedTable& t = _retained[i];
-        if (!t.buffer || t.id != id || (holder != ~0u && t.bounds.empty()))
+        if (!t.buffer || t.direct || t.id != id || (holder != ~0u && t.bounds.empty()))
             continue;
         holder = i;
         if (!t.bounds.empty())
@@ -5823,9 +9147,11 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         // Between GPU frames (no render's draws hold a slot): expired batches' tables go, without waiting for the GPU.
         _retained_gc_frame = _owner->_frame_serial;
         ++_retained_frames;
-        for (RetainedTable& t : _retained)
-            if (t.buffer && t.lifetime.expired())
+        for (RetainedTable& t : _retained) {
+            const auto life = t.direct ? t.scene_lifetime.lock() : nullptr;
+            if (t.buffer && (t.lifetime.expired() || (t.direct && (!life || *life != t.id))))
                 drop_table(t);
+        }
         std::erase_if(_retained, [](const RetainedTable& t) { return !t.buffer; });
         // The largest batch refused a table last frame may evict smaller ones claimed then; the room is kept for it
         // this frame. At most one such change a frame.
@@ -5842,15 +9168,15 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s] && ctx.scenes[s]->lod.enabled) {
             lod[s] = lod_view_of(ctx.scenes[s]->lod, ctx.scenes[s]->debug, ctx.scenes[s]->camera,
-                                 static_cast<f32>(view->_size.y));
+                                 static_cast<f32>(view->extent().y));
         }
     }
-    static_assert(max_local_shadow_layers + max_shadow_cascades <= 32);
+    static_assert(max_local_shadow_layers + max_shadow_cascades + 1 <= 64); // CullGroup's masks
     const auto classify_groups = [&](DrawRef& ref) {
         ref.group_first = static_cast<u32>(_cull_groups.size());
-        const auto groups = ref.draw->batch ? ref.draw->batch.groups()
-                                            : ctx.scenes[ref.scene]->instance_groups().subspan(ref.draw->group_first,
-                                                                                               ref.draw->group_count);
+        const auto groups =
+            ref.batch ? ref.draw->batch.groups()
+                      : ctx.scenes[ref.scene]->instance_groups().subspan(ref.draw->group_first, ref.draw->group_count);
         for (const Scene3D::InstanceGroup& group : groups) {
             const auto& bounds = group.world_bounds;
             if (!std::isfinite(bounds.min.x) || !std::isfinite(bounds.min.y) || !std::isfinite(bounds.min.z) ||
@@ -5884,7 +9210,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                     planes = shadow_cull::pending_planes({view.frustum.planes.data(), view.frustum.count}, b);
                     if (planes == shadow_cull::outside)
                         continue;
-                    g.local_mask |= 1u << v;
+                    g.local_mask |= u64{1} << v;
                     g.local_planes[v] = planes;
                     if (view.moon && ctx.scene.cull) {
                         const GpuFrustum& reach = view.single_map ? ctx.frustums[0] : view.slice;
@@ -5892,14 +9218,30 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                             shadow_reach::pending_planes({reach.planes.data(), reach.count}, b);
                     }
                     if (view.bounded && shadow_cull::inside_radius(b, view.centre, view.radius))
-                        g.local_radius_inside |= 1u << v;
+                        g.local_radius_inside |= u64{1} << v;
                 }
             }
             _cull_groups.push_back(g);
         }
         ref.group_count = static_cast<u32>(_cull_groups.size()) - ref.group_first;
     };
+    const auto bind_prepared = [&](DrawRef& ref) {
+        if (!ctx.prepared)
+            return;
+        const auto draw = static_cast<std::size_t>(ref.draw - ctx.scenes[ref.scene]->draws().data());
+        ref.prepared_first = ctx.prepared->sources[ref.scene].first[draw];
+        ref.prepared_records = ctx.prepared->records.data() + ref.prepared_first;
+        ref.cached_spheres = ctx.prepared->spheres.data() + ref.prepared_first;
+        ref.prepared_scales = ctx.prepared->scales.data() + ref.prepared_first;
+        stats.shared_records += ref.draw->count;
+        stats.preparation_cpu_bytes = ctx.prepared->cpu_bytes();
+    };
     bool any_levels = false, any_clusters = false, any_skinned = false;
+    // Reserve the complete finest cut's upper bound before choosing the cluster path. A draw that cannot fit uses
+    // its full level-zero mesh in every dependent pass. This conservative policy needs no GPU readback and cannot
+    // leave a partial silhouette; a later GPU per-object fallback can admit cuts whose actual size is much smaller.
+    u64 cluster_room = std::min<u64>(scene.lod.max_cluster_triangles, 100'000'000);
+    const u64 cluster_views = ctx.shadows ? 1 + std::max(ctx.cascades, 1u) : 1;
     // The frame's joint matrices: the scene's, then the overlay's.
     u32 joint_total = 0;
     std::array<u32, 2> joint_base{};
@@ -5927,8 +9269,12 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                                     draw.material.casts_shadow && !draw.material.wireframe;
                 _refs.push_back(
                     {&draw, draw.batch ? draw.batch.instances().data() : ctx.scenes[s]->instances().data() + draw.first,
-                     mesh, s, ctx.scenes[s]->cull ? &ctx.frustums[s] : nullptr, caster, b.center(), b.radius(), 0, 0,
-                     0});
+                     mesh, s,
+                     !ctx.scenes[s]->cull              ? nullptr
+                     : draw.clip == DrawClip3D::camera ? &ctx.frustums[s]
+                                                       : &ctx.whole_frustums[s],
+                     caster, b.center(), b.radius(), 0, 0, 0});
+                _refs.back().batch = bool(draw.batch);
                 if (draw.skinned) {
                     DrawRef& ref = _refs.back();
                     ref.skinned = true;
@@ -5939,17 +9285,28 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 }
                 // Levels of detail: only for a mesh that has them, drawn in an order that does not matter (blended
                 // copies are drawn furthest first, which a draw per level would break).
-                if (lod[s].on && mesh->levels.size() > 1 && draw.material.blend != Blend3D::Alpha) {
+                if (lod[s].on && mesh->levels.size() > 1 &&
+                    (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask)) {
                     _refs.back().levels = static_cast<u32>(std::min<std::size_t>(mesh->levels.size(), max_mesh_levels));
                     any_levels = true;
                 }
                 // A mesh with clusters is cut instead (its copies stay in the one run, seen first, then the sun's).
-                if (lod[s].on && mesh->clusters && draw.material.blend != Blend3D::Alpha) {
-                    _refs.back().clustered = true;
-                    any_clusters = true;
+                if (lod[s].on && mesh->clusters &&
+                    (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask)) {
+                    const u64 per_copy = u64(mesh->clusters->leaf_triangles) * cluster_views;
+                    if (per_copy && draw.count <= cluster_room / per_copy) {
+                        _refs.back().clustered = true;
+                        any_clusters = true;
+                        cluster_room -= per_copy * draw.count;
+                        stats.cluster_budget_reserved_triangles += per_copy * draw.count;
+                    } else {
+                        _refs.back().levels = 1;
+                        stats.cluster_budget_fallbacks += draw.count;
+                    }
                 }
                 if (!draw.skinned && ((has_groups && draw.group_count) || (draw.batch && !draw.batch.groups().empty())))
                     classify_groups(_refs.back());
+                bind_prepared(_refs.back());
                 if (draw.batch) {
                     if (eligible) {
                         if (_prepared_batches.size() < 128)
@@ -5959,18 +9316,26 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                             eligible = false;
                     }
                     retain_instances(_refs.back(), ctx);
-                    cache_instance_bounds(_refs.back(), stats);
+                    if (!ctx.prepared)
+                        cache_instance_bounds(_refs.back(), stats);
                 }
             }
     }
     if (reuse)
         for (DrawRef& ref : _refs) {
-            ref.frustum = ctx.scenes[ref.scene]->cull ? &ctx.frustums[ref.scene] : nullptr;
+            ref.frustum = !ctx.scenes[ref.scene]->cull           ? nullptr
+                          : ref.draw->clip == DrawClip3D::camera ? &ctx.frustums[ref.scene]
+                                                                 : &ctx.whole_frustums[ref.scene];
             ref.caster = ctx.shadows && ref.scene == 0 &&
                          (ref.draw->material.blend == Blend3D::Opaque || ref.draw->material.blend == Blend3D::Mask) &&
                          ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
             ref.retained = ~0u;
+            ref.retained_first = 0;
+            ref.direct = false;
             ref.cached_spheres = nullptr;
+            ref.prepared_records = nullptr;
+            ref.prepared_scales = nullptr;
+            bind_prepared(ref);
             if (ref.skinned) {
                 // Only the command layout is reused. Poses, bounds, shadow membership
                 // and current/previous GPU joint tables are refreshed every render.
@@ -5981,12 +9346,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             }
             if (ref.group_count)
                 classify_groups(ref);
-            if (ref.draw->batch) {
+            if (ref.batch) {
                 retain_instances(ref, ctx);
-                cache_instance_bounds(ref, stats);
+                if (!ctx.prepared)
+                    cache_instance_bounds(ref, stats);
             }
         }
 
+    retain_scene_instances(ctx);
     stats.retained_gpu_bytes = _retained_bytes;
     stats.bounds_cache_bytes = _bounds_cache_bytes;
     stats.spatial_groups = static_cast<u32>(_cull_groups.size());
@@ -6169,13 +9536,15 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 piece.seen[0] = camera == 2 ? n : 0;
                 return;
             }
-            const sphere_cull4::Test test{{ref.frustum->planes.data(), ref.frustum->count}, {}, 0, false};
             u32 i = piece.begin;
-            for (; piece.end - i >= 4; i += 4) {
-                const u32 mask = test.mask(ref.cached_spheres + i);
-                piece.seen[0] += static_cast<u32>(std::popcount(mask));
-                for (u32 k = 0; k < 4; ++k)
-                    visible[i - piece.begin + k] = mask & (1u << k) ? camera_bit : u8{0};
+            if (n >= 4) {
+                const sphere_cull4::Test test{{ref.frustum->planes.data(), ref.frustum->count}, {}, 0, false};
+                for (; piece.end - i >= 4; i += 4) {
+                    const u32 mask = test.mask(ref.cached_spheres + i);
+                    piece.seen[0] += static_cast<u32>(std::popcount(mask));
+                    for (u32 k = 0; k < 4; ++k)
+                        visible[i - piece.begin + k] = mask & (1u << k) ? camera_bit : u8{0};
+                }
             }
             for (; i < piece.end; ++i) {
                 const Vec4f& s = ref.cached_spheres[i];
@@ -6195,11 +9564,16 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                                                   group->sun_reach_planes[k]);
         }
         const bool transform_bounds = camera == 1 || (ref.caster && sun_mask) || ref.levels > 1 || save_bounds;
-        piece.bounds_tests = ref.skinned || (transform_bounds && !ref.cached_spheres) ? piece.end - piece.begin : 0;
+        piece.bounds_tests = !ref.cached_spheres && (ref.skinned || transform_bounds) ? piece.end - piece.begin : 0;
         for (u32 i = piece.begin; i < piece.end; ++i) {
             Vec3f c{};
             f32 r = 0.0f, scale = 1.0f;
-            if (ref.skinned) {
+            if (ref.prepared_scales) {
+                const auto& sphere = ref.cached_spheres[i];
+                c = {sphere.x, sphere.y, sphere.z};
+                r = sphere.w;
+                scale = ref.prepared_scales[i];
+            } else if (ref.skinned) {
                 // A posed copy's bound is the sphere round its joints' moved spheres, never smaller than the mesh posed
                 // (skin_sphere): the pose, not the mesh at rest. If no joint can be bounded, the rest bound stands.
                 Vec3f centre = ref.center;
@@ -6365,13 +9739,15 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     }
     if (any_clusters) {
         ctx.gpu_clusters = _gpu_clusters && ctx.scene.debug.gpu_culling;
-        ctx.occlusion = ctx.gpu_clusters && ctx.scene.lod.occlusion.enabled && _occlusion_available;
+        ctx.occlusion = !ctx.geometry_only && !ctx.surface_only && ctx.gpu_clusters &&
+                        ctx.scene.lod.occlusion.enabled && _occlusion_available;
         cut_clusters(ctx, _owner->_jobs);
         if (!ctx.gpu_clusters) {
             ctx.occlusion = false;
         }
     }
-    if (ctx.scene.lod.occlusion.enabled && !ctx.occlusion && !ctx.occlusion_said) {
+    if (!ctx.geometry_only && !ctx.surface_only && ctx.scene.lod.occlusion.enabled && !ctx.occlusion &&
+        !ctx.occlusion_said) {
         warn_once(_occlusion_warned, "3D: occlusion culling asked for, but it needs Lod3D::enabled and gpu_culling, "
                                      "clustered meshes, and a device that can: off");
     }
@@ -6384,13 +9760,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 return;
             u32 at = piece.out[0], extra = piece.out_extra[0];
             if (ref.levels == 1 && piece.seen[0] == piece.end - piece.begin) {
-                std::iota(_retained_visible.begin() + at, _retained_visible.begin() + at + piece.seen[0], piece.begin);
+                std::iota(_retained_visible.begin() + at, _retained_visible.begin() + at + piece.seen[0],
+                          ref.retained_first + piece.begin);
                 return;
             }
             for (u32 i = piece.begin; i < piece.end; ++i) {
                 const u8 v = _visible[piece.flat + i - piece.begin];
                 if (v & in_view_bits)
-                    _retained_visible[(v & camera_bit) ? at++ : extra++] = i;
+                    _retained_visible[(v & camera_bit) ? at++ : extra++] = ref.retained_first + i;
             }
         });
         const u32 bytes = retained_written * static_cast<u32>(sizeof(u32));
@@ -6398,7 +9775,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         _device->upload_storage_buffer(_retained_indices->handle(), 0, bytes, _retained_visible.data(), true);
         stats.retained_index_bytes = bytes;
     }
-    // The copies, straight into the upload memory; alpha-blended ones furthest first.
+    _main_order.clear();
+    // Pack transparent copies by camera depth; the main pass merges their order across every ref and sprite.
     if (written > 0) {
         const u32 bytes = static_cast<u32>(written * sizeof(GpuInstance3D));
         ensure_buffer(_instances, bytes, min_instance_buffer,
@@ -6413,6 +9791,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 _skin_prev_ordered.resize(written);
             }
         }
+        if (ctx.prepared)
+            _preparation_rows.resize(written);
         const auto write = [&](const DrawRef& ref, const MeshInstance3D& instance, u8* out, u32 at, u32 flat) {
             if (ctx.taa) {
                 _taa_ordered[at] = _taa_prev[flat]; // each copy's own slot: safe from the workers
@@ -6425,13 +9805,18 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                     _skin_prev_ordered[at] = ref.skinned ? _taa_prev_joint[flat] : ~0u;
                 }
             }
-            const GpuInstance3D g = pack_instance(instance, ref.draw->material.color);
-            std::memcpy(out + static_cast<std::size_t>(at) * sizeof(GpuInstance3D), &g, sizeof(g));
+            if (ctx.prepared) {
+                _preparation_rows[at] = ref.prepared_first + static_cast<u32>(&instance - ref.instances);
+            } else {
+                const GpuInstance3D g = pack_instance(instance, ref.draw->material.color, ref.draw->clip);
+                std::memcpy(out + static_cast<std::size_t>(at) * sizeof(GpuInstance3D), &g, sizeof(g));
+            }
         };
         const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
             each_task([&](Piece& piece) {
                 const DrawRef& ref = _refs[piece.ref];
-                if (ref.retained != ~0u || ref.draw->material.blend == Blend3D::Alpha) {
+                if (ref.retained != ~0u || ref.draw->material.blend == Blend3D::Alpha ||
+                    ref.draw->material.blend == Blend3D::Additive) {
                     return; // retained separately, or sorted below
                 }
                 std::array<u32, max_mesh_levels> at = piece.out, at_extra = piece.out_extra;
@@ -6451,51 +9836,97 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             });
             for (const Piece& first : _pieces) {
                 const DrawRef& ref = _refs[first.ref];
-                if (first.begin != 0 || ref.draw->material.blend != Blend3D::Alpha) {
+                if (first.begin != 0 ||
+                    (ref.draw->material.blend != Blend3D::Alpha && ref.draw->material.blend != Blend3D::Additive)) {
                     continue;
                 }
-                const Vec3f eye = ctx.scenes[ref.scene]->camera.position;
+                const auto& camera = ctx.scenes[ref.scene]->camera;
+                const Vec3f eye = camera.position, forward = camera.forward();
                 _sorted.clear();
                 const u32 flat = first.flat;
                 for (u32 i = 0; i < ref.draw->count; ++i) {
                     if (_visible[flat + i] & camera_bit) {
                         const Mat4f& t = ref.instances[i].transform;
-                        _sorted.push_back({length_squared(Vec3f{t.m[12], t.m[13], t.m[14]} - eye), i});
+                        _sorted.push_back({dot(t.apply(ref.center) - eye, forward), i});
                     }
                 }
-                std::sort(_sorted.begin(), _sorted.end(),
-                          [](const auto& a, const auto& b) { return a.first > b.first; });
+                std::stable_sort(_sorted.begin(), _sorted.end(),
+                                 [](const auto& a, const auto& b) { return a.first > b.first; });
                 u32 at = ref.out_first;
                 for (const auto& [d, i] : _sorted) {
+                    if (ctx.surface_stage != SurfaceStage3D::Opaque)
+                        _main_order.push_back({first.ref, at, 1, ref.scene, d, false, true});
                     write(ref, ref.instances[i], out.data(), at++, flat + i);
                 }
             }
         };
-        // Cycled: a view rendered earlier this frame keeps the instances it drew.
-        _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, /*cycle=*/true, &fill);
-        stats.instance_upload_bytes += bytes;
+        const auto detach_instances = [&] {
+            if (_instances == _local_instances) {
+                _instances = std::move(_spare_instances);
+                ensure_buffer(_instances, bytes, min_instance_buffer,
+                              SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+                                  (_gpu_clusters ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0u));
+            }
+        };
+        bool reused_upload = false;
+        if (ctx.prepared) {
+            fill({}); // mapping, sorting and per-view history offsets only
+            auto& prepared = *ctx.prepared;
+            reused_upload = prepared.upload_generation && prepared.upload_generation == _instance_generation &&
+                            prepared.uploaded_rows == _preparation_rows;
+            if (reused_upload) {
+                ++stats.shared_uploads;
+                stats.shared_instance_bytes += bytes;
+            } else {
+                const std::function<void(std::span<u8>)> copy = [&](std::span<u8> out) {
+                    const auto part = [&](u32 begin, u32 end) {
+                        for (u32 at = begin; at < end; ++at)
+                            std::memcpy(out.data() + std::size_t(at) * sizeof(GpuInstance3D),
+                                        &prepared.records[_preparation_rows[at]], sizeof(GpuInstance3D));
+                    };
+                    constexpr u32 chunk = 1024;
+                    if (jobs && written >= 2048)
+                        jobs->parallel_for(static_cast<i32>((written + chunk - 1) / chunk), [&](i32 n) {
+                            const u32 begin = static_cast<u32>(n) * chunk;
+                            part(begin, std::min(begin + chunk, written));
+                        });
+                    else
+                        part(0, written);
+                };
+                detach_instances();
+                _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, true, &copy);
+                ++_instance_generation;
+                stats.instance_upload_bytes += bytes;
+                prepared.upload_generation = _instance_generation;
+                if (_preparation_rows.capacity() <= prepared.records.size())
+                    prepared.uploaded_rows.swap(_preparation_rows);
+                else
+                    prepared.uploaded_rows.assign(_preparation_rows.begin(), _preparation_rows.end());
+            }
+            stats.preparation_cpu_bytes = prepared.cpu_bytes();
+            stats.preparation_scratch_bytes = _preparation_rows.capacity() * sizeof(u32);
+        } else {
+            // Cycled: earlier draws retain their own backing storage.
+            detach_instances();
+            _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, true, &fill);
+            ++_instance_generation;
+            stats.instance_upload_bytes += bytes;
+        }
 
         // Skinned copies: the frame's joint matrices (both scenes', straight into the upload memory) and each copy's
         // first one, in the places the instances are. One buffer each for the frame, grown as the previous ones are: no
         // upload per draw.
         if (any_skinned) {
-            const u32 joint_bytes = joint_total * static_cast<u32>(sizeof(Mat4f));
-            ensure_buffer(_joints, joint_bytes, min_joint_buffer);
-            const std::function<void(std::span<u8>)> fill_joints = [&](std::span<u8> out) {
-                for (u32 s = 0; s < 2; ++s) {
-                    if (ctx.scenes[s] && !ctx.scenes[s]->joint_matrices().empty()) {
-                        std::memcpy(out.data() + static_cast<std::size_t>(joint_base[s]) * sizeof(Mat4f),
-                                    ctx.scenes[s]->joint_matrices().data(),
-                                    ctx.scenes[s]->joint_matrices().size() * sizeof(Mat4f));
-                    }
-                }
-            };
-            _device->upload_storage_buffer(_joints->handle(), 0, joint_bytes, nullptr, /*cycle=*/true, &fill_joints);
-            ctx.joints_uploaded = true;
+            upload_joints(ctx);
             const u32 offset_bytes = written * static_cast<u32>(sizeof(u32));
             ensure_buffer(_joint_offsets, offset_bytes, min_caster_list_buffer);
-            _device->upload_storage_buffer(_joint_offsets->handle(), 0, offset_bytes, _skin_ordered.data(),
-                                           /*cycle=*/true);
+            if (!reused_upload || !ctx.prepared || !ctx.prepared->offsets_generation ||
+                ctx.prepared->offsets_generation != _offsets_generation) {
+                _device->upload_storage_buffer(_joint_offsets->handle(), 0, offset_bytes, _skin_ordered.data(), true);
+                ++_offsets_generation;
+                if (ctx.prepared)
+                    ctx.prepared->offsets_generation = _offsets_generation;
+            }
             if (ctx.taa) {
                 // Last frame's matrices, as the record holds them (whole), and where each copy's own start in them.
                 const std::vector<Mat4f>& past = view->_taa_last.joints;
@@ -6538,7 +9969,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                     const u32 index = (v & camera_bit) ? at[level]++ : at_extra[level]++;
                     for (u32 k = 0; k < ctx.cascades; ++k) {
                         if (in_cascade(v, k)) {
-                            _caster_list[to[k][level]++] = ref.retained != ~0u ? i : index;
+                            _caster_list[to[k][level]++] = ref.retained != ~0u ? ref.retained_first + i : index;
                         }
                     }
                 }
@@ -7146,6 +10577,8 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
             set_viewport(pass, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+            put_clip(u.clip, ctx.scenes[0]); // (what is behind a mirror hides nothing in its reflection)
+            put_hidden(u.first, ctx.scenes[0]);
             // the shadow vertex shaders' second buffer is a list this does not use; a skinned copy's also read the
             // joints
             const std::array<SDL_GPUBuffer*, 4> buffers{storage, storage, ctx.joints, ctx.joint_offsets};
@@ -7161,8 +10594,9 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
                 }
                 const Material3D& occluder = ref.draw->material;
                 const bool cutout = occluder.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided,
-                                                      Pass::Occluder, cutout, nullptr, false, ref.skinned);
+                SDL_GPUGraphicsPipeline* p =
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided, Pass::Occluder, cutout, nullptr,
+                             false, ref.skinned, false, false, Unlit::Off, false, pass_surface(occluder));
                 if (!p) {
                     continue;
                 }
@@ -7177,6 +10611,7 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, pass, occluder);
                 }
+                bind_offset(commands, pass, occluder, ref.skinned);
                 if (ref.clustered) {
                     draw_cluster_indirect(ref, commands, pass, u, 0, 0); // the first pass's clusters
                     continue;
@@ -7233,12 +10668,14 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx, u32 phase) {
         std::memcpy(p.cut[s], cut, sizeof(cut));
     }
     const auto put_frustum = [&](u32 f, const GpuFrustum& frustum) {
-        for (u32 k = 0; k < frustum.count; ++k) {
+        // Six a view: a camera's clip plane (the seventh) is left to the vertex shaders here.
+        const u32 count = std::min(frustum.count, 6u);
+        for (u32 k = 0; k < count; ++k) {
             const Vec4f& plane = frustum.planes[k];
             const f32 v[4] = {plane.x, plane.y, plane.z, plane.w};
             std::memcpy(p.planes[f * 6 + k], v, sizeof(v));
         }
-        p.counts[f >> 2][f & 3] = frustum.count;
+        p.counts[f >> 2][f & 3] = count;
     };
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s]) {
@@ -7512,7 +10949,341 @@ bool GpuRenderer3D::read_cluster_picks(IViewBackend3D&, std::vector<ClusterPick3
     return true;
 }
 
+void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
+    const u32 budget =
+        ctx.scene.debug.cache_draw_commands ? std::min<u32>(ctx.scene.debug.draw_command_budget, 4 * 1024 * 1024) : 0;
+    const auto clear = [&] {
+        _draw_plan_valid = false;
+        std::vector<DrawCommand>().swap(_draw_commands);
+        std::vector<DrawBindingKey>().swap(_draw_bindings);
+        std::vector<u32>().swap(_draw_order);
+        std::vector<u32>().swap(_main_draw_list);
+        _main_draw_indices.reset();
+    };
+    if (!budget || _refs.size() > 8192 ||
+        _refs.size() * (sizeof(DrawCommand) + sizeof(DrawBindingKey) + sizeof(u32)) > budget) {
+        clear();
+        return;
+    }
+    if (_draw_commands.capacity() * sizeof(DrawCommand) + _draw_bindings.capacity() * sizeof(DrawBindingKey) +
+            _draw_order.capacity() * sizeof(u32) + _main_draw_list.capacity() * sizeof(u32) >
+        budget)
+        clear();
+    std::array<PreparedKey, 2> keys{};
+    for (u32 s = 0; s < ctx.scenes.size(); ++s)
+        if (const auto* scene = ctx.scenes[s])
+            keys[s] = {scene,
+                       scene->draws().data(),
+                       scene->instances().data(),
+                       scene->draws().size(),
+                       scene->draw_identity(),
+                       scene->draw_revision()};
+    if (keys != _draw_plan_keys) {
+        // Rebuilt immediate-mode scenes must not pay packet interning/sorting
+        // every frame. Observe an unchanged command revision before admission.
+        _draw_plan_keys = keys;
+        _draw_plan_valid = false;
+        ctx.stats.draw_plan_bytes = _draw_commands.capacity() * sizeof(DrawCommand) +
+                                    _draw_bindings.capacity() * sizeof(DrawBindingKey) +
+                                    _draw_order.capacity() * sizeof(u32) + _main_draw_list.capacity() * sizeof(u32);
+        return;
+    }
+    if (_draw_plan_valid && keys == _draw_plan_keys && _draw_commands.size() == _refs.size()) {
+        ++ctx.stats.draw_plan_hits;
+    } else {
+        _draw_commands.assign(_refs.size(), {});
+        _draw_bindings.clear();
+        _draw_order.resize(_refs.size());
+        struct Hash {
+            std::size_t operator()(const DrawBindingKey& key) const {
+                u64 h = u32(key.u) | (u64(key.v) << 8);
+                // (Six textures, the graph maps last, but five samplers: each array by its own length.)
+                for (const ITextureBackend* texture : key.textures)
+                    h = (h ^ reinterpret_cast<std::uintptr_t>(texture)) * 0x9e3779b97f4a7c15ull;
+                for (const auto& sampler : key.sampling)
+                    h = (h ^ sampler_identity(sampler)) * 0x9e3779b97f4a7c15ull;
+                return static_cast<std::size_t>(h ^ (h >> 32));
+            }
+        };
+        std::unordered_map<DrawBindingKey, u32, Hash> bindings;
+        for (u32 r = 0; r < _refs.size(); ++r) {
+            const auto& material = _refs[r].draw->material;
+            const DrawBindingKey binding{{material.texture.backend().get(), material.metallic_roughness.backend().get(),
+                                          material.normal.backend().get(), material.occlusion.backend().get(),
+                                          material.emissive_texture.backend().get(),
+                                          material.graph_maps.backend().get()},
+                                         material.wrap_u,
+                                         material.wrap_v,
+                                         material.texture_samplers};
+            const auto [it, added] = bindings.try_emplace(binding, static_cast<u32>(_draw_bindings.size()));
+            if (added)
+                _draw_bindings.push_back(binding);
+            _draw_commands[r].binding = it->second;
+            _draw_order[r] = r;
+        }
+        // Sorting the complete source once and filtering its visible subset is
+        // exactly the old stable sort of visible refs: the comparator is static.
+        std::stable_sort(_draw_order.begin(), _draw_order.end(), [&](u32 a, u32 b) {
+            const auto group = [&](u32 r) {
+                const auto& ref = _refs[r];
+                const auto pass = pass_of(ref.draw->material);
+                return (u64(ref.scene) << 32) | (u64(pass) << 1) |
+                       u64(pass != Pass::Alpha && ref.draw->material.double_sided);
+            };
+            const u64 ag = group(a), bg = group(b);
+            return ag != bg ? ag < bg : _refs[a].mesh->serial < _refs[b].mesh->serial;
+        });
+        _draw_plan_keys = keys;
+        _draw_plan_valid = true;
+        ++ctx.stats.draw_plan_builds;
+    }
+    const u64 bytes = _draw_commands.capacity() * sizeof(DrawCommand) +
+                      _draw_bindings.capacity() * sizeof(DrawBindingKey) + _draw_order.capacity() * sizeof(u32) +
+                      _main_draw_list.capacity() * sizeof(u32);
+    if (bytes > budget) {
+        clear();
+        return;
+    }
+    ctx.stats.draw_plan_bytes = bytes;
+}
+
+GpuRenderer3D::DrawCommand* GpuRenderer3D::main_command(FrameCtx& ctx, u32 r, bool materials) {
+    if (!_draw_plan_valid || _refs[r].draw->material.shader.backend())
+        return nullptr;
+    auto& command = _draw_commands[r];
+    const auto& ref = _refs[r];
+    const auto* view = ctx.view;
+    const u32 format = ctx.taa ? hdr_format : view->_format, samples = ctx.taa ? 1 : view->_samples;
+    const u64 key = u64(format) | (u64(samples) << 32) | (u64(ctx.taa) << 40) | (u64(ctx.main_velocity) << 41) |
+                    (u64(ctx.fog) << 42) | (u64(ctx.lights_variant) << 43) | (u64(ref.retained != ~0u) << 44) |
+                    (u64(materials) << 45);
+    const u64 revision = _owner->_pipelines.revision();
+    if (command.pipeline_key != key || command.pipeline_revision != revision) {
+        command.selection = material_pipeline(ref.draw->material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog);
+        command.uniforms = material_uniforms(ref.draw->material, command.selection.unlit);
+        command.pipeline = pipeline(MeshPipelineRequest{static_cast<SDL_GPUTextureFormat>(format), samples,
+                                                        command.selection, ctx.main_velocity, ref.skinned, ctx.fog,
+                                                        ctx.lights_variant, ref.retained != ~0u, materials});
+        command.pipeline_key = command.pipeline ? key : ~0ull; // failed allocations must remain retryable
+        command.pipeline_revision = revision;
+        ++ctx.stats.draw_pipeline_misses;
+    } else {
+        ++ctx.stats.draw_pipeline_hits;
+    }
+    return &command;
+}
+
+void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
+    constexpr u32 limit = 4 * 1024 * 1024;
+    const u32 budget = _draw_plan_valid && _draw_materials_available && !ctx.geometry_only
+                           ? std::min(ctx.scene.debug.draw_command_budget, limit)
+                           : 0;
+    const u64 frame = _owner->_frame_serial;
+    _draw_material_slots.fill(~0u);
+    const auto drop = [&](DrawMaterials& table) {
+        if (table.buffer)
+            _draw_material_bytes -= table.buffer->size();
+        if (table.surface)
+            _draw_material_bytes -= table.surface->size();
+        table = {};
+    };
+    for (auto& table : _draw_material_tables) {
+        const auto life = table.lifetime.lock();
+        if (table.buffer && (!budget || !life || *life != table.scene))
+            drop(table);
+    }
+    while (_draw_material_bytes > budget) {
+        auto oldest = std::min_element(_draw_material_tables.begin(), _draw_material_tables.end(),
+                                       [](const auto& a, const auto& b) {
+                                           return (a.buffer ? a.used_frame : ~0ull) < (b.buffer ? b.used_frame : ~0ull);
+                                       });
+        drop(*oldest);
+    }
+    for (u32 s = 0; s < ctx.scenes.size() && budget; ++s) {
+        const auto* source = ctx.scenes[s];
+        if (!source ||
+            !std::any_of(_refs.begin(), _refs.end(), [&](const DrawRef& ref) { return ref.scene == s && ref.direct; }))
+            continue;
+        const u64 id = source->draw_identity(), revision = source->draw_revision();
+        const u64 bytes = source->instances().size() * sizeof(MaterialUniforms);
+        if (!bytes || bytes > budget)
+            continue;
+        u32 slot = ~0u;
+        for (u32 i = 0; i < _draw_material_tables.size(); ++i)
+            if (_draw_material_tables[i].buffer && _draw_material_tables[i].scene == id) {
+                slot = i;
+                break;
+            }
+        if (slot != ~0u) {
+            auto& table = _draw_material_tables[slot];
+            if ((!table.valid || table.revision != revision || table.buffer->size() != bytes) &&
+                (table.used_frame == frame || table.upload_frame == frame))
+                continue;
+            if (table.buffer->size() != bytes) {
+                drop(table);
+                slot = ~0u;
+            }
+        }
+        if (slot == ~0u) {
+            // Idle payloads may make room, but never replace a table selected
+            // by another view of this or the previous GPU frame.
+            for (;;) {
+                u32 free = ~0u, oldest = ~0u;
+                for (u32 i = 0; i < _draw_material_tables.size(); ++i) {
+                    const auto& table = _draw_material_tables[i];
+                    if (!table.buffer)
+                        free = i;
+                    else if (table.used_frame + 1 < frame &&
+                             (oldest == ~0u || table.used_frame < _draw_material_tables[oldest].used_frame))
+                        oldest = i;
+                }
+                if (free != ~0u && _draw_material_bytes + bytes <= budget) {
+                    slot = free;
+                    break;
+                }
+                if (oldest == ~0u)
+                    break;
+                drop(_draw_material_tables[oldest]);
+            }
+            if (slot == ~0u)
+                continue;
+            auto& table = _draw_material_tables[slot];
+            table.buffer = std::make_shared<GpuBuffer>(
+                _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, static_cast<u32>(bytes)));
+            table.scene = id;
+            table.lifetime = source->draw_lifetime();
+            _draw_material_bytes += bytes;
+        }
+        auto& table = _draw_material_tables[slot];
+        if (!table.valid || table.revision != revision) {
+            const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
+                std::memset(out.data(), 0, out.size());
+                for (const auto& ref : _refs)
+                    if (ref.scene == s && ref.direct) {
+                        const auto material = material_uniforms(ref.draw->material, Unlit::Off);
+                        for (u32 i = 0; i < ref.draw->count; ++i)
+                            std::memcpy(out.data() + std::size_t(ref.draw->first + i) * sizeof(material), &material,
+                                        sizeof(material));
+                    }
+            };
+            _device->upload_storage_buffer(table.buffer->handle(), 0, static_cast<u32>(bytes), nullptr, true, &fill);
+            // Surface shaders' parameters, for a scene with any: surface_param_count3d floats a copy, in the same
+            // places.
+            const bool surfaces = std::any_of(_refs.begin(), _refs.end(), [&](const DrawRef& ref) {
+                return ref.scene == s && ref.direct && ref.draw->material.surface.backend();
+            });
+            const u64 surface_bytes = source->instances().size() * sizeof(f32) * surface_param_count3d;
+            if (!surfaces || (table.surface && table.surface->size() != surface_bytes)) {
+                if (table.surface)
+                    _draw_material_bytes -= table.surface->size();
+                table.surface.reset();
+            }
+            if (surfaces) {
+                if (!table.surface) {
+                    table.surface = std::make_shared<GpuBuffer>(_device->create_buffer(
+                        SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, static_cast<u32>(surface_bytes)));
+                    _draw_material_bytes += surface_bytes;
+                }
+                const std::function<void(std::span<u8>)> params = [&](std::span<u8> out) {
+                    std::memset(out.data(), 0, out.size());
+                    for (const auto& ref : _refs)
+                        if (ref.scene == s && ref.direct && ref.draw->material.surface.backend())
+                            for (u32 i = 0; i < ref.draw->count; ++i)
+                                std::memcpy(
+                                    out.data() + std::size_t(ref.draw->first + i) * sizeof(f32) * surface_param_count3d,
+                                    ref.draw->material.shader_params.data(), sizeof(f32) * surface_param_count3d);
+                };
+                _device->upload_storage_buffer(table.surface->handle(), 0, static_cast<u32>(surface_bytes), nullptr,
+                                               true, &params);
+                ctx.stats.draw_material_upload_bytes += surface_bytes;
+            }
+            table.valid = true;
+            table.revision = revision;
+            table.upload_frame = frame;
+            ctx.stats.draw_material_upload_bytes += bytes;
+        }
+        table.used_frame = frame;
+        _draw_material_slots[s] = slot;
+    }
+    ctx.stats.draw_material_gpu_bytes = _draw_material_bytes;
+}
+
+void GpuRenderer3D::batch_main_commands(FrameCtx& ctx) {
+    retain_draw_materials(ctx);
+    _main_draw_list.clear();
+    ctx.stats.draw_index_gpu_bytes = _main_draw_indices ? _main_draw_indices->size() : 0;
+    if (!_draw_plan_valid)
+        return;
+    u32 rows = 0;
+    for (u32 slot : _draw_material_slots)
+        if (slot != ~0u)
+            rows += _draw_material_tables[slot].buffer->size() / sizeof(MaterialUniforms);
+    if (!rows)
+        return;
+    const u64 metadata = _draw_commands.capacity() * sizeof(DrawCommand) +
+                         _draw_bindings.capacity() * sizeof(DrawBindingKey) + _draw_order.capacity() * sizeof(u32);
+    const std::size_t capacity = std::max<std::size_t>(_main_draw_list.capacity(), std::bit_ceil(rows));
+    if (metadata + capacity * sizeof(u32) > ctx.scene.debug.draw_command_budget)
+        return;
+    // Reserve for every admitted source row before compacting commands. Camera
+    // changes then need no growth and cannot push the CPU payload over its cap.
+    _main_draw_list.reserve(capacity);
+    if (metadata + _main_draw_list.capacity() * sizeof(u32) > ctx.scene.debug.draw_command_budget) {
+        std::vector<u32>().swap(_main_draw_list);
+        ctx.stats.draw_plan_bytes = metadata;
+        return;
+    }
+    u32 written = 0;
+    for (auto item : _main_order) {
+        if (item.particle) {
+            _main_order[written++] = item;
+            continue;
+        }
+        const auto& ref = _refs[item.ref];
+        DrawCommand* command = nullptr;
+        if (!item.transparent && ref.direct && ref.levels == 1 && !ref.clustered && !ref.draw->material.unlit &&
+            !ref.draw->material.wireframe && _draw_material_slots[ref.scene] != ~0u) {
+            command = main_command(ctx, item.ref, true);
+            if (command && (command->selection.unlit != Unlit::Off || !command->pipeline ||
+                            command->selection.pass != Pass::Opaque))
+                command = nullptr;
+        }
+        if (command) {
+            item.materials = true;
+            item.first = static_cast<u32>(_main_draw_list.size());
+            item.count = ref.level_seen[0];
+            _main_draw_list.insert(_main_draw_list.end(), _retained_visible.begin() + ref.level_first[0],
+                                   _retained_visible.begin() + ref.level_first[0] + item.count);
+            if (written && _main_order[written - 1].materials) {
+                auto& previous = _main_order[written - 1];
+                const auto& before = _refs[previous.ref];
+                const auto& prior = _draw_commands[previous.ref];
+                if (before.scene == ref.scene && before.mesh == ref.mesh && before.retained == ref.retained &&
+                    prior.pipeline == command->pipeline && prior.binding == command->binding &&
+                    before.draw->material.receives_decals == ref.draw->material.receives_decals) {
+                    previous.count += item.count;
+                    ++ctx.stats.main_merged_draws;
+                    continue;
+                }
+            }
+        }
+        _main_order[written++] = item;
+    }
+    _main_order.resize(written);
+    if (!_main_draw_list.empty()) {
+        const u32 bytes = static_cast<u32>(_main_draw_list.size() * sizeof(u32));
+        ensure_buffer(_main_draw_indices, bytes, 4096, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+        _device->upload_storage_buffer(_main_draw_indices->handle(), 0, bytes, _main_draw_list.data(), true);
+        ctx.stats.draw_index_upload_bytes = bytes;
+    }
+    ctx.stats.draw_index_gpu_bytes = _main_draw_indices ? _main_draw_indices->size() : 0;
+    ctx.stats.draw_plan_bytes = _draw_commands.capacity() * sizeof(DrawCommand) +
+                                _draw_bindings.capacity() * sizeof(DrawBindingKey) +
+                                _draw_order.capacity() * sizeof(u32) + _main_draw_list.capacity() * sizeof(u32);
+}
+
 void GpuRenderer3D::order_draws(FrameCtx& ctx) {
+    prepare_draw_plan(ctx);
     // The draws in order: the scene, then the overlay; in each, opaque, then
     // alpha-blended (furthest first), then additive; then pipeline and mesh.
     const auto pass_of = [](const Material3D& m) {
@@ -7522,43 +11293,134 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
                                                                         : Pass::Additive;
     };
     _order.clear();
-    for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
-        if (_refs[r].out_count > 0) {
-            _order.push_back(r);
+    if (_draw_plan_valid) {
+        for (u32 r : _draw_order)
+            if (_refs[r].out_count)
+                _order.push_back(r);
+    } else {
+        for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
+            if (_refs[r].out_count > 0) {
+                _order.push_back(r);
+            }
         }
+        // Source refs are ordered for the depth/reactive passes. The main pass has a separate per-copy composition
+        // order below; a source batch's first instance must never stand in for its transparent copies' depths.
+        struct SortRef {
+            u64 group, mesh;
+            u32 ref;
+        };
+        std::vector<SortRef> sorted;
+        sorted.reserve(_order.size());
+        for (const u32 r : _order) {
+            const DrawRef& ref = _refs[r];
+            const Pass pass = pass_of(ref.draw->material);
+            const bool alpha = pass == Pass::Alpha;
+            const u64 group =
+                (u64(ref.scene) << 32) | (u64(pass) << 1) | u64(!alpha && ref.draw->material.double_sided);
+            sorted.push_back({group, ref.mesh->serial, r});
+        }
+        std::stable_sort(sorted.begin(), sorted.end(), [](const SortRef& a, const SortRef& b) {
+            if (a.group != b.group)
+                return a.group < b.group;
+            return a.mesh < b.mesh;
+        });
+        for (std::size_t i = 0; i < sorted.size(); ++i)
+            _order[i] = sorted[i].ref;
     }
-    const auto draw_distance = [&](const DrawRef& ref) {
-        const Mat4f& t = ref.instances[0].transform;
-        return length_squared(Vec3f{t.m[12], t.m[13], t.m[14]} - ctx.scenes[ref.scene]->camera.position);
-    };
-    // Sort compact values instead of repeatedly chasing large draw/material
-    // records. Equal keys still keep input order; alpha uses only depth after
-    // scene/pass, while the other passes use culling and mesh serial.
-    struct SortRef {
-        u64 group, mesh;
-        f32 distance;
-        u32 ref;
-    };
-    std::vector<SortRef> sorted;
-    sorted.reserve(_order.size());
-    for (const u32 r : _order) {
-        const DrawRef& ref = _refs[r];
-        const Pass pass = pass_of(ref.draw->material);
-        const bool alpha = pass == Pass::Alpha;
-        const u64 group = (u64(ref.scene) << 32) | (u64(pass) << 1) | u64(!alpha && ref.draw->material.double_sided);
-        sorted.push_back({group, ref.mesh->serial, alpha ? draw_distance(ref) : 0.0f, r});
+    if (ctx.geometry_only) {
+        retain_draw_materials(ctx);
+        ctx.stats.draw_index_gpu_bytes = _main_draw_indices ? _main_draw_indices->size() : 0;
+        return;
     }
-    std::stable_sort(sorted.begin(), sorted.end(), [](const SortRef& a, const SortRef& b) {
-        if (a.group != b.group)
-            return a.group < b.group;
-        if ((a.group & 0xffffffffu) == (u64(Pass::Alpha) << 1))
-            return a.distance > b.distance;
-        return a.mesh < b.mesh;
-    });
-    for (std::size_t i = 0; i < sorted.size(); ++i)
-        _order[i] = sorted[i].ref;
+    const auto composition_started = std::chrono::steady_clock::now();
+    const auto append_opaque = [&] {
+        u32 world = 0;
+        // With decals: the world's meshes that receive them first, then those that do not
+        // (Material3D::receives_decals), drawn after the decals and so over them; the overlay's after both. Rounds: 0
+        // everything (without decals), or 1 the world's receivers, 2 its others, 3 the overlay.
+        for (const int round : {0, 1, 2, 3}) {
+            if ((round == 0) == ctx.decals)
+                continue;
+            for (const u32 r : _order) {
+                const auto& ref = _refs[r];
+                const auto pass = pass_of(ref.draw->material);
+                if ((ctx.surface_stage == SurfaceStage3D::Opaque && pass != Pass::Opaque) ||
+                    (ctx.surface_stage == SurfaceStage3D::Transparent && pass == Pass::Opaque))
+                    continue;
+                const int mine = ref.scene != 0 ? 3 : ref.draw->material.receives_decals ? 1 : 2;
+                if (round != 0 && round != mine)
+                    continue;
+                if (ref.draw->material.blend != Blend3D::Alpha && ref.draw->material.blend != Blend3D::Additive) {
+                    _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
+                    world += ref.scene == 0;
+                }
+            }
+        }
+        return world;
+    };
+    const auto append_particles = [&] {
+        const auto& camera = ctx.scene.camera;
+        for (u32 b = 0; b < _particle_batches.size(); ++b) {
+            const auto& batch = _particle_batches[b];
+            if (!batch.look.sort) { // explicit opt-out: one run at its mean depth
+                _main_order.push_back({b, batch.first, batch.count, 0, batch.depth, true, true});
+                continue;
+            }
+            for (u32 n = 0; n < batch.count; ++n) {
+                const auto& sprite = _particle_source[b][_particle_order[batch.first + n]];
+                _main_order.push_back(
+                    {b, batch.first + n, 1, 0, dot(sprite.position - camera.position, camera.forward()), true, true});
+            }
+        }
+    };
+    const auto composition_less = [](const MainItem& a, const MainItem& b) {
+        if (a.scene != b.scene)
+            return a.scene < b.scene;
+        if (a.transparent != b.transparent)
+            return !a.transparent;
+        return a.transparent && a.depth > b.depth;
+    };
+    if (_draw_plan_valid) {
+        // Only transparent copies/particles need camera-dependent sorting.
+        // Rotate the already ordered opaque blocks into their exact stable
+        // positions: world opaque, world transparent, overlay opaque/transparent.
+        append_particles();
+        std::stable_sort(_main_order.begin(), _main_order.end(), composition_less);
+        const std::size_t transparent = _main_order.size();
+        const std::size_t world_transparent =
+            std::count_if(_main_order.begin(), _main_order.end(), [](const MainItem& item) { return item.scene == 0; });
+        const std::size_t world_opaque = append_opaque();
+        const std::size_t opaque = _main_order.size() - transparent;
+        std::rotate(_main_order.begin(), _main_order.begin() + transparent, _main_order.end());
+        std::rotate(_main_order.begin() + world_opaque, _main_order.begin() + opaque,
+                    _main_order.begin() + opaque + world_transparent);
+    } else {
+        append_opaque();
+        append_particles();
+        std::stable_sort(_main_order.begin(), _main_order.end(), composition_less);
+    }
+    std::size_t runs = 0;
+    for (const auto item : _main_order) {
+        if (runs && item.transparent) {
+            auto& last = _main_order[runs - 1];
+            if (last.transparent && last.particle == item.particle && last.ref == item.ref &&
+                last.scene == item.scene && last.first + last.count == item.first) {
+                last.count += item.count;
+                continue;
+            }
+        }
+        _main_order[runs++] = item;
+    }
+    _main_order.resize(runs);
+    ctx.stats.transparent_draw_runs = 0;
+    for (const auto& item : _main_order)
+        ctx.stats.transparent_draw_runs += item.transparent ? 1u : 0u;
+    ctx.stats.composition_order_bytes = _main_order.capacity() * sizeof(MainItem);
+    ctx.stats.transparent_sort_ms =
+        std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - composition_started).count();
     // The overlay in front of the world, seen by its own camera, and the velocity pass for it.
     ctx.overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });
+    batch_main_commands(ctx);
 }
 
 void GpuRenderer3D::choose_point_lights(FrameCtx& ctx) {
@@ -7577,7 +11439,8 @@ void GpuRenderer3D::choose_point_lights(FrameCtx& ctx) {
         ctx.chosen.push_back({strength / (distance * distance), &light});
     }
     std::sort(ctx.chosen.begin(), ctx.chosen.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-    ctx.chosen.resize(std::min<std::size_t>(ctx.chosen.size(), max_lights));
+    ctx.grid_possible = _lights_available && scene.debug.light_grid;
+    ctx.chosen.resize(std::min<std::size_t>(ctx.chosen.size(), ctx.grid_possible ? max_grid_lights : max_lights));
     stats.lights = static_cast<u32>(ctx.chosen.size());
 }
 
@@ -7594,7 +11457,10 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // textures stored encoded
     FrameUniforms f{};
     const Mat4f to_space = s == 0 ? Mat4f{} : ctx.scenes[1]->camera.view().inverse() * scene.camera.view();
-    put(f.sun_direction, normalize(to_space.apply_vector(normalize(lights.sun.direction))), 0.0f);
+    // The sun's disc: the sky's where it draws one, else the real sun's (0.53 degrees across).
+    const f32 sun_degrees = scene.sky.enabled ? std::clamp(scene.sky.sun_size, 0.0f, 20.0f) : 0.53f;
+    put(f.sun_direction, normalize(to_space.apply_vector(normalize(lights.sun.direction))),
+        0.5f * sun_degrees * (3.14159265f / 180.0f));
     put_color(f.sun_color, lights.sun.color, 0.0f);
     put_color(f.ambient, lights.ambient, 0.0f);
     put_color(f.ground_ambient, (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient), 0.0f);
@@ -7602,9 +11468,23 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     put(f.fill_direction, fill ? normalize(to_space.apply_vector(normalize(lights.fill.direction))) : Vec3f{}, 0.0f);
     put_color(f.fill_color, fill ? lights.fill.color : LinearRgb{}, 0.0f);
     const bool lit_by_sun_shadow = ctx.shadows && s == 0;
-    put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, lit_by_sun_shadow ? 1.0f : 0.0f},
-        static_cast<f32>(ctx.chosen.size()));
+    const std::size_t points = std::min<std::size_t>(ctx.chosen.size(), max_lights);
+    put(f.flags,
+        {output_flag(encode, view->_options.compress && !view->_hdr), decode ? 1.0f : 0.0f,
+         lit_by_sun_shadow ? 1.0f : 0.0f},
+        static_cast<f32>(points));
+    // The light grid lights the scene's own pass (the overlay's lights are carried into its space: its fixed blocks).
+    if (s == 0 && ctx.grid_cells > 0) {
+        put(f.grid, {1.0f, static_cast<f32>(grid_tile), grid_near}, ctx.grid_scale);
+        put(f.grid_size,
+            {static_cast<f32>(ctx.grid_tiles[0]), static_cast<f32>(ctx.grid_tiles[1]),
+             static_cast<f32>(ctx.grid_tiles[2])},
+            static_cast<f32>(ctx.grid_cells));
+    }
     put(f.eye, ctx.scenes[s]->camera.position, 1.0f);
+    f.time[0] = ctx.scenes[s]->time;
+    f.time[1] = ctx.scene.specular_multiscatter ? 0.0f : 1.0f; // (0, the block's zero, is kin's own: on)
+    f.time[2] = static_cast<f32>(static_cast<u32>(ctx.scene.debug.surface_channel)); // (a bake's: kin_mesh_main)
     if (ctx.environment) {
         // The picture turned by the light's rotation; in the overlay's space the
         // directions come back to the scene's first.
@@ -7613,11 +11493,12 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         put(f.environment, {lights.environment_intensity, static_cast<f32>(ctx.environment->levels - 1), 0.0f}, 1.0f);
         std::memcpy(f.environment_matrix, to_environment.m, sizeof(f.environment_matrix));
     }
+    f.environment[2] = std::clamp(ctx.scene.specular_aa, 0.0f, 1.0f); // the overlay's too, as anisotropy
     // Receiver bias in each cascade's own texels; the shader optionally
     // corrects each PCF tap for the geometric receiver plane.
     put(f.shadow,
         {static_cast<f32>(std::max(ctx.cascades, 1u)), lights.shadow_receiver_plane_bias ? 1.0f : 0.0f,
-         _shadow_size > 0 ? 1.0f / static_cast<f32>(_shadow_size) : 0.0f},
+         ctx.sun_size > 0 ? 1.0f / static_cast<f32>(ctx.sun_size) : 0.0f},
         0.0f);
     put(f.cascade_forward, scene.camera.forward(), 0.0f);
     // The overlay is not occluded: it is not in the pre-pass (the world's
@@ -7640,13 +11521,428 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         f.cascade_bias[0] = std::max(lights.shadow_bias, 0.0f) * ctx.texel_world / ctx.depth_range;
         f.cascade_bias[1] = std::max(lights.shadow_normal_offset, 0.0f) * ctx.texel_world;
     }
-    for (std::size_t i = 0; i < ctx.chosen.size(); ++i) {
+    for (std::size_t i = 0; i < points; ++i) {
         put(f.lights + i * 8, to_space.apply(ctx.chosen[i].second->position), ctx.chosen[i].second->radius);
         const f32 size = std::max(ctx.chosen[i].second->size, 0.01f);
         put_color(f.lights + i * 8 + 4, ctx.chosen[i].second->color, size * size);
     }
+    // Screen-space reflections, the scene's own pass only (ssr_trace).
+    if (s == 0 && ctx.ssr) {
+        f.ssr[0] = 1.0f;
+        const SsrLayout layout = ssr_layout(view->_size, view->extent());
+        f.ssr[1] = static_cast<f32>(layout.w);
+        f.ssr[2] = static_cast<f32>(layout.h);
+        f.ssr[3] = std::clamp(ctx.scene.ssr.max_roughness, 0.0f, 1.0f);
+        // The pyramid as the frame before kept it: its levels and its grid (x + 4096 y).
+        f.ssr_pyramid[0] = static_cast<f32>(view->_ssr_prior_levels);
+        f.ssr_pyramid[1] = view->_ssr_prior_y;
+        f.ssr_pyramid[2] = static_cast<f32>(layout.pyramid_word);
+        f.ssr_pyramid[3] = static_cast<f32>(view->_ssr_prior_grid.x + 4096 * view->_ssr_prior_grid.y);
+        std::memcpy(f.ssr_previous, view->_ssr_prior.m, sizeof(f.ssr_previous));
+    }
+    // The reflection probes too (prepare_reflections).
+    if (s == 0 && ctx.probe_count > 0) {
+        f.probes[0] = static_cast<f32>(ctx.probe_count);
+        f.probes[1] = static_cast<f32>(_reflection_levels - 1);
+        std::memcpy(f.probe, ctx.probe_records.data(), std::size_t(ctx.probe_count) * 24 * sizeof(f32));
+    }
+    // The probes are in the scene's world: the overlay keeps the sky's light.
+    if (ctx.gi_resolved && s == 0) {
+        f.gi[0] = 1.0f;
+        f.gi[1] = ctx.view->_gi.area_resolved ? 1.0f : 0.0f;
+        f.gi[2] = ctx.view->_gi.area_resolved ? static_cast<f32>(ctx.view->_gi.area_emitter_count) : 0.0f;
+        f.gi[3] = ctx.scene.global_illumination.probes.intensity;
+    }
 
     SDL_PushGPUFragmentUniformData(ctx.commands, slot, &f, sizeof(f));
+}
+
+bool GpuRenderer3D::ssr_trace(FrameCtx& ctx) {
+    GpuView3D& view = *ctx.view;
+    const Scene3D& scene = ctx.scene;
+    const ScreenSpaceReflections3D& settings = scene.ssr;
+    const SsrLayout layout = ssr_layout(view._size, view.extent());
+    try {
+        ensure_buffer(view._ssr_buffer, layout.words * 4, 64,
+                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                          SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: screen-space reflections' buffer not made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        return false;
+    }
+    // The first frame has no picture to read: nothing this time (the end of the frame keeps one).
+    if (!view._ssr_seen || !view._ao_depth || !view._ao_normals)
+        return false;
+    struct Uniforms {
+        f32 view[16], projection[16];
+        f32 unproject_xy[4], unproject_zw[4];
+        f32 sizes[4], shape[4], colour[4];
+    } u{};
+    const Mat4f camera_view = scene.camera.view();
+    std::memcpy(u.view, camera_view.m, sizeof(u.view));
+    std::memcpy(u.projection, ctx.main_projection.m, sizeof(u.projection));
+    const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+    std::memcpy(u.unproject_xy, unproject.xy, sizeof(u.unproject_xy));
+    std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
+    u.sizes[0] = static_cast<f32>(layout.w);
+    u.sizes[1] = static_cast<f32>(layout.h);
+    u.sizes[2] = static_cast<f32>(view.extent().x);
+    u.sizes[3] = static_cast<f32>(view.extent().y);
+    u.shape[0] = std::max(settings.thickness, 1e-3f);
+    u.shape[1] = std::max(settings.max_distance, 0.1f);
+    u.shape[2] = static_cast<f32>(std::clamp(settings.steps, 8u, 128u));
+    u.shape[3] = std::clamp(settings.intensity, 0.0f, 1.0f);
+    u.colour[2] = ctx.taa ? 1.0f : 0.0f;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const PassMarker marker{commands, _gpu_markers, "kin3d.ssr"};
+    const SDL_GPUStorageBufferReadWriteBinding output{.buffer = view._ssr_buffer->handle()};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &output, 1);
+    if (!pass)
+        return false;
+    SDL_BindGPUComputePipeline(pass, _ssr_pipeline);
+    const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+        {{view._ao_depth.handle(), _point_sampler}, {view._ao_normals.handle(), _point_sampler}}};
+    SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), static_cast<u32>(inputs.size()));
+    SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (layout.w + 7) / 8, (layout.h + 7) / 8, 1);
+    SDL_EndGPUComputePass(pass);
+    return true;
+}
+
+void GpuRenderer3D::ssr_keep_picture(FrameCtx& ctx) {
+    GpuView3D& view = *ctx.view;
+    if (!view._ssr_buffer || !_ssr_pyramid_pipeline)
+        return;
+    // The frame's lit picture, linear where there is one: the temporal resolve's, the HDR view's, else the view's own
+    // output (sRGB-encoded where the shader encoded it).
+    SDL_GPUTexture* source = nullptr;
+    bool encoded = false;
+    if (ctx.taa && ctx.shown)
+        source = ctx.shown->handle();
+    else if (view._hdr && view._scene)
+        source = view._scene.handle();
+    else if (view._resolved) {
+        source = view._resolved->texture().handle();
+        encoded = view._format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    }
+    if (!source)
+        return;
+    const SsrLayout layout = ssr_layout(view._size, view.extent());
+    if (view._ssr_buffer->size() < layout.words * 4)
+        return;
+    // Level 0 reads the part of the picture this render filled.
+    const f32 share_x = static_cast<f32>(view.extent().x) / static_cast<f32>(std::max(view._size.x, 1)),
+              share_y = static_cast<f32>(view.extent().y) / static_cast<f32>(std::max(view._size.y, 1));
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const PassMarker marker{commands, _gpu_markers, "kin3d.ssr_picture"};
+    // Level 0 from the picture, each level after from the one before: a pass each (each reads the one before's writes).
+    u32 w = layout.pw, h = layout.ph, first = layout.pyramid_word, before = first, bw = w, bh = h;
+    for (u32 level = 0; level < layout.levels; ++level) {
+        const SDL_GPUStorageBufferReadWriteBinding output{.buffer = view._ssr_buffer->handle()};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &output, 1);
+        if (!pass)
+            return;
+        SDL_BindGPUComputePipeline(pass, _ssr_pyramid_pipeline);
+        const SDL_GPUTextureSamplerBinding picture{source, _owner->_sampler_linear};
+        SDL_BindGPUComputeSamplers(pass, 0, &picture, 1);
+        const f32 params[12] = {static_cast<f32>(w),
+                                static_cast<f32>(h),
+                                static_cast<f32>(bw),
+                                static_cast<f32>(bh),
+                                static_cast<f32>(first),
+                                static_cast<f32>(before),
+                                level == 0 ? 1.0f : 0.0f,
+                                encoded ? 1.0f : 0.0f,
+                                share_x,
+                                share_y,
+                                view._options.compress && !view._hdr && !ctx.taa ? 1.0f : 0.0f,
+                                0.0f};
+        SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+        before = first;
+        bw = w;
+        bh = h;
+        first += w * h * 2;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    view._ssr_prior = ctx.view_projections[0];
+    view._ssr_prior_y = ctx.scene.camera.projection_matrix(ctx.aspect).at(1, 1);
+    view._ssr_prior_grid = {static_cast<i32>(layout.pw), static_cast<i32>(layout.ph)};
+    view._ssr_prior_levels = layout.levels;
+    view._ssr_seen = true;
+}
+
+bool GpuRenderer3D::read_mesh(const IMeshBackend3D& base, u32 vertex_count, MeshData3D& out) {
+    const auto* mesh = dynamic_cast<const GpuMesh3D*>(&base);
+    if (!mesh || !mesh->vertices || !mesh->indices || mesh->levels.empty() || vertex_count == 0)
+        return false;
+    if (_owner->_frame) { // (what is recorded so far first)
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    std::vector<u8> bytes;
+    if (!_device->read_buffer(mesh->vertices, mesh->vertex_offset, vertex_count * u32(sizeof(GpuMeshVertex)), bytes) ||
+        bytes.size() < std::size_t(vertex_count) * sizeof(GpuMeshVertex))
+        return false;
+    out.vertices.resize(vertex_count);
+    for (u32 i = 0; i < vertex_count; ++i) {
+        GpuMeshVertex v;
+        std::memcpy(&v, bytes.data() + std::size_t(i) * sizeof(GpuMeshVertex), sizeof v);
+        out.vertices[i] = {{v.x, v.y, v.z}, {v.nx, v.ny, v.nz}, {v.u, v.v}, Color::rgba(v.r, v.g, v.b, v.a)};
+    }
+    const GpuMesh3D::Level& level = mesh->levels[0];
+    const u32 count = level.index_count;
+    if (!_device->read_buffer(mesh->indices, mesh->index_offset + level.first_index * u32(sizeof(u32)),
+                              count * u32(sizeof(u32)), bytes) ||
+        bytes.size() < std::size_t(count) * sizeof(u32))
+        return false;
+    out.indices.resize(count);
+    std::memcpy(out.indices.data(), bytes.data(), std::size_t(count) * sizeof(u32));
+    out.skin.clear();
+    if (mesh->skin) {
+        if (!_device->read_buffer(mesh->skin, 0, vertex_count * u32(sizeof(GpuSkinVertex)), bytes) ||
+            bytes.size() < std::size_t(vertex_count) * sizeof(GpuSkinVertex))
+            return false;
+        out.skin.resize(vertex_count);
+        for (u32 i = 0; i < vertex_count; ++i) {
+            GpuSkinVertex s;
+            std::memcpy(&s, bytes.data() + std::size_t(i) * sizeof(GpuSkinVertex), sizeof s);
+            out.skin[i].joints = {s.j0, s.j1, s.j2, s.j3};
+            out.skin[i].weights = {f32(s.w0) / 255.0f, f32(s.w1) / 255.0f, f32(s.w2) / 255.0f, f32(s.w3) / 255.0f};
+        }
+    }
+    return true;
+}
+
+bool GpuRenderer3D::read_texture(const Texture& texture, std::vector<u8>& texels, Vec2i& size) {
+    const auto* own = dynamic_cast<const GpuTextureBackend*>(texture.backend().get());
+    if (!own || !own->texture())
+        return false;
+    if (_owner->_frame) {
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    const u32 w = own->texture().width(), h = own->texture().height();
+    size = {i32(w), i32(h)};
+    return _device->read_texture_region(own->texture(), 0, 0, w, h, 8, texels);
+}
+
+bool GpuRenderer3D::read_reflection_capture(IReflectionCaptureBackend3D& base, std::vector<f32>& rgb, Vec2i& size) {
+    auto* capture = dynamic_cast<GpuReflectionCapture3D*>(&base);
+    if (!capture || !capture->source || capture->captured == 0)
+        return false;
+    // What is recorded so far (the capture's renders among it) goes to the GPU first, as before a pick's read-back.
+    if (_owner->_frame) {
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    const u32 w = capture->source.width(), h = capture->source.height();
+    std::vector<u8> texels;
+    if (!_device->read_texture_region(capture->source, 0, 0, w, h, 8, texels) || texels.size() < std::size_t(w) * h * 8)
+        return false;
+    rgb.resize(std::size_t(w) * h * 3);
+    for (std::size_t i = 0; i < std::size_t(w) * h; ++i)
+        for (std::size_t c = 0; c < 3; ++c) {
+            u16 half;
+            std::memcpy(&half, &texels[i * 8 + c * 2], sizeof(half));
+            rgb[i * 3 + c] = from_half(half);
+        }
+    size = {static_cast<i32>(w), static_cast<i32>(h)};
+    return true;
+}
+
+std::shared_ptr<IReflectionCaptureBackend3D> GpuRenderer3D::create_reflection_capture_from(Vec2i size,
+                                                                                           std::span<const f32> rgb) {
+    if (!_panorama_pipeline || !_filter_pipeline || !_environment_sampler || !_lights_available)
+        return {};
+    try {
+        const u32 w = static_cast<u32>(size.x), h = static_cast<u32>(size.y);
+        auto capture = std::make_shared<GpuReflectionCapture3D>();
+        capture->source = reflection_texture(*_device, w, h, 1, GpuDevice::complete_mip_levels(w, h),
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        std::vector<u16> texels(std::size_t(w) * h * 4);
+        for (std::size_t i = 0; i < std::size_t(w) * h; ++i) {
+            for (std::size_t c = 0; c < 3; ++c)
+                texels[i * 4 + c] = to_half(rgb[i * 3 + c]);
+            texels[i * 4 + 3] = to_half(1.0f);
+        }
+        _device->update_texture(capture->source.handle(), 0, 0, w, h, reinterpret_cast<const u8*>(texels.data()), 8,
+                                true);
+        _device->generate_mipmaps(capture->source.handle());
+        capture->captured = 1; // (as if captured: the renders that use it filter it)
+        return capture;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: reflection capture not loaded",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+void GpuRenderer3D::prepare_reflections(FrameCtx& ctx) {
+    ctx.probe_count = 0;
+    ctx.reflections = nullptr;
+    const Lights3D& lights = ctx.scene.lights;
+    if (!_lights_available || !_filter_pipeline || ctx.surface_only)
+        return;
+    // The probes that reach the view, with a capture made here: by priority, then the nearest; at most the array's.
+    struct Chosen {
+        const ReflectionProbeSource3D* probe;
+        std::shared_ptr<IReflectionCaptureBackend3D> capture;
+        f32 distance, volume;
+    };
+    std::vector<Chosen> chosen;
+    const GpuView3D* view = ctx.view;
+    const f32 aspect = static_cast<f32>(view->extent().x) / static_cast<f32>(std::max(view->extent().y, 1));
+    const GpuFrustum frustum = frustum_of(ctx.scene.camera.view_projection(aspect));
+    for (const ReflectionProbeSource3D& probe : lights.reflection_probes) {
+        const auto& backend = probe.capture.backend();
+        const auto* capture = dynamic_cast<const GpuReflectionCapture3D*>(backend.get());
+        if (!capture || capture->captured == 0 || !(probe.intensity > 0.0f) ||
+            !(probe.extent.x > 0.0f && probe.extent.y > 0.0f && probe.extent.z > 0.0f))
+            continue;
+        const Vec3f centre = probe.position + probe.box_offset;
+        if (ctx.scene.cull && !sphere_in(frustum, centre, length(probe.extent)))
+            continue;
+        chosen.push_back({&probe, backend, length(centre - ctx.scene.camera.position),
+                          probe.extent.x * probe.extent.y * probe.extent.z});
+    }
+    std::stable_sort(chosen.begin(), chosen.end(), [](const Chosen& a, const Chosen& b) {
+        return a.probe->priority != b.probe->priority ? a.probe->priority > b.probe->priority : a.distance < b.distance;
+    });
+    if (chosen.size() > max_reflection_probes3d)
+        chosen.resize(max_reflection_probes3d);
+    // Blended in that order on the GPU: the higher priority, then the smaller box, first.
+    std::stable_sort(chosen.begin(), chosen.end(), [](const Chosen& a, const Chosen& b) {
+        return a.probe->priority != b.probe->priority ? a.probe->priority > b.probe->priority : a.volume < b.volume;
+    });
+    if (!ctx.environment && chosen.empty())
+        return;
+    try {
+        // The array: the environment's specular size and levels (256 x 128 without one); made again when they change.
+        const u32 w = ctx.environment ? ctx.environment->specular.width() : 256u;
+        const u32 levels = ctx.environment ? ctx.environment->levels : 5u;
+        if (!_reflections || _reflections.width() != w || _reflection_levels != levels) {
+            _reflections =
+                reflection_texture(*_device, w, w / 2, 1 + max_reflection_probes3d, levels + 1,
+                                   SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+            _reflection_levels = levels;
+            _reflection_environment = nullptr;
+            _reflection_layers = {};
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: reflection array not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return;
+    }
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const u32 w = _reflections.width(), h = _reflections.height();
+    // Layer 0: the environment's specular, copied when it was filtered again.
+    if (ctx.environment && (_reflection_environment != ctx.environment ||
+                            _reflection_environment_generation != ctx.environment->generation)) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            for (u32 level = 0; level < _reflection_levels; ++level) {
+                const SDL_GPUTextureLocation from{.texture = ctx.environment->specular.handle(), .mip_level = level};
+                const SDL_GPUTextureLocation to{.texture = _reflections.handle(), .mip_level = level};
+                SDL_CopyGPUTextureToTexture(copy, &from, &to, std::max(1u, w >> level), std::max(1u, h >> level), 1,
+                                            false);
+            }
+            SDL_EndGPUCopyPass(copy);
+            _reflection_environment = ctx.environment;
+            _reflection_environment_generation = ctx.environment->generation;
+        }
+    }
+    // A layer each probe: the one its capture is in, else a free one, else the one read longest ago (not this render).
+    ++_reflection_renders;
+    const auto same = [](const std::weak_ptr<IReflectionCaptureBackend3D>& a,
+                         const std::shared_ptr<IReflectionCaptureBackend3D>& b) {
+        return !a.owner_before(b) && !b.owner_before(a);
+    };
+    for (const Chosen& c : chosen) {
+        u32 layer = max_reflection_probes3d;
+        for (u32 i = 0; i < max_reflection_probes3d && layer == max_reflection_probes3d; ++i)
+            if (same(_reflection_layers[i].capture, c.capture) && !_reflection_layers[i].capture.expired())
+                layer = i;
+        if (layer == max_reflection_probes3d) {
+            u64 oldest = ~u64{0};
+            for (u32 i = 0; i < max_reflection_probes3d; ++i) {
+                const ReflectionLayer& l = _reflection_layers[i];
+                const u64 age = l.capture.expired() ? 0 : l.used;
+                if (l.used != _reflection_renders && age < oldest) {
+                    oldest = age;
+                    layer = i;
+                }
+            }
+            _reflection_layers[layer] = {c.capture, 0, 0};
+        }
+        ReflectionLayer& slot = _reflection_layers[layer];
+        slot.used = _reflection_renders;
+        const auto& capture = static_cast<const GpuReflectionCapture3D&>(*c.capture);
+        if (slot.generation != capture.captured) {
+            // Filtered into the array's layer as an environment's levels are, and one level more: what a diffuse
+            // surface facing each way receives (over pi), as an environment's irradiance (8 x 4 at the sky's size: it
+            // is smooth).
+            for (u32 level = 0; level <= _reflection_levels; ++level) {
+                const bool diffuse = level == _reflection_levels;
+                const SDL_GPUStorageTextureReadWriteBinding output{
+                    .texture = _reflections.handle(), .mip_level = level, .layer = 1 + layer};
+                SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+                if (!pass)
+                    return;
+                SDL_BindGPUComputePipeline(pass, _filter_pipeline);
+                const SDL_GPUTextureSamplerBinding source{capture.source.handle(), _environment_sampler};
+                SDL_BindGPUComputeSamplers(pass, 0, &source, 1);
+                const u32 lw = std::max(1u, w >> level), lh = std::max(1u, h >> level);
+                const f32 roughness =
+                    _reflection_levels > 1 ? static_cast<f32>(level) / static_cast<f32>(_reflection_levels - 1) : 0.0f;
+                const f32 params[8] = {static_cast<f32>(lw),
+                                       static_cast<f32>(lh),
+                                       diffuse ? 1.0f : roughness,
+                                       diffuse      ? 2.0f
+                                       : level == 0 ? 0.0f
+                                                    : 1.0f,
+                                       static_cast<f32>(capture.source.width()),
+                                       static_cast<f32>(capture.source.height()),
+                                       static_cast<f32>(diffuse ? irradiance_samples : environment_samples),
+                                       0.0f};
+                SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+                SDL_DispatchGPUCompute(pass, (lw + 7) / 8, (lh + 7) / 8, 1);
+                SDL_EndGPUComputePass(pass);
+            }
+            slot.generation = capture.captured;
+            ++ctx.stats.reflection_filters;
+        }
+        // Its record (kin_probe_reflection): the boxes' world-to-local rows and centre, the influence box and blend,
+        // the parallax box (0: none) and intensity, where it was captured and its layer (negative: it gives no diffuse
+        // light, ReflectionProbeSource3D::diffuse).
+        const ReflectionProbeSource3D& probe = *c.probe;
+        const Vec3f centre = probe.position + probe.box_offset;
+        // (the rows of the matrix that turns world into local are where the rotation turns the axes)
+        const Vec3f row_x = probe.rotation.rotate({1, 0, 0}), row_y = probe.rotation.rotate({0, 1, 0}),
+                    row_z = probe.rotation.rotate({0, 0, 1});
+        const Vec3f parallax =
+            !probe.parallax ? Vec3f{}
+            : (probe.parallax_extent.x > 0.0f && probe.parallax_extent.y > 0.0f && probe.parallax_extent.z > 0.0f)
+                ? probe.parallax_extent
+                : probe.extent;
+        f32* r = ctx.probe_records.data() + std::size_t(ctx.probe_count) * 24;
+        put(r, row_x, centre.x);
+        put(r + 4, row_y, centre.y);
+        put(r + 8, row_z, centre.z);
+        put(r + 12, probe.extent, std::max(probe.blend, 0.0f));
+        put(r + 16, parallax, probe.intensity);
+        put(r + 20, probe.position, static_cast<f32>(1 + layer) * (probe.diffuse ? 1.0f : -1.0f));
+        ++ctx.probe_count;
+    }
+    ctx.reflections = &_reflections;
+    if (ctx.probe_count > 0)
+        ctx.lights_variant = true;
+    ctx.stats.reflection_probes = ctx.probe_count;
 }
 
 void GpuRenderer3D::sky_environment(FrameCtx& ctx) {
@@ -7756,7 +12052,7 @@ void GpuRenderer3D::draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode) {
     std::memcpy(u.prior_view_projection, (ctx.taa_reset || !ctx.taa ? ctx.view_projections : view->_taa_prior)[0].m,
                 sizeof(u.prior_view_projection));
     const bool panorama = sky.mode == SkyMode3D::Image && ctx.environment;
-    put(u.target, {static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), panorama ? 1.0f : 0.0f},
+    put(u.target, {static_cast<f32>(view->extent().x), static_cast<f32>(view->extent().y), panorama ? 1.0f : 0.0f},
         orthographic ? 1.0f : 0.0f);
     put(u.camera, scene.camera.position, 1.0f);
     put(u.forward, scene.camera.forward(), 0.0f);
@@ -7770,6 +12066,7 @@ void GpuRenderer3D::draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode) {
     fill_atmosphere(u.atmosphere, sky, scene.lights.sun.direction);
     if (ctx.fog) {
         fill_fog(u.fog, scene.fog, sky, orthographic);
+        u.fog.view[2] = ctx.fog_sun || ctx.fog_volume_sun ? 1.0f : 0.0f;
     }
     if (mode != 2) {
         const SDL_GPUTextureSamplerBinding environment =
@@ -7803,7 +12100,8 @@ void GpuRenderer3D::begin_commands(FrameCtx& ctx) {
     SDL_GPUCommandBuffer* commands = ctx.commands;
 
     // Lights3D::sky_lights_scene: the environment is the sky's, made again when the sky has moved.
-    sky_environment(ctx);
+    if (!ctx.surface_only)
+        sky_environment(ctx);
     ctx.sky_pass = ctx.sky && (ctx.scene.sky.mode == SkyMode3D::Procedural || ctx.environment != nullptr);
 
     // An environment used for the first time: its filtered copies, once.
@@ -7811,6 +12109,7 @@ void GpuRenderer3D::begin_commands(FrameCtx& ctx) {
         filter_environment(commands, *ctx.environment);
         ++stats.environment_prefilters;
     }
+    prepare_reflections(ctx);
 
     // Without shadows the shader still samples a map: one that is all far.
     if ((!ctx.shadows || ctx.lights_variant) && _no_shadow && !_no_shadow_cleared) {
@@ -7822,7 +12121,7 @@ void GpuRenderer3D::begin_commands(FrameCtx& ctx) {
     }
 }
 
-void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
+bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     SDL_GPUCommandBuffer* commands = ctx.commands;
     SDL_GPUBuffer* storage = ctx.storage;
@@ -7831,7 +12130,7 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     stats.shadow_cascades = ctx.shadows ? ctx.cascades : 0;
     if (ctx.sun_shadow_cached) {
         stats.shadow_cached = true; // the maps hold what this render would draw into them
-        return;
+        return true;
     }
     bool complete = ctx.shadows;
     SDL_GPUBuffer* shadow_storage[2] = {storage, _caster_lists && ctx.cascades > 1 ? _caster_lists->handle() : storage};
@@ -7841,11 +12140,11 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
         // a frame rendering several views would otherwise be handed a new
         // map for each (64 MB at 4096: 7 ms a render, measured, instead of 2).
         const SDL_GPUDepthStencilTargetInfo depth =
-            depth_target(_shadow_map.handle(), SDL_GPU_STOREOP_STORE, /*cycle=*/false, k);
+            depth_target(ctx.sun_depth->handle(), SDL_GPU_STOREOP_STORE, /*cycle=*/false, k);
         SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
         complete = complete && pass != nullptr;
         if (pass) {
-            set_viewport(pass, _shadow_size, _shadow_size);
+            set_viewport(pass, ctx.sun_size, ctx.sun_size);
             DrawUniforms u{};
             std::memcpy(u.view_projection, (ctx.cascades > 1 ? ctx.plan.cascade[k].view_projection : ctx.light_vp).m,
                         sizeof(u.view_projection));
@@ -7860,9 +12159,11 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (ref.skinned && (!storage || !ctx.joints || !ctx.joint_offsets)) {
                     continue;
                 }
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided,
-                                                      Pass::Shadow, cutout, nullptr, false, ref.skinned);
+                SDL_GPUGraphicsPipeline* p =
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                             false, ref.skinned, false, false, Unlit::Off, false, pass_surface(caster));
                 if (!p) {
+                    complete = false;
                     continue;
                 }
                 // A skinned copy's shader also reads the frame's joint matrices and each copy's first.
@@ -7887,6 +12188,7 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, pass, caster);
                 }
+                bind_offset(commands, pass, caster, ref.skinned);
                 // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices (this map's).
                 if (ref.clustered && _gc.active) {
                     draw_cluster_indirect(ref, commands, pass, u, ctx.cascades > 1 ? 1 + k : 1);
@@ -7932,14 +12234,28 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                     stats.cascade_casters[k] += count;
                 }
             }
-            complete =
-                draw_particle_shadows(ctx, pass, ctx.cascades > 1 ? ctx.plan.cascade[k].view_projection : ctx.light_vp,
-                                      false, k) &&
-                complete;
+            // Public mesh shadows exclude particles, including scratch retained
+            // from a preceding stock render of another scene.
+            if (!ctx.public_shadow)
+                complete = draw_particle_shadows(ctx, pass,
+                                                 ctx.cascades > 1 ? ctx.plan.cascade[k].view_projection : ctx.light_vp,
+                                                 false, k) &&
+                           complete;
             SDL_EndGPURenderPass(pass);
         }
     }
-    shadow_drawn(ctx, complete);
+    if (ctx.public_shadow) {
+        // Initialize every layer, including unused cascades or an inactive sun.
+        for (u32 k = ctx.cascades; k < ctx.sun_layers; ++k) {
+            const auto depth = depth_target(ctx.sun_depth->handle(), SDL_GPU_STOREOP_STORE, false, k);
+            if (auto* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth))
+                SDL_EndGPURenderPass(pass);
+            else
+                return false;
+        }
+    } else
+        shadow_drawn(ctx, complete);
+    return !ctx.shadows || complete;
 }
 
 // The shadow cache (Lights3D::cache_shadows). The pass is a function of: the map, the cascades' views, the camera (it
@@ -8044,8 +12360,9 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
             c.prev_key.clear();
             return false;
         }
-        payload.value(ref.mesh->serial); // a skinned mesh's skeleton is the mesh's (its skin, and so its joint count),
-                                         // so this is its identity
+        payload.value(ref.mesh->serial);  // a skinned mesh's skeleton is the mesh's (its skin, and so its joint count),
+                                          // so this is its identity
+        payload.value(ref.mesh->content); // and its shape (morph targets)
         payload.value(ref.draw->count);
         payload.value(ref.levels);
         payload.value(ref.clustered);
@@ -8053,10 +12370,19 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
         payload.value(ref.skinned ? ref.mesh->skin_bounds.size() : std::size_t{0});
         payload.value(m.double_sided);
         payload.value(m.blend);
+        if (const auto* moving = moving_surface(m); moving && !ref.skinned) { // its vertices move: its offset's inputs
+            payload.value(reinterpret_cast<std::uintptr_t>(moving));
+            payload.value(ctx.scene.time);
+            payload.append(m.shader_params.data(), sizeof(m.shader_params));
+            for (const Texture* t :
+                 {&m.texture, &m.metallic_roughness, &m.normal, &m.occlusion, &m.emissive_texture, &m.graph_maps})
+                payload.value(reinterpret_cast<std::uintptr_t>(t->backend().get()));
+        }
         if (m.blend == Blend3D::Mask) {
             payload.value(m.alpha_cutoff);
             payload.value(m.wrap_u);
             payload.value(m.wrap_v);
+            shadow_sampler_key(payload, m, texture, _anisotropy, _lod_bias);
             payload.value(texture);
             payload.value(texture ? texture->version() : u64{0});
         }
@@ -8230,12 +12556,16 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     }
     VelocityUniforms u{};
     std::memcpy(u.view_projection, ctx.drawn[which].m, sizeof(u.view_projection));
+    put_clip(u.clip, ctx.scenes[which]);
+    put_hidden(u.first, ctx.scenes[which]);
     std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
     std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[which].m, sizeof(u.prior));
     // A skinned copy's shader also reads the joints (the frame's, each copy's first), and those of the frame before
     // (and where each copy's own start in them).
-    const std::array<SDL_GPUBuffer*, 6> buffers{storage,           previous_storage,    ctx.joints,
-                                                ctx.joint_offsets, ctx.previous_joints, ctx.previous_joint_offsets};
+    std::array<SDL_GPUBuffer*, 7> buffers{
+        storage, previous_storage, ctx.joints, ctx.joint_offsets, ctx.previous_joints, ctx.previous_joint_offsets,
+        nullptr};
+    std::array<SDL_GPUBuffer*, 3> morph_buffers{storage, previous_storage, nullptr};
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{target_pass};
     for (const u32 index : _order) {
@@ -8248,11 +12578,28 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
         }
         const Material3D& occluder = ref.draw->material;
         const bool cutout = occluder.blend == Blend3D::Mask;
-        SDL_GPUGraphicsPipeline* p = velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned);
+        // A mesh with morph targets blended on the GPU: its previous positions are the vertices as drawn the frame
+        // before (kept by this frame's first blend), or its vertices as they are when it was not blended this frame.
+        const GpuSurfaceShader3D* surface = pass_surface(occluder);
+        const bool morph = ref.mesh->morph && ref.mesh->previous && !(surface && surface->offsets()) &&
+                           (ref.skinned ? bool(_prepass_velocity_morph_skinned_vertex_shader)
+                                        : bool(_prepass_velocity_morph_vertex_shader));
+        SDL_GPUGraphicsPipeline* p =
+            velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned, surface, morph);
         if (!p) {
             continue;
         }
-        binder.bind_pipeline(p, buffers.data(), ref.skinned ? 6 : 2);
+        SDL_GPUBuffer* const before =
+            morph ? (ref.mesh->blended_frame == _owner->_frame_serial ? ref.mesh->previous : ref.mesh->vertices)
+                  : nullptr;
+        buffers[6] = before;
+        morph_buffers[2] = before;
+        if (morph && which == 0 && before == ref.mesh->previous)
+            ++stats.morph_velocity_draws;
+        if (morph && !ref.skinned)
+            binder.bind_pipeline(p, morph_buffers.data(), 3);
+        else
+            binder.bind_pipeline(p, buffers.data(), ref.skinned ? (morph ? 7 : 6) : 2);
         if (ref.clustered && !cluster_index) {
             continue;
         }
@@ -8263,6 +12610,7 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
         if (cutout) {
             bind_cutout(commands, target_pass, occluder);
         }
+        bind_offset(commands, target_pass, occluder, ref.skinned);
         if (ref.clustered) {
             draw_cluster_copies(ref, commands, target_pass, binder, u, which == 0 ? &stats : nullptr);
             continue;
@@ -8321,7 +12669,8 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     target.texture = view->_ao_normals.handle();
     target.load_op = SDL_GPU_LOADOP_LOAD;
     target.store_op = SDL_GPU_STOREOP_STORE;
-    auto depth = depth_target(view->_taa_depth.handle(), SDL_GPU_STOREOP_DONT_CARE, false);
+    auto depth = depth_target(view->_taa_depth.handle(),
+                              _taa_depth_sampled ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE, false);
     depth.load_op = SDL_GPU_LOADOP_LOAD;
     auto* pass = SDL_BeginGPURenderPass(ctx.commands, &target, 1, &depth);
     if (!pass)
@@ -8331,7 +12680,9 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     const auto particles = [&] {
         const auto before = ctx.stats.taa_reactive_draws;
         draw_particles(ctx, pass, true);
-        particles_ok = ctx.stats.taa_reactive_draws - before == ctx.stats.particle_batches;
+        // Colour composition can split one source around glass or other sprites.
+        // Coverage replays each source once, so compare against source batches.
+        particles_ok = ctx.stats.taa_reactive_draws - before == _particle_batches.size();
     };
     DrawBinder binder{pass};
     _phase = Phase::All;
@@ -8344,6 +12695,8 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
                      !which && ctx.overlaid ? overlay_split : 1);
         VelocityUniforms u{};
         std::memcpy(u.view_projection, ctx.drawn[which].m, sizeof(u.view_projection));
+        put_clip(u.clip, ctx.scenes[which]);
+        put_hidden(u.first, ctx.scenes[which]);
         std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
         std::memcpy(u.prior, view->_taa_prior[which].m, sizeof(u.prior));
         for (const auto index : _order) {
@@ -8372,7 +12725,8 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
             binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index_buffer() : nullptr);
             if (ref.skinned)
                 binder.bind_skin(ref.mesh);
-            const auto picture = texture_binding(material.texture, material.wrap_u, material.wrap_v);
+            const auto picture =
+                texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]);
             SDL_BindGPUFragmentSamplers(pass, 0, &picture, 1);
             u64 key = 1469598103934665603ull;
             taa_hash(key, ref.mesh->serial);
@@ -8390,8 +12744,10 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
                 taa_hash(ctx.coverage_key, effect);
                 taa_hash(ctx.coverage_key, ref.instances[i].transform);
             }
-            const Vec4f flags{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0};
-            SDL_PushGPUFragmentUniformData(ctx.commands, 0, &flags, sizeof(flags));
+            const std::array<Vec4f, 2> flags{
+                Vec4f{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0},
+                Vec4f{material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
+            SDL_PushGPUFragmentUniformData(ctx.commands, 0, flags.data(), sizeof(flags));
             if (ref.clustered) {
                 draw_cluster_copies(ref, ctx.commands, pass, binder, u, nullptr);
                 if (_gc.active) {
@@ -8418,6 +12774,88 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
         particles();
     SDL_EndGPURenderPass(pass);
     return particles_ok;
+}
+
+bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL_GPUTextureFormat depth, bool second) {
+    GpuView3D* view = ctx.view;
+    auto& stats = ctx.stats;
+    auto* commands = ctx.commands;
+    auto* storage = ctx.storage;
+    bool complete = true;
+    const u32 draws_before = stats.ao_draws, instances_before = stats.ao_instances;
+    set_viewport(prepass, view->extent().x, view->extent().y);
+    DrawUniforms u{};
+    std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+    put_clip(u.clip, ctx.scenes[0]);
+    put_hidden(u.first, ctx.scenes[0]);
+    SDL_GPUBuffer* cluster_index = cluster_index_buffer();
+    DrawBinder binder{prepass};
+    _phase = !ctx.occlusion ? Phase::All : second ? Phase::Second : Phase::First;
+    if (ctx.taa) {
+        draw_velocity(ctx, prepass, 0, depth);
+    }
+    for (const u32 index : _order) {
+        const DrawRef& ref = _refs[index];
+        if (ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || phase_skips(ref)) {
+            continue;
+        }
+        if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
+            continue;
+        }
+        const Material3D& occluder = ref.draw->material;
+        const bool cutout = occluder.blend == Blend3D::Mask;
+        SDL_GPUGraphicsPipeline* p = geometry_pipeline(depth, !occluder.double_sided, cutout, ref.skinned,
+                                                       ref.retained != ~0u, pass_surface(occluder));
+        if (!p) {
+            complete = false;
+            continue;
+        }
+        const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
+        const std::array<SDL_GPUBuffer*, 2> retained_buffers{
+            ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
+            _retained_indices ? _retained_indices->handle() : nullptr};
+        binder.bind_pipeline(p,
+                             ref.retained != ~0u ? retained_buffers.data()
+                             : ref.skinned       ? skinned_buffers.data()
+                                                 : &storage,
+                             ref.retained != ~0u ? 2
+                             : ref.skinned       ? 3
+                                                 : 1);
+        if (ref.clustered && !cluster_index) {
+            continue;
+        }
+        binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
+        if (ref.skinned) {
+            binder.bind_skin(ref.mesh);
+        }
+        if (cutout) {
+            bind_cutout(commands, prepass, occluder);
+        }
+        bind_offset(commands, prepass, occluder, ref.skinned);
+        if (ref.clustered) {
+            draw_cluster_copies(ref, commands, prepass, binder, u, &stats);
+            continue;
+        }
+        for (u32 l = 0; l < ref.levels; ++l) {
+            if (ref.level_seen[l] == 0) {
+                continue;
+            }
+            u.first[0] = ref.level_first[l];
+            SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+            (void)binder.draw(ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index);
+            ++stats.ao_draws;
+            stats.ao_instances += ref.level_seen[l];
+        }
+    }
+    // The camera's turn over the pixels nothing was drawn on (the far depth), so that the resolve reprojects
+    // the sky.
+    if (ctx.taa && ctx.sky_pass && (!ctx.occlusion || second)) {
+        draw_sky(ctx, prepass, 2);
+    }
+    _phase = Phase::All;
+    stats.geometry_draws += stats.ao_draws - draws_before;
+    stats.geometry_instances += stats.ao_instances - instances_before;
+    return complete;
 }
 
 void GpuRenderer3D::prepass(FrameCtx& ctx) {
@@ -8450,12 +12888,17 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
     ctx.velocity_drawn = false; // the pre-pass began, so _ao_normals holds this frame's velocity
     // Only stock mesh shaders define the main pass's velocity output. Colour-only particle/custom shaders must
     // stay off that attachment: masking an undefined shader output does not preserve it on every backend.
-    ctx.main_velocity = ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles &&
-                        _particle_batches.empty() && ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
-                        std::none_of(_refs.begin(), _refs.end(),
-                                     [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
-    if (!ctx.main_velocity && (ao.enabled || want_contact || ctx.taa || ctx.soft_particles) && _ao_available &&
-        (storage || ctx.taa || stats.retained_instances) &&
+    ctx.main_velocity =
+        ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles && !ctx.gi_lit &&
+        !ctx.fog_sun_wanted && !ctx.fog_volume_wanted && !ctx.decals && !ctx.ssr_wanted && _particle_batches.empty() &&
+        std::none_of(_refs.begin(), _refs.end(), [](const DrawRef& ref) { return ref.mesh->previous != nullptr; }) &&
+        ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
+        std::none_of(_refs.begin(), _refs.end(),
+                     [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
+    if (!ctx.main_velocity &&
+        (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit || ctx.fog_sun_wanted ||
+         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted) &&
+        _ao_available && (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
         SDL_GPUColorTargetInfo target{};
         target.texture = view->_ao_normals.handle();
@@ -8469,80 +12912,43 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
         // With Lod3D::occlusion the pre-pass is two passes: the opaque meshes and the first pass's clusters, then (once
         // the depth pyramid is built from that and the second pass has tested the rest against it) the second pass's
         // clusters.
-        const auto draw_all = [&](SDL_GPURenderPass* prepass, bool second) {
-            set_viewport(prepass, view->_size.x, view->_size.y);
-            DrawUniforms u{};
-            std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
-            SDL_GPUBuffer* cluster_index = cluster_index_buffer();
-            DrawBinder binder{prepass};
-            _phase = !ctx.occlusion ? Phase::All : second ? Phase::Second : Phase::First;
-            if (ctx.taa) {
-                draw_velocity(ctx, prepass, 0, _ao_depth_format);
-            }
-            for (const u32 index : _order) {
-                const DrawRef& ref = _refs[index];
-                if (ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || phase_skips(ref)) {
-                    continue;
-                }
-                if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
-                    continue;
-                }
-                const Material3D& occluder = ref.draw->material;
-                const bool cutout = occluder.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p =
-                    pipeline(ao_normal_format, 1, !occluder.double_sided, Pass::Prepass, cutout, nullptr, false,
-                             ref.skinned, false, false, Unlit::Off, ref.retained != ~0u);
-                if (!p) {
-                    continue;
-                }
-                const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
-                const std::array<SDL_GPUBuffer*, 2> retained_buffers{
-                    ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
-                    _retained_indices ? _retained_indices->handle() : nullptr};
-                binder.bind_pipeline(p,
-                                     ref.retained != ~0u ? retained_buffers.data()
-                                     : ref.skinned       ? skinned_buffers.data()
-                                                         : &storage,
-                                     ref.retained != ~0u ? 2
-                                     : ref.skinned       ? 3
-                                                         : 1);
-                if (ref.clustered && !cluster_index) {
-                    continue;
-                }
-                binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
-                if (ref.skinned) {
-                    binder.bind_skin(ref.mesh);
-                }
-                if (cutout) {
-                    bind_cutout(commands, prepass, occluder);
-                }
-                if (ref.clustered) {
-                    draw_cluster_copies(ref, commands, prepass, binder, u, &stats);
-                    continue;
-                }
-                for (u32 l = 0; l < ref.levels; ++l) {
-                    if (ref.level_seen[l] == 0) {
-                        continue;
-                    }
-                    u.first[0] = ref.level_first[l];
-                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                    (void)binder.draw(ref.mesh->levels[l].index_count, ref.level_seen[l],
-                                      ref.mesh->levels[l].first_index);
-                    ++stats.ao_draws;
-                    stats.ao_instances += ref.level_seen[l];
-                }
-            }
-            // The camera's turn over the pixels nothing was drawn on (the far depth), so that the resolve reprojects
-            // the sky.
-            if (ctx.taa && ctx.sky_pass && (!ctx.occlusion || second)) {
-                draw_sky(ctx, prepass, 2);
-            }
-            _phase = Phase::All;
+        const auto draw_all = [&](SDL_GPURenderPass* pass, bool second) {
+            return draw_geometry(ctx, pass, _ao_depth_format, second);
         };
-        if (SDL_GPURenderPass* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth)) {
+        const auto depth_format = _ao_depth_format == SDL_GPU_TEXTUREFORMAT_D32_FLOAT ? TextureFormat::Depth32Float
+                                                                                      : TextureFormat::Depth24Unorm;
+        const auto normal_format = ctx.taa ? TextureFormat::Rgba16Float : TextureFormat::Rg16Float;
+        auto& recipe = view->_geometry_recipe;
+        if (recipe.resources.empty() || recipe.resources[0].size != view->_size ||
+            recipe.resources[0].format != depth_format || recipe.resources[1].format != normal_format) {
+            // These are view-owned, pinned targets, not transient heap aliases.
+            // The stock velocity mode packs motion/flags alongside its normal.
+            recipe.resources = {{.name = "geometry_depth",
+                                 .kind = GraphResourceKind::RenderAttachment,
+                                 .format = depth_format,
+                                 .size = view->_size,
+                                 .exported = true,
+                                 .persistent = true},
+                                {.name = ctx.taa ? "geometry_normal_motion" : "geometry_normals",
+                                 .kind = GraphResourceKind::RenderAttachment,
+                                 .format = normal_format,
+                                 .size = view->_size,
+                                 .exported = true,
+                                 .persistent = true}};
+            recipe.passes = {{.name = "geometry", .writes = {0, 1}, .required_features = graph_feature::attachments}};
+        }
+        auto& compiler = view->_geometry_compiler;
+        const auto compilations = compiler.stats().compilations;
+        const auto& geometry_plan = compiler.compile(recipe, graph_feature::attachments);
+        stats.geometry_graph_reused = compilations == compiler.stats().compilations;
+        const auto record = [&] {
+            const PassMarker geometry_marker{commands, _gpu_markers, "kin3d.prepass_geometry"};
+            auto* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth);
+            if (!prepass)
+                return false;
             ctx.velocity_drawn = true;
             ctx.prepass_ran = true;
-            draw_all(prepass, /*second=*/false);
+            bool complete = draw_all(prepass, /*second=*/false);
             SDL_EndGPURenderPass(prepass);
             if (ctx.occlusion) {
                 build_depth_pyramid(ctx, view->_ao_depth);
@@ -8554,13 +12960,19 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                 keep_depth.load_op = SDL_GPU_LOADOP_LOAD;
                 keep_depth.cycle = false;
                 if (SDL_GPURenderPass* rest = SDL_BeginGPURenderPass(commands, &keep, 1, &keep_depth)) {
-                    draw_all(rest, /*second=*/true);
+                    complete = draw_all(rest, /*second=*/true) && complete;
                     SDL_EndGPURenderPass(rest);
+                } else {
+                    complete = false;
                 }
             }
             if (!ctx.taa) {
                 ctx.main_projection = scene.camera.projection_matrix(ctx.aspect);
             }
+            return complete;
+        };
+        const std::array<std::function<bool()>, 1> operations{[&] { return record(); }};
+        if (execute_resource_graph(geometry_plan, operations)) {
             // Both of them, at one size (the occlusion not at half): one blur serves both.
             const bool merge = ao.enabled && want_contact && _ao_blur_both_pipeline &&
                                view->_ao_raw.width() == view->_contact_raw.width() &&
@@ -8570,14 +12982,30 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                 compute_occlusion(commands, *view, scene.camera, ctx.main_projection, ao, stats, !merge);
             }
             if (want_contact) {
+                const PassMarker contact_marker{commands, _gpu_markers, "kin3d.contact_shadows"};
                 compute_contact_shadows(commands, *view, scene.camera, ctx.main_projection, contact,
                                         lights.sun.direction, stats, !merge);
             }
             if (merge) {
+                const PassMarker blur_marker{commands, _gpu_markers, "kin3d.ao_contact_blur"};
                 blur_screen_space_both(commands, *view, ctx.main_projection, stats);
             }
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
+            ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, _gi_borrowed, scene, ctx.main_projection,
+                                                       ctx.taa && !ctx.taa_reset, stats);
+            // (A view borrowing another's GI has no area lights' light: theirs is that view's, on its own pixels.)
+            view->_gi.area_resolved =
+                !_gi_borrowed && ctx.gi_resolved && gi_area(commands, *view, scene, ctx.main_projection, stats);
+            // (Added to a float picture after the main pass: an HDR view's or temporal anti-aliasing's.)
+            ctx.fog_sun =
+                ctx.fog_sun_wanted && ctx.fog && (view->_hdr || ctx.taa) && fog_sun(commands, *view, ctx, stats);
+            ctx.fog_volume =
+                ctx.fog_volume_wanted && ctx.fog && (view->_hdr || ctx.taa) && fog_volume(commands, *view, ctx, stats);
+            ctx.ssr = ctx.ssr_wanted && ssr_trace(ctx);
+            stats.ssr_traces = ctx.ssr ? 1 : 0;
+            if (ctx.ssr)
+                ctx.lights_variant = true;
         }
     }
 }
@@ -8605,6 +13033,169 @@ void GpuRenderer3D::overlay_velocity(FrameCtx& ctx) {
     }
 }
 
+void GpuRenderer3D::prepare_decals(FrameCtx& ctx) {
+    _decal_runs.clear();
+    _decal_records.clear();
+    if (!ctx.decals)
+        return;
+    const Scene3D& scene = ctx.scene;
+    const Camera3D& camera = scene.camera;
+    // The drawing order: by `order`, then by picture (each picture where it first appears among its order's decals),
+    // then as added. Stable, so equal keys keep the order given.
+    const auto decals = scene.decals();
+    _decal_order.resize(decals.size());
+    _decal_group.resize(decals.size());
+    std::map<std::tuple<i32, const void*, const void*, Wrap3D>, u32> first_of;
+    for (u32 i = 0; i < decals.size(); ++i) {
+        const Decal3D& d = decals[i];
+        _decal_order[i] = i;
+        _decal_group[i] =
+            first_of.try_emplace({d.order, d.texture.backend().get(), d.normal.backend().get(), d.wrap}, i)
+                .first->second;
+    }
+    std::stable_sort(_decal_order.begin(), _decal_order.end(), [&](u32 a, u32 b) {
+        return decals[a].order != decals[b].order ? decals[a].order < decals[b].order
+                                                  : _decal_group[a] < _decal_group[b];
+    });
+    for (const u32 index : _decal_order) {
+        const Decal3D& decal = decals[index];
+        // Out of the view: the sphere round its box.
+        const Mat4f& m = decal.transform;
+        const f32 reach = 0.5f * std::sqrt(m.at(0, 0) * m.at(0, 0) + m.at(1, 0) * m.at(1, 0) + m.at(2, 0) * m.at(2, 0) +
+                                           m.at(0, 1) * m.at(0, 1) + m.at(1, 1) * m.at(1, 1) + m.at(2, 1) * m.at(2, 1) +
+                                           m.at(0, 2) * m.at(0, 2) + m.at(1, 2) * m.at(1, 2) + m.at(2, 2) * m.at(2, 2));
+        if (!sphere_in(ctx.frustums[0], {m.at(0, 3), m.at(1, 3), m.at(2, 3)}, reach)) {
+            ++ctx.stats.decals_culled;
+            continue;
+        }
+        const Mat4f to_decal = decal.transform.inverse();
+        // Inside: the camera within the box grown by its near plane (in the box's units, along each axis).
+        const Vec3f eye = to_decal.apply(camera.position);
+        const f32 near = std::max(camera.z_near, 0.0f) * 2.0f;
+        bool inside = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            const Vec3f column{m.at(0, axis), m.at(1, axis), m.at(2, axis)};
+            const f32 scale = std::max(length(column), 1e-6f);
+            const f32 e = axis == 0 ? eye.x : axis == 1 ? eye.y : eye.z;
+            inside = inside && std::abs(e) <= 0.5f + near / scale;
+        }
+        const bool mirrored = m.determinant() < 0.0f;
+        DecalRecord record{};
+        std::memcpy(record.model, m.m, sizeof(record.model));
+        std::memcpy(record.to_decal, to_decal.m, sizeof(record.to_decal));
+        const LinearColor c = to_linear(decal.color);
+        put(record.colour, {c.r, c.g, c.b}, c.a);
+        put(record.surface,
+            {decal.roughness, std::clamp(decal.metallic, 0.0f, 1.0f), decal.normal ? decal.normal_strength : 0.0f},
+            std::max(decal.emission, 0.0f));
+        put(record.fade, {std::clamp(decal.normal_fade, 0.0f, 1.0f), std::clamp(decal.depth_fade, 0.0f, 1.0f), 0.0f},
+            0.0f);
+        // A run: decals one after another (in the drawing order) with the same pictures, sampler and pipeline.
+        const u32 at = static_cast<u32>(_decal_records.size());
+        _decal_records.push_back(record);
+        DecalRun* last = _decal_runs.empty() ? nullptr : &_decal_runs.back();
+        if (last && last->texture == decal.texture && last->normal == decal.normal && last->wrap == decal.wrap &&
+            last->inside == inside && last->mirrored == mirrored) {
+            ++last->count;
+        } else {
+            _decal_runs.push_back({at, 1, decal.texture, decal.normal, decal.wrap, inside, mirrored});
+            for (const Texture* t : {&decal.texture, &decal.normal}) {
+                if (*t) {
+                    _owner->retain(*t);
+                    if (const auto* gpu = dynamic_cast<const GpuTextureBackend*>(t->backend().get()))
+                        gpu->mark_material_read(_owner->_frame_serial);
+                }
+            }
+        }
+    }
+    // One upload of the frame's records, before its passes (cycled: a frame still drawing reads its own).
+    if (!_decal_records.empty()) {
+        const u32 bytes = static_cast<u32>(_decal_records.size() * sizeof(DecalRecord));
+        ensure_buffer(_decal_buffer, bytes, 64 * sizeof(DecalRecord), SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+        _device->upload_storage_buffer(_decal_buffer->handle(), 0, bytes, _decal_records.data(), true);
+    }
+}
+
+void GpuRenderer3D::draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass,
+                                std::array<SDL_GPUTextureSamplerBinding, 12> shared) {
+    GpuView3D* view = ctx.view;
+    const Scene3D& scene = ctx.scene;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    if (_decal_runs.empty() || !_decal_buffer || !view->_ao_depth || !view->_ao_normals || !_decal_shader ||
+        !_decal_vertex_shader)
+        return;
+    const SDL_GPUTextureFormat format = ctx.taa ? hdr_format : view->_format;
+    const SDL_GPUSampleCount samples = sample_count(ctx.taa ? 1u : view->_samples);
+    // Front faces tested against the scene's depth where the camera is outside the box (what is in front of the box
+    // hides it, a custom-shader mesh included); back faces untested where it is inside (the front ones are behind it).
+    const auto pipeline_for = [&](bool inside, bool mirrored) {
+        const bool front = !inside;
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _decal_vertex_shader.handle(),
+                                                     .fragment = _decal_shader.handle(),
+                                                     .blend = GpuBlendMode::Premultiplied,
+                                                     .format = format,
+                                                     .layout = GpuVertexLayout::None,
+                                                     .depth_stencil = _depth_format,
+                                                     .depth = front ? GpuDepthTest::Test : GpuDepthTest::None,
+                                                     .cull = front != mirrored ? GpuCull::Back : GpuCull::Front,
+                                                     .samples = samples});
+    };
+    // The material block the lighting reads: receives the sun's shadow, in the pre-pass (so its occlusion applies).
+    const MaterialUniforms material{{0, 0, 1, 0}, {0, 1, 1, 1}, {0, 0, 1, 0}, {0, 0, 0, 0}, {1, 1, 0, 0}};
+    SDL_PushGPUFragmentUniformData(commands, 1, &material, sizeof(material));
+    // Slot 2, the custom layout's parameters and fog (as a custom material's: the scene's fog), and slot 3 its lights.
+    auto custom = std::make_unique<CustomFogUniforms>();
+    if (ctx.fog) {
+        const bool orthographic = scene.camera.projection == Projection3D::Orthographic;
+        fill_fog(custom->fog.fog, scene.fog, scene.sky, orthographic);
+        custom->fog.fog.view[2] = ctx.fog_sun ? 1.0f : 0.0f;
+        fill_atmosphere(custom->fog.sky, scene.sky, scene.lights.sun.direction);
+        if (custom->fog.fog.colour[3] > 0.5f) {
+            _fog_table.update(scene.sky, scene.lights.sun.direction);
+            std::memcpy(custom->fog.table, _fog_table.values.data(), sizeof(custom->fog.table));
+        }
+        custom->fog.fog.view[1] = 1.0f;
+    }
+    SDL_PushGPUFragmentUniformData(commands, 2, custom.get(),
+                                   ctx.fog ? sizeof(CustomFogUniforms)
+                                           : sizeof(CustomUniforms) + sizeof(FogParamUniforms));
+    push_local_lights(ctx, 0, 3);
+    struct DecalDraw {
+        f32 view_projection[16], to_world[16];
+        u32 first[4];
+    } u{};
+    std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+    const Mat4f to_world = ctx.drawn[0].inverse();
+    std::memcpy(u.to_world, to_world.m, sizeof(u.to_world));
+    std::array<SDL_GPUTextureSamplerBinding, 14> samplers{};
+    std::copy(shared.begin(), shared.end(), samplers.begin());
+    const SDL_GPUTextureSamplerBinding white{_owner->_white.handle(), _owner->_sampler_linear};
+    samplers[2] = samplers[4] = samplers[5] = white;
+    samplers[12] = {view->_ao_depth.handle(), _point_sampler};
+    samplers[13] = {view->_ao_normals.handle(), _point_sampler};
+    SDL_GPUGraphicsPipeline* bound = nullptr;
+    SDL_GPUBuffer* const records = _decal_buffer->handle();
+    for (const DecalRun& run : _decal_runs) {
+        SDL_GPUGraphicsPipeline* p = pipeline_for(run.inside, run.mirrored);
+        if (!p)
+            continue;
+        if (p != bound) {
+            SDL_BindGPUGraphicsPipeline(pass, p);
+            SDL_BindGPUVertexStorageBuffers(pass, 0, &records, 1);
+            bound = p;
+        }
+        samplers[0] = texture_binding(run.texture, run.wrap, run.wrap, std::nullopt);
+        samplers[3] = texture_binding(run.normal, run.wrap, run.wrap, std::nullopt);
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+        u.first[0] = run.first;
+        SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+        SDL_DrawGPUPrimitives(pass, 36, run.count, 0, 0);
+        ctx.stats.decals_drawn += run.count;
+        ++ctx.stats.decal_draws;
+        ++ctx.stats.draws;
+    }
+}
+
 bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     RenderDebugStats3D& stats = ctx.stats;
@@ -8615,7 +13206,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // anti-aliasing: one sample, into the float picture the resolve reads.
     // An HDR view holds linear light whatever the 2D pipeline stores.
     SDL_FColor clear = _owner->stored_color(view->_options.background);
-    if (view->_hdr || ctx.taa) {
+    if (view->_hdr || ctx.taa || view->_format == hdr_format) {
         const LinearColor l = to_linear(view->_options.background);
         clear = {l.r, l.g, l.b, l.a};
     }
@@ -8625,8 +13216,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                             : view->_resolved->texture().handle();
     SDL_GPUColorTargetInfo colour{};
     colour.clear_color = clear;
-    colour.load_op = SDL_GPU_LOADOP_CLEAR;
-    colour.cycle = true; // a frame still reading the last picture keeps it
+    const bool load_surface = ctx.surface_stage == SurfaceStage3D::Transparent;
+    colour.load_op = load_surface ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+    colour.cycle = !load_surface; // a frame still reading the last picture keeps it
     if (view->_colour && !ctx.taa) {
         colour.texture = view->_colour.handle();
         colour.store_op = SDL_GPU_STOREOP_RESOLVE;
@@ -8641,10 +13233,34 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         });
     ctx.taa_reactive = ctx.taa && (!_particle_batches.empty() || ctx.mesh_coverage);
     // Reverse Z: the far plane.
-    SDL_GPUDepthStencilTargetInfo depth =
-        depth_target(ctx.taa ? view->_taa_depth.handle() : view->_depth.handle(),
-                     ctx.taa_reactive ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE,
-                     /*cycle=*/true);
+    const GpuTexture& main_depth = ctx.surface_depth ? *ctx.surface_depth : ctx.taa ? view->_taa_depth : view->_depth;
+    SDL_GPUDepthStencilTargetInfo depth = depth_target(
+        main_depth.handle(),
+        ctx.surface_only || ctx.taa_reactive || (ctx.taa && _taa_depth_sampled) ? SDL_GPU_STOREOP_STORE
+                                                                                : SDL_GPU_STOREOP_DONT_CARE,
+        /*cycle=*/true);
+    if (load_surface) {
+        depth.load_op = SDL_GPU_LOADOP_LOAD;
+        depth.cycle = false;
+    }
+    // Or the pre-pass's depth, where it has one alike (a sample a pixel, the view's size, the same format; no overlay,
+    // whose depths the main pass puts in a range of their own): the main pass starts from the scene's nearest surfaces,
+    // and the fragments they hide fail the depth test before they are shaded. The pre-pass's copies are drawn again
+    // over them at the same depths (the vertex shaders' positions are invariant); what it left out (blended, custom,
+    // unlit, the overlay) is drawn as before.
+    if (ctx.scene.debug.prepass_depth && ctx.prepass_ran && !ctx.overlaid && main_depth && view->_ao_depth &&
+        _ao_depth_format == _depth_format && (ctx.taa || view->_samples <= 1) &&
+        main_depth.width() == view->_ao_depth.width() && main_depth.height() == view->_ao_depth.height()) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUTextureLocation from{.texture = view->_ao_depth.handle()};
+            const SDL_GPUTextureLocation to{.texture = main_depth.handle()};
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, main_depth.width(), main_depth.height(), 1, /*cycle=*/true);
+            SDL_EndGPUCopyPass(copy);
+            depth.load_op = SDL_GPU_LOADOP_LOAD;
+            depth.cycle = false;
+            stats.main_depth_from_prepass = true;
+        }
+    }
 
     // With the velocity written here: a second colour target, cleared to no motion as the pre-pass clears it.
     std::array<SDL_GPUColorTargetInfo, 2> targets{colour, SDL_GPUColorTargetInfo{}};
@@ -8671,6 +13287,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     if (ctx.fog) {
         const bool orthographic = ctx.scene.camera.projection == Projection3D::Orthographic;
         fill_fog(fog_blocks[0].fog, ctx.scene.fog, ctx.scene.sky, orthographic);
+        fog_blocks[0].fog.view[2] = ctx.fog_sun || ctx.fog_volume_sun ? 1.0f : 0.0f;
         fill_atmosphere(fog_blocks[0].sky, ctx.scene.sky, ctx.scene.lights.sun.direction);
         if (fog_blocks[0].fog.colour[3] > 0.5f) {
             // The sky's colour, from the table (made again only when the sky or the sun's height has changed).
@@ -8684,10 +13301,18 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // parameters take as well (pushed again before the first stock draw after one).
     const u32 lights_slot = ctx.fog ? 3u : 2u;
     bool lights_bound = false;
+    // The light grid's buffers, bound with the light variants' samplers (build_light_grid made them).
+    const std::array<SDL_GPUBuffer*, 2> grid_buffers{_grid_lights ? _grid_lights->handle() : nullptr,
+                                                     _grid_cells ? _grid_cells->handle() : nullptr};
+    // The area lights' LTC tables and emitters (kin_area_specular), dummies without.
+    const bool area_reflections = view->_gi.area_resolved && view->_gi.area_shading && _area_ltc;
+    const std::array<SDL_GPUBuffer*, 2> area_buffers{
+        area_reflections ? _area_ltc->handle() : (_area_dummy ? _area_dummy->handle() : nullptr),
+        area_reflections ? view->_gi.area_shading->handle() : (_area_dummy ? _area_dummy->handle() : nullptr)};
     bool custom_lights_bound = false;
     const auto begin_scene = [&](u32 s) {
         const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && ctx.overlaid ? overlay_split : 1.0f;
-        set_viewport(pass, view->_size.x, view->_size.y, lo, hi);
+        set_viewport(pass, view->extent().x, view->extent().y, lo, hi);
         push_frame_uniforms(ctx, s);
         fog_bound = false;
         lights_bound = false;
@@ -8699,6 +13324,8 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // (the pre-pass's, from the same frame: the overlay has its own).
     const auto fill_uniforms = [&](auto& u, u32 s) {
         std::memcpy(u.view_projection, ctx.drawn[s].m, sizeof(u.view_projection));
+        put_clip(u.clip, ctx.scenes[s]);
+        put_hidden(u.first, ctx.scenes[s]);
         if constexpr (std::is_same_v<std::decay_t<decltype(u)>, VelocityUniforms>) {
             std::memcpy(u.current, ctx.view_projections[s].m, sizeof(u.current));
             std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[s].m, sizeof(u.prior));
@@ -8709,81 +13336,151 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
         ctx.environment ? SDL_GPUTextureSamplerBinding{ctx.environment->irradiance.handle(), _environment_sampler}
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear}};
-    // Smooth, so a half-size occlusion is read up; white (and never read) without.
+    // The stock light variants read the reflection array there instead (layer 0 the environment's; a white one where
+    // there is neither environment nor probe: never read then).
+    const SDL_GPUTextureSamplerBinding reflection_binding =
+        ctx.reflections ? SDL_GPUTextureSamplerBinding{ctx.reflections->handle(), _environment_sampler}
+                        : texture_binding(_white_maps, Wrap3D::Repeat, Wrap3D::Repeat, TextureSampler3D{});
+    // Prefer the depth/normal-aware reconstruction of half-size AO. Without
+    // that optional pipeline the original linear upscale remains available.
     const SDL_GPUTextureSamplerBinding occlusion_binding{
-        ctx.occluded ? view->_ao_raw.handle() : _owner->_white.handle(), _owner->_sampler_linear};
+        ctx.occluded ? (view->_ao_upsampled_ready ? view->_ao_upsampled.handle() : view->_ao_raw.handle())
+                     : _owner->_white.handle(),
+        _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding contact_binding{
         ctx.contacted ? view->_contact_raw.handle() : _owner->_white.handle(), _owner->_sampler_linear};
-    const SDL_GPUTextureSamplerBinding shadow_binding{ctx.shadows ? _shadow_map.handle() : _no_shadow.handle(),
+    const SDL_GPUTextureSamplerBinding shadow_binding{ctx.shadows ? ctx.sun_depth->handle() : _no_shadow.handle(),
                                                       _compare_sampler};
     // The light variants' two more maps: the local array and the moon's (the dummy where there is none; never read
     // then).
-    const bool local_maps = ctx.lights_variant && _local_map && !_local_views.empty();
-    const SDL_GPUTextureSamplerBinding local_binding{local_maps ? _local_map.handle() : _no_shadow.handle(),
+    const GpuTexture* local_maps = ctx.local_depth                                             ? ctx.local_depth
+                                   : ctx.lights_variant && _local_map && !_local_views.empty() ? &_local_map
+                                                                                               : nullptr;
+    const SDL_GPUTextureSamplerBinding local_binding{local_maps ? local_maps->handle() : _no_shadow.handle(),
                                                      _compare_sampler};
     const SDL_GPUTextureSamplerBinding moon_binding{
         ctx.lights_variant && ctx.moon_cascades > 0 && _moon_map ? _moon_map.handle() : _no_shadow.handle(),
         _compare_sampler};
+    const std::array<SDL_GPUTextureSamplerBinding, 3> gi_binding = gi_bindings(*view, ctx.gi_resolved);
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
-    using Textures = std::array<const ITextureBackend*, 5>;
+    using Textures = std::array<const ITextureBackend*, 6>; // the five maps, then the graph maps
     Textures unbound;
     unbound.fill(reinterpret_cast<const ITextureBackend*>(1)); // none yet
     Textures bound_textures = unbound;
+    const GpuMaterialInputs3D* bound_inputs = nullptr;
     std::pair<Wrap3D, Wrap3D> bound_wrap{};
+    decltype(Material3D::texture_samplers) bound_sampling{};
+    u32 bound_binding = ~0u;
+    SDL_GPUBuffer* bound_draw_materials = nullptr;
+    // What each fragment storage slot holds (to bind the screen-space reflections, the light variants' last, only when
+    // a slot's content changed).
+    std::array<SDL_GPUBuffer*, 8> fragment_storage{};
+    SDL_GPUBuffer* const ssr_buffer =
+        ctx.ssr && view->_ssr_buffer ? view->_ssr_buffer->handle() : (_ssr_dummy ? _ssr_dummy->handle() : nullptr);
+    bool material_slot_ready = false;
     u32 current_scene = 0;
     // The sky: after the scene's opaque meshes (their depth is in, so the triangle at the far plane shades only what is
     // left), before its blended and additive ones and the overlay. It binds a pipeline of its own: what the binder
-    // and the texture cache remember is forgotten.
-    // The particles come last in the scene's own space: after the sky and every blended mesh, before the overlay (they
-    // bind pipelines and uniforms of their own, so the binder and the texture cache forget what they had).
-    bool particles_done = !ctx.particles;
-    const auto particles_now = [&] {
-        particles_done = true;
-        draw_particles(ctx, pass);
-        binder.reset();
-        bound_textures = unbound;
-        fog_bound = false;
-        lights_bound = false;
-    };
-    bool sky_done = !ctx.sky_pass;
+    // and the texture cache remember is forgotten. Then the volume's fog light (Fog3D::volumetric), added over what is
+    // drawn so far: a blended surface drawn after dims it by its own opacity as it dims what is behind it.
+    const bool fog_in_pass = ctx.fog_volume && !ctx.main_velocity;
+    bool sky_done = !ctx.sky_pass && !fog_in_pass;
+    // The decals: after the scene's opaque meshes too, before the sky (which leaves the pixels they cover alone).
+    bool decals_done = !ctx.decals || !ctx.prepass_ran;
     const auto sky_now = [&] {
         sky_done = true;
-        draw_sky(ctx, pass, ctx.main_velocity ? 1u : 0u);
+        if (ctx.sky_pass) {
+            draw_sky(ctx, pass, ctx.main_velocity ? 1u : 0u);
+            stats.sky_drawn = true;
+        }
+        if (fog_in_pass) {
+            // What is drawn after (blended and additive meshes) adds the air in front of it (kin_fog_apply): the fog
+            // block's view.w, the volume's depth (negative: it holds the sun's).
+            fog_blocks[0].fog.view[3] = (ctx.fog_volume_sun ? -1.0f : 1.0f) * ctx.fog_volume_uniforms.forward[3];
+            fog_bound = false;
+            ctx.fog_volume_applied = fog_volume_apply(
+                ctx, pass, main_depth.format(), ctx.taa ? hdr_format : view->_format, ctx.taa ? 1u : view->_samples);
+        }
         // The sky uses fragment slots 0/1 too. A blended draw can follow it
         // in the same scene, so restore the mesh frame before that draw.
         push_frame_uniforms(ctx, current_scene);
-        stats.sky_drawn = true;
         binder.reset();
         bound_textures = unbound;
+        bound_binding = ~0u;
+        bound_draw_materials = nullptr;
+        fragment_storage = {};
+    };
+    const auto decals_now = [&] {
+        if (!decals_done) {
+            decals_done = true;
+            draw_decals(ctx, pass,
+                        {SDL_GPUTextureSamplerBinding{}, shadow_binding, SDL_GPUTextureSamplerBinding{},
+                         SDL_GPUTextureSamplerBinding{}, SDL_GPUTextureSamplerBinding{}, SDL_GPUTextureSamplerBinding{},
+                         environment_bindings[0], environment_bindings[1], occlusion_binding, contact_binding,
+                         local_binding, moon_binding});
+            // Their pipeline, samplers and fragment slots 1 to 3 (slot 0, the frame's, is the scene's still).
+            binder.reset();
+            bound_textures = unbound;
+            bound_binding = ~0u;
+            bound_draw_materials = nullptr;
+            bound_inputs = nullptr;
+            material_slot_ready = false;
+            fog_bound = false;
+            lights_bound = false;
+            custom_lights_bound = false;
+        }
+    };
+    const auto opaque_done = [&] {
+        decals_now();
+        if (!sky_done)
+            sky_now();
     };
     const auto draw_all = [&](auto& draw_uniforms) {
         fill_uniforms(draw_uniforms, 0);
         const std::array<SDL_GPUBuffer*, 2> buffers{storage, ctx.previous_storage};
-        for (const u32 index : _order) {
-            const DrawRef& ref = _refs[index];
-            const Material3D& material = ref.draw->material;
-            if (!sky_done && (ref.scene != 0 || pass_of(material) != Pass::Opaque)) {
-                sky_now();
+        for (const MainItem& item : _main_order) {
+            if (item.particle) {
+                opaque_done();
+                draw_particles(ctx, pass, false, item.ref, item.first, item.count);
+                binder.reset();
+                bound_textures = unbound;
+                bound_binding = ~0u;
+                bound_draw_materials = nullptr;
+                fragment_storage = {};
+                bound_inputs = nullptr;
+                begin_scene(current_scene);
+                fill_uniforms(draw_uniforms, current_scene);
+                continue;
             }
-            if (!particles_done && ref.scene != 0) {
-                particles_now();
+            const DrawRef& ref = _refs[item.ref];
+            const Material3D& material = ref.draw->material;
+            if (!(sky_done && decals_done) && (ref.scene != 0 || pass_of(material) != Pass::Opaque)) {
+                opaque_done();
+            } else if (!decals_done && !material.receives_decals) {
+                decals_now(); // (the meshes that do not receive them come last among the world's opaque ones)
             }
             if (ref.scene != current_scene) {
                 current_scene = ref.scene;
                 begin_scene(current_scene);
                 fill_uniforms(draw_uniforms, current_scene);
             }
-            const auto selection = material_pipeline(material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog);
+            const auto* command = main_command(ctx, item.ref, item.materials);
+            const auto selection = command
+                                       ? command->selection
+                                       : material_pipeline(material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog);
             const auto* custom = selection.custom;
             if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
                 continue;
             }
             const Unlit unlit = selection.unlit;
-            SDL_GPUGraphicsPipeline* p = pipeline(MeshPipelineRequest{
-                ctx.taa ? hdr_format : view->_format, ctx.taa ? 1u : view->_samples, selection, ctx.main_velocity,
-                ref.skinned, ctx.fog && !custom, ctx.lights_variant && !custom, ref.retained != ~0u});
+            SDL_GPUGraphicsPipeline* p =
+                command
+                    ? command->pipeline
+                    : pipeline(MeshPipelineRequest{ctx.taa ? hdr_format : view->_format, ctx.taa ? 1u : view->_samples,
+                                                   selection, ctx.main_velocity, ref.skinned, ctx.fog && !custom,
+                                                   ctx.lights_variant && !custom, ref.retained != ~0u, item.materials});
             if (!p) {
                 continue;
             }
@@ -8799,12 +13496,17 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             const std::array<SDL_GPUBuffer*, 6> skinned_velocity_buffers{
                 storage,           ctx.previous_storage, ctx.joints,
                 ctx.joint_offsets, ctx.previous_joints,  ctx.previous_joint_offsets};
-            const Textures textures{material.texture.backend().get(), material.metallic_roughness.backend().get(),
-                                    material.normal.backend().get(), material.occlusion.backend().get(),
-                                    material.emissive_texture.backend().get()};
+            const Textures textures =
+                command
+                    ? _draw_bindings[command->binding].textures
+                    : Textures{material.texture.backend().get(),          material.metallic_roughness.backend().get(),
+                               material.normal.backend().get(),           material.occlusion.backend().get(),
+                               material.emissive_texture.backend().get(), material.graph_maps.backend().get()};
             const std::array<SDL_GPUBuffer*, 2> retained_buffers{
                 ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
-                _retained_indices ? _retained_indices->handle() : nullptr};
+                item.materials      ? _main_draw_indices->handle()
+                : _retained_indices ? _retained_indices->handle()
+                                    : nullptr};
             if (binder.bind_pipeline(p,
                                      ref.retained != ~0u ? retained_buffers.data()
                                      : skinned_velocity  ? skinned_velocity_buffers.data()
@@ -8816,31 +13518,135 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                      : ctx.main_velocity && !custom ? 2
                                                                     : 1)) {
                 bound_textures = unbound;
+                bound_inputs = nullptr;
+                bound_binding = ~0u;
+                bound_draw_materials = nullptr;
+                fragment_storage = {};
             }
             const std::pair<Wrap3D, Wrap3D> wrap{material.wrap_u, material.wrap_v};
-            if (textures != bound_textures || wrap != bound_wrap) {
+            if (command
+                    ? command->binding != bound_binding
+                    : textures != bound_textures || wrap != bound_wrap || bound_sampling != material.texture_samplers) {
                 if (unlit == Unlit::Textured) {
-                    const auto base = texture_binding(material.texture, material.wrap_u, material.wrap_v);
+                    const auto base = texture_binding(material.texture, material.wrap_u, material.wrap_v,
+                                                      material.texture_samplers[0]);
                     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
                 } else if (unlit == Unlit::Off) {
-                    const std::array<SDL_GPUTextureSamplerBinding, 12> samplers{
-                        texture_binding(material.texture, material.wrap_u, material.wrap_v),
+                    const std::array<SDL_GPUTextureSamplerBinding, 15> samplers{
+                        texture_binding(material.texture, material.wrap_u, material.wrap_v,
+                                        material.texture_samplers[0]),
                         shadow_binding,
-                        texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v),
-                        texture_binding(material.normal, material.wrap_u, material.wrap_v),
-                        texture_binding(material.occlusion, material.wrap_u, material.wrap_v),
-                        texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v),
-                        environment_bindings[0],
+                        texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v,
+                                        material.texture_samplers[1]),
+                        texture_binding(material.normal, material.wrap_u, material.wrap_v,
+                                        material.texture_samplers[2]),
+                        texture_binding(material.occlusion, material.wrap_u, material.wrap_v,
+                                        material.texture_samplers[3]),
+                        texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v,
+                                        material.texture_samplers[4]),
+                        lit_variant && !custom ? reflection_binding : environment_bindings[0],
                         environment_bindings[1],
                         occlusion_binding,
                         contact_binding,
                         local_binding,
-                        moon_binding};
-                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom || lit_variant ? 12u : 10u);
+                        moon_binding,
+                        gi_binding[0],
+                        gi_binding[1],
+                        gi_binding[2]};
+                    // Custom shaders have twelve; the stock light variants fifteen (global illumination's light and
+                    // coverage).
+                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 15u : 10u);
+                    if (selection.surface && selection.surface->graph_maps) { // the sampler after those
+                        const Texture& maps = material.graph_maps ? material.graph_maps : _white_maps;
+                        _owner->retain(maps);
+                        const auto binding = texture_binding(maps, Wrap3D::Repeat, Wrap3D::Repeat, TextureSampler3D{});
+                        SDL_BindGPUFragmentSamplers(pass, lit_variant ? 15u : 10u, &binding, 1);
+                    }
+                    // A fog variant's fog volume, after those (a surface shader made before it has none).
+                    if (ctx.fog && !custom &&
+                        (!selection.surface ||
+                         (lit_variant ? selection.surface->fog_volume_lit : selection.surface->fog_volume))) {
+                        const SDL_GPUTextureSamplerBinding volume{ctx.fog_volume ? view->_fog_volume_sum.handle()
+                                                                                 : _no_fog_volume.handle(),
+                                                                  _owner->_sampler_linear};
+                        SDL_BindGPUFragmentSamplers(
+                            pass, (lit_variant ? 15u : 10u) + u32(selection.surface && selection.surface->graph_maps),
+                            &volume, 1);
+                    }
+                    if (lit_variant) {
+                        SDL_BindGPUFragmentStorageBuffers(pass, 0, grid_buffers.data(), 2);
+                        SDL_BindGPUFragmentStorageBuffers(pass, 2, area_buffers.data(), 2);
+                        fragment_storage[0] = grid_buffers[0];
+                        fragment_storage[1] = grid_buffers[1];
+                        fragment_storage[2] = area_buffers[0];
+                        fragment_storage[3] = area_buffers[1];
+                    }
                 }
                 bound_textures = textures;
                 bound_wrap = wrap;
+                bound_sampling = material.texture_samplers;
+                bound_binding = command ? command->binding : ~0u;
             }
+            if (selection.surface && !custom)
+                bind_offset(commands, pass, material, ref.skinned); // (a moving surface's: each draw its own values)
+            if (item.materials) {
+                const auto& table = _draw_material_tables[_draw_material_slots[ref.scene]];
+                SDL_GPUBuffer* buffer = table.buffer->handle();
+                if (buffer != bound_draw_materials) {
+                    SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 4 : 0, &buffer, 1);
+                    fragment_storage[lit_variant ? 4 : 0] = buffer;
+                    bound_draw_materials = buffer;
+                }
+                if (selection.surface && table.surface) { // (its parameters, after the records)
+                    SDL_GPUBuffer* params = table.surface->handle();
+                    SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 5 : 1, &params, 1);
+                    fragment_storage[lit_variant ? 5 : 1] = params;
+                }
+            }
+            // The screen-space reflections: the light variants' last storage buffer, after the draw materials' (and a
+            // merged surface's parameters) where those are there.
+            if (lit_variant && ssr_buffer) {
+                const u32 slot = item.materials ? (selection.surface ? 6u : 5u) : 4u;
+                if (fragment_storage[slot] != ssr_buffer) {
+                    SDL_BindGPUFragmentStorageBuffers(pass, slot, &ssr_buffer, 1);
+                    fragment_storage[slot] = ssr_buffer;
+                }
+            }
+            if (custom)
+                if (const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(material.inputs.backend().get());
+                    inputs && inputs != bound_inputs) {
+                    std::array<SDL_GPUTextureSamplerBinding, 4> extra{};
+                    for (u32 i = 0; i < inputs->input_textures.size(); ++i) {
+                        const auto& texture = inputs->input_textures[i];
+                        const auto* gpu = static_cast<const GpuTextureBackend*>(texture.backend().get());
+                        _owner->retain(texture);
+                        gpu->mark_material_read(_owner->_frame_serial);
+                        extra[i] = {gpu->texture().handle(), custom->textures[i].comparison ? _compare_sampler
+                                                             : texture.format() == TextureFormat::Rgba8 ||
+                                                                     texture_format_compressed(texture.format())
+                                                                 ? _owner->sampler_for(*gpu)
+                                                                 : _owner->_sampler_nearest};
+                    }
+                    if (!inputs->input_textures.empty())
+                        SDL_BindGPUFragmentSamplers(pass, 12, extra.data(),
+                                                    static_cast<u32>(inputs->input_textures.size()));
+                    std::array<SDL_GPUBuffer*, 8> storage_inputs{};
+                    for (u32 i = 0; i < inputs->input_buffers.size(); ++i) {
+                        const auto& buffer = inputs->input_buffers[i];
+                        const auto* gpu = static_cast<const GpuDataBuffer*>(buffer.backend().get());
+                        gpu->mark_used(_owner->_frame_serial);
+                        gpu->mark_material_read(_owner->_frame_serial);
+                        _owner->_retained_buffers.push_back(buffer.backend());
+                        storage_inputs[i] = gpu->buffer().handle();
+                    }
+                    if (!inputs->input_buffers.empty()) {
+                        SDL_BindGPUFragmentStorageBuffers(pass, 0, storage_inputs.data(),
+                                                          static_cast<u32>(inputs->input_buffers.size()));
+                        for (std::size_t i = 0; i < inputs->input_buffers.size() && i < fragment_storage.size(); ++i)
+                            fragment_storage[i] = storage_inputs[i];
+                    }
+                    bound_inputs = inputs;
+                }
             if (ref.clustered && !cluster_index) {
                 continue;
             }
@@ -8848,15 +13654,19 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             if (ref.skinned) {
                 binder.bind_skin(ref.mesh);
             }
-            const MaterialUniforms m{
-                {material.emissive, material.unlit || material.wireframe ? 1.0f : 0.0f,
-                 material.receives_shadow ? 1.0f : 0.0f,
-                 material.blend == Blend3D::Mask ? std::max(material.alpha_cutoff, 1e-6f) : 0.0f},
-                {material.metallic, material.roughness, material.normal_scale, material.occlusion_strength},
-                {material.normal ? 1.0f : 0.0f, material.emissive_texture ? 1.0f : 0.0f,
-                 pass_of(material) == Pass::Opaque ? 1.0f : 0.0f, pass_of(material) == Pass::Additive ? 1.0f : 0.0f}};
-
-            SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
+            if (selection.surface) {
+                // A surface shader's block is the stock one with its parameters after it.
+                SurfaceMaterialUniforms m{material_uniforms(material, unlit), {}};
+                std::memcpy(m.surface, material.shader_params.data(), sizeof(m.surface));
+                SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
+                material_slot_ready = false;
+            } else if (!item.materials || !material_slot_ready) {
+                const MaterialUniforms m = command ? command->uniforms : material_uniforms(material, unlit);
+                // Batched variants don't read slot 1, but SDL's uniform slot
+                // layout still includes it before fog/local-light slots.
+                SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
+                material_slot_ready = true;
+            }
             if (custom) {
                 CustomFogUniforms custom_data;
                 std::memcpy(custom_data.custom.values, material.shader_params.data(), sizeof(CustomUniforms));
@@ -8921,15 +13731,16 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             }
             // A draw for each level of detail the copies are at (the one, without).
             for (u32 l = 0; l < ref.levels; ++l) {
-                const u32 count = ref.level_seen[l];
+                const u32 count = item.transparent || item.materials ? item.count : ref.level_seen[l];
                 if (count == 0) {
                     continue;
                 }
                 const GpuMesh3D::Level& level = ref.mesh->levels[l];
-                draw_uniforms.first[0] = ref.level_first[l];
+                draw_uniforms.first[0] = item.transparent || item.materials ? item.first : ref.level_first[l];
                 SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
                 (void)binder.draw(level.index_count, count, level.first_index);
                 ++stats.draws;
+                stats.main_batched_draws += item.materials;
                 stats.unlit_draws += unlit != Unlit::Off ? 1u : 0u;
                 stats.unlit_textured_draws += unlit == Unlit::Textured ? 1u : 0u;
                 stats.skinned_draws += ref.skinned ? 1u : 0u;
@@ -8945,11 +13756,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         DrawUniforms draw_uniforms{};
         draw_all(draw_uniforms);
     }
-    if (!sky_done) {
-        sky_now(); // nothing but opaque meshes (or none) in the scene
-    }
-    if (!particles_done) {
-        particles_now();
+    opaque_done(); // nothing but opaque meshes (or none) in the scene
+    if (ctx.gi && ctx.scene.debug.gi_view != GiView3D::Off) {
+        // The GI scene instead of the picture (RenderDebugOptions3D::gi_view).
+        draw_gi_view(commands, pass, *view, ctx.scene, ctx.drawn[0], ctx.taa ? hdr_format : view->_format,
+                     ctx.taa ? 1u : view->_samples, ctx.main_velocity ? hdr_format : SDL_GPU_TEXTUREFORMAT_INVALID,
+                     !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
     }
     SDL_EndGPURenderPass(pass);
     if (ctx.taa_reactive && !reactive_pass(ctx)) {
@@ -8961,6 +13773,449 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         view->_taa_coverage_key = 0;
     }
     return true;
+}
+
+bool GpuRenderer3D::fog_sun(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats) {
+    if (!_fog_sun_pipeline || !_fog_sun_apply_shader || !ctx.shadows || !view._ao_depth || !_point_sampler) {
+        return false;
+    }
+    const u32 hw = std::max(1u, (static_cast<u32>(view._size.x) + 1) / 2),
+              hh = std::max(1u, (static_cast<u32>(view._size.y) + 1) / 2);
+    try {
+        if (!view._fog_sun || view._fog_sun.width() != hw || view._fog_sun.height() != hh) {
+            view._fog_sun =
+                _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                       SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the fog's sunlit share could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view._fog_sun = {};
+        return false;
+    }
+    const Scene3D& scene = ctx.scene;
+    const Lights3D& lights = scene.lights;
+    const Camera3D& camera = scene.camera;
+    FogSunUniforms u{};
+    std::memcpy(u.to_world, camera.view().inverse().m, sizeof(u.to_world));
+    // The inverse of the projection the pre-pass drew with, as gtao.comp reads it.
+    const Mat4f inverse = ctx.main_projection.inverse();
+    const f32 xy[4] = {inverse.at(0, 0), inverse.at(1, 1), inverse.at(0, 3), inverse.at(1, 3)};
+    const f32 zw[4] = {inverse.at(2, 2), inverse.at(2, 3), inverse.at(3, 2), inverse.at(3, 3)};
+    std::memcpy(u.unproject_xy, xy, sizeof(xy));
+    std::memcpy(u.unproject_zw, zw, sizeof(zw));
+    put(u.sizes, {static_cast<f32>(hw), static_cast<f32>(hh), static_cast<f32>(view._ao_depth.width())},
+        static_cast<f32>(view._ao_depth.height()));
+    put(u.eye, camera.position, 0.0f);
+    put(u.forward, camera.forward(), std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
+    fill_fog(u.fog, scene.fog, scene.sky, false);
+    // The cascades as the main pass has them; one map is cascade 0 over the whole area.
+    u32 count = 1;
+    f32 reach = lights.shadow_distance > 0.0f ? lights.shadow_distance : 100.0f;
+    if (ctx.cascades > 1) {
+        count = ctx.cascades;
+        for (u32 k = 0; k < count; ++k) {
+            const ShadowCascade3D& c = ctx.plan.cascade[k];
+            std::memcpy(u.shadow_matrix + 16 * k, c.view_projection.m, 16 * sizeof(f32));
+            u.cascade_end[k] = c.slice_far;
+            u.cascade_bias[k] = std::max(lights.shadow_bias, 0.0f) * c.texel_world / c.depth_range;
+        }
+        reach = ctx.plan.cascade[count - 1].slice_far;
+    } else {
+        std::memcpy(u.shadow_matrix, ctx.light_vp.m, 16 * sizeof(f32));
+        u.cascade_bias[0] = std::max(lights.shadow_bias, 0.0f) * ctx.texel_world / ctx.depth_range;
+    }
+    // Each frame's walk offset by the golden ratio under temporal anti-aliasing (which averages them), else fixed.
+    const f32 offset = ctx.taa ? std::fmod(static_cast<f32>(view._taa_frame) * 0.618034f, 1.0f) : 0.0f;
+    put(u.shadow, {static_cast<f32>(count), reach, offset}, static_cast<f32>(fog_sun_steps));
+    put(u.sun, normalize(lights.sun.direction), 0.0f);
+    put_color(u.sun_light, lights.sun.color, 0.0f);
+    ctx.fog_sun_uniforms = u;
+    const SDL_GPUStorageTextureReadWriteBinding out{.texture = view._fog_sun.handle(), .cycle = true};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+    if (!pass) {
+        return false;
+    }
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{_shadow_map.handle(), _compare_sampler}};
+    SDL_BindGPUComputePipeline(pass, _fog_sun_pipeline);
+    SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+    SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (hw + 7) / 8, (hh + 7) / 8, 1);
+    SDL_EndGPUComputePass(pass);
+    stats.fog_sun_shadowed = true;
+    return true;
+}
+
+void GpuRenderer3D::fog_sun_apply(FrameCtx& ctx) {
+    GpuView3D* view = ctx.view;
+    // The picture the main pass drew (a float one: see fog_sun's caller), resolved from its samples.
+    SDL_GPUTexture* picture = view->_hdr ? view->_scene.handle() : ctx.taa ? view->_taa_in.handle() : nullptr;
+    SDL_GPUGraphicsPipeline* p = fullscreen_additive(_fog_sun_apply_shader.handle(), hdr_format);
+    if (!picture || !p) {
+        return;
+    }
+    SDL_GPUColorTargetInfo target{};
+    target.texture = picture;
+    target.load_op = SDL_GPU_LOADOP_LOAD;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(ctx.commands, &target, 1, nullptr);
+    if (!pass) {
+        return;
+    }
+    set_viewport(pass, view->_size.x, view->_size.y);
+    SDL_BindGPUGraphicsPipeline(pass, p);
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{view->_ao_depth.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{view->_fog_sun.handle(), _owner->_sampler_linear}};
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), 2);
+    SDL_PushGPUFragmentUniformData(ctx.commands, 0, &ctx.fog_sun_uniforms, sizeof(ctx.fog_sun_uniforms));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+}
+
+bool GpuRenderer3D::fog_volume(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx,
+                               RenderDebugStats3D& stats) {
+    if (!_fog_volume_pipeline || !_fog_volume_integrate_pipeline || !_fog_volume_apply_shader || !view._ao_depth ||
+        !_point_sampler) {
+        return false;
+    }
+    const Scene3D& scene = ctx.scene;
+    const Lights3D& lights = scene.lights;
+    const VolumetricFog3D& settings = scene.fog.volumetric;
+    // The local maps the main pass reads (none: every light is unshadowed in the fog as it is on surfaces).
+    const GpuTexture* local_maps = ctx.local_depth                                             ? ctx.local_depth
+                                   : ctx.lights_variant && _local_map && !_local_views.empty() ? &_local_map
+                                                                                               : nullptr;
+    // The lights the frame chose (those whose reach meets the view), as the light grid has them, their colour times the
+    // fog's intensity and their own `volumetric`.
+    const f32 intensity = std::max(settings.intensity, 0.0f);
+    std::vector<GridLight> list;
+    list.reserve(ctx.chosen.size() + ctx.spots.size());
+    for (std::size_t j = 0; j < ctx.chosen.size(); ++j) {
+        const PointLightSource3D& l = *ctx.chosen[j].second;
+        const f32 k = intensity * std::max(l.volumetric, 0.0f);
+        if (k <= 0.0f) {
+            continue;
+        }
+        GridLight g{};
+        put(g.at, l.position, l.radius);
+        const f32 size = std::max(l.size, 0.01f);
+        put_color(g.colour, {l.color.r * k, l.color.g * k, l.color.b * k}, size * size);
+        put(g.axis, {}, -2.0f);
+        const f32 layer = local_maps && j < ctx.point_layers.size() ? ctx.point_layers[j] : -1.0f;
+        put(g.cone, {0.0f, layer, 0.0f}, 0.0f);
+        list.push_back(g);
+    }
+    for (std::size_t s = 0; s < ctx.spots.size(); ++s) {
+        const SpotLightSource3D& l = lights.spots[ctx.spots[s]];
+        const f32 k = intensity * std::max(l.volumetric, 0.0f);
+        if (k <= 0.0f) {
+            continue;
+        }
+        const SpotCone3D cone = spot_cone(l);
+        GridLight g{};
+        put(g.at, l.position, l.radius);
+        const f32 size = std::max(l.size, 0.01f);
+        put_color(g.colour, {l.color.r * k, l.color.g * k, l.color.b * k}, size * size);
+        put(g.axis, cone.axis, cone.cos_outer);
+        const f32 layer = local_maps && s < ctx.spot_layers.size() ? ctx.spot_layers[s] : -1.0f;
+        put(g.cone, {cone.scale, layer, 0.0f}, 0.0f);
+        list.push_back(g);
+    }
+    // The sun and the fill light (VolumetricFog3D::sun_and_moon), scattered as the main pass's fog scatters the sun.
+    const Fog3D& fog = scene.fog;
+    const auto shines = [](const DirectionalLight3D& l) {
+        return l.color.r + l.color.g + l.color.b > 0.0f && length_squared(l.direction) > 0.0f;
+    };
+    const bool directional = settings.sun_and_moon && fog.sun_scatter > 0.0f;
+    const bool sun = directional && shines(lights.sun);
+    const bool fill = directional && shines(lights.fill);
+    if (list.empty() && !sun && !fill) {
+        // Nothing lights the air: nothing to add, and no history to keep (a light coming back starts afresh).
+        view._fog_volume_valid = false;
+        return false;
+    }
+
+    // The volume's shape: tiles of the view by slices of its depth.
+    const u32 tile = settings.tile != 0
+                         ? std::clamp(settings.tile, 4u, 64u)
+                         : std::max(8u, static_cast<u32>(std::lround(static_cast<f32>(view._size.y) / 90.0f)));
+    const std::array<u32, 3> cells{(static_cast<u32>(std::max(view._size.x, 1)) + tile - 1) / tile,
+                                   (static_cast<u32>(std::max(view._size.y, 1)) + tile - 1) / tile,
+                                   std::clamp(settings.slices, 8u, 256u)};
+    const f32 depth = std::max(settings.distance, 0.01f);
+    try {
+        if (!view._fog_volume_sum || view._fog_volume_cells != cells) {
+            constexpr SDL_GPUTextureUsageFlags usage =
+                SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+            for (GpuTexture& t : view._fog_volume) {
+                t = _device->create_volume(cells[0], cells[1], cells[2], SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                           usage);
+            }
+            view._fog_volume_sum =
+                _device->create_volume(cells[0], cells[1], cells[2], SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
+            for (GpuTexture& t : view._fog_volume_reach) {
+                t = _device->create_target(cells[0], cells[1], SDL_GPU_TEXTUREFORMAT_R32_FLOAT, usage);
+            }
+            view._fog_volume_cells = cells;
+            view._fog_volume_valid = false;
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the volume of the lights' light in the fog could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view._fog_volume = {};
+        view._fog_volume_sum = {};
+        view._fog_volume_reach = {};
+        view._fog_volume_cells = {};
+        view._fog_volume_valid = false;
+        return false;
+    }
+
+    // The view's rays at view depth 1, from the camera's matrices without the jitter of temporal anti-aliasing.
+    const Camera3D& camera = scene.camera;
+    const Vec3f eye = camera.position, forward = camera.forward();
+    const Mat4f view_projection = camera.view_projection(ctx.aspect);
+    const Mat4f to_world = view_projection.inverse();
+    const auto ray = [&](f32 x, f32 y) {
+        const Vec4f p = to_world * Vec4f{x, y, 0.5f, 1.0f};
+        const Vec3f r = Vec3f{p.x / p.w, p.y / p.w, p.z / p.w} - eye;
+        return r * (1.0f / dot(r, forward));
+    };
+    const Vec3f ray00 = ray(-1.0f, 1.0f), ray_x = ray(1.0f, 1.0f) - ray00, ray_y = ray(-1.0f, -1.0f) - ray00;
+
+    // The history is the last frame's volume when it was made in the same shape and depth (and not reset since), from
+    // about the same place: a camera that jumped more than a twentieth of the volume's depth or turned more than 30
+    // degrees in a frame is a cut (a picture's camera put somewhere new) whose last volume would smear light from
+    // elsewhere over the first frames.
+    const f32 history = std::clamp(settings.history, 0.0f, 0.98f);
+    const bool cut =
+        length(eye - view._fog_volume_eye) > 0.05f * depth || dot(forward, view._fog_volume_forward) < 0.866f;
+    const bool previous = view._fog_volume_valid && view._fog_volume_depth == depth && history > 0.0f && !cut;
+    // Each frame's points moved within their cells by an R2 sequence in three dimensions (the history averages them);
+    // without a history, the cells' middles.
+    const f32 n = static_cast<f32>(view._fog_volume_frame++ % 4096u);
+    const Vec3f jitter =
+        history > 0.0f ? Vec3f{std::fmod(0.5f + n * 0.8191725134f, 1.0f), std::fmod(0.5f + n * 0.6710436067f, 1.0f),
+                               std::fmod(0.5f + n * 0.5497004779f, 1.0f)}
+                       : Vec3f{0.5f, 0.5f, 0.5f};
+    FogVolumeUniforms u{};
+    put(u.eye, eye, depth);
+    put(u.forward, forward, static_cast<f32>(list.size()));
+    put(u.ray00, ray00, 0.0f);
+    put(u.ray_x, ray_x, 0.0f);
+    put(u.ray_y, ray_y, 0.0f);
+    put(u.size, {static_cast<f32>(cells[0]), static_cast<f32>(cells[1]), static_cast<f32>(cells[2])},
+        previous ? history : 0.0f);
+    put(u.jitter, jitter, std::clamp(settings.anisotropy, -0.9f, 0.9f));
+    std::memcpy(u.previous, view._fog_volume_previous.m, sizeof(u.previous));
+    // (w: 1 lights every cell: RenderDebugOptions3D::fog_volume_cull off.)
+    put(u.previous_eye, view._fog_volume_eye, scene.debug.fog_volume_cull ? 0.0f : 1.0f);
+    put(u.previous_forward, view._fog_volume_forward, previous ? 1.0f : 0.0f);
+    fill_fog(u.fog, scene.fog, scene.sky, false);
+    if (sun) {
+        put(u.sun, normalize(lights.sun.direction),
+            ctx.shadows ? std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f) : 0.0f);
+        put_color(u.sun_light, lights.sun.color, 0.0f);
+    }
+    if (fill) {
+        put(u.fill, normalize(lights.fill.direction), 0.0f);
+        put_color(u.fill_light, lights.fill.color, 0.0f);
+    }
+    // The sun's cascades as the main pass has them (one map: cascade 0 over the whole area), as fog_sun reads them.
+    if (sun && ctx.shadows) {
+        u32 count = 1;
+        f32 reach = lights.shadow_distance > 0.0f ? lights.shadow_distance : 100.0f;
+        if (ctx.cascades > 1) {
+            count = ctx.cascades;
+            for (u32 k = 0; k < count; ++k) {
+                const ShadowCascade3D& c = ctx.plan.cascade[k];
+                std::memcpy(u.sun_matrix + 16 * k, c.view_projection.m, 16 * sizeof(f32));
+                u.sun_end[k] = c.slice_far;
+                u.sun_bias[k] = std::max(lights.shadow_bias, 0.0f) * c.texel_world / c.depth_range;
+            }
+            reach = ctx.plan.cascade[count - 1].slice_far;
+        } else {
+            std::memcpy(u.sun_matrix, ctx.light_vp.m, 16 * sizeof(f32));
+            u.sun_bias[0] = std::max(lights.shadow_bias, 0.0f) * ctx.texel_world / ctx.depth_range;
+        }
+        put(u.sun_shadow, {static_cast<f32>(count), reach, 0.0f}, 0.0f);
+    }
+    // The local and moon blocks as the main pass's (the moon's cascades only where its map was made).
+    const bool moon_map = fill && ctx.moon_cascades > 0 && _moon_map;
+    LocalLightUniforms locals_block = ctx.lu;
+    if (!moon_map) {
+        locals_block.counts[1] = 0.0f;
+    }
+
+    const u32 lit_by = static_cast<u32>(list.size());
+    if (list.empty()) {
+        list.push_back(GridLight{}); // (bound, never read: the count is 0)
+    }
+    const u32 light_bytes = static_cast<u32>(list.size() * sizeof(GridLight));
+    ensure_buffer(_fog_lights, light_bytes, 64 * sizeof(GridLight), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+    _device->upload_storage_buffer(_fog_lights->handle(), 0, light_bytes, list.data(), /*cycle=*/true);
+
+    // How deep each column's cells are lit: its tile's farthest surface (the pre-pass's depth), then the farthest of
+    // its 3 x 3 neighbourhood (the adding pass reads a column's sums bilinearly with its neighbours').
+    {
+        const Mat4f inverse = ctx.main_projection.inverse();
+        FogReachUniforms ru{};
+        const f32 zw[4] = {inverse.at(2, 2), inverse.at(2, 3), inverse.at(3, 2), inverse.at(3, 3)};
+        std::memcpy(ru.unproject_zw, zw, sizeof(zw));
+        put(ru.sizes,
+            {static_cast<f32>(cells[0]), static_cast<f32>(cells[1]), static_cast<f32>(view._ao_depth.width())},
+            static_cast<f32>(view._ao_depth.height()));
+        for (u32 step = 0; step < 2; ++step) {
+            put(ru.tile,
+                {static_cast<f32>(view._ao_depth.width()) / static_cast<f32>(cells[0]),
+                 static_cast<f32>(view._ao_depth.height()) / static_cast<f32>(cells[1]), static_cast<f32>(step)},
+                0.0f);
+            const SDL_GPUStorageTextureReadWriteBinding out{.texture = view._fog_volume_reach[step].handle(),
+                                                            .cycle = true};
+            SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+            if (!pass) {
+                return false;
+            }
+            const SDL_GPUTextureSamplerBinding in{
+                step == 0 ? view._ao_depth.handle() : view._fog_volume_reach[0].handle(), _point_sampler};
+            SDL_BindGPUComputePipeline(pass, _fog_volume_depth_pipeline);
+            SDL_BindGPUComputeSamplers(pass, 0, &in, 1);
+            SDL_PushGPUComputeUniformData(commands, 0, &ru, sizeof(ru));
+            SDL_DispatchGPUCompute(pass, (cells[0] + 7) / 8, (cells[1] + 7) / 8, 1);
+            SDL_EndGPUComputePass(pass);
+        }
+    }
+
+    const u32 written = view._fog_volume_written ^ 1u;
+    {
+        const SDL_GPUStorageTextureReadWriteBinding out{.texture = view._fog_volume[written].handle(), .cycle = true};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        const std::array<SDL_GPUTextureSamplerBinding, 5> samplers{
+            SDL_GPUTextureSamplerBinding{local_maps ? local_maps->handle() : _no_shadow.handle(), _compare_sampler},
+            SDL_GPUTextureSamplerBinding{view._fog_volume[view._fog_volume_written].handle(), _owner->_sampler_linear},
+            SDL_GPUTextureSamplerBinding{sun && ctx.shadows ? _shadow_map.handle() : _no_shadow.handle(),
+                                         _compare_sampler},
+            SDL_GPUTextureSamplerBinding{moon_map ? _moon_map.handle() : _no_shadow.handle(), _compare_sampler},
+            SDL_GPUTextureSamplerBinding{view._fog_volume_reach[1].handle(), _point_sampler}};
+        SDL_GPUBuffer* buffer = _fog_lights->handle();
+        SDL_BindGPUComputePipeline(pass, _fog_volume_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+        SDL_BindGPUComputeStorageBuffers(pass, 0, &buffer, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+        SDL_PushGPUComputeUniformData(commands, 1, &locals_block, sizeof(locals_block));
+        SDL_DispatchGPUCompute(pass, (cells[0] + 3) / 4, (cells[1] + 3) / 4, (cells[2] + 3) / 4);
+        SDL_EndGPUComputePass(pass);
+    }
+    {
+        FogIntegrateUniforms iu{};
+        put(iu.eye, eye, depth);
+        put(iu.ray00, ray00, 0.0f);
+        put(iu.ray_x, ray_x, 0.0f);
+        put(iu.ray_y, ray_y, 0.0f);
+        put(iu.size, {static_cast<f32>(cells[0]), static_cast<f32>(cells[1]), static_cast<f32>(cells[2])},
+            1.0f - std::clamp(scene.fog.max_opacity, 0.0f, 1.0f));
+        const SDL_GPUStorageTextureReadWriteBinding out{.texture = view._fog_volume_sum.handle(), .cycle = true};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        const std::array<SDL_GPUTextureSamplerBinding, 2> lit{
+            SDL_GPUTextureSamplerBinding{view._fog_volume[written].handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._fog_volume_reach[1].handle(), _point_sampler}};
+        SDL_BindGPUComputePipeline(pass, _fog_volume_integrate_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, lit.data(), static_cast<u32>(lit.size()));
+        SDL_PushGPUComputeUniformData(commands, 0, &iu, sizeof(iu));
+        SDL_DispatchGPUCompute(pass, (cells[0] + 7) / 8, (cells[1] + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+    }
+    view._fog_volume_written = written;
+    view._fog_volume_valid = true;
+    view._fog_volume_previous = view_projection;
+    view._fog_volume_eye = eye;
+    view._fog_volume_forward = forward;
+    view._fog_volume_depth = depth;
+
+    // What fog_volume_apply reads the sums with: the pre-pass's depth (as it was drawn: jittered) to view depth.
+    FogVolumeApplyUniforms& a = ctx.fog_volume_uniforms;
+    a = {};
+    std::memcpy(a.to_world, camera.view().inverse().m, sizeof(a.to_world));
+    const Mat4f inverse = ctx.main_projection.inverse();
+    const f32 xy[4] = {inverse.at(0, 0), inverse.at(1, 1), inverse.at(0, 3), inverse.at(1, 3)};
+    const f32 zw[4] = {inverse.at(2, 2), inverse.at(2, 3), inverse.at(3, 2), inverse.at(3, 3)};
+    std::memcpy(a.unproject_xy, xy, sizeof(xy));
+    std::memcpy(a.unproject_zw, zw, sizeof(zw));
+    put(a.sizes,
+        {static_cast<f32>(view._size.x), static_cast<f32>(view._size.y), static_cast<f32>(view._ao_depth.width())},
+        static_cast<f32>(view._ao_depth.height()));
+    put(a.forward, forward, depth);
+    put(a.cells, {static_cast<f32>(cells[0]), static_cast<f32>(cells[1]), static_cast<f32>(cells[2])},
+        sun ? 1.0f : 0.0f);
+    put(a.eye, eye, 0.0f);
+    if (sun) {
+        put(a.sun, normalize(lights.sun.direction), 0.0f);
+        put_color(a.sun_light, lights.sun.color, 0.0f);
+    }
+    fill_fog(a.fog, scene.fog, scene.sky, false);
+    ctx.fog_volume_sun = sun;
+    stats.fog_volume = true;
+    stats.fog_volume_lights = lit_by;
+    stats.fog_volume_cells = cells[0] * cells[1] * cells[2];
+    return true;
+}
+
+bool GpuRenderer3D::fog_volume_apply(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
+                                     SDL_GPUTextureFormat format, u32 samples) {
+    GpuView3D* view = ctx.view;
+    SDL_GPUGraphicsPipeline* p = _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                                       .fragment = _fog_volume_apply_shader.handle(),
+                                                                       .blend = GpuBlendMode::PremultipliedAdditive,
+                                                                       .format = format,
+                                                                       .layout = GpuVertexLayout::None,
+                                                                       .depth_stencil = depth_format,
+                                                                       .samples = sample_count(samples)});
+    if (!p) {
+        return false;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, p);
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{view->_ao_depth.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{view->_fog_volume_sum.handle(), _owner->_sampler_linear}};
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), 2);
+    SDL_PushGPUFragmentUniformData(ctx.commands, 0, &ctx.fog_volume_uniforms, sizeof(ctx.fog_volume_uniforms));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    return true;
+}
+
+void GpuRenderer3D::fog_volume_apply(FrameCtx& ctx) {
+    GpuView3D* view = ctx.view;
+    // The picture the main pass drew (a float one: see fog_volume's caller), resolved from its samples.
+    SDL_GPUTexture* picture = view->_hdr ? view->_scene.handle() : ctx.taa ? view->_taa_in.handle() : nullptr;
+    SDL_GPUGraphicsPipeline* p = fullscreen_additive(_fog_volume_apply_shader.handle(), hdr_format);
+    if (!picture || !p) {
+        return;
+    }
+    SDL_GPUColorTargetInfo target{};
+    target.texture = picture;
+    target.load_op = SDL_GPU_LOADOP_LOAD;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(ctx.commands, &target, 1, nullptr);
+    if (!pass) {
+        return;
+    }
+    set_viewport(pass, view->_size.x, view->_size.y);
+    SDL_BindGPUGraphicsPipeline(pass, p);
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{view->_ao_depth.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{view->_fog_volume_sum.handle(), _owner->_sampler_linear}};
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), 2);
+    SDL_PushGPUFragmentUniformData(ctx.commands, 0, &ctx.fog_volume_uniforms, sizeof(ctx.fog_volume_uniforms));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
 }
 
 void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
@@ -8979,9 +14234,13 @@ void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
             warn_once(_taa_prepass_warned,
                       "3D: temporal anti-aliasing: the velocity pass could not begin, so this frame has no history");
         }
+        // The main pass's depth (the overlay's in front, in its slice of the range): the resolve takes the velocity
+        // of the nearest surface round each pixel at an edge.
+        const bool depth = _taa_depth_sampled && view->_taa_depth;
         ctx.shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings,
                                 ctx.taa_reset || !ctx.velocity_drawn, ctx.jitter, ctx.taa_reactive,
-                                ctx.coverage_key != view->_taa_coverage_key, ctx.scene.debug.freeze_jitter, stats);
+                                ctx.coverage_key != view->_taa_coverage_key, ctx.scene.debug.freeze_jitter,
+                                depth ? &view->_taa_depth : nullptr, ctx.overlaid, stats);
         view->_taa_valid = ctx.velocity_drawn;
         for (u32 s = 0; s < 2; ++s) {
             if (ctx.scenes[s]) {
@@ -9017,6 +14276,8 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
             set_viewport(picking, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
+            put_clip(u.clip, ctx.scenes[0]);
+            put_hidden(u.first, ctx.scenes[0]);
             SDL_GPUBuffer* cluster_index = cluster_index_buffer();
             DrawBinder binder{picking};
             for (const u32 index : _order) {
@@ -9032,7 +14293,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                 const bool cutout = picked.blend == Blend3D::Mask;
                 SDL_GPUGraphicsPipeline* p =
                     pipeline(pick_format, 1, !picked.double_sided, Pass::Pick, cutout, nullptr, false, ref.skinned,
-                             false, false, Unlit::Off, ref.retained != ~0u);
+                             false, false, Unlit::Off, ref.retained != ~0u, pass_surface(picked));
                 if (!p) {
                     continue;
                 }
@@ -9057,6 +14318,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, picking, picked);
                 }
+                bind_offset(commands, picking, picked, ref.skinned);
                 if (ref.clustered) {
                     draw_cluster_copies(ref, commands, picking, binder, u, nullptr);
                     continue;
@@ -9077,7 +14339,237 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
     }
 }
 
+bool GpuRenderer3D::render_visibility(const VisibilityTargets3D& targets, IPreparedSceneBackend3D& input,
+                                      const VisibilityOptions3D& options, RenderDebugStats3D& stats) {
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    if (!prepared || prepared->owner != this || !prepared->valid() || !_capabilities.visibility_pass)
+        return false;
+    const auto* depth = dynamic_cast<const GpuTextureBackend*>(targets.depth.backend().get());
+    const auto* mask = dynamic_cast<const GpuTextureBackend*>(targets.mask.backend().get());
+    const auto valid = [&](const GpuTextureBackend* t, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage) {
+        return t && t->texture() && t->texture().belongs_to(_device->handle()) && t->texture().format() == format &&
+               (t->texture().usage() & usage) == usage;
+    };
+    if (targets.depth.array_layers() || targets.mask.array_layers() ||
+        !valid(depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+               SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        !valid(mask, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+               SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        depth->size() != mask->size())
+        return false;
+    const auto& camera = prepared->sources[0].scene->camera;
+    if (!(camera.z_near > 0) || !(camera.z_far > camera.z_near))
+        return false;
+    const auto projection = camera.view_projection(f32(depth->size().x) / f32(depth->size().y));
+    for (const auto value : projection.m)
+        if (!std::isfinite(value))
+            return false;
+    for (const auto& draw : prepared->sources[0].scene->draws()) {
+        if (draw.material.blend != Blend3D::Mask || !draw.material.texture)
+            continue;
+        const auto& source = draw.material.texture;
+        const auto* texture = dynamic_cast<const GpuTextureBackend*>(source.backend().get());
+        if (source == targets.mask || source == targets.depth || !texture ||
+            !texture->texture().belongs_to(_device->handle()) || source.array_layers())
+            return false;
+    }
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    collect_mesh_buffers();
+    GpuView3D scratch;
+    scratch._size = depth->size();
+    FrameCtx ctx{&scratch, *prepared->sources[0].scene, stats};
+    ctx.prepared = prepared;
+    ctx.geometry_only = true;
+    _local_views.clear();
+    _particle_batches.clear();
+    setup_frame(ctx);
+    cull_and_upload(ctx);
+    order_draws(ctx);
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    ctx.commands = _owner->_frame->command_buffer();
+    ctx.storage = _instances ? _instances->handle() : nullptr;
+    ctx.joints = _joints ? _joints->handle() : nullptr;
+    ctx.joint_offsets = _joint_offsets ? _joint_offsets->handle() : nullptr;
+    _owner->retain(targets.depth);
+    _owner->retain(targets.mask);
+    cluster_pass_gpu(ctx, 0);
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = mask->texture().handle();
+    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    const auto depth_info = depth_target(depth->texture().handle(), SDL_GPU_STOREOP_STORE, true);
+    bool complete = false;
+    if (auto* picking = SDL_BeginGPURenderPass(ctx.commands, &colour, 1, &depth_info)) {
+        complete = true;
+        auto* commands = ctx.commands;
+        auto* storage = ctx.storage;
+        auto* cluster_index = cluster_index_buffer();
+        set_viewport(picking, scratch._size.x, scratch._size.y);
+        DrawUniforms u{};
+        std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
+        put_clip(u.clip, ctx.scene.camera);
+        put_hidden(u.first, ctx.scene.camera);
+        const u32 ids[4] = {options.target_id, options.ignored_id.value_or(0), options.ignored_id ? 1u : 0u, 0};
+        SDL_PushGPUFragmentUniformData(commands, 1, ids, sizeof(ids));
+        DrawBinder binder{picking};
+        for (const u32 index : _order) {
+            const DrawRef& ref = _refs[index];
+            const Pass kind = pass_of(ref.draw->material);
+            if (ref.scene != 0 || kind != Pass::Opaque) {
+                continue;
+            }
+            if (std::none_of(ref.level_seen.begin(), ref.level_seen.end(), [](u32 count) { return count != 0; }))
+                continue;
+            if (!storage || (ref.skinned && (!ctx.joints || !ctx.joint_offsets))) {
+                complete = false;
+                break;
+            }
+            const Material3D& picked = ref.draw->material;
+            const bool cutout = picked.blend == Blend3D::Mask;
+            SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 1, !picked.double_sided,
+                                                  Pass::Visibility, cutout, nullptr, false, ref.skinned, false, false,
+                                                  Unlit::Off, ref.retained != ~0u, pass_surface(picked));
+            if (!p) {
+                complete = false;
+                break;
+            }
+            const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
+            const std::array<SDL_GPUBuffer*, 2> retained_buffers{
+                ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
+                _retained_indices ? _retained_indices->handle() : nullptr};
+            binder.bind_pipeline(p,
+                                 ref.retained != ~0u ? retained_buffers.data()
+                                 : ref.skinned       ? skinned_buffers.data()
+                                                     : &storage,
+                                 ref.retained != ~0u ? 2
+                                 : ref.skinned       ? 3
+                                                     : 1);
+            if (ref.clustered && !cluster_index) {
+                complete = false;
+                break;
+            }
+            binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
+            if (ref.skinned) {
+                binder.bind_skin(ref.mesh);
+            }
+            if (cutout) {
+                bind_cutout(commands, picking, picked);
+            }
+            bind_offset(commands, picking, picked, ref.skinned);
+            if (ref.clustered) {
+                RenderDebugStats3D drawn{};
+                draw_cluster_copies(ref, commands, picking, binder, u, &drawn);
+                stats.visibility_draws += drawn.ao_draws;
+                stats.visibility_instances += drawn.ao_instances;
+                continue;
+            }
+            for (u32 l = 0; l < ref.levels; ++l) {
+                if (ref.level_seen[l] == 0) {
+                    continue;
+                }
+                u.first[0] = ref.level_first[l];
+                SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                binder.draw(ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index);
+                ++stats.visibility_draws;
+                stats.visibility_instances += ref.level_seen[l];
+            }
+        }
+        SDL_EndGPURenderPass(picking);
+        mask->bump_version();
+        depth->bump_version();
+    }
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return complete;
+}
+
+bool GpuRenderer3D::render_geometry(const GeometryTargets3D& targets, const Scene3D& scene, RenderDebugStats3D& stats) {
+    return render_geometry_scene(targets, scene, stats, nullptr);
+}
+bool GpuRenderer3D::render_geometry_scene(const GeometryTargets3D& targets, const Scene3D& scene,
+                                          RenderDebugStats3D& stats, GpuPreparedScene3D* prepared) {
+    const auto* depth = dynamic_cast<const GpuTextureBackend*>(targets.depth.backend().get());
+    const auto* normals = dynamic_cast<const GpuTextureBackend*>(targets.normals.backend().get());
+    const auto valid = [&](const GpuTextureBackend* texture, SDL_GPUTextureFormat format,
+                           SDL_GPUTextureUsageFlags usage) {
+        return texture && texture->texture() && texture->texture().belongs_to(_device->handle()) &&
+               texture->texture().format() == format && (texture->texture().usage() & usage) == usage;
+    };
+    if (!_capabilities.geometry_pass || targets.depth.array_layers() || targets.normals.array_layers() ||
+        !valid(depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+               SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        !valid(normals, ao_normal_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        depth->size() != normals->size())
+        return false;
+    if (!prepared)
+        for (const auto& draw : scene.draws()) {
+            if (pass_of(draw.material) != Pass::Opaque)
+                continue;
+            const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+            if (!mesh || !mesh->device || *mesh->device != _device->handle() || (draw.skinned && !_skinning_available))
+                return false;
+            if (draw.material.blend == Blend3D::Mask && draw.material.texture) {
+                if (draw.material.texture == targets.depth || draw.material.texture == targets.normals)
+                    return false; // an attachment cannot be sampled while this pass writes it
+                const auto* texture = dynamic_cast<const GpuTextureBackend*>(draw.material.texture.backend().get());
+                if (!texture || !texture->texture().belongs_to(_device->handle()) ||
+                    draw.material.texture.array_layers())
+                    return false;
+            }
+        }
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    collect_mesh_buffers();
+    GpuView3D scratch;
+    scratch._size = depth->size();
+    FrameCtx ctx{&scratch, scene, stats};
+    ctx.prepared = prepared;
+    if (prepared && !preparation_live(prepared->frame))
+        return false;
+    ctx.geometry_only = true;
+    _local_views.clear();
+    _particle_batches.clear();
+    setup_frame(ctx);
+    cull_and_upload(ctx);
+    order_draws(ctx);
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    ctx.commands = _owner->_frame->command_buffer();
+    ctx.storage = _instances ? _instances->handle() : nullptr;
+    ctx.joints = _joints ? _joints->handle() : nullptr;
+    ctx.joint_offsets = _joint_offsets ? _joint_offsets->handle() : nullptr;
+    _owner->retain(targets.depth);
+    _owner->retain(targets.normals);
+    cluster_pass_gpu(ctx, 0);
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = normals->texture().handle();
+    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    const auto depth_info = depth_target(depth->texture().handle(), SDL_GPU_STOREOP_STORE, true);
+    bool complete = false;
+    if (auto* pass = SDL_BeginGPURenderPass(ctx.commands, &colour, 1, &depth_info)) {
+        complete = draw_geometry(ctx, pass, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, false);
+        SDL_EndGPURenderPass(pass);
+        normals->bump_version();
+        depth->bump_version();
+    }
+    resume_2d();
+    stats.ao_draws = stats.ao_instances = 0;
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return complete;
+}
+
 bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDebugStats3D& stats) {
+    return render_scene(base, scene, stats, nullptr);
+}
+bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, RenderDebugStats3D& stats,
+                                 GpuPreparedScene3D* prepared) {
     struct CountWaits { // on every way out
         RenderDebugStats3D& stats;
         const GpuDevice& device;
@@ -9086,19 +14578,56 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     } count_waits{stats, *_device};
     collect_mesh_buffers();
     auto* view = dynamic_cast<GpuView3D*>(&base);
-    if (!view || !_vertex_shader || !_fragment_shader) {
+    if (!view || !view->_resolved || !view->_resolved->texture().belongs_to(_device->handle()) || !_vertex_shader ||
+        !_fragment_shader) {
         return false;
     }
+    // Only a completed render that resolved GI can supply the next render's lighting history. This also covers
+    // failed geometry/main passes and successful renders with GI disabled, before TAA advances its own history.
+    struct GiHistoryFrame {
+        GpuView3D::Gi& gi;
+        bool resolved = false;
+        ~GiHistoryFrame() {
+            if (!resolved)
+                gi.has_last = false;
+        }
+    } gi_history{view->_gi};
     // The 2D pipeline's colour format changed (set_color_space): the view follows.
     if (view->_output_format != _owner->_target_format && !make_targets(*view)) {
         return false;
     }
+    // The GI scene's stand-ins for surface materials it has none of yet, drawn before this render's passes (each a
+    // render of its own into the frame's commands).
+    bake_gi_proxies(scene);
     const std::size_t pipelines_before = _owner->_pipelines.size();
+    u64 input_signature = 0;
+    const std::array material_outputs{view->texture()};
+    if (!validate_material_inputs(scene, material_outputs, &input_signature))
+        return false;
+    // A material whose map is this view's picture (a mirror's or a portal's, drawn into its own view) reads white here.
+    struct DrawnPicture {
+        SDL_GPUTexture*& slot;
+        ~DrawnPicture() { slot = nullptr; }
+    } drawn_picture{_drawn_picture};
+    if (const auto* own = dynamic_cast<const GpuTextureBackend*>(view->texture().backend().get());
+        own && own->texture())
+        _drawn_picture = own->texture().handle();
     FrameCtx ctx{view, scene, stats};
+    ctx.input_signature = input_signature;
+    ctx.prepared = prepared;
+    if (prepared && !preparation_live(prepared->frame))
+        return false;
     setup_frame(ctx);
+    if (!scene.decals().empty()) {
+        ctx.decals = _capabilities.decals && _ao_available;
+        if (!ctx.decals)
+            warn_once(_decals_warned, "3D: decals asked for, but this device cannot draw them: not drawn");
+    }
+    prepare_decals(ctx);
     fit_sun_shadow(ctx);
     choose_point_lights(ctx);
     choose_local_lights(ctx);
+    build_light_grid(ctx);
     cull_and_upload(ctx);
     prepare_particles(ctx);
     ctx.shadow_history = ctx.taa && std::ranges::any_of(_particle_batches, [](const auto& batch) {
@@ -9109,68 +14638,108 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     ctx.sun_shadow_cached = ctx.shadows && shadow_unchanged(ctx);
     upload_particle_casts(ctx);
     begin_commands(ctx);
-    // Debug markers stay in the existing command buffer. External profilers can
-    // timestamp them without the submission splits of the fence-based scopes.
-    struct PassMarker {
-        SDL_GPUCommandBuffer* commands;
-        PassMarker(SDL_GPUCommandBuffer* buffer, bool enabled, const char* name)
-            : commands(enabled ? buffer : nullptr) {
-            if (commands)
-                SDL_PushGPUDebugGroup(commands, name);
-        }
-        ~PassMarker() {
-            if (commands)
-                SDL_PopGPUDebugGroup(commands);
-        }
-    };
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.clusters"};
-        cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.sun_shadow"};
-        shadow_pass(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.local_shadows"};
-        local_shadow_pass(ctx);
-    }
-    stats.lights_variant = ctx.lights_variant;
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.prepass"};
-        prepass(ctx);
-    }
-    stats.taa_main_velocity = ctx.main_velocity;
-    if (ctx.occlusion && !ctx.occlusion_second) {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.occluders"};
-        occluder_pass(ctx); // no pre-pass made the depth: a pass of its own
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.overlay_velocity"};
-        overlay_velocity(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.main"};
-        if (!main_pass(ctx))
+    const ResourceGraphDesc& recipe = stock_frame_graph3d(); // also what tools show
+    auto& compiler = view->_graph_compiler;
+    const auto before = compiler.stats().compilations;
+    const auto& plan = compiler.compile(recipe, ~u64{0});
+    if (!plan)
+        return false;
+    stats.graph_reused = compiler.stats().compilations == before;
+    stats.graph_compile_ms = stats.graph_reused ? 0 : compiler.stats().last_compile_ms;
+    stats.graph_passes = static_cast<u32>(plan.order.size());
+    stats.graph_culled_passes = plan.culled_passes;
+    const std::array<std::function<bool()>, frame_graph_passes3d> operations{
+        {[&] {
+             cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
+             return true;
+         },
+         [&] { return local_shadow_pass(ctx); },
+         [&] {
+             // (A capture borrowing a view's GI builds none of its own: that view's probes light it.)
+             ctx.gi = !_gi_borrowed && gi_scene(ctx.commands, *view, scene, stats);
+             return true;
+         },
+         [&] {
+             if (_gi_borrowed) {
+                 ctx.gi_lit = _lights_available && _gi_borrowed->_gi.lit && _gi_borrowed->_gi.irradiance;
+                 ctx.lights_variant = ctx.lights_variant || ctx.gi_lit;
+             } else if (ctx.gi) {
+                 const Mat4f to_environment =
+                     Mat4f::rotation_y(ctx.sky_env_used ? 0.0f : -scene.lights.environment_rotation);
+                 ctx.gi_lit =
+                     _lights_available && gi_probes(ctx.commands, *view, scene, ctx.environment, to_environment, stats);
+                 ctx.lights_variant = ctx.lights_variant || ctx.gi_lit;
+             }
+             return true;
+         },
+         [&] {
+             const bool ok = shadow_pass(ctx);
+             stats.lights_variant = ctx.lights_variant;
+             return ok;
+         },
+         [&] {
+             prepass(ctx);
+             stats.taa_main_velocity = ctx.main_velocity;
+             return true;
+         },
+         [&] {
+             if (ctx.occlusion && !ctx.occlusion_second)
+                 occluder_pass(ctx);
+             return true;
+         },
+         [&] {
+             overlay_velocity(ctx);
+             return true;
+         },
+         [&] { return main_pass(ctx); },
+         [&] {
+             if (ctx.fog_sun)
+                 fog_sun_apply(ctx);
+             if (ctx.fog_volume && !ctx.fog_volume_applied)
+                 fog_volume_apply(ctx);
+             return true;
+         },
+         [&] {
+             resolve_history(ctx);
+             if (ctx.ssr_wanted)
+                 ssr_keep_picture(ctx); // (the next frame's reflections read it)
+             return true;
+         },
+         [&] {
+             pick_pass(ctx);
+             return true;
+         },
+         [&] {
+             if (ctx.taa)
+                 return finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass, scene.time,
+                                    stats);
+             else if (view->_hdr)
+                 return finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass, scene.time,
+                                    stats);
+             return true;
+         }}};
+    static constexpr std::array<const char*, frame_graph_passes3d> markers{
+        {"kin3d.clusters", "kin3d.local_shadows", "kin3d.gi_scene", "kin3d.gi_probes", "kin3d.sun_shadow",
+         "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.main", "kin3d.fog_sun",
+         "kin3d.temporal_resolve", "kin3d.picking", "kin3d.output"}};
+    const auto record_start = std::chrono::steady_clock::now();
+    for (u32 i = 0; i < plan.order.size(); ++i) {
+        const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
+        const PassMarker marker{ctx.commands, _gpu_markers, markers[pass]};
+        const auto pass_start = std::chrono::steady_clock::now();
+        const bool recorded = operations[pass]();
+        stats.graph_pass_ms[pass] =
+            std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - pass_start).count();
+        if (!recorded) {
+            resume_2d();
             return false;
+        }
     }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.temporal_resolve"};
-        resolve_history(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.picking"};
-        pick_pass(ctx);
-    }
-    if (ctx.taa) {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.output"};
-        finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass);
-    } else if (view->_hdr) {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.output"};
-        finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass);
-    }
+    stats.graph_record_ms =
+        std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - record_start).count();
     age_targets(ctx);
     stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines_before);
+    view->_resolved->bump_version();
     resume_2d();
     if (ctx.occlusion && ctx.occlusion_second) {
         view->_occ_read ^= 1; // what the second pass wrote is what the next render's first pass reads
@@ -9187,10 +14756,13 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
         stats.shared_mesh_range_reuses = pooled.reused;
         stats.shared_mesh_pages = pooled.pages;
     }
+    gi_history.resolved = ctx.gi_resolved;
     return true;
 }
 
 bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
+    if (!validate_material_inputs(scene))
+        return false;
     auto* view = dynamic_cast<GpuView3D*>(&base);
     if (!view || !_vertex_shader || !_fragment_shader) {
         return false;
@@ -9228,13 +14800,20 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
     bool taa = scene.taa.enabled && _taa_available;
     const bool soft = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
     const bool particles = _particles_available && (!scene.particle_draws().empty() || scene.weather.active());
-    const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft;
+    const bool gi_wanted =
+        scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
+    const bool fog_sun_wanted = _fog_sun_pipeline && scene.fog.enabled && scene.fog.sun_shadows &&
+                                scene.fog.sun_scatter > 0.0f && scene.camera.projection == Projection3D::Perspective;
+    const bool fog_volume_wanted = _fog_volume_pipeline && fog_volume_possible(scene.fog, scene.camera);
+    const bool ssr_wanted = scene.ssr.enabled && _ssr_pipeline && _ao_available && _lights_available;
+    const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft || gi_wanted || fog_sun_wanted ||
+                               fog_volume_wanted || ssr_wanted;
     if (taa) {
         taa = ensure_taa_targets(*view, scene.taa.sharpness > 0.0f) &&
               (needs_prepass || custom_shader || particles
                    ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/true)
                    : ensure_velocity_target(*view));
-    } else if (ao || contact || soft) {
+    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted || fog_volume_wanted) {
         ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/false);
     }
     if (shadows) {
@@ -9247,8 +14826,9 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
                                            [](const PointLightSource3D& l) { return l.shadow_enabled; });
     const bool moon_shadow =
         lights.fill_shadow.enabled && lights.fill_shadow.strength > 0.0f && area_size.x > 0 && area_size.z > 0;
+    const bool gi_lit = scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
     const bool lights_on = _lights_available && (!lights.spots.empty() || spot_shadows || point_shadows ||
-                                                 moon_shadow || lights.sun_shadow_strength < 1.0f);
+                                                 moon_shadow || lights.sun_shadow_strength < 1.0f || gi_lit);
     if (lights_on && (spot_shadows || point_shadows) && _shadow_shader && _shadow_vertex_shader) {
         u32 side = 0;
         for (const SpotLightSource3D& l : lights.spots) {
@@ -9257,13 +14837,32 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
         for (const PointLightSource3D& l : lights.points) {
             side = l.shadow_enabled ? std::max(side, local_resolution(l, lights)) : side;
         }
-        const u32 spot_cap = std::min(lights.max_shadowed_spots, max_spot_shadow_maps);
-        const u32 point_cap = std::min(lights.max_shadowed_points, max_point_shadow_maps);
-        const auto count = [](const auto& list) {
-            return static_cast<u32>(
-                std::count_if(list.begin(), list.end(), [](const auto& l) { return l.shadow_enabled; }));
+        // The array as the most demanding lights that ask would fill it (the largest maps of each kind, up to its cap).
+        side = std::bit_ceil(std::clamp(side, 64u, 4096u));
+        const auto largest = [&](const auto& list, u32 cap) {
+            std::vector<u32> sizes;
+            for (const auto& l : list) {
+                if (l.shadow_enabled) {
+                    sizes.push_back(local_map_size(local_resolution(l, lights), side));
+                }
+            }
+            std::sort(sizes.begin(), sizes.end(), std::greater<>());
+            sizes.resize(std::min<std::size_t>(sizes.size(), cap));
+            return sizes;
         };
-        ensure_local_map(side, std::min(spot_cap, count(lights.spots)), std::min(point_cap, count(lights.points)));
+        std::vector<std::pair<u32, u32>> maps;
+        for (const u32 size : largest(lights.spots, std::min(lights.max_shadowed_spots, max_spot_shadow_maps))) {
+            maps.push_back({static_cast<u32>(maps.size()), size});
+        }
+        u32 slot = 0;
+        for (const u32 size : largest(lights.points, std::min(lights.max_shadowed_points, max_point_shadow_maps))) {
+            for (u32 f = 0; f < cube_faces; ++f) {
+                maps.push_back({max_spot_shadow_maps + cube_faces * slot + f, size});
+            }
+            ++slot;
+        }
+        std::array<LocalPlace, max_local_shadow_layers> places{};
+        ensure_local_map(side, pack_local_maps(side, maps, places));
     }
     if (lights_on && moon_shadow && _shadow_shader && _shadow_vertex_shader) {
         const u32 res = lights.fill_shadow.resolution != 0 ? lights.fill_shadow.resolution : lights.shadow_resolution;
@@ -9401,13 +15000,21 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
 
             // Warm the retained variants too. Capacity conflicts can still select the ordinary
             // variants at render time; preparing both avoids a first-visible-frame compile.
-            if (_retained_enabled && draw.batch && !taa && !draw.skinned && !custom &&
+            const auto* source = scenes[index];
+            const bool direct = !draw.batch && !source->instances_exposed() && !source->lod.enabled &&
+                                source->debug.retain_scene_instances && source->draws().size() >= 32 &&
+                                source->instances().size() >= 256;
+            if (_retained_enabled && (draw.batch || direct) && !taa && !draw.skinned && !custom &&
                 !scenes[0]->lod.occlusion.enabled && (m.blend == Blend3D::Opaque || m.blend == Blend3D::Mask)) {
                 auto retained = request;
-                retained.fog = fog_on;
-                retained.lights = lights_on;
                 retained.indexed = true;
-                pipeline(retained);
+                warm_mesh(retained);
+                if (direct && scene.debug.cache_draw_commands && _draw_materials_available && !m.unlit &&
+                    !m.wireframe) {
+                    auto materials = retained;
+                    materials.materials = true;
+                    warm_mesh(materials);
+                }
                 if (index == 0 && view->_pick)
                     pipeline(pick_format, 1, !m.double_sided, Pass::Pick, cutout, nullptr, false, false, false, false,
                              Unlit::Off, true);

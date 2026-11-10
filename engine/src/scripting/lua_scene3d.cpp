@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <kin/ecs/system.hpp>
+#include <kin/scene/planar_views3d.hpp>
 #include <limits>
 #include <sol/sol.hpp>
 #include <stdexcept>
@@ -265,7 +267,7 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         const auto options = checked<sol::table>(options_argument, "options");
 
         command_buffer(*api);
-        fields(options, {"move", "forward", "jump", "crouch", "sprint"});
+        fields(options, {"move", "forward", "jump", "crouch", "sprint", "facing"});
         CharacterInput3D input;
         if (sol::object move = options["move"]; move != sol::nil) {
             const auto value = checked<sol::table>(move, "move");
@@ -278,6 +280,9 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         input.jump = option(options, "jump", false);
         input.crouch = option(options, "crouch", false);
         input.sprint = option(options, "sprint", false);
+        std::optional<Quatf> facing;
+        if (sol::object value = options["facing"]; value != sol::nil)
+            facing = rotation(checked<sol::table>(value, "facing"));
         script_component_access("CharacterController3D", true);
         auto entity = resolve(*api, handle);
         if (!native_character(*api, entity))
@@ -286,6 +291,8 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         if (!controller)
             return false;
         controller->input = input;
+        if (facing)
+            controller->facing = *facing;
         return true;
     };
     scene["character_state"] = [api](sol::this_state state, SceneEntity3D handle) -> sol::object {
@@ -425,6 +432,49 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
                                                              animator->player.time(), "playing", animator->playing,
                                                              "speed", animator->speed, "loop", animator->loop,
                                                              "finished", animator->player.finished()));
+    };
+    // Morph target weights (MorphWeights3D): set by name on the entity's model (added when the entity has none: it
+    // then draws its own copies of the parts with targets), read back, and given back to the clips and the model.
+    scene["set_morph_weight"] = [api](SceneEntity3D handle, std::string target, f32 weight) {
+        auto& commands = command_buffer(*api);
+        if (target.empty() || !std::isfinite(weight) || weight < -1 || weight > 1)
+            throw std::runtime_error("morph weights need a target name and a weight within [-1, 1]");
+        script_component_access("MorphWeights3D", true);
+        auto actor = resolve(*api, handle);
+        if (!actor)
+            return false;
+        if (auto* own = actor.has<MorphWeights3D>() ? actor.get_mut<MorphWeights3D>() : nullptr) {
+            own->set(target, weight);
+            return true;
+        }
+        const EcsId id = actor.id();
+        commands.defer([id, target = std::move(target), weight](EcsWorld& world, std::string&) {
+            if (auto entity = world.entity_by_id(id))
+                entity.ensure<MorphWeights3D>().set(target, weight);
+            return true;
+        });
+        return true;
+    };
+    scene["morph_weight"] = [api](SceneEntity3D handle, std::string target) -> sol::optional<f32> {
+        script_component_access("MorphWeights3D", false);
+        const auto actor = resolve(*api, handle);
+        const auto* own = actor ? actor.get<MorphWeights3D>() : nullptr;
+        if (!own)
+            return sol::nullopt;
+        for (const MorphWeight3D& w : own->weights)
+            if (w.target == target)
+                return w.weight;
+        return sol::nullopt;
+    };
+    scene["clear_morph_weight"] = [api](SceneEntity3D handle, std::string target) {
+        command_buffer(*api);
+        script_component_access("MorphWeights3D", true);
+        auto actor = resolve(*api, handle);
+        auto* own = actor && actor.has<MorphWeights3D>() ? actor.get_mut<MorphWeights3D>() : nullptr;
+        if (!own)
+            return false;
+        own->erase(target);
+        return true;
     };
     scene["play_action"] = [api](sol::this_state state, SceneEntity3D handle, std::string name,
                                  sol::object mode_argument) -> sol::object {
@@ -585,6 +635,24 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
                                   vector(lua, hit->physics.point), "normal", vector(lua, hit->physics.normal));
         if (hit->entity)
             result["entity"] = SceneEntity3D(hit->entity);
+        return sol::make_object(state, result);
+    };
+    // A step through the scene's portals (Portal3D; portal_step): nil when it goes through none, else where it ends
+    // (the rest of the step out of the exit), the turn for its facing and velocity, and the portals.
+    scene["portal_step"] = [api](sol::this_state state, sol::object from_argument,
+                                 sol::object to_argument) -> sol::object {
+        if (!api->active() || !api->world)
+            throw std::runtime_error("3D portals require an active scene");
+        const auto step = portal_step(*api->world, vector(checked<sol::table>(from_argument, "from")),
+                                      vector(checked<sol::table>(to_argument, "to")));
+        if (!step)
+            return sol::nil;
+        sol::state_view lua{state};
+        auto result = lua.create_table_with(
+            "position", vector(lua, step->position), "turn",
+            lua.create_table_with("x", step->turn.x, "y", step->turn.y, "z", step->turn.z, "w", step->turn.w));
+        result["portal"] = api->handle(step->portal);
+        result["exit"] = api->handle(step->exit);
         return sol::make_object(state, result);
     };
     scene["teleport"] = [api](SceneEntity3D handle, sol::object position_argument, sol::object rotation_argument) {

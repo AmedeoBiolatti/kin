@@ -1,7 +1,13 @@
 # Interactive performance examples
 
+For a minimal native 2D game, use [the starter](../games/starter/README.md).
+The [project workflow](../docs/project_workflow.md) maps other requirements to
+current examples; reuse the parts the game needs.
+
 For a new 3D game, start from `camp_walk` or `projectile_range`: both use `SceneSession3D` for loading, frame stages,
-physics and rendering. Configure with `cmake --preset 3d`, build in `build-3d`, and run binaries from `build-3d/bin`. The renderer viewers and timing workloads in this directory
+physics and rendering. Configure with `cmake --preset dev-3d -DKIN_BUILD_EXAMPLES=ON`,
+build the chosen target with `cmake --build --preset dev-3d --target camp_walk`
+(or `projectile_range`), and run it from `out/build/dev-3d/bin`. The renderer viewers and timing workloads in this directory
 use the direct APIs so that they can isolate rendering costs; Summit integrates its existing simulation with the frame
 stages. See [the 3D guide](../docs/rendering_3d.md#owning-a-3d-scene-session) for the normal session lifecycle.
 For Lua gameplay, start from [Lua 3D range](#lua-3d-range), which uses the same session and frame stages.
@@ -276,6 +282,9 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   scale (the picture is of a person on a swing in Sponza's nave).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
+- Probe global illumination: `--preset gi,ao,taa,contact`. The "Global illumination" panel controls the finest voxel
+  size, clipmap levels, rays per update, probes per frame and intensity. GI is opt-in in this feature viewer; the
+  stats show `gi: lighting` when it is active. Let it settle for a few seconds; for a still use at least 600 frames.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8
   --screenshot out.png --preset ao` (or `--preset contact`, `--preset taa`, with `--spin 0.4` for a moving camera and enough `--frames` to settle) renders from the start camera and writes the
   picture (`--hud` puts the panel in it, `--spin DEG` turns the camera a frame,
@@ -748,6 +757,48 @@ this example predates that and keeps its own mapper for its look sensitivity and
 settings file. Its CPU mapper tests cover rebinding/edge semantics,
 and GPU gameplay tests drive identical routes with scripted, keyboard and synthetic
 pad commands through the same systems.
+
+## Bunker exit
+
+`bunker_exit` (3D builds) shows auto exposure, decals and morph targets in one small scene: the camera walks from a
+dark concrete bunker out into the afternoon sun and back, and the view's exposure follows (too bright for a moment
+outside, slower to open up again inside). Scorch marks, painted arrows, hazard stripes and bullet holes with a
+normal map are decals, lit with the floor and walls they lie on; two jelly sentinels (a sphere with "squash",
+"spikes" and "breathe" morph targets, the second a `copy_mesh` with weights of its own) bounce, breathe and bristle
+when the camera comes near. Every picture is made in code: no content files.
+
+```sh
+bunker_exit
+KIN_RENDER_BACKEND=gpu bunker_exit --shot inside.png --frames 90 --start 0    # a picture, headless
+KIN_RENDER_BACKEND=gpu bunker_exit --shot outside.png --frames 90 --start 8
+```
+
+E turns auto exposure on and off (off: a fixed exposure), D the decals, Space pauses the walk.
+
+## Material gallery
+
+`material_gallery` (3D builds) puts materials imported from another engine by `kin_import_material --graphs` on a
+ring of pedestals under a procedural sky. The band round each pedestal says how far the import got: green, the whole
+node graph; amber, a graph with some outputs falling back to their standard value; red, the standard material only.
+The heads-up line names what fell back.
+
+The materials themselves are not in the repository: the exhibits named in `material_gallery/main.cpp` are free Fab
+packs, whose licence allows using them in a project but not redistributing them. Export them from their Unreal
+project with `tools/import_material/unreal_export.py`, import them, and point the gallery at the folder:
+
+```sh
+kin_import_material unreal <export> --project <export> --content <folder> --out <folder>/m --graphs
+material_gallery --content <folder>
+KIN_RENDER_BACKEND=gpu material_gallery --content <folder> --exhibit 4 --shot zombie.png   # a picture, headless
+```
+
+Exhibits that are missing are left out, said once. Drag to orbit, the wheel to zoom, Left and Right for the
+exhibits, Up for the whole ring, Space for a tour.
+
+Graphs the import left uncooked are cooked on worker threads as the gallery starts, beside their sources
+(`<graph>.spv`, what `kin_material_graph cook` writes), so only the first start pays for glslc; the materials then load
+one a frame behind a progress bar. Large maps still take their time to decode: the zombie skin's four 16-bit 4096
+square PNGs, about 6 s.
 
 ## Summit
 

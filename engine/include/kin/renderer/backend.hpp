@@ -1,23 +1,26 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
 #include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
-#include <kin/renderer/data_buffer.hpp>
-#include <kin/renderer/material.hpp>
-#include <kin/renderer/shader_reflect.hpp>
+#include <kin/renderer/backend_types.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/color_grading.hpp>
+#include <kin/renderer/data_buffer.hpp>
+#include <kin/renderer/flip.hpp>
+#include <kin/renderer/gpu_memory_stats.hpp>
 #include <kin/renderer/gradient.hpp>
 #include <kin/renderer/mask.hpp>
+#include <kin/renderer/material.hpp>
 #include <kin/renderer/post_process.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/shape.hpp>
+#include <kin/renderer/sprite_instance.hpp>
 #include <kin/renderer/texture.hpp>
-
 #include <memory>
-#include <functional>
-#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
@@ -30,149 +33,13 @@ class JobSystem;
 class IRendererBackend3D;
 struct CompressedImage;
 
-// Mirroring a sprite within its rectangle, left-right (X) and/or upside
-// down (Y), before it turns about its pivot.
-enum class Flip : u8 { None = 0, X = 1, Y = 2, XY = 3 };
-constexpr Flip operator|(Flip a, Flip b) { return static_cast<Flip>(static_cast<u8>(a) | static_cast<u8>(b)); }
-constexpr Flip operator^(Flip a, Flip b) { return static_cast<Flip>(static_cast<u8>(a) ^ static_cast<u8>(b)); }
-constexpr bool flips_x(Flip f) { return (static_cast<u8>(f) & 1u) != 0; }
-constexpr bool flips_y(Flip f) { return (static_cast<u8>(f) & 2u) != 0; }
-constexpr Flip flip_of(bool x, bool y) { return static_cast<Flip>((x ? 1u : 0u) | (y ? 2u : 0u)); }
-// `source` (texture pixels) read the other way round: what backends are given
-// for a flipped draw (a negative width or height reads right to left or bottom
-// to top).
-constexpr Rectf mirrored(Rectf source, Flip flip) {
-    if (flips_x(flip)) {
-        source = {source.x + source.w, source.y, -source.w, source.h};
-    }
-    if (flips_y(flip)) {
-        source = {source.x, source.y + source.h, source.w, -source.h};
-    }
-    return source;
-}
-
-// One quad of a draw_sprites() call: what draw_texture(texture, source, dest,
-// tint, rotation, pivot, flip) would draw.
-struct SpriteInstance {
-    Rectf dest{};
-    Rectf source{};             // texture pixels; empty means the whole texture
-    Color tint = colors::white;
-    f32 rotation = 0.0f;        // degrees, clockwise, about the pivot
-    Vec2f pivot{0.5f, 0.5f};    // normalized within dest
-    Flip flip = Flip::None;
-};
-
-// How Renderer2D::draw_distance_field reads a distance-field texture: its
-// alpha is 0.5 on the outline, rising inside and falling outside by 0.5 over
-// `spread` texels.
-struct DistanceFieldStyle {
-    f32 spread = 8.0f;
-    f32 outline = 0.0f; // its width outside the outline, in texels
-    Color outline_color = colors::black;
-};
-
-struct RendererBackendCapabilities {
-    bool immediate_2d = true;
-    bool queued_2d = false;
-    bool render_targets = false;
-    bool blend_modes = false;
-    bool min_max_blend = false; // BlendMode::Max and Min honoured
-    bool shader_geometry = false; // draw_shader_geometry() draws
-    bool data_buffers = false;    // create_data_buffer() and shaders reading them
-    bool compute = false;         // compute shaders (Renderer2D::dispatch_compute)
-    bool transforms = false;      // set_transform() honoured (Renderer2D::push_transform)
-    bool shapes = false;          // draw_shape_mesh() draws (Renderer2D::draw_shape and friends)
-    bool shape_primitives = false; // draw_shape_primitives() draws primitives whole
-    bool distance_fields = false;  // draw_distance_field() draws
-    bool masks = false;            // layers, and draw_masked() lays one over through another
-    bool stencil_clips = false;    // push_stencil_clip(): hard-edged clips without layers
-    bool linear_color = false;     // set_color_space(Linear), and an HDR scene
-    bool color_output = false;     // set_color_output(): exposure, tonemapping, LUTs, dithering
-    bool materials_2d = false;
-    bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
-    bool text = false;
-    // 3D views (kin/render3d, experimental; renderer_3d() is not null).
-    bool rendering_3d = false;
-    // create_texture() accepts the data formats (R16Uint, Rg16Uint, R32Float).
-    bool data_textures = false;
-};
-
-// A named part of a frame's GPU work (Renderer2D::gpu_scope) and its GPU time.
-struct GpuScopeTiming {
-    std::string name{};
-    f64 ms = 0.0;
-    // The pixels its draws shaded (as RendererBackendStats::last_pixels_drawn),
-    // and that over the screen's: its share of the frame's overdraw.
-    f64 pixels = 0.0;
-    f64 overdraw = 0.0;
-};
-
-// What a compute dispatch reads and writes (Renderer2D::dispatch_compute). In
-// the shader, set 0 holds the sampled `sources` then the read-only `buffers`,
-// set 1 the `outputs` (storage textures, from create_storage_texture) then the
-// `output_buffers`, and set 2 the uniform block (`params`).
-struct ComputeBindings {
-    std::span<const Texture> sources{};
-    std::span<const DataBuffer> buffers{};
-    std::span<const Texture> outputs{};
-    std::span<const DataBuffer> output_buffers{};
-    const ShaderParams* params = nullptr;
-};
-
-struct RendererBackendStats {
-    u64 texture_draws_submitted = 0;
-    u64 texture_batch_flushes = 0;
-    u64 texture_batch_breaks = 0;
-    u64 direct_rect_fills = 0;
-    u64 rect_fills_submitted = 0;
-    u64 rect_batch_flushes = 0;
-    u64 direct_rect_outlines = 0;
-    u64 direct_lines = 0;
-    f64 last_present_flush_ms = 0.0;
-    f64 last_present_backend_ms = 0.0;
-    // SDL_GPU only. The time present() blocked acquiring a swapchain image: the
-    // CPU waiting for the GPU (or the display) to catch up.
-    f64 last_gpu_wait_ms = 0.0;
-    // SDL_GPU with GPU timing on: the GPU time of the latest frame that finished,
-    // usually one or two frames behind. Measured with fences, not timestamps.
-    // With the GPU far behind, some frames go untimed and the next sample spans
-    // them (last_gpu_frame_span frames): this is then their average.
-    f64 last_gpu_frame_ms = 0.0;
-    u32 last_gpu_frame_span = 1;
-    // Samples taken so far: last_gpu_frame_ms is new when this has grown.
-    u64 gpu_frames_sampled = 0;
-    // SDL_GPU: the pixels the last frame's draws covered, in each target's own
-    // pixels (a logical scene at its native size; overlaps counted each time,
-    // clipping not taken off), and that over the screen's: how many times each
-    // pixel was shaded on average. Render targets count too.
-    f64 last_pixels_drawn = 0.0;
-    f64 last_overdraw = 0.0;
-    // SDL_GPU: texture uploads (create_texture, update_texture) so far, and the
-    // command buffers that carried them (batched: many uploads, one submit).
-    u64 texture_uploads = 0;
-    u64 texture_upload_submits = 0;
-    // SDL_GPU shared upload staging: current single-handle capacity and allocations
-    // since device creation. Excludes SDL cycle backings, retired buffers and driver pools.
-    u64 upload_staging_bytes = 0, upload_staging_allocations = 0;
-    u64 saved_texture_draws() const {
-        return texture_draws_submitted > texture_batch_flushes ? texture_draws_submitted - texture_batch_flushes : 0;
-    }
-    u64 saved_rect_draws() const {
-        return rect_fills_submitted > rect_batch_flushes ? rect_fills_submitted - rect_batch_flushes : 0;
-    }
-};
-
 class IRenderer2DBackend {
 public:
     virtual ~IRenderer2DBackend() = default;
 
     virtual std::string_view name() const = 0;
-    virtual RendererBackendCapabilities capabilities() const {
-        return {};
-    }
-    virtual RendererBackendStats stats() const {
-        return {};
-    }
+    virtual RendererBackendCapabilities capabilities() const { return {}; }
+    virtual RendererBackendStats stats() const { return {}; }
     virtual void reset_stats() {}
     // Measures each frame's GPU time (stats().last_gpu_frame_ms) where supported.
     virtual void set_gpu_timing_enabled(bool) {}
@@ -229,6 +96,9 @@ public:
         f32 lut_strength = 1.0f;
     };
     virtual bool set_color_output(const ColorOutputState&) { return false; }
+    // `scene` drawn into `dest` (through the transform) as the output pass
+    // would show it (Renderer2D::draw_color_output).
+    virtual bool draw_color_output(const Texture&, Rectf, Rectf, const ColorOutputState&, bool) { return false; }
     // The current target's size in pixels (a layer's resolution is a share of it).
     virtual Vec2i current_target_pixels() const { return {}; }
     // Draws show how many times each pixel is shaded instead of themselves.
@@ -239,31 +109,30 @@ public:
     // The scopes that finished on the GPU since the last call.
     virtual std::vector<GpuScopeTiming> take_gpu_scope_timings() { return {}; }
     virtual void set_texture_batching_enabled(bool) {}
-    virtual bool texture_batching_enabled() const {
-        return false;
-    }
+    virtual bool texture_batching_enabled() const { return false; }
 
     virtual void clear(Color color) = 0;
     virtual void present() = 0;
 
     // Captures the current render target to a PNG file. Returns false if the
     // backend cannot read back pixels (e.g. fake/test backends).
-    virtual bool save_png(const char*) {
-        return false;
-    }
+    virtual bool save_png(const char*) { return false; }
 
     // Reads a logical-space region from the current render target as tightly
     // packed RGBA pixels. Returns false when readback is unsupported or empty.
-    virtual bool read_rgba(Rectf, std::vector<u8>&, Vec2i&) {
-        return false;
-    }
+    virtual bool read_rgba(Rectf, std::vector<u8>&, Vec2i&) { return false; }
+    // Starts reading a logical-space region of the current render target without waiting for the GPU (what is drawn so
+    // far is submitted; the pixels arrive once the GPU has drawn it): the read's ticket for take_read_rgba, 0 when the
+    // backend cannot (Renderer2D then reads with read_rgba, which waits).
+    virtual u64 request_read_rgba(Rectf) { return 0; }
+    // The pixels of the read `ticket` once they have arrived (true: the ticket is spent; `out` empty when the read
+    // failed), false until then; `wait`: waits for them.
+    virtual bool take_read_rgba(u64, std::vector<u8>&, Vec2i&, bool /*wait*/) { return false; }
 
     // Copy a logical-space region of the current render target into `dst` entirely on
     // the GPU (no CPU round-trip) — the fast path for backdrop capture / refraction.
     // Default returns false so callers fall back to read_rgba + re-upload.
-    virtual bool blit_region_to_target(Rectf /*region*/, const RenderTarget& /*dst*/) {
-        return false;
-    }
+    virtual bool blit_region_to_target(Rectf /*region*/, const RenderTarget& /*dst*/) { return false; }
 
     // Native pixel dimensions a capture of `region` (logical) would have. Default = the
     // logical size (1:1); a backend whose internal target is higher-res (e.g. native
@@ -274,6 +143,13 @@ public:
 
     virtual void set_logical_size(Vec2i size) = 0;
     virtual void set_integer_logical_size(Vec2i size) = 0;
+    // Native presentation at a uniform scale (see Renderer2D::set_content_scale).
+    // False when the backend can't present so.
+    virtual bool set_content_scale(f32 scale) {
+        static_cast<void>(scale);
+        return false;
+    }
+    virtual f32 content_scale() const { return 0.0f; }
     virtual void push_native_coordinates() {}
     virtual void pop_native_coordinates() {}
     virtual Vec2i output_size() const = 0;
@@ -298,9 +174,7 @@ public:
     // (kin/assets/texture_file.hpp; the caller has checked image.valid()), never
     // given generated mips. Default: an invalid texture, for a backend without
     // compressed textures.
-    virtual Texture create_texture_compressed(const CompressedImage& /*image*/) {
-        return {};
-    }
+    virtual Texture create_texture_compressed(const CompressedImage& /*image*/) { return {}; }
     // Replace the texels of a `size` region at `at` of `texture` with `pixels`
     // (RGBA8, tightly packed, row by row). False when the backend cannot update a
     // texture in place: the caller then makes a new one. Default: false.
@@ -332,21 +206,18 @@ public:
         const Vec2i size = texture.size();
         for (const SpriteInstance& sprite : sprites) {
             const Rectf source = sprite.source.w > 0.0f && sprite.source.h > 0.0f
-                ? sprite.source
-                : Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
-            draw_texture(texture, mirrored(source, sprite.flip), sprite.dest, sprite.tint, sprite.rotation, sprite.pivot);
+                                     ? sprite.source
+                                     : Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
+            draw_texture(texture, mirrored(source, sprite.flip), sprite.dest, sprite.tint, sprite.rotation,
+                         sprite.pivot);
         }
     }
 
     virtual void fill_rect(Rectf rect, Color color) = 0;
     virtual void draw_rect(Rectf rect, Color color) = 0;
     virtual void draw_line(Vec2f a, Vec2f b, Color color) = 0;
-    virtual void fill_rounded_rect(Rectf rect, f32, Color color) {
-        fill_rect(rect, color);
-    }
-    virtual void draw_rounded_rect(Rectf rect, f32, Color color, f32 = 1.0f) {
-        draw_rect(rect, color);
-    }
+    virtual void fill_rounded_rect(Rectf rect, f32, Color color) { fill_rect(rect, color); }
+    virtual void draw_rounded_rect(Rectf rect, f32, Color color, f32 = 1.0f) { draw_rect(rect, color); }
 
     // Linear gradient fill. Default degrades to a flat fill of the mid color, so
     // the call is always valid; a backend that reports capabilities().gradients
@@ -415,6 +286,8 @@ public:
         return {};
     }
     virtual Texture create_storage_texture(Vec2i /*size*/, TextureFormat /*format*/) { return {}; }
+    virtual Texture create_render_attachment(Vec2i /*size*/, TextureFormat /*format*/, u32 /*array_layers*/ = 0) { return {}; }
+    virtual bool copy_texture(const Texture& /*source*/, const Texture& /*destination*/) { return false; }
     virtual bool dispatch_compute(ComputeShaderHandle, Vec2i /*groups*/, const ComputeBindings&) { return false; }
 
     // Storage buffers for shaders (capabilities().data_buffers). `data` (or
@@ -442,6 +315,11 @@ public:
     // (before viewports and clips, which it leaves alone). A backend that
     // reports capabilities().transforms honours it.
     virtual void set_transform(const Affine2&) {}
+    // Indexed textured triangles (Renderer2D::draw_textured_geometry, which
+    // checks them first); false where the backend can't.
+    virtual bool draw_textured_geometry(const Texture&, std::span<const ShaderVertex>, std::span<const u32>) {
+        return false;
+    }
     // Anti-aliased triangles (Renderer2D::draw_shape): each vertex's colour
     // times `tint`, faded out over the pixel past the outline by its `edge`
     // (measured on the GPU, or from the transform's scale where shaders cannot
@@ -469,12 +347,8 @@ public:
     virtual void reset_viewport() = 0;
     virtual void push_viewport(Rectf rect) = 0;
     virtual void pop_viewport() = 0;
-    virtual void push_clip(Rectf rect) {
-        push_viewport(rect);
-    }
-    virtual void pop_clip() {
-        pop_viewport();
-    }
+    virtual void push_clip(Rectf rect) { push_viewport(rect); }
+    virtual void pop_clip() { pop_viewport(); }
 
     // Render targets. Defaults report "unsupported": create returns an empty
     // target, push/pop are no-ops. A backend that reports
@@ -482,9 +356,7 @@ public:
     // drawing uses the target's native pixel space (1:1, origin top-left);
     // push must save and pop must restore the prior target, viewport, clip, and
     // logical-presentation state. Calls nest (stack-based).
-    virtual RenderTarget create_render_target(Vec2i /*size_px*/, ScaleMode = ScaleMode::Linear) {
-        return {};
-    }
+    virtual RenderTarget create_render_target(Vec2i /*size_px*/, ScaleMode = ScaleMode::Linear) { return {}; }
     virtual void push_render_target(const RenderTarget&) {}
     virtual void pop_render_target() {}
 

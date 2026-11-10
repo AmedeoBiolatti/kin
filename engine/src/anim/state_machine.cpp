@@ -12,7 +12,7 @@ bool from_matches(const AnimTransition& transition, std::string_view current) {
     return transition.from.empty() || transition.from == current;
 }
 
-bool condition_matches(const Condition& condition, const AnimationParams& params) {
+bool condition_matches(const Condition& condition, const AnimationParams& params, bool finished) {
     switch (condition.op) {
     case CondOp::IsTrue:
         return params.get_bool(condition.param);
@@ -28,16 +28,21 @@ bool condition_matches(const Condition& condition, const AnimationParams& params
         return std::fabs(params.get_float(condition.param) - condition.threshold) > float_epsilon;
     case CondOp::TriggerSet:
         return params.triggers.contains(condition.param);
+    case CondOp::Finished:
+        return finished;
     }
     return false;
 }
 
-bool transition_matches(const AnimTransition& transition, std::string_view current, const AnimationParams& params) {
+bool transition_matches(const AnimTransition& transition, std::string_view current, const AnimationParams& params, bool finished) {
     if (!from_matches(transition, current)) {
         return false;
     }
+    if (transition.from.empty() && transition.to == current && transition.mode == TransitionMode::ReplaceBase) {
+        return false; // into the state it is in: it would start again each step
+    }
     for (const Condition& condition : transition.when) {
-        if (!condition_matches(condition, params)) {
+        if (!condition_matches(condition, params, finished)) {
             return false;
         }
     }
@@ -70,9 +75,10 @@ f32 AnimationParams::get_float(std::string_view key) const {
 
 const AnimTransition* evaluate(const AnimationStateMachine& machine,
                                std::string_view current,
-                               AnimationParams& params) {
+                               AnimationParams& params,
+                               bool finished) {
     for (const AnimTransition& transition : machine.transitions) {
-        if (!transition_matches(transition, current, params)) {
+        if (!transition_matches(transition, current, params, finished)) {
             continue;
         }
         for (const Condition& condition : transition.when) {

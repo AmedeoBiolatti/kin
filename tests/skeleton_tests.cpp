@@ -2107,7 +2107,7 @@ void test_ecs_animator_layers_and_root_motion() {
         blend_masked(base, layer, PoseMask3D::subtree(sk, sk.find("middle"), 1.0f, true), 0.75f);
         assert(max_difference(collected_matrices(state), matrices_of(base, sk)) < 1e-5f);
     }
-    {
+    for (const auto mode : {SceneMutationMode3D::Conservative, SceneMutationMode3D::Tracked}) {
         // Root motion: 2 m a second along the entity's own x; the entity turned a quarter about Y goes along -z. The
         // root joint stays at rest.
         Animator3D a;
@@ -2115,17 +2115,21 @@ void test_ecs_animator_layers_and_root_motion() {
         a.apply_root_motion = true;
         kin::EcsWorld world;
         WorldRenderState3D state{world};
+        state.mutation_mode(mode);
         const flecs::entity e =
             world.raw()
                 .entity()
                 .set(Transform3D{.position = {5, 0, 0}, .rotation = Quatf::axis_angle({0, 1, 0}, 90.0f)})
                 .set(SkinnedMeshRenderer3D{.model = hero.model})
                 .set(a);
+        state.propagate_transforms();
         for (int i = 0; i < 30; ++i) {
             state.animate(dt);
+            state.propagate_transforms();
         }
         const Transform3D* t = e.get<Transform3D>();
         assert(close(t->position, {5.0f, 0.0f, -1.0f}, 1e-3f));
+        assert(close(e.get<WorldTransform3D>()->position(), t->position, 1e-5f));
         Pose3D p;
         p = e.get<Animator3D>()->player.pose();
         assert(close(p.joints[0].translation.x, 0.0f, 1e-6f)); // held at rest in x

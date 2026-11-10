@@ -30,7 +30,7 @@ namespace kin::ui2 {
 namespace {
 
 // Opens a font from the content (a mounted pack, or disk), face `source.face`.
-TTF_Font* open_font(const FontSource& source, f32 size) {
+TTF_Font* open_font(const FontSource& source, f32 size, bool embolden = false) {
     SDL_IOStream* stream = open_content_stream(source.path);
     if (!stream) {
         return nullptr;
@@ -44,6 +44,9 @@ TTF_Font* open_font(const FontSource& source, f32 size) {
     }
     TTF_Font* font = TTF_OpenFontWithProperties(props);
     SDL_DestroyProperties(props);
+    if (font && embolden) {
+        TTF_SetFontStyle(font, TTF_STYLE_BOLD);
+    }
     return font;
 }
 
@@ -199,6 +202,16 @@ Image render_glyph(TTF_Font* font, u32 c) {
     std::string text;
     utf8_append(text, c);
     return render_white(font, text);
+}
+
+// Whether a glyph drawn in white has colours of its own (a colour emoji).
+bool colored(const Image& image) {
+    for (std::size_t i = 0; i + 3 < image.rgba.size(); i += 4) {
+        if (image.rgba[i + 3] > 32 && (image.rgba[i] < 240 || image.rgba[i + 1] < 240 || image.rgba[i + 2] < 240)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---- Laying out text from a face's metrics ----
@@ -546,8 +559,8 @@ TextKind classify(std::string_view text) {
     for (std::size_t k = 0; k < text.size();) {
         const auto byte = static_cast<unsigned char>(text[k]);
         if (byte < 0x80) {
-            if (byte < first_glyph && byte != '\n' && byte != '\r' && byte != '\t') {
-                kind = TextKind::Simple; // a control character: drawn as nothing
+            if (!printable(byte) && byte != '\n' && byte != '\r' && byte != '\t') {
+                kind = TextKind::Simple; // a control character (DEL too): drawn as nothing
             }
             ++k;
             continue;
@@ -731,6 +744,7 @@ struct AtlasGlyph {
     Rectf source{};
     u8 page = 0;
     bool drawable = false;
+    bool colored = false; // its own colours (an emoji): drawn untinted
 };
 
 // Glyphs by code point: printable ASCII in an array, the rest as they come.
@@ -782,7 +796,8 @@ class TtfFontBackend final : public IFontBackend {
 public:
     TtfFontBackend(const std::filesystem::path& path, f32 point_size, const TtfFontOptions& options)
         : _path(path), _point_size(point_size), _oversample(std::max(1.0f, options.oversample)),
-          _rendering(options.rendering), _kerning(path) {
+          _rendering(options.rendering), _embolden(options.embolden), _atlas_pages(static_cast<std::size_t>(std::clamp(options.atlas_pages, 1, 255))),
+          _kerning(path) {
         ensure_ttf();
         for (const FontSource& fallback : options.fallbacks) {
             if (!fallback.path.empty() && !(fallback.path == path && fallback.face == 0)) {
@@ -949,7 +964,6 @@ private:
     // Bitmap: faces and atlases, one a size, kept for the most recent few.
     static constexpr std::size_t max_faces = 12;
     static constexpr std::size_t max_glyph_atlases = 8;
-    static constexpr std::size_t max_atlas_pages = 4;
     static constexpr std::size_t max_shaped_sizes = 1024;
 
     static void close(FontFace& face) {
@@ -973,7 +987,7 @@ private:
     FontFace* sdf_face() const {
         if (!_sdf.font) {
             _sdf.point_size = sdf_base * static_cast<f32>(sdf_supersample);
-            _sdf.font = open_font({_path, 0}, _sdf.point_size);
+            _sdf.font = open_font({_path, 0}, _sdf.point_size, _embolden);
             set_language(_sdf.font);
         }
         return _sdf.font ? &_sdf : nullptr;
@@ -1100,7 +1114,7 @@ private:
     TTF_Font* fallback_font(FontFace& face, std::size_t i) const {
         face.fallbacks.resize(_fallbacks.size(), nullptr);
         if (!face.fallbacks[i] && probe(i)) {
-            face.fallbacks[i] = open_font(_fallbacks[i].source, face.point_size);
+            face.fallbacks[i] = open_font(_fallbacks[i].source, face.point_size, _embolden);
             set_language(face.fallbacks[i]);
         }
         return face.fallbacks[i];
@@ -1360,7 +1374,7 @@ private:
             _faces.erase(oldest);
         }
 
-        TTF_Font* font = open_font({_path, 0}, size);
+        TTF_Font* font = open_font({_path, 0}, size, _embolden);
         if (!font) {
             KIN_LOG_ERROR_F("ui",
                             "font open failed",
@@ -1434,7 +1448,20 @@ private:
     }
 
     // Packs the glyphs of `text` the atlas lacks (not those that are shaped).
+    // Full (all its pages: text in many scripts at a large size), it starts
+    // over with printable ASCII and this text's glyphs: those other text used
+    // are made again when it is drawn next.
     void add_glyphs(Renderer2D& renderer, FontFace& face, GlyphAtlas& atlas, std::string_view text) const {
+        add_glyphs_once(renderer, face, atlas, text);
+        if (atlas.full) { // once: a text that alone needs more than the budget gets what fits
+            GlyphAtlas fresh = build_glyph_atlas(renderer, face, atlas.scale);
+            fresh.last_used = atlas.last_used;
+            atlas = std::move(fresh);
+            add_glyphs_once(renderer, face, atlas, text);
+        }
+    }
+
+    void add_glyphs_once(Renderer2D& renderer, FontFace& face, GlyphAtlas& atlas, std::string_view text) const {
         const GlyphMetrics& metrics = metrics_of(face);
         bool added = false;
         for (std::size_t k = 0; k < text.size();) {
@@ -1457,13 +1484,14 @@ private:
                 continue;
             }
             Vec2i at;
-            if (!place(atlas.pages, image.size, at, glyph.page, 0, atlas.full)) {
+            if (!place(atlas.pages, _atlas_pages, image.size, at, glyph.page, 0, atlas.full)) {
                 continue;
             }
             blit(renderer, atlas.pages[glyph.page], at, image.size, image.rgba.data());
             glyph.source = {static_cast<f32>(at.x), static_cast<f32>(at.y), static_cast<f32>(image.size.x),
                             static_cast<f32>(image.size.y)};
             glyph.drawable = true;
+            glyph.colored = colored(image);
             added = true;
         }
         if (added) {
@@ -1473,16 +1501,16 @@ private:
 
     // Room for an image on the last page, or a new one; false when the atlas
     // has all the pages it may.
-    static bool place(std::vector<AtlasPage>& pages, Vec2i size, Vec2i& at, u8& page, u8 fill_rgb, bool& full) {
+    static bool place(std::vector<AtlasPage>& pages, std::size_t max_pages, Vec2i size, Vec2i& at, u8& page, u8 fill_rgb, bool& full) {
         if (!pages.empty() && pack(pages.back(), size, at)) {
             page = static_cast<u8>(pages.size() - 1);
             return true;
         }
-        if (pages.size() >= max_atlas_pages) {
+        if (pages.size() >= max_pages) {
             if (!full) {
-                full = true;
-                KIN_LOG_WARN("ui", "glyph atlas full: further characters are not drawn");
+                KIN_LOG_INFO("ui", "glyph atlas full: it starts over"); // the bitmap one; a distance-field one drops what is new
             }
+            full = true;
             return false;
         }
         const Vec2i side = pages.empty() ? Vec2i{1024, 1024} : pages.back().size;
@@ -1520,7 +1548,7 @@ private:
                                    snap(origin.y + (pen.y + source.y_offset) * inv),
                                    glyph->source.w * inv,
                                    glyph->source.h * inv},
-                                  color);
+                                  glyph->colored ? Color{255, 255, 255, color.a} : color);
         });
     }
 
@@ -1632,7 +1660,7 @@ private:
         if (atlas.pages.empty()) {
             atlas.pages.push_back(make_page({sdf_page_side, sdf_page_side}, 255));
         }
-        return place(atlas.pages, size, at, page, 255, atlas.full);
+        return place(atlas.pages, _atlas_pages, size, at, page, 255, atlas.full);
     }
 
     // The fields of the characters in `text` the atlas lacks.
@@ -1692,7 +1720,14 @@ private:
                                               .tint = color});
             });
         };
-        std::vector<std::pair<const CachedTextTexture*, Rectf>> shaped;
+        // The shaped runs' textures, kept (not the cache's entries: making the
+        // next run's may move or drop them).
+        struct ShapedRun {
+            Texture texture;
+            Vec2i size{};
+            Rectf dest{};
+        };
+        std::vector<ShapedRun> shaped;
         if (kind == TextKind::Shaped) {
             for (const Segment& segment : layout(*face, text).segments) {
                 const std::string_view part = text.substr(segment.begin, segment.end - segment.begin);
@@ -1701,8 +1736,10 @@ private:
                 if (!segment.shaped) {
                     add_quads(part, origin);
                 } else if (const CachedTextTexture* cached = shaped_texture(renderer, *face, part, segment.rtl, scale, true)) {
-                    shaped.emplace_back(cached, Rectf{origin.x, origin.y, static_cast<f32>(cached->size.x) * face_s,
-                                                      static_cast<f32>(cached->size.y) * face_s});
+                    shaped.push_back({.texture = cached->texture,
+                                      .size = cached->size,
+                                      .dest = {origin.x, origin.y, static_cast<f32>(cached->size.x) * face_s,
+                                               static_cast<f32>(cached->size.y) * face_s}});
                 }
             }
         } else {
@@ -1720,15 +1757,16 @@ private:
             }
         }
         // Shaped runs are plain textures: their outline is stamped round them.
-        for (const auto& [cached, dest] : shaped) {
-            const Rectf source{0, 0, static_cast<f32>(cached->size.x), static_cast<f32>(cached->size.y)};
+        for (const ShapedRun& run : shaped) {
+            const Rectf source{0, 0, static_cast<f32>(run.size.x), static_cast<f32>(run.size.y)};
+            const Rectf& dest = run.dest;
             if (outline > 0.0f && outline_color.a > 0) {
                 for (const Vec2f off : {Vec2f{-outline, 0}, Vec2f{outline, 0}, Vec2f{0, -outline}, Vec2f{0, outline}}) {
-                    renderer.draw_texture(cached->texture, source, {dest.x + off.x, dest.y + off.y, dest.w, dest.h},
+                    renderer.draw_texture(run.texture, source, {dest.x + off.x, dest.y + off.y, dest.w, dest.h},
                                           outline_color);
                 }
             }
-            renderer.draw_texture(cached->texture, source, dest, color);
+            renderer.draw_texture(run.texture, source, dest, color);
         }
         return drawn;
     }
@@ -1737,6 +1775,8 @@ private:
     f32 _point_size = 0.0f;
     f32 _oversample = 1.0f;
     TextRendering _rendering = TextRendering::Bitmap;
+    bool _embolden = false;
+    std::size_t _atlas_pages = 4; // TtfFontOptions::atlas_pages
     std::vector<FontSource> _general_fallbacks;
     std::vector<LanguageFont> _language_fallbacks;
     mutable std::vector<Fallback> _fallbacks; // the chain for the text language

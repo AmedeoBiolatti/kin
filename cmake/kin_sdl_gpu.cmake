@@ -1,0 +1,50 @@
+include_guard(GLOBAL)
+
+# SDL 3.4.10 uses one default SAMPLER state for graphics and compute sampling,
+# but its Vulkan barriers only include graphics shader stages. Patch the
+# missing compute stage in a generated translation unit, never in shared sources.
+function(kin_patch_sdl_gpu_sampler_barriers target)
+    get_target_property(sources "${target}" SOURCES)
+    set(original)
+    foreach(source IN LISTS sources)
+        get_filename_component(name "${source}" NAME)
+        if(name STREQUAL "SDL_gpu_vulkan.c")
+            set(original "${source}")
+            break()
+        endif()
+    endforeach()
+    if(NOT original)
+        return() # Vulkan is not compiled for this SDL profile/platform.
+    endif()
+    file(READ "${original}" code)
+    string(REPLACE "\r\n" "\n" code "${code}")
+    string(SHA256 digest "${code}")
+    if(NOT digest STREQUAL "c1bd7422338abac65a32290e9a235d3484716385eb6e0927f4d87adae0250a0c")
+        message(FATAL_ERROR
+            "Kin's compute-sampler barrier patch requires the unmodified SDL release-3.4.10 "
+            "Vulkan source. Review cmake/kin_sdl_gpu.cmake before upgrading SDL.")
+    endif()
+    foreach(direction source destination)
+        if(direction STREQUAL "source")
+            set(stages srcStages)
+        else()
+            set(stages dstStages)
+        endif()
+        set(before "${direction}UsageMode == VULKAN_TEXTURE_USAGE_MODE_SAMPLER) {\n        ${stages} = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;")
+        set(after "${direction}UsageMode == VULKAN_TEXTURE_USAGE_MODE_SAMPLER) {\n        ${stages} = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;")
+        string(REPLACE "${before}" "${after}" code "${code}")
+    endforeach()
+    get_target_property(binary "${target}" BINARY_DIR)
+    set(patched "${binary}/kin-source/SDL_gpu_vulkan_kin.c")
+    file(MAKE_DIRECTORY "${binary}/kin-source")
+    file(CONFIGURE OUTPUT "${patched}" CONTENT
+        "/* Modified by Kin: Vulkan sampler barriers also cover compute shaders. */\n@code@" @ONLY)
+    # Keep the original include context for Vulkan's relative private headers.
+    get_filename_component(include_directory "${original}" DIRECTORY)
+    target_include_directories("${target}" PRIVATE "${include_directory}")
+    list(REMOVE_ITEM sources "${original}")
+    list(APPEND sources "${patched}")
+    set_property(TARGET "${target}" PROPERTY SOURCES "${sources}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${original}")
+    message(STATUS "Kin: SDL Vulkan compute-sampler barrier patch: ${patched}")
+endfunction()

@@ -6,12 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <utility>
 
 #if defined(_WIN32)
@@ -27,6 +29,11 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+#if defined(__ANDROID__)
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <jni.h>
 #endif
 
 #include "content_io.hpp"
@@ -172,6 +179,9 @@ struct Mount {
     // the pack this way.
     std::filesystem::path canonical;
     std::shared_ptr<const ContentPack> pack;
+    // Set for a MemoryContent's pack: it unmounts itself when it is destroyed.
+    std::weak_ptr<const MemoryContent> memory;
+    bool from_memory = false;
 };
 
 std::filesystem::path canonical_form(const std::filesystem::path& point) {
@@ -191,10 +201,12 @@ Mounts& mounts() {
 }
 
 // Where `path` is in a mounted pack: the pack, and the path inside it ("" for
-// the mount point itself).
+// the mount point itself). Locked only after the mounts' lock is released: the
+// last owner of a MemoryContent unmounts it.
 struct PackLocation {
     std::shared_ptr<const ContentPack> pack;
     std::string inner;
+    std::weak_ptr<const MemoryContent> memory;
 };
 
 std::optional<PackLocation> locate(const std::filesystem::path& path) {
@@ -221,7 +233,7 @@ std::optional<PackLocation> locate(const std::filesystem::path& path) {
             inner = inside(mount.canonical);
         }
         if (inner) {
-            return PackLocation{mount.pack, std::move(*inner)};
+            return PackLocation{mount.pack, std::move(*inner), mount.memory};
         }
     }
     return std::nullopt;
@@ -264,11 +276,84 @@ ContentPack::~ContentPack() {
         CloseHandle(static_cast<HANDLE>(_mapping));
     }
 #else
+#if defined(__ANDROID__)
+    if (_mapping) {
+        AAsset_close(static_cast<AAsset*>(_mapping)); // its buffer is _data
+        return;
+    }
+#endif
     if (_data) {
         munmap(const_cast<std::byte*>(_data), _size);
     }
 #endif
 }
+
+#if defined(__ANDROID__)
+namespace {
+
+// The app's AssetManager, from SDL's activity; kept for the life of the process.
+AAssetManager* android_asset_manager() {
+    static AAssetManager* const manager = []() -> AAssetManager* {
+        auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (!env || !activity) {
+            return nullptr;
+        }
+        AAssetManager* result = nullptr;
+        jclass type = env->GetObjectClass(activity);
+        jmethodID get_assets = env->GetMethodID(type, "getAssets", "()Landroid/content/res/AssetManager;");
+        jobject assets = get_assets ? env->CallObjectMethod(activity, get_assets) : nullptr;
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        if (assets) {
+            // The native manager is valid while its Java object is: keep that alive.
+            result = AAssetManager_fromJava(env, env->NewGlobalRef(assets));
+            env->DeleteLocalRef(assets);
+        }
+        env->DeleteLocalRef(type);
+        env->DeleteLocalRef(activity);
+        return result;
+    }();
+    return manager;
+}
+
+} // namespace
+
+std::shared_ptr<const ContentPack> ContentPack::open_android_asset(std::string_view name, std::string* error) {
+    const std::string asset_name{name};
+    const std::string shown = "apk:" + asset_name;
+    AAssetManager* manager = android_asset_manager();
+    if (!manager) {
+        set_error(error, "no Android asset manager for " + shown);
+        return nullptr;
+    }
+    AAsset* asset = AAssetManager_open(manager, asset_name.c_str(), AASSET_MODE_BUFFER);
+    if (!asset) {
+        set_error(error, "cannot open " + shown);
+        return nullptr;
+    }
+    std::shared_ptr<ContentPack> pack{new ContentPack};
+    pack->_file = std::filesystem::path{"/android_asset"} / asset_name;
+    pack->_mapping = asset; // closed by the destructor
+    // A stored (uncompressed) asset's buffer is the APK's own mapped bytes; a
+    // compressed one would be inflated into memory here.
+    pack->_data = static_cast<const std::byte*>(AAsset_getBuffer(asset));
+    pack->_size = static_cast<std::size_t>(AAsset_getLength64(asset));
+    if (!pack->_data) {
+        set_error(error, "cannot map " + shown);
+        return nullptr;
+    }
+    if (pack->_size < HeaderSize) {
+        set_error(error, shown + " is not a kin pack (too short)");
+        return nullptr;
+    }
+    if (!read_index(*pack, shown, error)) {
+        return nullptr;
+    }
+    return pack;
+}
+#endif
 
 std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path& file, std::string* error) {
     std::shared_ptr<ContentPack> pack{new ContentPack};
@@ -322,17 +407,24 @@ std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path
     pack->_data = static_cast<const std::byte*>(data);
     pack->_size = static_cast<std::size_t>(info.st_size);
 #endif
+    if (!read_index(*pack, name, error)) {
+        return nullptr;
+    }
+    return pack;
+}
 
+bool ContentPack::read_index(ContentPack& pack_ref, const std::string& name, std::string* error) {
+    ContentPack* const pack = &pack_ref;
     const std::byte* base = pack->_data;
     if (std::memcmp(base, PackMagic.data(), PackMagic.size()) != 0) {
         set_error(error, name + " is not a kin pack");
-        return nullptr;
+        return false;
     }
     const u32 version = read_le<u32>(base + 8);
     if (version != PackVersion) {
         set_error(error, name + " is pack version " + std::to_string(version) + "; this build reads version " +
                              std::to_string(PackVersion));
-        return nullptr;
+        return false;
     }
     const u32 count = read_le<u32>(base + 12);
     const u64 index_offset = read_le<u64>(base + 16);
@@ -340,19 +432,19 @@ std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path
     const u32 index_crc = read_le<u32>(base + 28);
     if (index_offset < HeaderSize || index_offset > pack->_size || index_size > pack->_size - index_offset) {
         set_error(error, name + " is damaged (index out of range)");
-        return nullptr;
+        return false;
     }
     const std::byte* index = base + index_offset;
     if (crc32_update(0, index, index_size) != index_crc) {
         set_error(error, name + " is damaged (index checksum)");
-        return nullptr;
+        return false;
     }
     pack->_entries.reserve(count);
     std::size_t at = 0;
     for (u32 i = 0; i < count; ++i) {
         if (index_size - at < EntryFixedSize) {
             set_error(error, name + " is damaged (index too short)");
-            return nullptr;
+            return false;
         }
         Entry entry;
         entry.offset = read_le<u64>(index + at);
@@ -362,25 +454,25 @@ std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path
         at += EntryFixedSize;
         if (index_size - at < length) {
             set_error(error, name + " is damaged (index too short)");
-            return nullptr;
+            return false;
         }
         entry.path.assign(reinterpret_cast<const char*>(index + at), length);
         at += length;
         if (!valid_entry_path(entry.path)) {
             set_error(error, name + " has an invalid path: " + entry.path);
-            return nullptr;
+            return false;
         }
         if (entry.offset < HeaderSize || entry.offset > index_offset || entry.size > index_offset - entry.offset) {
             set_error(error, name + " is damaged (" + entry.path + " out of range)");
-            return nullptr;
+            return false;
         }
         if (!pack->_entries.empty() && pack->_entries.back().path >= entry.path) {
             set_error(error, name + " is damaged (index out of order at " + entry.path + ")");
-            return nullptr;
+            return false;
         }
         pack->_entries.push_back(std::move(entry));
     }
-    return pack;
+    return true;
 }
 
 const ContentPack::Entry* ContentPack::find(std::string_view path) const {
@@ -396,10 +488,16 @@ const ContentPack::Entry* ContentPack::find_ignoring_case(std::string_view path)
 }
 
 std::span<const std::byte> ContentPack::bytes(const Entry& entry) const {
+    if (_memory_owner) {
+        return _memory_bytes[static_cast<std::size_t>(&entry - _entries.data())];
+    }
     return {_data + entry.offset, static_cast<std::size_t>(entry.size)};
 }
 
 bool ContentPack::verify(std::string* error) const {
+    if (_memory_owner) {
+        return true; // made from bytes in memory: there is no file to go bad
+    }
     for (const Entry& entry : _entries) {
         const std::span<const std::byte> data = bytes(entry);
         if (crc32_update(0, data.data(), data.size()) != entry.crc32) {
@@ -515,13 +613,57 @@ ContentPackWriteResult write_content_pack(const std::filesystem::path& dir, cons
 
 // --- Mounts and reads ------------------------------------------------------
 
-void mount_content_pack(const std::filesystem::path& mount_point, std::shared_ptr<const ContentPack> pack) {
+namespace {
+
+void add_mount(Mount entry) {
     Mounts& state = mounts();
     std::unique_lock lock{state.mutex};
-    const std::filesystem::path point = normalized(mount_point);
-    std::erase_if(state.list, [&](const Mount& m) { return m.point == point; });
-    state.list.push_back({point, canonical_form(point), std::move(pack)});
+    std::erase_if(state.list, [&](const Mount& m) { return m.point == entry.point; });
+    state.list.push_back(std::move(entry));
     std::ranges::stable_sort(state.list, std::greater<>{}, [](const Mount& m) { return m.point.native().size(); });
+}
+
+} // namespace
+
+void mount_content_pack(const std::filesystem::path& mount_point, std::shared_ptr<const ContentPack> pack) {
+    const std::filesystem::path point = normalized(mount_point);
+    add_mount({.point = point, .canonical = canonical_form(point), .pack = std::move(pack)});
+}
+
+std::shared_ptr<const MemoryContent> MemoryContent::create(Files files) {
+    for (const auto& [name, bytes] : files) {
+        if (!valid_entry_path(name)) {
+            throw std::invalid_argument("invalid memory content path: " + name);
+        }
+    }
+    static std::atomic<u64> next{1};
+    std::shared_ptr<MemoryContent> content{new MemoryContent};
+    content->_root =
+        normalized(std::filesystem::temp_directory_path() / ".kin-memory-content" / std::to_string(next.fetch_add(1)));
+    content->_files = std::make_shared<const Files>(std::move(files));
+    // A map keeps its files in path order, as a pack's index is.
+    std::shared_ptr<ContentPack> pack{new ContentPack};
+    pack->_file = content->_root;
+    pack->_memory_owner = content->_files;
+    for (const auto& [name, bytes] : *content->_files) {
+        pack->_entries.push_back({.path = name, .offset = 0, .size = bytes.size(), .crc32 = 0});
+        pack->_memory_bytes.push_back(std::as_bytes(std::span{bytes.data(), bytes.size()}));
+    }
+    content->_pack = pack;
+    // Its root is a name, not a folder, but under the temp folder, which a path
+    // canonical code resolves may name differently (a symlink, RUNNER~1).
+    add_mount({.point = content->_root,
+               .canonical = canonical_form(content->_root),
+               .pack = std::move(pack),
+               .memory = content,
+               .from_memory = true});
+    return content;
+}
+
+MemoryContent::~MemoryContent() {
+    Mounts& state = mounts();
+    std::unique_lock lock{state.mutex};
+    std::erase_if(state.list, [&](const Mount& m) { return m.pack == _pack; });
 }
 
 void unmount_content_pack(const std::filesystem::path& mount_point) {
@@ -534,9 +676,14 @@ void unmount_content_pack(const std::filesystem::path& mount_point) {
 void unmount_all_content_packs() {
     Mounts& state = mounts();
     std::unique_lock lock{state.mutex};
-    state.list.clear();
+    // Live MemoryContents stay mounted: they unmount themselves.
+    std::erase_if(state.list, [](const Mount& m) { return !m.from_memory; });
 }
 
+std::shared_ptr<const MemoryContent> memory_content_for(const std::filesystem::path& path) {
+    const std::optional<PackLocation> location = locate(path);
+    return location ? location->memory.lock() : nullptr;
+}
 std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path& path) {
     std::optional<PackLocation> location = locate(path);
     return location ? location->pack : nullptr;
@@ -827,6 +974,24 @@ std::filesystem::path find_content_root(const ContentSearch& search, int argc, c
         }
         tried.push_back(search.dev_dir.string());
     }
+#if defined(__ANDROID__)
+    // An Android app's content is a pack in its APK's assets (kin_android_app).
+    {
+        const std::string asset = search.name + ".kinpak";
+        std::string why;
+        if (std::shared_ptr<const ContentPack> pack = ContentPack::open_android_asset(asset, &why)) {
+            const std::filesystem::path root = std::filesystem::path{"/android_asset"} / search.name;
+            KIN_LOG_INFO_F("content", "content pack",
+                           (LogFields{{.name = "pack", .value = "apk:" + asset},
+                                      {.name = "root", .value = root.string()},
+                                      {.name = "files", .value = std::to_string(pack->entries().size())},
+                                      {.name = "from", .value = "the APK"}}));
+            mount_content_pack(root, std::move(pack));
+            return remember(root);
+        }
+        tried.push_back(why);
+    }
+#endif
     const std::filesystem::path beside = executable_dir();
     const std::filesystem::path pack = beside / (search.name + ".kinpak");
     std::error_code error;

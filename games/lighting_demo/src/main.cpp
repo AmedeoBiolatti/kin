@@ -8,6 +8,7 @@
 //   C        linear HDR / the old gamma pipeline     G  grading on / off
 //   Esc      quit
 
+#include <kin/platform/window.hpp>
 #include <kin/core/json.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/renderer/color_grading.hpp>

@@ -52,6 +52,8 @@
 
 namespace kin {
 
+class Renderer3D;
+
 // Where an entity sits relative to its parent (flecs ChildOf), or to the
 // world without one: scaled, then turned, then moved to `position`.
 struct Transform3D {
@@ -118,6 +120,7 @@ struct PointLight3D {
     LinearRgb color{1.0f, 1.0f, 1.0f}; // linear; as PointLightSource3D::color
     f32 radius = 5.0f;
     f32 size = 0.01f;
+    f32 volumetric = 1.0f; // times its light in the fog's air (Fog3D::volumetric); 0: none
     bool shadow_enabled = false;
     u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
     f32 shadow_bias = 1.0f;          // map texels
@@ -136,6 +139,7 @@ struct SpotLight3D {
     f32 size = 0.01f;
     f32 inner_angle = 20.0f; // degrees; see SpotLightSource3D
     f32 outer_angle = 30.0f;
+    f32 volumetric = 1.0f; // times its light in the fog's air (Fog3D::volumetric); 0: none
     bool shadow_enabled = false;
     u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
     f32 shadow_bias = 1.0f;          // map texels
@@ -159,9 +163,103 @@ struct ParticleEmitter3D {
     std::string bound_texture; // runtime-only; empty refs clear only authored bindings
 };
 
+// Mirrors and portals on entities (docs/rendering_3d.md, Mirrors and portals; PlanarViews3D in
+// kin/scene/planar_views3d.hpp renders them, SceneSession3D on its own). Each is a surface in the entity's XY plane,
+// centred on it, its front its +Z, `size` wide (its X) and high (its Y) times the entity's scale; PlanarViews3D draws
+// it (pick answers the entity) and renders the picture it shows into a view of its own when it is on screen: of where
+// it shows only, with the main view's samples and its pixels' density times `resolution` (1: as sharp as the view).
+//
+// A mirror, still water, a polished floor: its reflection is its picture, weighed as kin's material weighs a
+// reflection (its colour, metallic and roughness: water reflects little head on and much at a glance, a silver mirror
+// all of it). `normal_asset` (a normal map, linear: water's ripples) repeats `uv_scale` times across it and moves by
+// `flow` a second; `distortion` (world units) is how far its ripples move where the picture is read.
+struct Mirror3D {
+    bool enabled = true;
+    Vec2f size{2.0f, 2.0f};
+    Color color = Color::rgb(235, 235, 240);
+    f32 metallic = 1.0f;
+    f32 roughness = 0.045f;
+    ComponentAssetRef normal_asset;
+    f32 normal_scale = 1.0f;
+    Vec2f uv_scale{1.0f, 1.0f};
+    Vec2f flow{0.0f, 0.0f};
+    f32 distortion = 0.0f;
+    f32 strength = 1.0f;   // how much of the reflection its picture is
+    f32 resolution = 1.0f; // its picture's pixels' density, a share of the view's
+    // Water you see into (refraction_view): `refraction` of what is below shows through (0: none, a mirror), bent by
+    // the ripples by `refraction_distortion`, fading into `murk` as it deepens (half of it gone about `murk_depth`
+    // down).
+    f32 refraction = 0.0f;
+    f32 refraction_distortion = 0.1f;
+    Color murk = Color::rgb(28, 64, 70);
+    f32 murk_depth = 1.5f;
+    Texture normal; // runtime: normal_asset's (resolve_render3d_assets), or one from C++
+    std::string bound_normal;
+};
+
+// A portal: the entity `exit` (another portal, or any entity: its placing is the exit's) is what it opens onto, in at
+// this one's front and out of the exit's front (portal_view). `depth`: how many levels of it seen through itself are
+// drawn (two portals facing each other show their corridor that deep); the deepest, and the portal in other planar
+// views' pictures, is `stand_in`, unlit. Things go through it by portal_step (kin/scene/planar_views3d.hpp; Lua
+// scene3d.portal_step).
+// Goes through portals (PortalTravel3D, kin/scene/planar_views3d.hpp): when the point `height` above the entity's
+// origin (a character's waist: the openings may start above its feet) crosses an enabled portal's opening from its
+// front, the entity is put at the exit (its character or dynamic body carried by the physics, its velocity turned with
+// it: WorldPhysicsState3D::carry; else its Transform3D moved and turned). SceneSession3D runs it after each physics
+// step.
+struct PortalTraveller3D {
+    bool enabled = true;
+    f32 height = 1.0f;
+};
+
+struct Portal3D {
+    // What the surface does to its picture (kin's planar_window surface): nothing; ripples spreading from where things
+    // go through, as on water; a vortex turning round its middle, spun faster by what goes through; a glitching
+    // signal, its picture torn and split in colour, worst where things go through; a liquid membrane, wobbling, a
+    // soap film's colours at a glance, rippled by what goes through. Each with a glow at its rim.
+    enum class Effect : u8 { None, Ripples, Vortex, Glitch, Membrane };
+    bool enabled = true;
+    Vec2f size{1.8f, 2.8f};
+    ComponentEntityRef exit{};
+    u32 depth = 1;
+    f32 resolution = 1.0f;
+    Color stand_in = Color::rgb(24, 40, 52);
+    Effect effect = Effect::None;
+    f32 effect_strength = 1.0f;
+};
+
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the
 // rest pose without one). Not MeshRenderer3D: a mesh renderer's entities are instances of one mesh and merge into one
 // draw, and a character is a model of several parts with a skeleton and a pose of its own.
+// A reflection probe (kin/render3d/reflection_probes3d.hpp): the scene seen all round from the entity's place, which
+// the glossy surfaces inside its box reflect, parallax-corrected, in place of the environment. Its boxes are round the
+// entity (plus `box_offset`), turned and scaled as it is. Captured when it first shows, when it moves, when `recapture`
+// changes, every `interval` seconds (0: not on a clock) or every frame (`every_frame`: a shiny thing's own probe, with
+// `hide_self`, the entity's own copies left out of its picture; `faces_per_frame` of its six faces a frame, in turn,
+// the picture updated (and filtered) when all six are new: 2 costs a third of 6, the reflection three frames late).
+// With `baked` (a Radiance .hdr panorama in the content: ReflectionProbes3D::bake writes them) it is loaded from there
+// instead, and captured only when `recapture` changes. SceneSession3D captures and places them (ReflectionProbes3D,
+// kin/scene/reflection_probes3d.hpp).
+struct ReflectionProbe3D {
+    bool enabled = true;
+    Vec3f extent{5.0f, 5.0f, 5.0f};
+    Vec3f box_offset{};
+    f32 blend = 0.5f;
+    bool parallax = true;
+    Vec3f parallax_extent{};
+    f32 intensity = 1.0f;
+    bool diffuse = true;
+    i32 priority = 0;
+    u32 resolution = 128;
+    f32 interval = 0.0f;
+    bool every_frame = false;
+    u32 faces_per_frame = 6; // 1 to 6 (every_frame)
+    bool hide_self = false;
+    f32 z_near = 0.05f;
+    u32 recapture = 0;
+    ComponentAssetRef baked;
+};
+
 struct SkinnedMeshRenderer3D {
     // Its parts, skeleton and clips. Shared: the entity keeps it alive (the animator points into it).
     std::shared_ptr<const Model3D> model;
@@ -173,6 +271,61 @@ struct SkinnedMeshRenderer3D {
     // Optional authored reference; model stays runtime-only. Resolve before
     // animation/physics setup. An empty reference leaves C++ models untouched.
     ComponentAssetRef asset;
+};
+
+// One morph target weight by the target's name (MorphWeights3D).
+struct MorphWeight3D {
+    std::string target;
+    f32 weight = 0.0f;
+    friend bool operator==(const MorphWeight3D&, const MorphWeight3D&) = default;
+};
+
+// Morph target weights (docs/rendering_3d.md, Morph targets) for the model of the entity's SkinnedMeshRenderer3D or
+// ModelRenderer3D: a face's expression, a door's dent. Each part of the model with a target of a listed name shows that
+// weight (within [-1, 1]); the other targets keep what the clips of the entity's Animator3D give them (when `animated`)
+// or the weights the model was made with. The model's meshes are shared by every entity drawing it, so the entity draws
+// copies of its own of the parts with targets (made by WorldRenderState3D::apply_morphs, once a model; their memory is
+// the parts' vertices again). Without this component an entity draws the model's shared meshes, at their weights.
+// Authored as one string, "smile=0.8, blink=1" (`weights` in a scene file; Lua scene3d.set_morph_weight).
+struct MorphWeights3D {
+    std::vector<MorphWeight3D> weights;
+    bool animated = true;
+    // The weight set for `target`, or `fallback` when none is.
+    f32 get(std::string_view target, f32 fallback = 0.0f) const {
+        for (const MorphWeight3D& w : weights)
+            if (w.target == target)
+                return w.weight;
+        return fallback;
+    }
+    // Sets (or adds) `target`'s weight; erase() takes it away (the clips' or the model's weight again).
+    void set(std::string_view target, f32 weight) {
+        for (MorphWeight3D& w : weights)
+            if (w.target == target) {
+                w.weight = weight;
+                return;
+            }
+        weights.push_back({std::string(target), weight});
+    }
+    void erase(std::string_view target) {
+        std::erase_if(weights, [&](const MorphWeight3D& w) { return w.target == target; });
+    }
+
+    // --- set by WorldRenderState3D::apply_morphs; not for setting
+    std::vector<Mesh3D> meshes;            // by model part: the entity's copy, or empty (the part's own)
+    std::weak_ptr<const Model3D> made_for; // the model they are copies of
+    flecs::entity_t made_by = 0;           // the entity they were made for (a copied component makes its own)
+};
+
+// A decal (Decal3D: docs/rendering_3d.md, Decals) at the entity's WorldTransform3D: the box is the entity's space
+// scaled by `size` (the picture's width along X, the depth it reaches along Y, its height along Z), projected along the
+// entity's -Y. `decal.transform` is ignored. `texture_asset` and `normal_asset` are authored images relative to
+// Assets3D::root(), bound by resolve_render3d_assets (empty: `decal.texture`/`decal.normal` as set from C++).
+struct DecalRenderer3D {
+    Decal3D decal{};
+    Vec3f size{1.0f, 1.0f, 1.0f};
+    bool visible = true;
+    ComponentAssetRef texture_asset, normal_asset;
+    std::string bound_texture, bound_normal; // runtime-only: the paths bound
 };
 
 // What a constraint aims at: a point of the world, a point carried by another entity (its WorldTransform3D of the
@@ -471,10 +624,32 @@ class AnimationEventDispatch;
 // the number of unhandled events; these are discarded, never kept in a queue.
 u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& dispatch);
 
+enum class SceneMutationMode3D : u8 { Conservative, Tracked };
+
+struct SceneWorkStats3D {
+    u64 transform_flushes = 0, transform_visits = 0, transforms_recomputed = 0, transforms_reused = 0;
+    u64 topology_rebuilds = 0, collection_visits = 0, collection_updates = 0, collection_reuses = 0;
+    u64 collection_fallbacks = 0, tracking_bytes = 0;
+    u64 particle_validation_runs = 0, particle_validation_reuses = 0;
+};
+
 class WorldRenderState3D {
 public:
     explicit WorldRenderState3D(flecs::world& world);
     explicit WorldRenderState3D(EcsWorld& world) : WorldRenderState3D(world.raw()) { _ecs = &world; }
+    ~WorldRenderState3D();
+    WorldRenderState3D(const WorldRenderState3D&) = delete;
+    WorldRenderState3D& operator=(const WorldRenderState3D&) = delete;
+
+    // Conservative preserves escaped raw writes. Tracked requires set/modified
+    // for component writes, or explicit invalidation after external changes.
+    void mutation_mode(SceneMutationMode3D mode);
+    SceneMutationMode3D mutation_mode() const;
+    void invalidate();
+    // Configuration revision for particle validation (tracked writes only).
+    u64 particle_configuration_revision() const;
+    SceneWorkStats3D work_stats() const;
+    void reset_work_stats();
 
     // Every WorldTransform3D from its Transform3D and its parent's, parents first.
     void propagate_transforms();
@@ -489,6 +664,11 @@ public:
     using IKPresentation3D = std::function<std::optional<IKTargetPose3D>(const IKConstraint3D&)>;
     void collect(Scene3D& scene, const Presentation3D& presentation = {}, const PosePresentation3D& poses = {},
                  const IKPresentation3D& ik = {}, f32 alpha = 1);
+    // Morph targets: for each entity with a MorphWeights3D and a model with targets, makes its own copies of the parts
+    // with targets (once a model) and sets their weights: the model's, then its Animator3D's clips' (when `animated`),
+    // then the named ones. Call it after animate() and before collect(), on the renderer's thread (SceneFrame3D does);
+    // collect() draws the copies. Unchanged weights cost nothing.
+    void apply_morphs(Renderer3D& renderer);
     // Release reusable mesh/material buckets after bulk removal. ECS-owned
     // handles remain intact; the next collect rebuilds active buckets.
     void clear_collection_cache();
@@ -520,6 +700,10 @@ public:
     bool apply_weather(Scene3D& scene, const Fog3D& base_fog) const;
 
 private:
+    friend class SceneFrame3D;
+    void note_particle_validation(bool reused);
+    struct Tracking;
+    std::unique_ptr<Tracking> _tracking;
     u64 history_id(flecs::entity entity) const;
     u64 _history_identity; // collection scope, separate from simulation/rollback state
     const PosePresentation3D* _pose_presentation = nullptr;
@@ -554,6 +738,9 @@ private:
     flecs::query<const WorldTransform3D, const PointLight3D, const RenderTransform3D*> _point_lights;
     flecs::query<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*> _spot_lights;
     flecs::query<const WorldTransform3D, const ParticleEmitter3D> _emitters;
+    flecs::query<const WorldTransform3D, const DecalRenderer3D, const RenderTransform3D*> _decals;
+    flecs::query<MorphWeights3D, const SkinnedMeshRenderer3D*, const ModelRenderer3D*, const Animator3D*> _morphs;
+    std::vector<f32> _morph_scratch;
     std::vector<ParticleSprite3D> _particle_sprites;
     flecs::query<Weather3D> _weather;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused

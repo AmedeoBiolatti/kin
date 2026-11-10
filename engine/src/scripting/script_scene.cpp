@@ -3,8 +3,13 @@
 #include <kin/core/json.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
+#include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/runtime/development.hpp>
+#include <kin/scene/scene_asset_runtime.hpp>
 #include <kin/scripting/script_engine.hpp>
+#include <kin/scripting/script_reload.hpp>
+#include <kin/scripting/workflows2d.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -230,6 +235,69 @@ ScriptScene::~ScriptScene() {
 }
 
 void ScriptScene::on_enter(SceneContext& ctx) {
+#if KIN_ENABLE_DEVELOPMENT
+    if (ctx.development && !_development) {
+        _development = std::make_unique<DevelopmentSession>(_config.asset_root);
+        if (_script) {
+            _script->use_content(_development->active().content);
+        }
+        adopt_assets(Assets2D::from_snapshot(ctx.renderer, _development->active().content));
+        assets()->bind(ecs());
+        SceneAssetRuntime* scene_runtime = _config.scene_runtime.get();
+        if (scene_runtime && scene_runtime->loaded() && !scene_runtime->tracks_authored() &&
+            !scene_runtime->track_authored(ecs().components())) {
+            const auto& diagnostics = scene_runtime->diagnostics();
+            KIN_LOG_WARN("development", "the scene cannot reload: " +
+                                            (diagnostics.empty() ? std::string("unknown error") : diagnostics.front()));
+        }
+        _development->add_target("scene and assets", [this](const DevelopmentRevision& revision, std::string& error) {
+            SceneAssetRuntime* runtime = _config.scene_runtime.get();
+            ScenePatchPreparer prepare_scene;
+            if (runtime) {
+                prepare_scene = [&](const AssetPreviewCheck& check, std::string& failure) {
+                    return runtime->prepare_patch(ecs(), revision.content->root(), failure, check);
+                };
+            }
+            return prepare_asset_reload(
+                revision, prepare_scene,
+                [this, runtime] {
+                    if (runtime) {
+                        render_config().clear_color = runtime->scene()->clear_color;
+                    }
+                },
+                error);
+        });
+        _development->add_target("Lua", [this](const DevelopmentRevision& revision, std::string& error) {
+            auto path = _config.script_path.is_absolute() ? _config.script_path.lexically_relative(_config.asset_root)
+                                                          : _config.script_path;
+            if (_config.scene_runtime) {
+                const auto scene_path =
+                    _config.scene_runtime->scene_path().lexically_relative(_config.scene_runtime->asset_root());
+                const auto loaded = load_scene_asset(revision.content->root() / scene_path, ecs().components());
+                if (!loaded.ok() || loaded.scene->script.empty()) {
+                    error = "candidate scene requires a valid script";
+                    return std::unique_ptr<DevelopmentChange>{};
+                }
+                path = loaded.scene->script;
+            }
+            auto change = prepare_script_reload(_script, revision, path, error);
+            if (change) {
+                auto finalize = std::move(change->finalize);
+                change->finalize = [this, path, finalize = std::move(finalize)] {
+                    if (finalize) {
+                        finalize();
+                    }
+                    _config.script_path = path;
+                    clear_script_error();
+                };
+            }
+            return change;
+        });
+    }
+#endif
+    if (_script && _script->workflows()) {
+        _script->workflows()->configure(&ctx.renderer, ctx.app.gamepads(), assets());
+    }
     if (_script && !_script->call_on_enter(ctx)) {
         set_script_error(_script->last_error(), "on_enter");
         KIN_LOG_ERROR_F("script", _last_error, (LogFields{{.name = "path", .value = resolved_script_path().string()}}));
@@ -244,6 +312,9 @@ void ScriptScene::on_exit(SceneContext& ctx) {
 }
 
 void ScriptScene::update(SceneContext& ctx) {
+    if (_script && _script->workflows()) {
+        _script->workflows()->configure(&ctx.renderer, ctx.app.gamepads(), assets());
+    }
     if (_config.before_update) {
         _config.before_update(*this, ctx);
     }
@@ -322,6 +393,16 @@ void ScriptScene::clear_script_entities() {
 }
 
 bool ScriptScene::reload_script() {
+#if KIN_ENABLE_DEVELOPMENT
+    if (_development) {
+        std::string error;
+        const bool queued = _development->request(error);
+        if (!queued) {
+            set_script_error(error, "reload");
+        }
+        return queued;
+    }
+#endif
     KIN_LOG_INFO_F("script",
                    "script reload requested",
                    (LogFields{
@@ -342,7 +423,7 @@ bool ScriptScene::load_script(bool clear_entities) {
                        {.name = "clear_entities", .value = clear_entities ? "true" : "false"},
                        {.name = "hot_reload", .value = _config.hot_reload ? "true" : "false"},
                    }));
-    auto next = std::make_unique<ScriptEngine>(_config.bind);
+    auto next = std::make_unique<ScriptEngine>(_config.bind, _config.runtime_limits);
     if (!next->load_file(_config.asset_root, _config.script_path)) {
         set_script_error(next->last_error(), "load");
         _script_loaded = _script != nullptr;
@@ -377,7 +458,7 @@ bool ScriptScene::load_script(bool clear_entities) {
 }
 
 void ScriptScene::poll_hot_reload() {
-    if (!_config.hot_reload) {
+    if (_development || !_config.hot_reload) {
         return;
     }
 

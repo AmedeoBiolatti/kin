@@ -8,6 +8,7 @@
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/scene_session3d.hpp>
 #include <sol/sol.hpp>
@@ -210,8 +211,36 @@ void lua_kinematic_teleport(App& app, Renderer2D& renderer) {
           "Lua teleport lost rotation");
 }
 
+// scene3d.portal_step: a step into one authored portal comes out of the other, turned; one beside it, or a bad
+// vector, does not.
+void lua_portal_step(App& app, Renderer2D& renderer) {
+    Scratch source;
+    write(source.path / "portals.kinscene", R"({"schema":"kin.scene/1","script":"portals.lua","entities":[
+      {"id":"a","components":{"Transform3D":{"position":[0,5,0]},"Portal3D":{"size":[2,2],"exit":"b"}}},
+      {"id":"b","components":{"Transform3D":{"position":[10,5,0]},"Portal3D":{"size":[2,2],"exit":"a"}}}]})");
+    write(source.path / "portals.lua", R"lua(
+      function update(ctx)
+        local through = scene3d.portal_step({x=0.5,y=5,z=1}, {x=0.5,y=5,z=-1})
+        assert(through and through.portal.id == scene3d.entity('a').id and through.exit.id == scene3d.entity('b').id)
+        assert(math.abs(through.position.x - 9.5) < 1e-4 and math.abs(through.position.z - 1) < 1e-4)
+        assert(math.abs(through.turn.y) > 0.999) -- half round
+        assert(scene3d.portal_step({x=5,y=5,z=1}, {x=5,y=5,z=-1}) == nil)
+        assert(not pcall(scene3d.portal_step, {x=0,y=0,z=0/0}, {x=0,y=0,z=0}))
+        record_exit()
+      end
+    )lua");
+    Renderer3D rendering{renderer};
+    Assets3D assets{rendering, source.path};
+    int exits = 0;
+    SceneSession3D session{rendering, assets, options(app, exits)};
+    ok(session, session.load("portals.kinscene"), "Lua portal fixture failed");
+    ok(session, session.step(.1f), "Lua portal step failed");
+    check(exits == 1, "Lua portal checks did not run");
+}
+
 void workflow(App& app, Renderer2D& renderer, bool gpu) {
     lua_kinematic_teleport(app, renderer);
+    lua_portal_step(app, renderer);
     InputMap input;
     input.bind("launch", Key::Space);
     app.input().set_map(input);
@@ -556,6 +585,10 @@ function on_enter(ctx)
     assert(scene3d.set_animation_parameter(actor, 'amount', 1.25))
     assert(scene3d.set_animation_parameter(actor, 'ready', true))
     assert(scene3d.trigger_animation(other, 'wave'))
+    assert(not pcall(scene3d.set_morph_weight, actor, 'smile', 2))
+    assert(not pcall(scene3d.set_morph_weight, actor, '', 0.5))
+    assert(scene3d.morph_weight(actor, 'smile') == nil and not scene3d.clear_morph_weight(actor, 'smile'))
+    assert(scene3d.set_morph_weight(actor, 'smile', 0.5)) -- adds MorphWeights3D when the commands run
     assert(scene3d.play_action(actor, 'missing') == nil)
     assert(not pcall(scene3d.play_action, actor, 'wave', 'bogus'))
     local first = scene3d.play_action(actor, 'wave')
@@ -605,6 +638,9 @@ function update(ctx)
         forward=turn and {x=0,y=0,z=1} or {x=0,y=0,z=-1}, jump=ticks==40,
         crouch=ticks>=65 and ticks<=75,sprint=ticks>=90 and ticks<=100}))
     if ticks == 2 then
+        assert(scene3d.morph_weight(actor, 'smile') == 0.5)
+        assert(scene3d.set_morph_weight(actor, 'smile', -0.25) and scene3d.morph_weight(actor, 'smile') == -0.25)
+        assert(scene3d.clear_morph_weight(actor, 'smile') and scene3d.morph_weight(actor, 'smile') == nil)
         assert(scene3d.set_animation(actor, {playing=false}))
     elseif ticks == 3 then
         assert(scene3d.set_animation(actor, {playing=true}))

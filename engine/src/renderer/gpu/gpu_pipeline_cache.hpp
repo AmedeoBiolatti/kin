@@ -13,7 +13,8 @@ namespace kin::gpu {
 // What a draw does with the depth buffer (3D views). Depth is reverse Z
 // (kin/core/math3d.hpp): nearer is greater, so a fragment passes where its
 // depth is greater than or equal to what is there.
-enum class GpuDepthTest : u8 { None, TestWrite, Test };
+// Overwrite: no test, every fragment's depth written (a depth target cleared in part, by a draw).
+enum class GpuDepthTest : u8 { None, TestWrite, Test, Overwrite };
 // Which triangles are not drawn; counter-clockwise ones (as glTF winds them)
 // face the front.
 enum class GpuCull : u8 { None, Back, Front };
@@ -80,6 +81,7 @@ public:
 
     // How many pipelines are made.
     std::size_t size() const { return _entries.size(); }
+    u64 revision() const { return _revision; } // invalidates retained pipeline pointers after forget/destroy
 
     void destroy();
     // Releases the pipelines made with `fragment` (it is being replaced). SDL
@@ -105,6 +107,7 @@ private:
 
     SDL_GPUDevice* _device = nullptr;
     std::vector<Entry> _entries;
+    u64 _revision = 1;
 };
 
 } // namespace kin::gpu
