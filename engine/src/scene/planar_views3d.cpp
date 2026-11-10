@@ -723,6 +723,13 @@ Status3D PortalTravel3D::step(EcsWorld& world, WorldPhysicsState3D* physics) {
     _crossings.clear();
     Diagnostics3D errors;
     std::unordered_map<u64, Vec3f> points;
+    // Who crossed, found while iterating (which only reads: flecs keeps the tables locked meanwhile), then carried.
+    struct Crossed {
+        flecs::entity entity;
+        PortalStep3D through;
+        Vec3f offset;
+    };
+    std::vector<Crossed> crossed;
     world.each([&](flecs::entity entity, const PortalTraveller3D& c) {
         if (!c.enabled)
             return;
@@ -736,32 +743,31 @@ Status3D PortalTravel3D::step(EcsWorld& world, WorldPhysicsState3D* physics) {
                                  ? Vec3f{world_matrix.m[12], world_matrix.m[13], world_matrix.m[14]}
                                  : local->position;
         const Vec3f offset{0.0f, c.height, 0.0f};
-        Vec3f point = origin + offset;
+        const Vec3f point = origin + offset;
         if (const auto before = _points.find(entity.id()); before != _points.end())
-            if (const auto through = portal_step(world, before->second, point)) {
-                const Vec3f turned = through->turn.rotate(offset);
-                const Vec3f to = through->position - turned;
-                bool carried = false;
-                if (physics) {
-                    const auto status = physics->carry(entity, to, through->turn);
-                    carried = bool(status);
-                }
-                if (!carried && !entity.parent().is_valid()) {
-                    // No body: the transform itself.
-                    Transform3D* t = EcsEntity{entity}.get_mut<Transform3D>();
-                    t->position = to;
-                    t->rotation = (through->turn * t->rotation).normalized();
-                    carried = true;
-                }
-                if (carried) {
-                    point = through->position;
-                    _crossings.push_back({EcsEntity{entity}, through->portal, through->exit, through->turn});
-                } else {
-                    errors.push_back("portal travel: an entity under a parent, without a body, cannot be carried");
-                }
-            }
+            if (const auto through = portal_step(world, before->second, point))
+                crossed.push_back({entity, *through, offset});
         points[entity.id()] = point;
     });
+    for (const Crossed& x : crossed) {
+        const Vec3f to = x.through.position - x.through.turn.rotate(x.offset);
+        bool carried = false;
+        if (physics)
+            carried = bool(physics->carry(x.entity, to, x.through.turn));
+        if (!carried && !x.entity.parent().is_valid()) {
+            // No body: the transform itself.
+            Transform3D* t = EcsEntity{x.entity}.get_mut<Transform3D>();
+            t->position = to;
+            t->rotation = (x.through.turn * t->rotation).normalized();
+            carried = true;
+        }
+        if (carried) {
+            points[x.entity.id()] = x.through.position;
+            _crossings.push_back({EcsEntity{x.entity}, x.through.portal, x.through.exit, x.through.turn});
+        } else {
+            errors.push_back("portal travel: an entity under a parent, without a body, cannot be carried");
+        }
+    }
     _points = std::move(points);
     return status3d(errors.empty(), std::move(errors));
 }
