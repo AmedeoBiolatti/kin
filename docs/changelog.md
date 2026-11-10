@@ -161,8 +161,12 @@ releases may change APIs.
 - The material graph's `smoothstep` node is filtered by the pixel's footprint (distant tile seams and terrazzo chips
   no longer break into crawling dots, plainly so through a portal); the atrium's floor fades its checker and veins to
   their mean far away too.
-- Where every GI probe round a point is hidden from it (under a ball on a plinth, a crease), the probes give up two
-  fifths of their share to the ambient light instead of leaving it pitch black.
+- Where every GI probe round a point is hidden from it (under a ball on a plinth, a crease), it is no longer pitch
+  black: it takes its own surface's GI light from round it, where the probes see it (texels on two rings, by their
+  depth on its plane), and only failing that gives seven tenths of the probes' share to the ambient light.
+- The atrium's GI is one window over the whole room (`gi_side` 176, `gi_height` 64 at 0.15 m): it no longer moves with
+  the camera, so a walk, or a portal that carries the camera across the room, does not start its probes over (seconds
+  of changing light, horizontal bands on the walls while they filled in); about 0.3 ms more GPU.
 - The GI's light on the view takes a texel only from this fragment's own surface by its depth plane (a rim's side next
   to its top is not its surface, though as deep).
 - Screen-space reflections on rough surfaces fade in over their lobe's width where neighbouring rays hit and miss (a
