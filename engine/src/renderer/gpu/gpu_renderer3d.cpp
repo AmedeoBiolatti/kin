@@ -1003,6 +1003,25 @@ public:
         return changed;
     }
 
+    // Stock unskinned shadows always have exactly these two storage slots.
+    // Keep the same binding state as the general recorder across mixed draws,
+    // without constructing/comparing/copying variable-length buffer arrays.
+    void bind_shadow(SDL_GPUGraphicsPipeline* pipeline, SDL_GPUBuffer* instances, SDL_GPUBuffer* lists,
+                     const GpuMesh3D* mesh) {
+        const bool changed = pipeline != _pipeline;
+        if (changed) {
+            SDL_BindGPUGraphicsPipeline(_pass, pipeline);
+            _pipeline = pipeline;
+        }
+        if (changed || _storage_count != 2 || _storage[0] != instances || _storage[1] != lists) {
+            _storage[0] = instances;
+            _storage[1] = lists;
+            _storage_count = 2;
+            SDL_BindGPUVertexStorageBuffers(_pass, 0, _storage.data(), 2);
+        }
+        bind_mesh(mesh);
+    }
+
     // The mesh's vertices and, unless `indices` is given (a clustered mesh's compacted ones), its own indices.
     void bind_mesh(const GpuMesh3D* mesh, SDL_GPUBuffer* indices = nullptr) {
         // Pool allocations contain whole GpuMeshVertex/u32 elements. Keep the page bound at zero and
@@ -8876,6 +8895,17 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
     // These eight variants are fixed for this call. Avoid rebuilding and
     // searching the full pipeline key for every caster in every light map.
     std::array<SDL_GPUGraphicsPipeline*, 8> pipelines{};
+    // Resolve ordinary depth-state groups once for all drawn maps of this call.
+    // Keep small/single-map passes on the existing loop: they cannot amortize
+    // this source table. No pointer survives the next recording call.
+    const bool shared =
+        _local_entries.size() >= 128 &&
+        std::count_if(_local_views.begin(), _local_views.end(), [](const LocalView& view) { return view.drawn; }) >= 2;
+    _local_records.clear();
+    if (shared) {
+        _local_record_refs.assign(_refs.size(), ~0u);
+        _local_records.reserve(std::min(_refs.size(), _local_entries.size()));
+    }
     for (LocalView& view : _local_views) {
         if (!view.drawn) {
             continue;
@@ -8927,6 +8957,46 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
         DrawBinder binder{pass};
         for (u32 e = view.entry_first; e < view.entry_first + view.entry_count; ++e) {
             const LocalEntry& entry = _local_entries[e];
+            if (shared && !entry.clustered && entry.level == 0) {
+                // The selection compiler already proves this group's mesh,
+                // instance table and stock depth state identical. Its source
+                // representative can differ between maps and locality windows.
+                const u32 group = _local_batch_refs[entry.ref];
+                u32& record = _local_record_refs[group];
+                if (record == ~0u) {
+                    const DrawRef& ref = _refs[group];
+                    const Material3D& material = ref.draw->material;
+                    if (ref.skinned || ref.clustered || ref.levels != 1 || material.blend == Blend3D::Mask ||
+                        (material.surface.backend() && pass_surface(material))) {
+                        record = ~1u;
+                    } else {
+                        SDL_GPUGraphicsPipeline*& p = pipelines[u32(!material.double_sided)];
+                        if (!p)
+                            p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !material.double_sided, Pass::Shadow, false,
+                                         nullptr, false, false);
+                        if (!p) {
+                            // Preserve per-entry allocation retries and incomplete-map handling.
+                            complete = false;
+                            continue;
+                        }
+                        const auto& level = ref.mesh->levels.front();
+                        record = static_cast<u32>(_local_records.size());
+                        _local_records.push_back(
+                            {p, ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : instances, ref.mesh,
+                             level.index_count, level.first_index});
+                    }
+                }
+                if (record != ~1u) {
+                    const LocalRecord& source = _local_records[record];
+                    binder.bind_shadow(source.pipeline, source.instances, lists, source.mesh);
+                    const u32 first = uniforms.bind(0, entry.list_first + 1, false);
+                    binder.draw(source.index_count, entry.count, source.first_index, first);
+                    ++stats.local_shadow_draws;
+                    stats.local_shadow_casters += entry.count;
+                    stats.local_shadow_triangles += static_cast<u64>(source.index_count / 3) * entry.count;
+                    continue;
+                }
+            }
             const DrawRef& ref = _refs[entry.ref];
             const Material3D& caster = ref.draw->material;
             const bool cutout = caster.blend == Blend3D::Mask;

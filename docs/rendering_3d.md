@@ -126,6 +126,18 @@ The eight stock depth pipeline variants resolve once per recording call. Recordi
 selection and draw order, shadow cache ownership and rasterization settings; no persistent recording cache or additional
 GPU buffer is added.
 
+Local recording with at least two drawn maps and 128 selected entries resolves
+eligible stock depth state once per existing preparation group. A compact
+record holds the current pipeline, instance table, mesh and level-zero index
+range; different source occurrences in light maps and locality windows share
+that record. Ordinary two-buffer draws use direct handle comparisons through
+the same binding state as the general recorder, including storage rebinding on
+pipeline changes and pooled-mesh offsets. Masked, depth-affecting surface,
+skinned, clustered and higher-level draws retain the general path. Small and
+single-map passes avoid the table. Source lookup and record vectors retain
+scratch capacity, refreshing their contents before use each recording call;
+they add no retained result cache, GPU allocation or command reordering.
+
 Local-shadow merging uses the compact stock depth-state key for ordinary materials with identity cutout UVs.
 Depth-affecting surface shaders and stock cutouts with UV transforms keep their source draws separate: their per-draw
 parameters, map bindings, UVs and instance IDs must not be borrowed from another caster sharing the mesh. This rule

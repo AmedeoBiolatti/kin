@@ -4,6 +4,93 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Reuse exact depth-state groups during shadow recording, 2026-11-12
+
+The reference is `54e0a2aa`. Large multi-map local-shadow recording now reuses
+the exact depth-state groups already interned by selection preparation. Different
+source representatives in light maps and locality windows resolve once into a
+compact record holding the current pipeline, retained/streamed instance table,
+mesh and level-zero index range. Ordinary two-buffer commands use direct buffer
+comparisons/assignments through the same `DrawBinder` state as general commands.
+This removes repeated material/ref classification, range lookup and variable
+buffer-array comparison/copy work while preserving pipeline-triggered storage
+rebinding and pooled vertex/index offsets.
+
+The table requires at least two drawn maps and 128 selected entries. Masked,
+depth-affecting surface, skinned, clustered and higher-level commands retain the
+general recorder. Current pipeline and table handles refresh before use every
+recording call; failed pipeline allocations retain per-entry retries. This
+introduces no persistent result cache, GPU allocation, selection/sort/merge change,
+command reordering or shader/uniform-addressing change. Source lookup costs four
+bytes per ref and records 32 bytes per reserved slot on the measured x64 build;
+vector capacity is retained as scratch outside the selection-plan budget.
+
+Five alternating Hard pairs show **4.0% median paired caller-CPU p50 reduction**,
+improving in all five; individual reductions are **2.8%, 7.3%, 3.6%, 4.0% and
+8.9%**. Process CPU falls **3.5%** by the same calculation. Conditions are
+original independent Yard submissions, 720p HDR, no AA/GI/AO, classic 1,024 spot
+maps, four helpers, affinity 0–15, and 300 warm-up plus 1,440 measured route
+frames. Blender/background jobs stay untouched; clocks, thermals and load are
+uncontrolled: results are **contended**. PMU collection and image readback run
+separately from normal timing.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 1 | 0.479 / 0.550 / 0.648 | 0.475 / 0.528 / 0.594 | 0.7% |
+| Medium | 1 | 1.389 / 1.557 / 1.961 | 1.361 / 1.490 / 1.575 | 2.1% |
+| Hard | 5 | 3.821 / 4.391 / 5.114 | 3.669 / 3.978 / 4.267 | 4.0% |
+
+Percentiles are medians of per-run percentiles; paired reductions compare
+adjacent run medians. Easy and Medium are single guard pairs. Hard frame p50
+regresses a median 1.3%, with paired changes spanning −10.7% to +10.3%; Medium
+frame p50 regresses 4.8%. These contended frame results do not establish an
+isolated throughput gain or a new cross-engine ranking. CPU gains do not compound
+with earlier campaigns.
+
+Every non-timing per-frame work/cache/resource/upload column matches, with no
+counter exceptions. Hard peak process RSS, including startup and driver memory,
+is 198.0 → 241.3 MiB; the first candidate process has that peak, with subsequent
+candidate runs at 196.2–196.4 MiB. No total-process memory reduction is claimed.
+
+Two separate forward/reverse inherited P-core controls, after both binaries
+completed the normal campaign, show **1.893% and 1.868% fewer retired user
+instructions**, at 99–100% event running coverage. Each includes startup,
+300 warm-up plus **720 measured frames (half the route)**, helpers, driver
+threads, scene assembly and presentation. These are whole-process user counts,
+not isolated render-phase counts or a clock-normalized speedup. There is no
+full-route extrapolation. Every non-timing work column matches in these controls.
+
+Fresh before/after `cpu-clock:u` profiles each cover one full 1,440-frame Hard
+route at 499 Hz with 16 KiB DWARF user stacks. Actual render-call windows exclude
+assembly, warm-up and presentation; caller, Kin workers and other threads are
+separate. **Shadow recording falls from 20.12% to 10.53% of caller samples**.
+These are normalized user-CPU shares, not phase medians; the paired total-CPU
+reduction above remains the timing result. Remaining caller shares are
+camera/instance preparation 24.26%, local-shadow preparation 21.51%, draw
+planning/lookup 16.96% and material input validation 9.25%.
+
+Caller samples number 2,724/2,659, with 1.06%/1.05% unresolved phase attribution.
+Every profile work column matches its normal control. Normal timing above uses
+the adjacent unsampled controls.
+
+Nine focused NVIDIA suites and four llvmpipe suites pass. The existing direct-cache
+fixture now interleaves over 1,025 multi-copy source rows with transformed cutouts,
+both culling variants, retained live batches and skinned draws across spot/point
+maps, cache hits/misses and source/projection changes. It compares exact pixels,
+picks and shadow work with the streamed reference, including sparse wanted cube
+faces. Other focused suites cover surface stages, LOD/clusters, preparation
+lifetimes, planar views, GI and attachment graphs. All **10,080 paired route
+frames** preserve every non-timing work column. Nine decoded-RGBA pairs across
+three tiers at route phases 1/541/961 are pixel-identical.
+
+The earlier per-ref prototype completed three Hard pairs with 1.85%, 0.37% and
+1.26% caller-p50 reductions before being superseded by reuse of existing depth-state
+groups. Those runs and frozen binary remain separately under
+`out/runs/render3d-shadow-recording-sources/`; they are not pooled into the final
+results. Commands, source/binary hashes, raw paired percentiles, exact captures,
+instruction controls and fresh profiles for the retained version are under
+`out/runs/render3d-shadow-recording-classes/`.
+
 ### Shared live-shadow caster selection, 2026-11-11
 
 The reference is `861e5cdc`. When at least two wanted fixed-local shadow views

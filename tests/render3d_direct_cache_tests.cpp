@@ -530,9 +530,18 @@ void check(Renderer2D& renderer) {
             copies.push_back(
                 {Mat4f::translation({f32(n % 32) * .65f - 10, f32(n / 32) * .65f - 5, 0}), colors::white, n + 1});
         }
-        assert(scene.draw_instanced(mesh, copies, materials[row % 3]));
-        if (row == 63 || row == 127 || row == 128 || row == 255)
+        auto material = materials[row % 3];
+        material.double_sided = row % 5 == 0;
+        // Keep cut-outs as distinct depth commands so ordinary two-buffer
+        // records interleave with the general recorder across many entries.
+        if (material.blend == Blend3D::Mask)
+            material.uv_offset = {.13f, .27f};
+        assert(scene.draw_instanced(mesh, copies, material));
+        if (row == 63 || row == 127 || row == 128 || row == 255) {
             assert(scene.draw_instanced(mixed_batch, materials[0]));
+            const std::array pose{Mat4f::identity()};
+            assert(scene.draw_skinned(skinned, pose, Mat4f::translation({0, 3, 1}), materials[0]));
+        }
     }
     for (f32 x : {-6.f, 6.f})
         scene.lights.spots.push_back(

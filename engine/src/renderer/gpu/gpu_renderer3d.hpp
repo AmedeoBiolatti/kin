@@ -1426,6 +1426,14 @@ private:
     LocalGatherCache* local_gather_plan(const FrameCtx& ctx, const LocalView& view, u32 refs, bool& ready);
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
+    struct LocalRecord {
+        SDL_GPUGraphicsPipeline* pipeline;
+        SDL_GPUBuffer* instances;
+        const GpuMesh3D* mesh;
+        u32 index_count, first_index;
+    };
+    std::vector<u32> _local_record_refs;
+    std::vector<LocalRecord> _local_records;       // refreshed per recording call; no persistent source/pipeline cache
     std::vector<u32> _local_list;                  // the lists, as uploaded
     std::vector<u32> _local_selection_list;        // live selections; independent of the final GPU list
     std::vector<u32> _local_batch_refs;            // each ref's compatible depth-draw representative
