@@ -549,6 +549,8 @@ struct WebGLRenderer3D::Impl {
                     return false;
                 }
         for (const auto& draw : scene.draws()) {
+            if (!draw.mesh.backend())
+                continue; // an empty mesh draws nothing, as on the native renderer
             const auto& material = draw.material;
             const auto* mesh = dynamic_cast<const Mesh*>(draw.mesh.backend().get());
             if (!mesh || mesh->alive != device.alive() || (draw.skinned && !caps.skinning) || material.wireframe ||
@@ -773,7 +775,7 @@ struct WebGLRenderer3D::Impl {
             glUniformMatrix4fv(uniform("uViewProjection"), 1, GL_FALSE, matrix.m);
             for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
                 const auto& draw = scene.draws()[slot];
-                if (!draw.material.casts_shadow || draw.material.blend == Blend3D::Alpha ||
+                if (!draw.mesh.backend() || !draw.material.casts_shadow || draw.material.blend == Blend3D::Alpha ||
                     draw.material.blend == Blend3D::Additive || draw.clip == DrawClip3D::whole_if_cut)
                     continue;
                 copies.clear();
@@ -866,7 +868,7 @@ struct WebGLRenderer3D::Impl {
         std::array<std::vector<u32>, max_mesh_levels> batches;
         for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
             const auto& draw = scene.draws()[slot];
-            if (draw.clip == DrawClip3D::whole_if_cut)
+            if (!draw.mesh.backend() || draw.clip == DrawClip3D::whole_if_cut)
                 continue; // (nothing is cut here: Camera3D::clip_plane is not supported)
             auto* records = slot < prepared.size() ? prepared[slot].get() : nullptr;
             for (auto& batch : batches)

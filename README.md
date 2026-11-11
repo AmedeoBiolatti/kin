@@ -203,6 +203,7 @@ caches, games using Kin as a subproject, and measurements. The main build option
 | `KIN_ENABLE_DETERMINISM_CHECK` | `ON` | Determinism check, `--check-determinism` ([testing](docs/testing.md#determinism-check)) |
 | `KIN_ENABLE_AGENT_SERVER` | `ON` | The agent server, `--server` ([agent interface](docs/agent_interface.md#server-mode)) |
 | `KIN_ENABLE_NET` | `OFF` | Experimental networking: transports and sync models, `kin::net` ([networking](docs/networking.md)) |
+| `KIN_ENABLE_VOICE` | `OFF` | Voice chat: Opus voice, noise suppression and echo gate, `kin::voice` ([voice chat](docs/voice.md)); fetches Opus and RNNoise |
 | `KIN_PACK_CONTENT` | `ON` | Ship a game's content as one `.kinpak` rather than a folder |
 | `KIN_REQUIRE_GPU_SHADERS` | `KIN_SHIPPING` | Stop at configure when the GPU shaders cannot be built (no glslc or `KIN_SPIRV_DIR`) |
 
@@ -289,7 +290,7 @@ Kin installs games, not itself, so `find_package(kin)` is not supported.
 | 2D | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [skeletal animation](docs/skeleton_2d.md), [2D physics](docs/physics_2d.md), [2D workflows](docs/2d_workflows.md), [importing](docs/importing_2d.md), [hex grids](docs/hex_grids.md), [scene flow](docs/scene_flow.md) |
 | 3D (experimental) | [3D rendering](docs/rendering_3d.md), [3D physics](docs/physics_3d.md), [render graphs](docs/render_graph.md), [glTF profile](docs/gltf_profile3d.md), [validation](docs/rendering_validation.md) |
 | UI and apps | [UI](docs/ui.md), [localization](docs/localization.md), [input](docs/input.md) |
-| Engine | [audio](docs/audio.md), [assets](docs/assets.md), [hot reload](docs/hot_reload.md), [saving](docs/saving.md), [dialogue](docs/dialogue.md), [scripting](docs/scripting.md), [Lua development](docs/lua_development.md), [Python](docs/python_scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [platform services](docs/platform_services.md), [determinism](docs/determinism.md), [networking](docs/networking.md) (experimental) |
+| Engine | [audio](docs/audio.md), [assets](docs/assets.md), [hot reload](docs/hot_reload.md), [saving](docs/saving.md), [dialogue](docs/dialogue.md), [scripting](docs/scripting.md), [Lua development](docs/lua_development.md), [Python](docs/python_scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [platform services](docs/platform_services.md), [determinism](docs/determinism.md), [networking](docs/networking.md) (experimental), [voice chat](docs/voice.md) |
 | Shipping | [shipping a game](docs/shipping.md), [Android](docs/android.md), [web](docs/web.md), [build times](docs/build_times.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing

@@ -12,6 +12,7 @@
 
 namespace kin {
 
+class AudioOutputTap;
 class FileWatcher;
 class JobSystem;
 class JsonWriter;
@@ -244,6 +245,12 @@ public:
     std::vector<f32> spectrum(std::string_view bus, i32 bands, f32 min_hz = 20.0f, f32 max_hz = 20000.0f) const;
     // The strongest amplitude between two frequencies (one band of spectrum()).
     f32 magnitude(std::string_view bus, f32 from_hz, f32 to_hz) const;
+    // A copy of the final output as it is mixed, holding `seconds` of it for
+    // another thread to read (kin/audio/audio_capture.hpp): what the speakers
+    // play, for an echo gate (kin/voice/voice.hpp) or a recording. One tap at a
+    // time: opening another replaces it. Off until opened.
+    std::shared_ptr<AudioOutputTap> open_output_tap(f32 seconds = 1.0f);
+    void close_output_tap();
     i32 sample_rate() const;
     i32 channels() const;
     bool device_available() const;

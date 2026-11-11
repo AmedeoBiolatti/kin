@@ -37,6 +37,22 @@ releases may change APIs.
   for it. Nobody waits for a joiner, and one that never comes leaves the slot free. `StepInfo` gains `present` and
   `joined`. A lost optional link no longer fails a session (`LinkInfo::optional`). Lobby matches can keep free
   slots (`start_lobby_match(..., free_slots)`, `seat_lobby_joiners`, `free_lobby_slot`, `allow_lobby_joiners`).
+- Voice chat (`KIN_ENABLE_VOICE`, `kin::voice`; [voice chat](voice.md)): each player's microphone, cleaned of noise
+  (RNNoise) and of the speakers playing back into it (an echo gate), gated (open or push to talk), coded with Opus
+  and sent to the others over the platform's messages (`ServicesVoiceLink`, on Steam through its relays) or a game's
+  own transport (`VoiceLink`); a jitter buffer per speaker (`VoiceStream`) that recovers lost frames; voices played
+  where the speakers stand (`add_voice_clip`, `voice_cue`); `voice_level()` for a game's commands. The AUDIO
+  component gains microphone capture (`open_audio_capture`, `list_audio_input_devices`) and
+  `AudioEngine::open_output_tap`.
+- Players leave a game that goes on (`InputSyncConfig::players_may_leave`, on by default;
+  [networking](networking.md#leaving)): a player who quits or whose connection is lost is gone from a tick every peer
+  agrees on (`StepInfo::left`), in rollback and lockstep. The peers relay the commands some lack, and a player only
+  one peer cannot reach leaves too. In a joinable session the slot can be taken again, by the same player too;
+  `free_lobby_slot` frees any player's slot. `InputSyncStats::leaves` and `lost`.
+- A desync no longer ends the game (`InputSyncConfig::resync`, on by default;
+  [networking](networking.md#desyncs)): a peer whose state differs from the host's takes the host's state, as a
+  joiner does, and runs its ticks since again. Three resyncs in a row with no agreeing state end that peer's session,
+  and the others play on. `InputSyncStats::resyncs` and `resyncing`.
 - Lobbies and messages between players ([platform services](platform_services.md#lobbies-and-messages)):
   `PlatformServices` gains `create_lobby`, `find_lobbies` (rules over lobby data, open slots, distance), `join_lobby`,
   `leave_lobby`, the members and owner, the lobby's data and each member's, `set_lobby_joinable`, chat, and messages

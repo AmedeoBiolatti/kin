@@ -1,5 +1,6 @@
 #include <kin/audio/audio_engine.hpp>
 
+#include <kin/audio/audio_capture.hpp>
 #include <kin/audio/audio_decoder.hpp>
 #include <kin/assets/file_watcher.hpp>
 
@@ -204,6 +205,7 @@ struct AudioEngine::State {
     f32 limiter_release = 0.0f;
     Meter output_meter;
     i64 output_frame = 0; // frames mixed so far: the clock scheduled voices start on
+    std::shared_ptr<AudioOutputTap> output_tap; // a copy of what is played, for another thread
     // What finished voices held, handed back for the game thread to free (in
     // update()), so the audio thread never frees a clip's samples. Reserved up
     // front; past capacity the audio thread frees them itself.
@@ -863,6 +865,9 @@ struct AudioEngine::State {
 
         limit(out, frames);
         measure(output_meter, out.data(), frames);
+        if (output_tap) {
+            output_tap->write(out.first(samples), output_frame);
+        }
         output_frame += frames;
         stats.mixed_frames += frames;
     }
@@ -2054,6 +2059,18 @@ std::vector<AudioBusState> AudioEngine::bus_states() const {
         states.push_back({.id = bus.id, .volume = bus.target, .muted = bus.muted, .paused = bus.paused});
     }
     return states;
+}
+
+std::shared_ptr<AudioOutputTap> AudioEngine::open_output_tap(f32 seconds) {
+    auto tap = std::make_shared<AudioOutputTap>(_state->sample_rate, _state->channels, seconds);
+    const std::scoped_lock lock{_state->mutex};
+    _state->output_tap = tap;
+    return tap;
+}
+
+void AudioEngine::close_output_tap() {
+    const std::scoped_lock lock{_state->mutex};
+    _state->output_tap.reset();
 }
 
 i32 AudioEngine::sample_rate() const {

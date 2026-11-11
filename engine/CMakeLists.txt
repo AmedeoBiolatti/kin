@@ -293,6 +293,7 @@ if(KIN_ENABLE_AUDIO)
         src/audio/audio_analysis.cpp
         src/audio/audio_catalog.cpp
         src/audio/audio_clip.cpp
+        src/audio/audio_capture.cpp
         src/audio/audio_decoder.cpp
         src/audio/audio_effects.cpp
         src/audio/audio_engine.cpp
@@ -414,7 +415,9 @@ if(KIN_ENABLE_NET)
         src/net/loopback.cpp
         src/net/lobby_match.cpp
         src/net/services_transport.cpp)
-    if(NOT EMSCRIPTEN)
+    if(EMSCRIPTEN)
+        target_sources(kin_net PRIVATE src/net/udp_browser.cpp) # no UDP in a page: open() fails and says so
+    else()
         target_sources(kin_net PRIVATE src/net/udp.cpp)
     endif()
     add_library(kin::net ALIAS kin_net)
@@ -423,6 +426,15 @@ if(KIN_ENABLE_NET)
         target_link_libraries(kin_net PRIVATE ws2_32)
     endif()
     kin_enable_release_optimizations(kin_net)
+endif()
+if(KIN_ENABLE_VOICE)
+    # Voice chat (docs/voice.md): a game links kin::voice beside kin::engine.
+    add_library(kin_voice STATIC
+        src/voice/voice.cpp
+        src/voice/voice_input.cpp)
+    add_library(kin::voice ALIAS kin_voice)
+    target_link_libraries(kin_voice PUBLIC kin_audio kin_engine PRIVATE opus kin_rnnoise)
+    kin_enable_release_optimizations(kin_voice)
 endif()
 if(KIN_ENABLE_SCENE_SERVER)
     target_sources(kin_engine PRIVATE

@@ -43,9 +43,9 @@ target_link_libraries(check PRIVATE kin::components)
         self.configure()
         manifest=self.manifest()
         self.assertEqual(manifest['schema'],'kin.components/1')
-        self.assertEqual(len(manifest['components']),14)
-        # Every component is on by default but the experimental ones: Python scripts and networking.
-        experimental={'python','net'}
+        self.assertEqual(len(manifest['components']),15)
+        # Every component is on by default but the experimental ones: Python scripts, networking and voice chat.
+        experimental={'python','net','voice'}
         self.assertTrue(all(c['enabled'] != (name in experimental) for name, c in manifest['components'].items()))
         self.assertFalse(manifest['components']['python']['enabled'])
         self.assertEqual(manifest['components']['python']['tests'],['kin-python-scripts'])

@@ -166,8 +166,8 @@ bool free_lobby_slot(PlatformServices& services, std::string_view player) {
         return false;
     }
     const auto it = std::ranges::find(match->players, player);
-    if (it == match->players.end() || !match->late[static_cast<std::size_t>(it - match->players.begin())]) {
-        return false; // only a latecomer's slot is freed: one who started the match is part of it
+    if (it == match->players.end() || !match->joinable) {
+        return false; // without free slots, nobody takes it: a player who goes leaves the game for good
     }
     match->late[static_cast<std::size_t>(it - match->players.begin())] = false;
     it->clear();
