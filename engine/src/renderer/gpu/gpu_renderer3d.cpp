@@ -8729,7 +8729,7 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
         fresh.lifetime = batch.lifetime();
         fresh.buffer = std::move(buffer);
         _retained_bytes += static_cast<u32>(bytes);
-        if (_retained_reserved.id == id)
+        if (_retained_reserved.id == id && !_retained_reserved.direct)
             _retained_reserved = {};
     }
     auto& table = _retained[slot];
@@ -8876,9 +8876,10 @@ void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
             }
         }
         if (slot == ~0u) {
-            // ID zero cannot consume a reservation made for an explicit batch.
-            if (!make_room(0, bytes, false, ctx.stats)) {
+            if (!make_room(id, bytes, false, ctx.stats, true)) {
                 ++ctx.stats.retained_refused;
+                if (bytes <= retained_budget && bytes > _retained_wanted.bytes)
+                    _retained_wanted = {id, bytes, source->draw_lifetime(), true};
                 continue;
             }
             auto buffer = std::make_shared<GpuBuffer>(
@@ -8895,6 +8896,8 @@ void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
             table.lifetime = table.scene_lifetime;
             table.buffer = std::move(buffer);
             _retained_bytes += static_cast<u32>(bytes);
+            if (_retained_reserved.id == id && _retained_reserved.direct)
+                _retained_reserved = {};
         }
         auto& table = _retained[slot];
         // A moved scene can contain commands at revision zero. Empty bounds
@@ -8967,7 +8970,7 @@ void GpuRenderer3D::drop_table(RetainedTable& table) {
     table = {};
 }
 
-bool GpuRenderer3D::make_room(u64 id, u64 bytes, bool active_too, RenderDebugStats3D& stats) {
+bool GpuRenderer3D::make_room(u64 id, u64 bytes, bool active_too, RenderDebugStats3D& stats, bool direct) {
     // Room for a new table of `bytes` within the 32 MiB / 128 tables, less what the collection kept for another batch.
     // It evicts, least recently claimed first, tables not claimed for a whole GPU frame; with `active_too` (the
     // collection, for the last frame's largest refused batch) tables claimed last frame too, while all of those it
@@ -8978,7 +8981,7 @@ bool GpuRenderer3D::make_room(u64 id, u64 bytes, bool active_too, RenderDebugSta
     if (bytes > budget)
         return false;
     const u64 frame = _retained_frames;
-    const bool others = _retained_reserved.id && _retained_reserved.id != id;
+    const bool others = _retained_reserved.id && (_retained_reserved.id != id || _retained_reserved.direct != direct);
     const u64 held = others ? _retained_reserved.bytes : 0;
     u32 live = others ? 1u : 0u;
     for (const RetainedTable& t : _retained)
@@ -9153,13 +9156,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 drop_table(t);
         }
         std::erase_if(_retained, [](const RetainedTable& t) { return !t.buffer; });
-        // The largest batch refused a table last frame may evict smaller ones claimed then; the room is kept for it
-        // this frame. At most one such change a frame.
+        // The largest batch/scene refused a table last frame may evict smaller ones claimed then; the room is kept for
+        // it this frame. At most one such change a frame.
         _retained_reserved = {};
         const RetainedWant want = std::exchange(_retained_wanted, {});
+        const auto life = want.lifetime.lock();
+        const bool live = life && (!want.direct || *static_cast<const u64*>(life.get()) == want.id);
         const u32 evicted = stats.retained_evictions;
-        if (!want.lifetime.expired() && make_room(want.id, want.bytes, true, stats) &&
-            stats.retained_evictions != evicted)
+        if (live && make_room(want.id, want.bytes, true, stats, want.direct) && stats.retained_evictions != evicted)
             _retained_reserved = want;
     }
     _cull_groups.clear();

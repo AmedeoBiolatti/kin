@@ -1568,11 +1568,11 @@ private:
     // budget, never a wrong picture.
     u64 _retained_frames = 0;
     u32 _retained_bytes = 0;
-    // The largest batch refused a table this GPU frame, and the room the next collection evicted for it (kept for it
-    // that frame).
+    // The largest batch/scene refused a table this GPU frame, and the room the next collection kept for it.
     struct RetainedWant {
         u64 id = 0, bytes = 0;
         std::weak_ptr<const void> lifetime;
+        bool direct = false; // scene and batch identities have independent namespaces
     };
     RetainedWant _retained_wanted, _retained_reserved;
     std::vector<u32> _retained_victims;                          // scratch
@@ -1580,7 +1580,7 @@ private:
     std::vector<std::array<u32, 2>> _retained_spans;             // and their bytes in the table
     std::vector<u32> _retained_starts;                           // each range's first among the changed copies
     void drop_table(RetainedTable& table);
-    bool make_room(u64 id, u64 bytes, bool active_too, RenderDebugStats3D& stats);
+    bool make_room(u64 id, u64 bytes, bool active_too, RenderDebugStats3D& stats, bool direct = false);
     bool _retained_enabled = false;
     bool _bounds_cache_grew = false;
     bool _gpu_markers = false; // external GPU profiler labels, no fence scopes

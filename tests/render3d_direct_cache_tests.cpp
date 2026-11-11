@@ -320,6 +320,46 @@ void check(Renderer2D& renderer) {
            empty.stats.local_gather_cached_copies == 0 && empty.stats.local_shadow_casters == 0 &&
            empty.stats.local_instance_tests == 0 && empty.stats.local_task_bytes == 0);
 
+    // Explicit batches must not permanently starve a larger static source of
+    // its table (and therefore its local-shadow gather cache) at the slot cap.
+    scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    scene.lights.cache_shadows = false;
+    scene.lights.spots.push_back(original_spot);
+    scene.lights.max_shadowed_spots = 1;
+    scene.lights.local_shadow_resolution = 128;
+    std::vector<InstanceBatch3D> crowded;
+    for (u32 i = 0; i < 128; ++i) {
+        crowded.push_back(InstanceBatch3D::create(mesh, stationary).value_or({}));
+        assert(crowded.back() && scene.draw_instanced(crowded.back(), materials[i % 3]));
+    }
+    for (u32 i = 0; i < 32; ++i)
+        assert(scene.draw_instanced(mesh, stationary, materials[i % 3]));
+    const auto crowded_reference = shoot(false);
+    for (u32 i = 0; i < 5; ++i)
+        shoot(true);
+    const auto crowded_cached = shoot(true);
+    assert(crowded_cached.stats.direct_retained_instances == 512 && crowded_cached.stats.direct_cache_hits == 1 &&
+           crowded_cached.stats.local_gather_cache_hits == 1 && crowded_cached.stats.retained_refused > 0 &&
+           crowded_cached.stats.retained_gpu_bytes <= 32 * 1024 * 1024 && crowded_cached.stats.device_waits == 0);
+    assert(crowded_cached.pixels == crowded_reference.pixels && crowded_cached.pick_id == crowded_reference.pick_id &&
+           crowded_cached.stats.draws == crowded_reference.stats.draws &&
+           crowded_cached.stats.instances == crowded_reference.stats.instances &&
+           crowded_cached.stats.local_shadow_draws == crowded_reference.stats.local_shadow_draws &&
+           crowded_cached.stats.local_shadow_casters == crowded_reference.stats.local_shadow_casters &&
+           crowded_cached.stats.local_shadow_triangles == crowded_reference.stats.local_shadow_triangles);
+    // Both a streamed and a retained dynamic batch stay live under pressure.
+    for (u32 index : {0u, 127u}) {
+        const std::vector<MeshInstance3D> copies(16, {Mat4f::translation({f32(index % 3), 0, 2})});
+        assert(crowded[index].update(0, copies));
+        const auto updated = shoot(true);
+        const auto reference = shoot(false);
+        assert(updated.pixels == reference.pixels && updated.pick_id == reference.pick_id &&
+               updated.stats.local_shadow_casters == reference.stats.local_shadow_casters &&
+               updated.stats.local_shadow_triangles == reference.stats.local_shadow_triangles);
+    }
+
     // Oversized direct tables stream within the existing 32 MiB budget.
     scene = Scene3D{};
     scene.debug.cache_draw_commands = false;

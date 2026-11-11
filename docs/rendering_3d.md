@@ -273,8 +273,9 @@ unavailable shaders and capacity overflow keep the ordinary upload path. CPU bat
 The budget covers live tables, not total GPU memory: streamed buffers, staging and in-flight buffer versions are additional.
 Expired batches' tables are released between GPU frames without waiting for the GPU (SDL frees a buffer once the work
 submitted with it is done). When the 128 tables or 32 MiB are full, tables not drawn for a whole frame are evicted, least
-recently drawn first; the next frame, the largest batch refused may also evict tables drawn last frame that together are
-smaller than it, its room kept for it, so retention settles on the larger batches without equal ones trading places. Stats:
+recently drawn first; the next frame, the largest batch or direct scene refused may also evict tables drawn last frame
+that together are smaller than it, its room kept for it, so retention settles on larger tables without equal ones
+trading places. Stats:
 `retained_evictions`, `retained_refused` (eligible draws streamed for lack of room) and `device_waits` (device-wide waits
 inside `render()`, 0 normally).
 Tables with at least 8,192 records pack directly into upload staging on the attached renderer workers, in 2,048-record
@@ -300,7 +301,9 @@ static caster selection as described below. Colour draws keep their source order
 
 Scene tables share the existing 32 MiB/128-table GPU budget and 4 MiB bounds
 budget with explicit batches. Their rows follow `Scene3D::instances()`, including
-unused rows for ineligible draws. Tables retain weak scene identities and release
+unused rows for ineligible draws. Scene tables participate in the same largest-refused-table reservation as batches:
+at the slot cap, a larger stable scene table and its local-shadow gather cache can displace smaller active batches.
+Scene and batch reservations have independent identities. Tables retain weak scene identities and release
 expired/moved sources between GPU frames. Unsupported features, memory pressure,
 and later edits after an upload in the same GPU frame use the streamed path.
 Shared prepared consumers, TAA, enabled LOD/occlusion, custom shaders, wireframes,
