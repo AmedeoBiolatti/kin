@@ -191,6 +191,49 @@ that comes with the Steam and WebRTC transports.
 A transport delivers datagrams or loses them; the layers above repeat what matters. Input sync sends every command a
 peer has not acknowledged in each datagram, so a lost datagram costs nothing.
 
+## Joining a game in progress
+
+A session with `joinable` keeps slots free: their `peers` entry is `no_peer`, and an empty slot plays the default
+command. A player joins one while the game runs:
+
+1. Every player in the game calls `allow_join(slot, peer)`. The joiner starts its session with `joining`, and its
+   `peers` name the players in the game. It picks a random id, which every join message carries.
+2. The game's **host** (the lowest slot in it) sends the joiner the state from before the first tick that is not yet
+   final everywhere, after taking back any wrong predictions, so the state is from real commands only. The others
+   keep playing, and nobody waits.
+3. The joiner restores the state and plays the ticks since from every player's commands, up to 120 ticks an update,
+   as a spectator (`stats().spectating`). Once it has caught up, reaches every player, and (with `hash_interval`)
+   one of its state hashes matched the game's, it says it is ready.
+4. The host picks the first tick none of its commands has been sent for, and sends the join with its command for that
+   tick. Every peer can finish that tick only with that command, so every peer applies the join at the same tick.
+   A peer that ran it on a prediction runs it again. Who may decide a join at a tick is fixed by the game itself (the
+   lowest slot in it the tick before), so every peer agrees on it even while the host changes.
+
+From that tick the joiner plays. `StepInfo::present` says which slots are in the game, and `StepInfo::joined` which
+arrive at this tick, so the game spawns them there. It is part of the deterministic state like any command.
+
+```cpp
+void step(std::span<const Command> commands, const kin::net::StepInfo& info) {
+    for (u32 slot = 0; slot < players; ++slot) {
+        if (info.joined & (1u << slot)) spawn(slot);
+        if (info.present & (1u << slot)) move(slot, commands[slot]);
+    }
+}
+```
+
+Joining needs `save()` and `restore()`, in lockstep too. The state travels in pieces of about 1.2 KB, sixteen at a time.
+The joiner keeps pieces that arrive after a lost one, and the host sends a lost piece again. In the tests, 60 KB
+over a link that loses one datagram in ten arrives in under a second; a joiner takes at most 256 MB. Several players
+can join at once. A joiner fails alone, and the game goes on, if:
+
+- its state differs from the game's (a hash compared before it plays): `desynced`;
+- the state stops arriving for a link timeout, or takes longer than the 256 ticks of commands each peer keeps (about
+  four seconds at 60 ticks a second): "the game moved on";
+- a player in the game does not answer it, or it was not told about one: the reason names the player.
+
+A joiner that never comes, or leaves before it plays, leaves the slot empty, and nobody waits for it. A slot can then
+go to someone else. Once it plays, a joiner is a player like the others: losing it ends the session.
+
 ## Testing a networked game
 
 - **`sync_test()`** plays a simulation alone and, after every tick, takes it back a few ticks and plays them again.
@@ -223,6 +266,13 @@ drive the link.
 | 5 | bye | |
 | 32 | inputs | slot `u8`, sender's tick `u32`, its advantage `i16` (1/256 tick), next tick it lacks from the receiver `u32`, first tick `u32`, count `u8`, the commands |
 | 33 | hash | slot `u8`, tick `u32`, state hash `u64` |
+| 34 | join request | the joiner's slot `u8`, its id `u64` |
+| 35 | join state | the joiner's slot `u8`, base tick `u32`, slots in the game before it `u32`, total bytes `u32`, offset `u32`, bytes |
+| 36 | join ack | the joiner's slot `u8`, bytes received from the start `u32` |
+| 37 | join ready | the joiner's slot `u8`, its id `u64` |
+
+In a joinable session, inputs end with the joins their sender decided at the ticks of their commands: count `u8`,
+then tick `u32`, slot `u8` and the joiner's id `u64` each.
 
 A peer sends hellos until it hears one that carries its token (the other side heard it). Any later message from the
 peer completes the handshake too, so one lost hello costs nothing. A hello whose model, game, configuration, session or
@@ -232,7 +282,8 @@ handshake only if no matching hello follows before the connect timeout.
 
 ## Not yet
 
-- No joining a game in progress and no spectators; a lost peer ends the session.
+- A lost player ends the session: nobody leaves a game that goes on. A joiner watches before it plays, but there is
+  no spectator that only watches.
 - No NAT traversal, encryption or authentication: a peer's address and token are its identity, so anyone who sees
   the traffic can forge it.
 - Commands are copied in the machine's byte order: little-endian peers only (every desktop and console today).

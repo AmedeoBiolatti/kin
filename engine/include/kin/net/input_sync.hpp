@@ -19,12 +19,13 @@
 // tick's command, which it keeps in its state. The peers' clocks are kept within about a tick of each other: the
 // one ahead runs a little slower until the other catches up.
 
-#include <kin/net/session.hpp>
-#include <kin/net/sim.hpp>
-
 #include <array>
 #include <deque>
 #include <functional>
+#include <kin/net/session.hpp>
+#include <kin/net/sim.hpp>
+#include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,6 +48,15 @@ struct InputSyncConfig {
     u64 game = 0;           // SessionIdentity::game, e.g. compatibility_hash("my_game", "1.2")
     u64 session = 0;        // SessionIdentity::session
     LinksConfig links;      // timings; its local_slot is set from local_player
+    // Players may join while the game runs (docs/networking.md#joining-a-game-in-progress): a slot whose peers
+    // entry is no_peer starts empty (its command is the default one), and allow_join() lets a player take it. A
+    // joiner starts from a saved state, so this needs a simulation with save() and restore(). Must match on every
+    // peer.
+    bool joinable = false;
+    // This peer joins a game already running (joinable too): `peers` names the players in it, no_peer for empty
+    // slots. One of them sends the state; this peer catches up as a spectator, then plays from a tick the game
+    // agrees on (StepInfo::joined says which).
+    bool joining = false;
 };
 
 inline constexpr u32 max_players = 16;
@@ -62,7 +72,12 @@ struct InputSyncStats {
     u64 waits = 0;          // updates that could not run a due tick (lockstep, or out of prediction)
     u64 slowed_updates = 0; // updates whose clock ran slow to let the peers catch up
     u64 hashes_compared = 0;
-    f32 advantage = 0.0f; // ticks this peer is ahead of the furthest-behind one (smoothed)
+    f32 advantage = 0.0f;    // ticks this peer is ahead of the furthest-behind one (smoothed)
+    u32 present = 0;         // the slots in the game at the current tick, a bit each
+    u32 joins = 0;           // players who joined while this peer played (itself too, for a joiner)
+    u32 start_tick = 0;      // this peer's first tick: 0, or for a joiner the tick of the state it was sent
+    bool spectating = false; // a joiner that has the state and follows the game, before it plays
+    u64 state_bytes_sent = 0, state_bytes_received = 0;
 };
 
 struct DesyncReport {
@@ -94,8 +109,14 @@ public:
     // The command for the next tick that has none yet (it applies input_delay ticks after the current one). The
     // latest value is used for every tick an update() schedules.
     void set_local_input(std::span<const u8> command);
-    // Called once per tick, in order, when every player's real command for it is known: a replay log.
+    // Called once per tick, in order, when every player's real command for it is known: a replay log. A joiner's
+    // starts at its first tick.
     void set_on_confirmed(std::function<void(u32 tick, std::span<const u8> commands)> on_confirmed);
+    // Lets the player at transport peer `peer` join empty slot `slot` (InputSyncConfig::joinable). Every peer in
+    // the game must allow it: the joiner needs each one's commands. False for a slot that is taken (or is this
+    // peer's), or a session that is not joinable. A joiner that never comes, or goes before it plays, leaves the
+    // slot empty again; allowing another player the slot meanwhile replaces them.
+    bool allow_join(u32 slot, PeerId peer);
 
     void update(u64 now_us) override;
     SessionStatus status() const override { return _status; }
@@ -120,6 +141,27 @@ private:
         u64 last_sent_us = 0;
         i64 last_ack_sent = -2;
         std::deque<std::pair<u32, u64>> hashes; // the peer's hashes not yet compared
+        bool linked = false;                    // the slot has a link (a player in the game, or one joining)
+        u64 join_id = 0;     // what the joiner on this link calls itself (its join requests say), 0 until heard
+        u64 expected_id = 0; // the joiner the game let into this slot (0 for a player from the start)
+        u64 served_id = 0;   // the joiner this host sent a state to (a repeated request from it is not a new one)
+        u64 joined_at_us = 0;
+    };
+    struct JoinEvent {
+        u32 tick = 0;
+        u32 slot = 0;
+        u64 id = 0; // the joiner's join id
+    };
+    // The state on its way to a joiner (this peer is the game's host).
+    struct Transfer {
+        u32 slot = 0;
+        u32 base = 0;    // the state is from before this tick
+        u32 present = 0; // the slots in the game before `base`
+        std::vector<u8> bytes;
+        u32 acked = 0; // bytes the joiner has, from the start
+        u32 next = 0;  // the next byte to send
+        u64 progress_us = 0;
+        u64 acked_us = 0; // when the joiner last acknowledged more
     };
 
     bool start_failed(std::string detail);
@@ -134,6 +176,25 @@ private:
     void compare_hashes();
     void advance(u64 elapsed_us);
     void send_inputs();
+    void on_join_request(u32 slot, u64 id);
+    void serve_join_requests();
+    void check_joined_players();
+    void fail_joining(std::string detail);
+    void on_join_state(u32 slot, ByteReader& payload);
+    void on_join_ack(u32 slot, ByteReader& payload);
+    void on_join_ready(u32 slot, u64 id);
+    void apply_join(u32 slot, u32 tick, u64 id);
+    void start_from_state();
+    void serve_transfers();
+    void send_join_messages();
+    void drop_failed_joiners();
+    u32 catch_up();
+    bool in_game(u32 slot) const { return _active_from[slot] != never; }
+    bool present(u32 slot, u32 tick) const { return _active_from[slot] <= static_cast<i64>(tick); }
+    u32 present_mask(u32 tick) const;
+    u32 host() const;
+    u32 host_at(u32 tick) const;
+    f64 remote_now(u32 slot) const;
     f32 own_view(u32 slot) const;
     f32 measure_advantage() const;
 
@@ -161,6 +222,25 @@ private:
     std::vector<u8> _local_input;
     std::vector<u8> _step_buffer;
     std::vector<PeerTrack> _peers; // remote players, by slot (the local slot's entry is unused)
+    // The tick each slot's player is in the game from (never: an empty slot).
+    static constexpr i64 never = std::numeric_limits<i64>::max();
+    std::vector<i64> _active_from;
+    std::vector<JoinEvent> _created; // joins this peer decided as the host, sent with its commands
+    std::vector<Transfer> _transfers;
+    std::vector<u32> _join_requests; // slots that asked for the state since the last update (served after rollback)
+    // A joiner's own id, random: every join message names the player, so each peer can tell it is the one it allowed.
+    u64 _join_id = 0;
+    u64 _state_progress_us = 0;
+    // A joiner's incoming state.
+    bool _have_state = false;
+    bool _state_started = false;
+    u32 _state_from = 0;
+    u32 _state_base = 0;
+    u32 _state_present = 0;
+    u32 _state_total = 0;
+    std::vector<u8> _state;
+    std::map<u32, std::vector<u8>> _state_early; // chunks that came before one that was lost, by offset
+    u64 _next_join_message_us = 0;
 
     // A saved state before every tick that ran on a prediction, in a ring of max_prediction + 2.
     std::vector<std::vector<u8>> _snapshots;
@@ -210,6 +290,7 @@ public:
     std::string status_detail() const override { return _core.status_detail(); }
     std::span<const LinkInfo> links() const override { return _core.links(); }
     void leave() override { _core.leave(); }
+    bool allow_join(u32 slot, PeerId peer) { return _core.allow_join(slot, peer); }
 
     const InputSyncConfig& config() const { return _core.config(); }
     const InputSyncStats& stats() const { return _core.stats(); }
