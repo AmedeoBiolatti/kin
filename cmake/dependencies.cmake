@@ -578,8 +578,13 @@ if(KIN_ENABLE_VOICE)
     list(TRANSFORM _kin_rnnoise_sources PREPEND "${rnnoise_SOURCE_DIR}/src/")
     add_library(kin_rnnoise STATIC ${_kin_rnnoise_sources})
     unset(_kin_rnnoise_sources)
+    # Without SSE2 or NEON (MSVC defines neither macro) RNNoise takes its plain C path, which wants Opus's os_support.h
+    # (left out of its release) for OPUS_CLEAR, and C99's restrict (MSVC's C spells it __restrict).
+    file(WRITE "${CMAKE_BINARY_DIR}/kin_rnnoise/os_support.h"
+        "#pragma once\n#include <string.h>\n#define OPUS_CLEAR(dst, n) (memset((dst), 0, (n) * sizeof(*(dst))))\n")
     target_include_directories(kin_rnnoise SYSTEM PUBLIC "${rnnoise_SOURCE_DIR}/include"
-        PRIVATE "${rnnoise_SOURCE_DIR}/src")
+        PRIVATE "${rnnoise_SOURCE_DIR}/src" "${CMAKE_BINARY_DIR}/kin_rnnoise")
+    target_compile_definitions(kin_rnnoise PRIVATE "$<$<C_COMPILER_ID:MSVC>:restrict=__restrict>")
     target_compile_definitions(kin_rnnoise PRIVATE RNNOISE_BUILD DISABLE_DEBUG_FLOAT=1
         compute_generic_conv1d=rnn_compute_generic_conv1d compute_generic_dense=rnn_compute_generic_dense
         compute_generic_gru=rnn_compute_generic_gru compute_glu=rnn_compute_glu conv2d_init=rnn_conv2d_init
