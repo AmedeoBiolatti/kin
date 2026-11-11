@@ -588,6 +588,10 @@ void check(Renderer2D& renderer) {
             scene.camera.window = {.25f, 0, .5f, 1};
         }
         scene.cull = camera != 3;
+        scene.lights.shadow_area = {{-10, -7, -2}, {10, 7, 4}};
+        scene.lights.shadow_resolution = 128;
+        scene.lights.sun_shadow_strength = camera % 2 ? 0.f : 1.f;
+        scene.lights.shadow_cascades = camera == 4 ? 4 : 1;
         const auto reference = shoot(false);
         const auto actual = shoot(true);
         assert(actual.pixels == reference.pixels && actual.pick_id == reference.pick_id &&
@@ -595,7 +599,36 @@ void check(Renderer2D& renderer) {
                actual.stats.triangles == reference.stats.triangles &&
                actual.stats.camera_instance_tests == reference.stats.camera_instance_tests &&
                actual.stats.direct_retained_instances == 1033 && actual.stats.device_waits == 0);
+        // Both retained and streamed calls can reuse ref metadata. Force a
+        // fresh identity to independently check camera/caster flag transitions.
+        Scene3D moved = std::move(scene);
+        scene = std::move(moved);
+        const auto fresh = shoot(false);
+        assert(fresh.stats.prepared_reused == 0 && actual.pixels == fresh.pixels && actual.pick_id == fresh.pick_id &&
+               actual.stats.instances == fresh.stats.instances &&
+               actual.stats.shadow_casters == fresh.stats.shadow_casters &&
+               actual.stats.shadow_draws == fresh.stats.shadow_draws &&
+               actual.stats.camera_instance_tests == fresh.stats.camera_instance_tests);
+        shoot(true);
+        shoot(true);
     }
+    // Prepared consumers replace the ref bindings with shared records/spheres.
+    // Returning to native retention must rebind them even with the same layout.
+    const auto native = shoot(true);
+    const auto prepared = r3d.prepare(scene).value_or({});
+    assert(prepared);
+    renderer.clear(colors::black);
+    assert(r3d.render_prepared(view, prepared));
+    assert(r3d.debug_stats().direct_retained_instances == 0 && r3d.debug_stats().shared_records > 0);
+    renderer.draw_texture(view.texture(), rect);
+    std::vector<u8> prepared_pixels;
+    Vec2i prepared_size;
+    assert(renderer.read_rgba(rect, prepared_pixels, prepared_size) && prepared_size == extent);
+    renderer.present();
+    const auto rebound = shoot(true);
+    assert(prepared_pixels == native.pixels && rebound.pixels == native.pixels && rebound.pick_id == native.pick_id &&
+           rebound.stats.direct_retained_instances == 1033 && rebound.stats.direct_upload_bytes == 0 &&
+           rebound.stats.direct_bounds_rebuilt == 0);
 
     // Force the general multi-level prefix path to level zero and compare it
     // with the single-level path. Mix retained and streamed refs, including a

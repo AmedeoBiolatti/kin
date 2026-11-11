@@ -1564,6 +1564,17 @@ private:
         u64 revision;
     };
     std::array<PreparedKey, 2> _prepared_keys{};
+    // Stable draw inputs need no per-render reset/rebind. Frustum storage stays
+    // here while its current planes refresh; only batch/skin/group refs update
+    // live. Keys include command revisions, even after structural layout reuse.
+    std::array<GpuFrustum, 2> _ref_frustums{}, _ref_whole_frustums{};
+    std::array<PreparedKey, 2> _ref_update_keys{};
+    std::vector<u32> _live_ref_updates;
+    std::array<std::vector<u32>, 2> _direct_ref_updates;
+    std::array<bool, 2> _ref_update_cull{};
+    bool _ref_update_valid = false, _ref_update_shadows = false;
+    std::array<u32, 2> _direct_bound_slots{~0u, ~0u};
+    std::array<const Vec4f*, 2> _direct_bound_spheres{};
     // Admission history is independent of the bounded draw-layout cache.
     std::array<std::array<u64, 2>, 2> _direct_sources{};
     std::vector<PreparedBatch> _prepared_batches; // <=128 entries, not per copy
@@ -1619,6 +1630,7 @@ private:
     GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material,
                                 DrawClip3D clip = DrawClip3D::camera) const;
     void retain_instances(DrawRef& ref, FrameCtx& ctx);
+    static bool scene_retention_eligible(const DrawRef& ref);
     void retain_scene_instances(FrameCtx& ctx);
     void cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stats);
     struct CullGroup {

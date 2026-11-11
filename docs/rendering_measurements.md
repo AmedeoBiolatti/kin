@@ -4,6 +4,62 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Stable culling/retention ref updates, 2026-11-11
+
+The reference is `033b9b43`, including the shadow and culling redesigns and the
+surface-shadow compatibility correction. The new path compiles live-update and
+direct-retention ref indices with the existing command layout. Exact command
+revisions avoid resetting/rebinding every ref and rechecking every material's
+retention eligibility. Current camera planes still refresh; batch, skin and
+spatial-group refs keep live updates. Culling/shadow enablement changes refresh
+static flags. Direct-source tables are validated after explicit batch claims,
+with rebind/clear on eviction, slot/bound-storage changes or retention fallback.
+Prepared consumers and material/command revisions take the full refresh path.
+Optional index payload counts within the existing 16 MiB layout limit and is
+discarded before rejecting a layout for memory pressure. GPU work is unchanged.
+
+Five alternating Hard pairs, each 300 warm-up plus a full 1,440-frame route,
+show **14.0% median paired caller-CPU reduction**, range **1.8–26.1%**; all five
+pairs improve. Process CPU, including helpers, falls **11.8%** by the same
+paired-median calculation. These are **contended** observations: Blender and all
+external workloads remain running, with uncontrolled clocks, thermals and load.
+The workload is original independent Yard submissions, 720p HDR, no AA/GI/AO,
+classic 1,024 spot shadows, four helpers and affinity 0–15.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 1 | 0.698 / 0.887 / 1.040 | 0.680 / 0.918 / 0.988 | 2.6% |
+| Medium | 1 | 2.802 / 3.267 / 3.620 | 2.417 / 2.914 / 3.153 | 13.8% |
+| Hard | 5 | 5.870 / 7.091 / 7.745 | 5.390 / 6.633 / 6.990 | 14.0% |
+
+The Hard percentile columns are medians of per-run percentiles. Paired reductions
+use adjacent before/after run medians, so they differ from dividing the table's
+independently aggregated p50s. Easy/Medium are guard pairs, not repeatability
+studies. Hard frame p50 is essentially flat (median run medians 11.998 →
+12.001 ms), with noisy tails; no frame-throughput improvement is established.
+
+Separate before/after `cpu-clock:u` profiles cover two full Hard routes each at
+499 Hz with 16 KiB DWARF stacks. Actual per-frame render-call windows exclude
+assembly, warm-up and presentation. Direct retention falls from **6.76%** of
+caller samples to **zero samples** after the change; this is below sampling
+resolution, not zero cost. Camera culling/instance preparation is **20.05 →
+17.53%**, and their combined share with retained-batch updates is **30.96 →
+22.58%**. These are normalized user-CPU sample shares, not exact phase timings.
+There are 7,428/6,502 caller samples, with under 0.5% unresolved in each profile.
+The remaining culling and batch-update shares are 17.53% and 5.04%; live bounds,
+visibility, packing and uploads still execute. Local shadow preparation is the
+largest remaining caller category at 26.78%.
+
+Ten focused NVIDIA checks and four llvmpipe checks pass. New regressions compare
+warm metadata against forced fresh layouts across camera/cull/shadow toggles,
+then interleave prepared consumers with native retention. Existing coverage
+includes material revisions, live batches/poses/groups, mutable spans, moves,
+same-frame consumers and memory/table pressure. All **10,080 before/after route
+frame comparisons** preserve every recorded non-timing work/upload/resource/cache
+column; nine decoded-RGBA pairs across all tiers and phases 1/541/961 are exact.
+Artifacts, hashes, commands, per-pair timings and separate profiles are under
+`out/runs/render3d-ref-refresh/`.
+
 ### Shadow recording redesign, 2026-11-11
 
 The reference is `6a1a5d61`, with both preceding shadow-preparation and culling

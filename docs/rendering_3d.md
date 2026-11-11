@@ -207,11 +207,17 @@ Fixed-size batch content edits keep draw/piece/task metadata valid. Group bounds
 a group gaining/losing valid bounds changes the batch layout revision and rebuilds the layout, even if the total number
 of valid groups stays the same. GPU tables and CPU spheres continue to use the full content revision independently.
 
-This reuses the renderer's existing arrays, not a copy of scene instances or visibility results. Camera frustums, shadow
-membership, group plane proofs, retained-table slots/bounds and uploads are refreshed each render. Writes through a still
-valid `add_instances()` span remain visible. A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
+This reuses the renderer's existing arrays, not a copy of scene instances or visibility results. Camera planes and group
+proofs refresh each render. An exact command revision also reuses material eligibility and stable ref bindings, with
+separate live-update indices for batches, skins and spatial groups. Camera-culling and sun-shadow enablement changes
+refresh ref flags even without a command revision. Direct-source tables are validated after batch claims every render;
+eviction, slot compaction, changed bound storage or disabled retention rebinds or clears the affected refs. Prepared
+consumers and command revisions use the full refresh path. Writes through a still valid `add_instances()` span remain
+visible. A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
 alternating unrelated scenes replaces it. It is bounded to 16,384 pieces, 4,096 submitted spatial groups,
 128 batch stamps and 16 MiB of existing vector payload capacity.
+Optional ref-update indices cover at most 65,536 refs and count within that same 16 MiB payload budget; they are discarded
+before rejecting a layout for memory pressure. Larger layouts retain the full refresh traversal.
 Exact structural descriptors cover up to 8,192 source draws and add at most 1 MiB of bounded vector payload
 (plus weak-owner control-block overhead). Larger persistent command sets reuse the layout only while their exact
 scene identity and command revision remain unchanged; resubmission rebuilds without allocating more descriptors.

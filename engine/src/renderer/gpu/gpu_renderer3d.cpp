@@ -8951,145 +8951,181 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
     ctx.stats.retained_instances += draw.count;
 }
 
+bool GpuRenderer3D::scene_retention_eligible(const DrawRef& ref) {
+    const auto& draw = *ref.draw;
+    return !ref.batch && !ref.skinned && !ref.clustered && ref.levels == 1 && !draw.material.shader.backend() &&
+           !draw.material.wireframe && (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask);
+}
+
 void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
     // Share storage, not draw order: material changes and equal-depth surfaces
     // must keep exactly the same order as the streamed path.
-    if (!_retained_enabled || ctx.prepared || ctx.taa || ctx.scene.lod.occlusion.enabled ||
-        !ctx.scene.debug.retain_scene_instances)
-        return;
-    const auto eligible = [](const DrawRef& ref) {
-        const auto& draw = *ref.draw;
-        return !ref.batch && !ref.skinned && !ref.clustered && ref.levels == 1 && !draw.material.shader.backend() &&
-               !draw.material.wireframe &&
-               (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask);
+    const auto unbind = [&](u32 s) {
+        if (_direct_bound_slots[s] == ~0u)
+            return;
+        for (const u32 r : _direct_ref_updates[s]) {
+            auto& ref = _refs[r];
+            ref.retained = ~0u;
+            ref.retained_first = 0;
+            ref.direct = false;
+            ref.cached_spheres = nullptr;
+        }
+        _direct_bound_slots[s] = ~0u;
+        _direct_bound_spheres[s] = nullptr;
     };
+    if (!_retained_enabled || ctx.prepared || ctx.taa || ctx.scene.lod.occlusion.enabled ||
+        !ctx.scene.debug.retain_scene_instances) {
+        for (u32 s = 0; s < ctx.scenes.size(); ++s)
+            unbind(s);
+        return;
+    }
     for (u32 s = 0; s < ctx.scenes.size(); ++s) {
-        const auto* source = ctx.scenes[s];
-        if (!source || source->instances_exposed() || source->lod.enabled || !source->debug.retain_scene_instances)
-            continue;
-        const u64 id = source->draw_identity();
-        const u64 revision = source->draw_revision();
-        const auto previous = std::exchange(_direct_sources[s], std::array{id, revision});
-        const u64 bytes = source->instances().size() * sizeof(GpuInstance3D);
-        u32 slot = ~0u;
-        for (u32 i = 0; i < _retained.size(); ++i)
-            if (_retained[i].buffer && _retained[i].direct && _retained[i].id == id) {
-                slot = i;
-                break;
-            }
-        if (slot == ~0u && previous != std::array{id, revision})
-            continue;
-        const bool current = slot != ~0u && _retained[slot].revision == revision &&
-                             _retained[slot].buffer->size() == bytes && !_retained[slot].bounds.empty();
-        u32 copies = current ? _retained[slot].direct_instances : 0;
-        if (!current) {
-            u32 draws = 0;
-            for (const auto& ref : _refs)
-                if (ref.scene == s && eligible(ref)) {
+        const auto retain_source = [&]() -> bool {
+            const auto* source = ctx.scenes[s];
+            if (!source || source->instances_exposed() || source->lod.enabled || !source->debug.retain_scene_instances)
+                return false;
+            const auto visit = [&](auto&& consume) {
+                if (_ref_update_valid) {
+                    for (const u32 r : _direct_ref_updates[s])
+                        consume(_refs[r]);
+                } else {
+                    for (auto& ref : _refs)
+                        if (ref.scene == s && scene_retention_eligible(ref))
+                            consume(ref);
+                }
+            };
+            const u64 id = source->draw_identity();
+            const u64 revision = source->draw_revision();
+            const auto previous = std::exchange(_direct_sources[s], std::array{id, revision});
+            const u64 bytes = source->instances().size() * sizeof(GpuInstance3D);
+            u32 slot = ~0u;
+            for (u32 i = 0; i < _retained.size(); ++i)
+                if (_retained[i].buffer && _retained[i].direct && _retained[i].id == id) {
+                    slot = i;
+                    break;
+                }
+            if (slot == ~0u && previous != std::array{id, revision})
+                return false;
+            const bool current = slot != ~0u && _retained[slot].revision == revision &&
+                                 _retained[slot].buffer->size() == bytes && !_retained[slot].bounds.empty();
+            u32 copies = current ? _retained[slot].direct_instances : 0;
+            if (!current) {
+                u32 draws = 0;
+                visit([&](const DrawRef& ref) {
                     ++draws;
                     copies += ref.draw->count;
+                });
+                // One/few draws already have a compact streaming path. Stable scene
+                // revisions reuse this admission count as well as their records.
+                if (draws < 32 || copies < 256)
+                    return false;
+            }
+            const u64 serial = _owner->_frame_serial;
+            if (slot != ~0u) {
+                const auto& table = _retained[slot];
+                const bool dirty = table.revision != revision || table.buffer->size() != bytes || table.bounds.empty();
+                // As with explicit batches, never overwrite an upload already used
+                // in this GPU frame. Later consumers stream their current records.
+                if (dirty && (table.claimed == _retained_epoch || table.upload_frame == serial))
+                    return false;
+                if (table.buffer->size() != bytes) {
+                    drop_table(_retained[slot]);
+                    slot = ~0u;
                 }
-            // One/few draws already have a compact streaming path. Stable scene
-            // revisions reuse this admission count as well as their records.
-            if (draws < 32 || copies < 256)
-                continue;
-        }
-        const u64 serial = _owner->_frame_serial;
-        if (slot != ~0u) {
-            const auto& table = _retained[slot];
-            const bool dirty = table.revision != revision || table.buffer->size() != bytes || table.bounds.empty();
-            // As with explicit batches, never overwrite an upload already used
-            // in this GPU frame. Later consumers stream their current records.
-            if (dirty && (table.claimed == _retained_epoch || table.upload_frame == serial))
-                continue;
-            if (table.buffer->size() != bytes) {
-                drop_table(_retained[slot]);
-                slot = ~0u;
             }
-        }
-        if (slot == ~0u) {
-            if (!make_room(id, bytes, false, ctx.stats, true)) {
-                ++ctx.stats.retained_refused;
-                if (bytes <= retained_budget && bytes > _retained_wanted.bytes)
-                    _retained_wanted = {id, bytes, source->draw_lifetime(), true};
-                continue;
+            if (slot == ~0u) {
+                if (!make_room(id, bytes, false, ctx.stats, true)) {
+                    ++ctx.stats.retained_refused;
+                    if (bytes <= retained_budget && bytes > _retained_wanted.bytes)
+                        _retained_wanted = {id, bytes, source->draw_lifetime(), true};
+                    return false;
+                }
+                auto buffer = std::make_shared<GpuBuffer>(_device->create_buffer(
+                    SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, static_cast<u32>(bytes)));
+                slot = 0;
+                while (slot < _retained.size() && _retained[slot].buffer)
+                    ++slot;
+                if (slot == _retained.size())
+                    _retained.emplace_back();
+                auto& table = _retained[slot];
+                table.id = id;
+                table.direct = true;
+                table.scene_lifetime = source->draw_lifetime();
+                table.lifetime = table.scene_lifetime;
+                table.buffer = std::move(buffer);
+                _retained_bytes += static_cast<u32>(bytes);
+                if (_retained_reserved.id == id && _retained_reserved.direct)
+                    _retained_reserved = {};
             }
-            auto buffer = std::make_shared<GpuBuffer>(
-                _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, static_cast<u32>(bytes)));
-            slot = 0;
-            while (slot < _retained.size() && _retained[slot].buffer)
-                ++slot;
-            if (slot == _retained.size())
-                _retained.emplace_back();
             auto& table = _retained[slot];
-            table.id = id;
-            table.direct = true;
-            table.scene_lifetime = source->draw_lifetime();
-            table.lifetime = table.scene_lifetime;
-            table.buffer = std::move(buffer);
-            _retained_bytes += static_cast<u32>(bytes);
-            if (_retained_reserved.id == id && _retained_reserved.direct)
-                _retained_reserved = {};
-        }
-        auto& table = _retained[slot];
-        // A moved scene can contain commands at revision zero. Empty bounds
-        // distinguish a fresh table from a valid table holding that revision.
-        if (table.revision != revision || table.bounds.empty()) {
-            const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
-                // Unused (skinned/transparent/custom) rows are never indexed.
-                std::memset(out.data(), 0, out.size());
-                for (const auto& ref : _refs)
-                    if (ref.scene == s && eligible(ref))
+            // A moved scene can contain commands at revision zero. Empty bounds
+            // distinguish a fresh table from a valid table holding that revision.
+            if (table.revision != revision || table.bounds.empty()) {
+                const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
+                    // Unused (skinned/transparent/custom) rows are never indexed.
+                    std::memset(out.data(), 0, out.size());
+                    visit([&](const DrawRef& ref) {
                         for (u32 i = 0; i < ref.draw->count; ++i) {
                             const auto record =
                                 pack_instance(ref.instances[i], ref.draw->material.color, ref.draw->clip);
                             std::memcpy(out.data() + std::size_t(ref.draw->first + i) * sizeof(record), &record,
                                         sizeof(record));
                         }
-            };
-            _device->upload_storage_buffer(table.buffer->handle(), 0, table.buffer->size(), nullptr, true, &fill);
-            table.revision = revision;
-            table.upload_frame = serial;
-            ctx.stats.retained_upload_bytes += bytes;
-            ctx.stats.direct_upload_bytes += bytes;
-        } else {
-            ++ctx.stats.direct_cache_hits;
-        }
-        if (table.bounds_revision != revision || table.bounds.empty()) {
-            const u64 old_bytes = table.bounds.capacity() * sizeof(Vec4f);
-            if (table.bounds.size() != source->instances().size())
-                std::vector<Vec4f>(source->instances().size()).swap(table.bounds);
-            _bounds_cache_bytes -= static_cast<u32>(old_bytes);
-            _bounds_cache_bytes += static_cast<u32>(table.bounds.capacity() * sizeof(Vec4f));
-            _bounds_cache_grew = true;
-            for (const auto& ref : _refs)
-                if (ref.scene == s && eligible(ref))
+                    });
+                };
+                _device->upload_storage_buffer(table.buffer->handle(), 0, table.buffer->size(), nullptr, true, &fill);
+                table.revision = revision;
+                table.upload_frame = serial;
+                ctx.stats.retained_upload_bytes += bytes;
+                ctx.stats.direct_upload_bytes += bytes;
+            } else {
+                ++ctx.stats.direct_cache_hits;
+            }
+            if (table.bounds_revision != revision || table.bounds.empty()) {
+                const u64 old_bytes = table.bounds.capacity() * sizeof(Vec4f);
+                if (table.bounds.size() != source->instances().size())
+                    std::vector<Vec4f>(source->instances().size()).swap(table.bounds);
+                _bounds_cache_bytes -= static_cast<u32>(old_bytes);
+                _bounds_cache_bytes += static_cast<u32>(table.bounds.capacity() * sizeof(Vec4f));
+                _bounds_cache_grew = true;
+                visit([&](const DrawRef& ref) {
                     for (u32 i = 0; i < ref.draw->count; ++i) {
                         Vec3f centre;
                         f32 radius;
                         sphere_of(ref.instances[i].transform, ref.center, ref.radius, centre, radius);
                         table.bounds[ref.draw->first + i] = {centre.x, centre.y, centre.z, radius};
                     }
-            table.bounds_revision = revision;
-            ctx.stats.bounds_cache_rebuilt += copies;
-            ctx.stats.bounds_instance_tests += copies;
-            ctx.stats.direct_bounds_rebuilt += copies;
-        }
-        table.claimed = _retained_epoch;
-        table.frame = _retained_frames;
-        table.serial = serial;
-        table.used = ++_retained_claims;
-        table.direct_instances = copies;
-        for (auto& ref : _refs)
-            if (ref.scene == s && eligible(ref)) {
-                ref.retained = slot;
-                ref.retained_first = ref.draw->first;
-                ref.direct = true;
-                ref.cached_spheres = table.bounds.data() + ref.draw->first;
+                });
+                table.bounds_revision = revision;
+                ctx.stats.bounds_cache_rebuilt += copies;
+                ctx.stats.bounds_instance_tests += copies;
+                ctx.stats.direct_bounds_rebuilt += copies;
             }
-        ctx.stats.retained_instances += copies;
-        ctx.stats.direct_retained_instances += copies;
-        ctx.stats.bounds_cache_instances += copies;
+            table.claimed = _retained_epoch;
+            table.frame = _retained_frames;
+            table.serial = serial;
+            table.used = ++_retained_claims;
+            table.direct_instances = copies;
+            // Validate the current table after explicit batches have had their
+            // normal opportunity to evict it. Only unchanged bindings skip writes.
+            if (!_ref_update_valid || _direct_bound_slots[s] != slot || _direct_bound_spheres[s] != table.bounds.data())
+                visit([&](DrawRef& ref) {
+                    ref.retained = slot;
+                    ref.retained_first = ref.draw->first;
+                    ref.direct = true;
+                    ref.cached_spheres = table.bounds.data() + ref.draw->first;
+                });
+            if (_ref_update_valid) {
+                _direct_bound_slots[s] = slot;
+                _direct_bound_spheres[s] = table.bounds.data();
+            }
+            ctx.stats.retained_instances += copies;
+            ctx.stats.direct_retained_instances += copies;
+            ctx.stats.bounds_cache_instances += copies;
+            return true;
+        };
+        if (!retain_source())
+            unbind(s);
     }
 }
 
@@ -9271,6 +9307,18 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 break;
             }
         }
+    // Refs point at stable storage; the actual camera planes are always live.
+    _ref_frustums = ctx.frustums;
+    _ref_whole_frustums = ctx.whole_frustums;
+    std::array<bool, 2> cull_flags{};
+    for (u32 s = 0; s < ctx.scenes.size(); ++s)
+        cull_flags[s] = ctx.scenes[s] && ctx.scenes[s]->cull;
+    const bool reuse_updates = reuse && _ref_update_valid && !ctx.prepared && keys == _ref_update_keys;
+    if (!reuse_updates) {
+        _ref_update_valid = false;
+        _direct_bound_slots.fill(~0u);
+        _direct_bound_spheres.fill(nullptr);
+    }
     _prepared_valid = false;
     if (!reuse) {
         _refs.clear();
@@ -9408,8 +9456,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                     {&draw, draw.batch ? draw.batch.instances().data() : ctx.scenes[s]->instances().data() + draw.first,
                      mesh, s,
                      !ctx.scenes[s]->cull              ? nullptr
-                     : draw.clip == DrawClip3D::camera ? &ctx.frustums[s]
-                                                       : &ctx.whole_frustums[s],
+                     : draw.clip == DrawClip3D::camera ? &_ref_frustums[s]
+                                                       : &_ref_whole_frustums[s],
                      caster, b.center(), b.radius(), 0, 0, 0});
                 _refs.back().batch = bool(draw.batch);
                 if (draw.skinned) {
@@ -9458,14 +9506,16 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 }
             }
     }
-    if (reuse)
-        for (DrawRef& ref : _refs) {
-            ref.frustum = !ctx.scenes[ref.scene]->cull           ? nullptr
-                          : ref.draw->clip == DrawClip3D::camera ? &ctx.frustums[ref.scene]
-                                                                 : &ctx.whole_frustums[ref.scene];
-            ref.caster = ctx.shadows && ref.scene == 0 &&
-                         (ref.draw->material.blend == Blend3D::Opaque || ref.draw->material.blend == Blend3D::Mask) &&
-                         ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
+    const auto refresh_static = [&](DrawRef& ref) {
+        ref.frustum = !ctx.scenes[ref.scene]->cull           ? nullptr
+                      : ref.draw->clip == DrawClip3D::camera ? &_ref_frustums[ref.scene]
+                                                             : &_ref_whole_frustums[ref.scene];
+        ref.caster = ctx.shadows && ref.scene == 0 &&
+                     (ref.draw->material.blend == Blend3D::Opaque || ref.draw->material.blend == Blend3D::Mask) &&
+                     ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
+    };
+    const auto refresh_live = [&](DrawRef& ref, bool keep_direct) {
+        if (!keep_direct || !ref.direct) {
             ref.retained = ~0u;
             ref.retained_first = 0;
             ref.direct = false;
@@ -9473,23 +9523,56 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             ref.prepared_records = nullptr;
             ref.prepared_scales = nullptr;
             bind_prepared(ref);
-            if (ref.skinned) {
-                // Only the command layout is reused. Poses, bounds, shadow membership
-                // and current/previous GPU joint tables are refreshed every render.
-                ref.skin_first = ctx.scenes[ref.scene]->skin_offsets().data() + ref.draw->skin_first;
-                ref.joints = ctx.scenes[ref.scene]->joint_matrices().data();
-                ref.joint_base = joint_base[ref.scene];
-                any_skinned = true;
-            }
-            if (ref.group_count)
-                classify_groups(ref);
-            if (ref.batch) {
-                retain_instances(ref, ctx);
-                if (!ctx.prepared)
-                    cache_instance_bounds(ref, stats);
-            }
         }
-
+        if (ref.skinned) {
+            // Only the command layout is reused. Poses, bounds, shadow membership
+            // and current/previous GPU joint tables are refreshed every render.
+            ref.skin_first = ctx.scenes[ref.scene]->skin_offsets().data() + ref.draw->skin_first;
+            ref.joints = ctx.scenes[ref.scene]->joint_matrices().data();
+            ref.joint_base = joint_base[ref.scene];
+            any_skinned = true;
+        }
+        if (ref.group_count)
+            classify_groups(ref);
+        if (ref.batch) {
+            retain_instances(ref, ctx);
+            if (!ctx.prepared)
+                cache_instance_bounds(ref, stats);
+        }
+    };
+    if (reuse_updates) {
+        // Command revisions prove material/clip eligibility, but culling and
+        // shadow enablement can change without submitting any new commands.
+        if (cull_flags != _ref_update_cull || ctx.shadows != _ref_update_shadows)
+            for (DrawRef& ref : _refs)
+                refresh_static(ref);
+        for (const u32 r : _live_ref_updates)
+            refresh_live(_refs[r], true);
+    } else {
+        if (reuse)
+            for (DrawRef& ref : _refs) {
+                refresh_static(ref);
+                refresh_live(ref, false);
+            }
+        // Optional indices into the existing layout, never copies of source
+        // content. Large/uncacheable layouts keep the original live traversal.
+        _ref_update_valid = eligible && !ctx.prepared && _refs.size() <= 65536;
+        if (_ref_update_valid) {
+            _live_ref_updates.clear();
+            for (auto& direct : _direct_ref_updates)
+                direct.clear();
+            for (u32 r = 0; r < _refs.size(); ++r) {
+                const DrawRef& ref = _refs[r];
+                if (ref.batch || ref.skinned || ref.group_count)
+                    _live_ref_updates.push_back(r);
+                if (scene_retention_eligible(ref))
+                    _direct_ref_updates[ref.scene].push_back(r);
+            }
+            _ref_update_keys = keys;
+        }
+    }
+    _ref_update_cull = cull_flags;
+    _ref_update_shadows = ctx.shadows;
     retain_scene_instances(ctx);
     stats.retained_gpu_bytes = _retained_bytes;
     stats.bounds_cache_bytes = _bounds_cache_bytes;
@@ -9577,10 +9660,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             piece.resident_end = 0;
         const auto resident_piece = [&](const Piece& piece) {
             const DrawRef& ref = _refs[piece.ref];
-            const auto& m = ref.draw->material;
-            return piece.group == ~0u && piece.end == piece.begin + 1 && !ref.batch && !ref.skinned && !ref.clustered &&
-                   ref.levels == 1 && !m.shader.backend() && !m.wireframe &&
-                   (m.blend == Blend3D::Opaque || m.blend == Blend3D::Mask);
+            return piece.group == ~0u && piece.end == piece.begin + 1 && scene_retention_eligible(ref);
         };
         for (u32 t = 0; t + 1 < _tasks.size(); ++t)
             for (u32 p = _tasks[t]; p < _tasks[t + 1];) {
@@ -9610,6 +9690,22 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                        _pieces.capacity() * sizeof(Piece) + _piece_results.capacity() * sizeof(u32) +
                        _tasks.capacity() * sizeof(u32) + _cull_groups.capacity() * sizeof(CullGroup) +
                        previous_pack_bytes;
+    const auto ref_update_bytes = [&]() -> u64 {
+        return (_live_ref_updates.capacity() + _direct_ref_updates[0].capacity() + _direct_ref_updates[1].capacity()) *
+               sizeof(u32);
+    };
+    const auto discard_ref_updates = [&]() {
+        std::vector<u32>().swap(_live_ref_updates);
+        for (auto& direct : _direct_ref_updates)
+            std::vector<u32>().swap(direct);
+        _ref_update_valid = false;
+        _direct_bound_slots.fill(~0u);
+        _direct_bound_spheres.fill(nullptr);
+    };
+    // This optional shortcut must not reduce the original layout's admission.
+    if (!eligible || layout_bytes + ref_update_bytes() > 16 * 1024 * 1024)
+        discard_ref_updates();
+    layout_bytes += ref_update_bytes();
     eligible = eligible && _pieces.size() <= 16384 && layout_bytes <= 16 * 1024 * 1024;
     if (eligible) {
         if (!reuse && draw_count <= 8192) {
@@ -9643,7 +9739,10 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     stats.prepared_layout_bytes = layout_bytes;
     stats.prepared_cache_bytes = sizeof(_prepared_keys) + sizeof(_prepared_batches) + sizeof(_prepared_draws) +
                                  sizeof(_prepared_groups) + sizeof(_prepared_total) + sizeof(_prepared_valid) +
-                                 _prepared_batches.capacity() * sizeof(PreparedBatch) +
+                                 sizeof(_ref_frustums) + sizeof(_ref_whole_frustums) + sizeof(_ref_update_keys) +
+                                 sizeof(_live_ref_updates) + sizeof(_direct_ref_updates) + sizeof(_ref_update_cull) +
+                                 sizeof(_ref_update_valid) + sizeof(_ref_update_shadows) + sizeof(_direct_bound_slots) +
+                                 sizeof(_direct_bound_spheres) + _prepared_batches.capacity() * sizeof(PreparedBatch) +
                                  _prepared_draws.capacity() * sizeof(PreparedDraw) +
                                  _prepared_groups.capacity() * sizeof(Scene3D::InstanceGroup);
     JobSystem* jobs = _owner->_jobs && total >= parallel_from ? _owner->_jobs : nullptr;
@@ -10146,6 +10245,10 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     }
     layout_bytes +=
         _pack_pieces.capacity() * sizeof(PackPiece) + _pack_tasks.capacity() * sizeof(u32) - previous_pack_bytes;
+    if (layout_bytes > 16 * 1024 * 1024) {
+        layout_bytes -= ref_update_bytes();
+        discard_ref_updates();
+    }
     stats.prepared_layout_bytes = layout_bytes;
     if (layout_bytes > 16 * 1024 * 1024)
         _prepared_valid = false;
