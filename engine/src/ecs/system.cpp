@@ -1,10 +1,12 @@
 #include <kin/ecs/system.hpp>
 
+#include <kin/core/hash.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/ecs/component.hpp>
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <deque>
 #include <exception>
@@ -1176,6 +1178,105 @@ bool EcsSystemRegistry::scheduled_run_due(SystemRecord& record, f32 dt) {
         record.interval_accumulator -= interval;
     }
     return true;
+}
+
+namespace {
+
+void append_le(std::vector<u8>& out, u64 value, int bytes) {
+    for (int i = 0; i < bytes; ++i) {
+        out.push_back(static_cast<u8>(value >> (8 * i)));
+    }
+}
+
+bool read_le(std::span<const u8> bytes, std::size_t& offset, int size, u64& value) {
+    if (bytes.size() - offset < static_cast<std::size_t>(size)) {
+        return false;
+    }
+    value = 0;
+    for (int i = 0; i < size; ++i) {
+        value |= static_cast<u64>(bytes[offset + static_cast<std::size_t>(i)]) << (8 * i);
+    }
+    offset += static_cast<std::size_t>(size);
+    return true;
+}
+
+} // namespace
+
+// Layout: u32 system count, then per system, in id order (so peers that registered the same systems in another
+// order save the same bytes): u32 id length, the id, u8 enabled, u64 scheduled ticks, f32 interval clock (bits).
+// Little-endian, so the same state is the same bytes on every peer.
+void EcsSystemRegistry::save_schedule_state(std::vector<u8>& out) const {
+    std::vector<const SystemRecord*> records;
+    records.reserve(_records.size());
+    for (const SystemRecord& record : _records) {
+        records.push_back(&record);
+    }
+    std::ranges::sort(records, {}, [](const SystemRecord* r) -> std::string_view { return r->descriptor.id; });
+    out.clear();
+    append_le(out, records.size(), 4);
+    for (const SystemRecord* record : records) {
+        append_le(out, record->descriptor.id.size(), 4);
+        out.insert(out.end(), record->descriptor.id.begin(), record->descriptor.id.end());
+        append_le(out, record->enabled ? 1u : 0u, 1);
+        append_le(out, record->scheduled_ticks, 8);
+        append_le(out, std::bit_cast<u32>(record->interval_accumulator), 4);
+    }
+}
+
+bool EcsSystemRegistry::restore_schedule_state(std::span<const u8> bytes) {
+    std::size_t offset = 0;
+    u64 count = 0;
+    if (!read_le(bytes, offset, 4, count) || count != _records.size()) {
+        return false;
+    }
+    struct Restored {
+        SystemRecord* record;
+        bool enabled;
+        u64 ticks;
+        f32 clock;
+    };
+    std::vector<Restored> restored;
+    restored.reserve(_records.size());
+    for (u64 i = 0; i < count; ++i) {
+        u64 length = 0;
+        if (!read_le(bytes, offset, 4, length) || bytes.size() - offset < length) {
+            return false;
+        }
+        const std::string_view id(reinterpret_cast<const char*>(bytes.data() + offset), static_cast<std::size_t>(length));
+        offset += static_cast<std::size_t>(length);
+        u64 enabled = 0;
+        u64 ticks = 0;
+        u64 clock = 0;
+        if (!read_le(bytes, offset, 1, enabled) || enabled > 1 || !read_le(bytes, offset, 8, ticks) ||
+            !read_le(bytes, offset, 4, clock)) {
+            return false;
+        }
+        const auto record = std::ranges::find(_records, id, [](const SystemRecord& r) -> std::string_view {
+            return r.descriptor.id;
+        });
+        if (record == _records.end() ||
+            std::ranges::any_of(restored, [&](const Restored& entry) { return entry.record == &*record; })) {
+            return false;
+        }
+        restored.push_back({&*record, enabled != 0, ticks, std::bit_cast<f32>(static_cast<u32>(clock))});
+    }
+    if (offset != bytes.size()) {
+        return false;
+    }
+    for (const Restored& state : restored) {
+        if (state.record->enabled != state.enabled) {
+            enable(state.record->descriptor.id, state.enabled); // the flecs system too
+        }
+        state.record->scheduled_ticks = state.ticks;
+        state.record->interval_accumulator = state.clock;
+    }
+    return true;
+}
+
+u64 EcsSystemRegistry::schedule_state_hash() const {
+    std::vector<u8> bytes;
+    save_schedule_state(bytes);
+    return hash_bytes(bytes.data(), bytes.size());
 }
 
 void EcsSystemRegistry::update_matched_count(SystemRecord& record) const {

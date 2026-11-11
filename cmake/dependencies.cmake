@@ -239,7 +239,7 @@ if(KIN_ENABLE_SCRIPTING)
             "${lua_SOURCE_DIR}/src/lopcodes.c"
             "${lua_SOURCE_DIR}/src/loslib.c"
             "${lua_SOURCE_DIR}/src/lparser.c"
-            "${lua_SOURCE_DIR}/src/lstate.c"
+            "${CMAKE_CURRENT_LIST_DIR}/../engine/src/scripting/lua_state_seed.c" # lstate.c with kin's hash seed
             "${lua_SOURCE_DIR}/src/lstring.c"
             "${lua_SOURCE_DIR}/src/lstrlib.c"
             "${lua_SOURCE_DIR}/src/ltable.c"

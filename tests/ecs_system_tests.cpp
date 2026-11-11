@@ -277,6 +277,71 @@ void test_interval_waits_for_accumulated_scheduled_dt() {
     assert(snapshot.stats.runs == 2);
 }
 
+// A rollback takes the scheduler back with the world: after a restore, systems with a rate or an interval run on
+// the same ticks as the first time.
+void test_schedule_state_save_and_restore() {
+    kin::EcsWorld world;
+    register_components(world);
+    world.entity("marker").add<Marker>();
+    std::string ran;
+    world.systems().register_task({.id = "every.third", .rate = 3}, [&](kin::SystemContext&) { ran += 'r'; });
+    world.systems().register_task({.id = "every.quarter", .interval_seconds = 0.25f},
+                                  [&](kin::SystemContext&) { ran += 'i'; });
+    const auto run_ticks = [&](int ticks) {
+        ran.clear();
+        for (int tick = 0; tick < ticks; ++tick) {
+            assert(world.run_frame(0.1f));
+            ran += '.';
+        }
+        return ran;
+    };
+    run_ticks(4);
+    std::vector<kin::u8> saved;
+    world.systems().save_schedule_state(saved);
+    const kin::u64 saved_hash = world.systems().schedule_state_hash();
+    const std::string first = run_ticks(7);
+    assert(world.systems().schedule_state_hash() != saved_hash);
+    assert(world.systems().restore_schedule_state(saved));
+    assert(world.systems().schedule_state_hash() == saved_hash);
+    assert(run_ticks(7) == first);
+
+    // Without the restore the pattern would differ: the counters moved on.
+    assert(run_ticks(7) != first);
+
+    // Bytes of another set of systems, or damaged ones, change nothing.
+    const kin::u64 before = world.systems().schedule_state_hash();
+    std::vector<kin::u8> truncated(saved.begin(), saved.end() - 1);
+    assert(!world.systems().restore_schedule_state(truncated));
+    assert(!world.systems().restore_schedule_state({}));
+    kin::EcsWorld other;
+    register_components(other);
+    other.systems().register_task({.id = "every.third", .rate = 3}, [](kin::SystemContext&) {});
+    std::vector<kin::u8> other_bytes;
+    other.systems().save_schedule_state(other_bytes);
+    assert(!world.systems().restore_schedule_state(other_bytes));
+    assert(world.systems().schedule_state_hash() == before);
+
+    // Disabling a system is scheduler state too: a rollback past it enables the system again.
+    world.systems().save_schedule_state(saved);
+    assert(world.systems().disable("every.third"));
+    assert(run_ticks(3).find('r') == std::string::npos);
+    assert(world.systems().restore_schedule_state(saved));
+    assert(world.systems().snapshot("every.third").enabled);
+    assert(run_ticks(3).find('r') != std::string::npos);
+
+    // The same systems registered in another order save the same bytes.
+    kin::EcsWorld first_order;
+    kin::EcsWorld second_order;
+    register_components(first_order);
+    register_components(second_order);
+    first_order.systems().register_task({.id = "a", .rate = 2}, [](kin::SystemContext&) {});
+    first_order.systems().register_task({.id = "b", .rate = 3}, [](kin::SystemContext&) {});
+    second_order.systems().register_task({.id = "b", .rate = 3}, [](kin::SystemContext&) {});
+    second_order.systems().register_task({.id = "a", .rate = 2}, [](kin::SystemContext&) {});
+    assert(first_order.run_frame(0.1f) && second_order.run_frame(0.1f));
+    assert(first_order.systems().schedule_state_hash() == second_order.systems().schedule_state_hash());
+}
+
 void test_manual_run_bypasses_rate_and_interval() {
     kin::EcsWorld world;
     register_components(world);
@@ -1445,6 +1510,7 @@ int main() {
     test_empty_tags_are_supported_as_read_only_terms();
     test_rate_runs_every_nth_scheduled_tick_starting_immediately();
     test_interval_waits_for_accumulated_scheduled_dt();
+    test_schedule_state_save_and_restore();
     test_manual_run_bypasses_rate_and_interval();
     test_native_access_validation_rejects_mismatches();
     test_read_only_systems_share_a_batch();

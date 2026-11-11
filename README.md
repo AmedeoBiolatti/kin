@@ -288,7 +288,7 @@ Kin installs games, not itself, so `find_package(kin)` is not supported.
 | 2D | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [skeletal animation](docs/skeleton_2d.md), [2D physics](docs/physics_2d.md), [2D workflows](docs/2d_workflows.md), [importing](docs/importing_2d.md), [hex grids](docs/hex_grids.md), [scene flow](docs/scene_flow.md) |
 | 3D (experimental) | [3D rendering](docs/rendering_3d.md), [3D physics](docs/physics_3d.md), [render graphs](docs/render_graph.md), [glTF profile](docs/gltf_profile3d.md), [validation](docs/rendering_validation.md) |
 | UI and apps | [UI](docs/ui.md), [localization](docs/localization.md), [input](docs/input.md) |
-| Engine | [audio](docs/audio.md), [assets](docs/assets.md), [hot reload](docs/hot_reload.md), [saving](docs/saving.md), [dialogue](docs/dialogue.md), [scripting](docs/scripting.md), [Lua development](docs/lua_development.md), [Python](docs/python_scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [platform services](docs/platform_services.md) |
+| Engine | [audio](docs/audio.md), [assets](docs/assets.md), [hot reload](docs/hot_reload.md), [saving](docs/saving.md), [dialogue](docs/dialogue.md), [scripting](docs/scripting.md), [Lua development](docs/lua_development.md), [Python](docs/python_scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [platform services](docs/platform_services.md), [determinism](docs/determinism.md) |
 | Shipping | [shipping a game](docs/shipping.md), [Android](docs/android.md), [web](docs/web.md), [build times](docs/build_times.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing

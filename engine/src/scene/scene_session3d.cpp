@@ -1146,6 +1146,7 @@ bool SceneSession3D::activate_operation() {
                     return std::nullopt;
                 });
             BoolScope callback(candidate->script_callback);
+            candidate->script->seed_random(fold_in(d.options.scripts.rng, ScriptEngine::script_random_stream));
             if (!candidate->script->call_on_enter(d.script_context())) {
                 d.errors = {"scene script: " + candidate->script->last_error()};
                 return false;

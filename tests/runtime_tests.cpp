@@ -51,16 +51,25 @@ public:
     void update(kin::SceneContext& ctx) override {
         KIN_PROFILE_SCOPE("seeded.update");
         _observed = kin::rng_u32(ctx.rng);
+        _step_key = kin::rng_u32(kin::fold_in(ctx.rng, ctx.step));
+        _steps += (_steps.empty() ? "" : ",") + std::to_string(ctx.step);
         ++_frames;
     }
+    void render(kin::SceneContext& ctx) override { _render_step = static_cast<kin::i64>(ctx.step); }
 
     void write_report(kin::JsonWriter& json) const override {
         json.field("observed", _observed);
+        json.field("step_key", _step_key);
+        json.field("steps", _steps);
+        json.field("render_step", _render_step);
         json.field("frames", _frames);
     }
 
 private:
     kin::u32 _observed = 0;
+    kin::u32 _step_key = 0;
+    std::string _steps;
+    kin::i64 _render_step = -1;
     kin::i32 _frames = 0;
 };
 
@@ -497,6 +506,14 @@ int main() {
 
         const kin::u32 expected = kin::rng_u32(kin::make_key(99));
         assert(text.find("\"observed\": " + std::to_string(expected)) != std::string::npos);
+        // Each update knows the run's update index, so fold_in(rng, step) gives each its own key. A scene pushed
+        // before the run enters during update 0 (the stack was empty) and is updated from update 1 on.
+        assert(text.find("\"steps\": \"1,2\"") != std::string::npos);
+        const kin::u32 step_key = kin::rng_u32(kin::fold_in(kin::make_key(99), 2));
+        assert(text.find("\"step_key\": " + std::to_string(step_key)) != std::string::npos);
+        assert(step_key != kin::rng_u32(kin::fold_in(kin::make_key(99), 1)));
+        assert(text.find("\"render_step\": 3") != std::string::npos ||
+               text.find("\"render_step\": -1") != std::string::npos);
     }
 
     // A windowed run keeps its pipeline record where it is told (and reads it
