@@ -1,3 +1,4 @@
+#include "../engine/src/renderer/gpu/gpu_light_grid3d.hpp"
 #include "local_graph_shaders.hpp"
 
 #include <algorithm>
@@ -15,10 +16,81 @@
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
+#include <random>
 using namespace kin;
 namespace {
 constexpr Vec2i size{160, 120};
 constexpr Rectf rect{0, 0, 160, 120};
+// Independent cell-centric oracle: directly test every light's box at each
+// cell and append source IDs in order, without the builder's axis masks.
+void grid_lists() {
+    using namespace kin::gpu;
+    LightGridLists grid;
+    const auto check = [&](std::span<const LightGridBox> boxes, u32 across, u32 down, u32 slices) {
+        std::vector<u32> expected, indices;
+        bool fits = true;
+        if (boxes.empty()) {
+            expected.push_back(0);
+        } else {
+            expected.resize(across * down * slices);
+            u32 cell = 0;
+            for (u32 z = 0; z < slices && fits; ++z)
+                for (u32 y = 0; y < down && fits; ++y)
+                    for (u32 x = 0; x < across && fits; ++x) {
+                        const u32 first = static_cast<u32>(indices.size());
+                        for (u32 i = 0; i < boxes.size(); ++i) {
+                            const auto& b = boxes[i];
+                            if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1 && z >= b.z0 && z <= b.z1)
+                                indices.push_back(i);
+                        }
+                        expected[cell++] = (first << 12) | (static_cast<u32>(indices.size()) - first);
+                        fits = indices.size() < LightGridLists::max_indices;
+                    }
+            if (fits)
+                expected.insert(expected.end(), indices.begin(), indices.end());
+            else
+                expected.assign(1, 0);
+        }
+        assert(grid.build(boxes, across, down, slices) == fits);
+        assert(grid.data == expected);
+    };
+    check({}, 1, 1, 1);
+    for (u32 n : {1u, 31u, 32u, 63u, 64u, 65u, 127u, 128u, 255u, 256u, 257u, 511u, 512u}) {
+        std::vector<LightGridBox> boxes(n, {0, 6, 0, 4, 0, 8});
+        check(boxes, 7, 5, 9); // dense coverage and every mask-word boundary
+        for (u32 i = 0; i < n; ++i)
+            boxes[i] = i % 3 ? LightGridBox{i % 7, i % 7, i % 5, i % 5, i % 9, i % 9} : LightGridBox{};
+        check(boxes, 7, 5, 9); // empty boxes, holes and isolated boundary cells
+    }
+    std::mt19937 random(0x19d63a);
+    for (u32 trial = 0; trial < 160; ++trial) {
+        const u32 across = 1 + random() % 21, down = 1 + random() % 13, slices = 1 + random() % 32;
+        std::vector<LightGridBox> boxes(random() % 513);
+        for (auto& b : boxes)
+            if (random() % 5) {
+                b.x0 = random() % across;
+                b.x1 = b.x0 + random() % (across - b.x0);
+                b.y0 = random() % down;
+                b.y1 = b.y0 + random() % (down - b.y0);
+                b.z0 = random() % slices;
+                b.z1 = b.z0 + random() % (slices - b.z0);
+            }
+        check(boxes, across, down, slices); // reuse across changing dimensions/counts
+    }
+    std::vector<LightGridBox> limit(512, {0, 0, 0, 0, 0, 2047});
+    limit.back().z1 = 2046;
+    check(limit, 1, 1, 2048); // exactly max_indices - 1 is admitted
+    limit.back().z1 = 2047;
+    check(limit, 1, 1, 2048); // equality selects the original overflow fallback
+    check(limit, 2, 1, 2048); // uncovered trailing cells cannot change overflow
+    limit.back().x1 = 1;
+    check(limit, 2, 1, 2048); // above the global index limit also falls back
+    limit.assign(512, {});
+    check(limit, 2, 3, 4); // nonempty light input, all projected boxes empty
+    check({}, 1, 1, 1);    // no stale headers/IDs after overflow and reuse
+    std::cout << "light grid: exact packed lists, mask boundaries, reuse and overflow passed\n";
+}
+
 struct Fixture {
     Renderer2D& r;
     Renderer3D r3d{r};
@@ -657,6 +729,7 @@ void validation(Fixture& f) {
 }
 } // namespace
 int main() {
+    grid_lists();
     App app;
     auto& window = app.create_window({.title = "local graph", .width = 160, .height = 120, .hidden = true});
     Renderer2D r{make_render_backend(window, false, true)};

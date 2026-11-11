@@ -1433,7 +1433,15 @@ fragment with the point and spot lights whose reach touches its cell of the view
 tiles of 64 pixels by 32 slices of the depth along the camera's forward (each slice farther than the last by the same ratio, from 0.1
 to where the farthest light's reach ends), and each frame the CPU lists, for each cell, the lights whose bounding sphere's box covers
 it, in the order the lights were chosen (so the light adds up as a loop over them all would). The lights and the lists go to two
-storage buffers the light variants read. With more than 16 point lights in view the light variant draws (the plain shaders keep their
+storage buffers the light variants read. CPU construction factors each projected
+box into X-tile, Y-tile and depth-slice membership masks. Intersecting those three
+masks gives a cell's exact light set; ascending set bits preserve the chosen light
+order. Box volumes determine the total index count before a sequential header/list
+write, with the same strict 20-bit offset overflow fallback. The selection cap of
+512 total lights stays below the 12-bit per-cell count limit. Light records,
+bounds, boxes and mask scratch reuse renderer-owned storage; current lights,
+camera, jitter and depth slicing are recomputed each render. No GPU layout or
+shader changes are required. With more than 16 point lights in view the light variant draws (the plain shaders keep their
 loop over 16); the overlay, particles, custom material shaders and WebGL2 keep the fixed blocks of the 16 strongest of each kind.
 `Scene3D::debug.light_grid = false` turns it off (every fragment looping over the 16 strongest of each, as before it): the same lights
 give the same picture either way. In Bistro's night (2404 x 1352, 40 to 60 lights in view) the grid took 1.6 ms off the GPU's frame

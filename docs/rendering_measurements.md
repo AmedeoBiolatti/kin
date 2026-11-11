@@ -4,6 +4,79 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Axis masks for exact light-grid construction, 2026-11-11
+
+The reference is `9348edcf`. Projected light bounds are Cartesian boxes over
+X tiles, Y tiles and depth slices. CPU construction now records light membership
+once per axis; intersecting the three masks gives a cell's exact light set.
+Ascending set bits emit IDs in the original point-then-spot order, preserving
+floating-point accumulation order. Box volumes determine the exact total index
+count before allocation. At most 512 selected lights stay below the 12-bit
+per-cell count limit, so saturation is unreachable; totals at or above the
+20-bit index limit retain the original fallback.
+
+The builder writes packed headers and indices sequentially, replacing per-box
+counting, scattered writes and per-cell cursors. It retains the light,
+sphere, box and mask arrays and avoids shrinking/zeroing the index payload
+before filling it. Mask scratch uses `(X + Y + Z) × ceil(lights / 64)` words:
+512 logical bytes for the Hard route's 24 lights at 720p, at most 4 KiB for
+512 lights at that extent, excluding retained capacity. Current projection,
+jitter, depth slicing, light records, shader ABI, GPU allocations/uploads and
+all other rendering work are unchanged. There is no result cache or new switch.
+
+Five alternating Hard pairs show **7.1% median paired caller-CPU p50 reduction**,
+improving in all five; individual reductions are **5.3%, 7.1%, 7.0%, 9.1% and
+13.1%**. Process CPU falls **6.2%** by the same calculation. Conditions are
+original independent Yard submissions, 720p HDR, no AA/GI/AO, classic 1,024 spot
+maps, four helpers, affinity 0–15, and 300 warm-up plus 1,440 measured route
+frames. Blender/background jobs stay untouched; clocks, thermals and load are
+uncontrolled: results are **contended**. PMU collection and image readback run
+separately from normal timing.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 1 | 0.496 / 0.680 / 0.758 | 0.360 / 0.429 / 0.493 | 27.4% |
+| Medium | 1 | 1.575 / 1.925 / 2.073 | 1.107 / 1.375 / 1.556 | 29.7% |
+| Hard | 5 | 4.294 / 5.128 / 5.705 | 3.989 / 4.641 / 5.208 | 7.1% |
+
+Percentiles are medians of per-run percentiles; paired reductions compare
+adjacent run medians. Easy and Medium are single guard pairs, not repeatability
+studies. Hard frame p50 has a 9.9% median paired reduction, with individual
+reductions ranging from −16.8% to 17.1%; Medium's frame p50 regresses 12.7%.
+These contended frame results do not establish an isolated throughput gain or
+a new cross-engine ranking. CPU gains do not compound with earlier campaigns.
+
+Every non-timing per-frame work/cache/resource/upload column matches, with no
+counter exceptions. Peak process RSS, including startup and driver allocations,
+is 199.9 → 241.6 MiB for Hard; no total-process memory reduction is claimed.
+
+Two separate forward/reverse inherited P-core instruction/cycle controls show
+**9.565% and 9.596% fewer retired user instructions**, at 99–100% event running
+coverage. Counts include helpers, driver threads, startup, warm-up, scene
+assembly and presentation, not isolated render-phase counts or a clock-normalized
+speedup. All non-timing work columns match in these controls too.
+
+Fresh before/after `cpu-clock:u` profiles each cover two complete Hard routes at
+499 Hz with 16 KiB DWARF user stacks. Actual render-call windows exclude assembly,
+warm-up and presentation; caller, Kin workers and other threads are separate.
+**Light-grid construction falls from 16.85% to 2.82% of caller samples.** These
+normalized user-CPU shares are not phase medians. Remaining caller shares are
+local-shadow preparation 23.95%, camera/instance preparation 19.32%, shadow
+recording 18.36% and draw planning/lookup 15.33%.
+
+Caller samples number 5,425/4,684, with under 1% unresolved phase attribution
+in each. Normal timing above uses the fresh adjacent controls, not sampled runs.
+
+Nine focused NVIDIA suites and four llvmpipe suites pass. The existing local-graph
+suite adds an independent cell-by-cell oracle comparing **193 exact packed-grid
+cases**: dense and sparse coverage, empty boxes, all 64-bit word boundaries up
+to 512 lights, changing dimensions/counts, reuse, and just below/equal/above the
+index limit. No additional test executable is introduced. All **10,080 paired
+route frames** preserve every non-timing work/cache/resource/upload column.
+Nine decoded-RGBA pairs across the three tiers at route phases 1/541/961 are
+pixel-identical. Commands, frozen hashes, raw paired percentiles, instruction
+controls and fresh profiles are under `out/runs/render3d-light-grid-redesign/`.
+
 ### Compiled opaque spans and direct batch emission, 2026-11-11
 
 The reference is `db636c6f`. Stable source order, scene/pass/decal classes and

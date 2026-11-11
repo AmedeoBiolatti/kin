@@ -227,8 +227,7 @@ constexpr u32 max_grid_lights = 256;
 constexpr u32 grid_tile = 64;
 constexpr u32 grid_slices = 32;
 constexpr f32 grid_near = 0.1f;
-constexpr u32 grid_max_count = 0xfff;      // a cell's lights: 12 bits
-constexpr u32 grid_max_indices = 1u << 20; // all cells' lists: 20 bits of offset
+static_assert(2 * max_grid_lights == LightGridLists::max_lights);
 // Storage buffers' smallest sizes, so that the first frames of a growing scene don't each remake them.
 constexpr u32 min_instance_buffer = 64 * 1024;
 constexpr u32 min_previous_buffer = 32 * 1024;
@@ -360,16 +359,6 @@ struct FrameUniforms {
     f32 ssr_previous[16]; // world to the previous frame's clip space
 };
 static_assert(sizeof(FrameUniforms) == 2832);
-// A light of the light grid (as gi_light.comp's): place and reach, colour and the square of the size, a spot's way and
-// the cosine of its outer angle (a point light: -2), 1 / (cos inner - cos outer) and its shadow's layer (a point
-// light's cube's first; -1: none).
-struct GridLight {
-    f32 at[4];
-    f32 colour[4];
-    f32 axis[4];
-    f32 cone[4];
-};
-static_assert(sizeof(GridLight) == 64);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -7356,8 +7345,10 @@ void GpuRenderer3D::build_light_grid(FrameCtx& ctx) {
     const Lights3D& lights = scene.lights;
     // The lights: the points, then the spots, as the fixed blocks have them (a cell's list in that order adds up their
     // light as the fixed loops do), each with its bounding sphere.
-    std::vector<GridLight> list;
-    std::vector<std::pair<Vec3f, f32>> spheres;
+    auto& list = _grid_light_scratch;
+    auto& spheres = _grid_sphere_scratch;
+    list.clear();
+    spheres.clear();
     if (ctx.grid_possible) {
         list.reserve(ctx.chosen.size() + ctx.spots.size());
         spheres.reserve(list.capacity());
@@ -7408,10 +7399,8 @@ void GpuRenderer3D::build_light_grid(FrameCtx& ctx) {
         const f32 x = std::log(std::max(depth, grid_near) / grid_near) * scale;
         return std::min(static_cast<u32>(std::max(x, 0.0f)), grid_slices - 1);
     };
-    struct Box {
-        u32 x0, x1, y0, y1, z0, z1;
-    };
-    std::vector<Box> boxes(list.size(), Box{1, 0, 1, 0, 1, 0}); // empty: x0 > x1
+    auto& boxes = _grid_box_scratch;
+    boxes.assign(list.size(), {}); // empty: x0 > x1
     const Mat4f& vp = ctx.drawn[0];
     for (std::size_t i = 0; i < spheres.size(); ++i) {
         const auto& [c, r] = spheres[i];
@@ -7450,54 +7439,20 @@ void GpuRenderer3D::build_light_grid(FrameCtx& ctx) {
         boxes[i] = {tile(px0, across), tile(px1, across), tile(py0, down),
                     tile(py1, down),   slice(depth - r),  slice(depth + r)};
     }
-    std::vector<u32>& data = _grid_scratch;
-    data.assign(cells, 0);
-    u64 total = 0;
-    for (const Box& b : boxes) {
-        for (u32 z = b.z0; z <= b.z1 && b.x0 <= b.x1; ++z) {
-            for (u32 y = b.y0; y <= b.y1; ++y) {
-                for (u32 x = b.x0; x <= b.x1; ++x) {
-                    u32& count = data[(z * down + y) * across + x];
-                    count = std::min(count + 1, grid_max_count);
-                    ++total;
-                }
-            }
-        }
-    }
-    const bool fits = total < grid_max_indices;
-    if (!fits) {
+    // A projected box is the Cartesian product of three intervals. Axis
+    // membership masks recover each cell's exact light set; emit its ordered
+    // IDs directly, without counting and then scattering over every box.
+    const bool fits = _grid_lists.build(boxes, across, down, grid_slices);
+    if (!fits)
         warn_once(_grid_warned, "3D: the light grid's lists overflowed: the 16 strongest of each kind light the view");
-    }
     if (fits && !list.empty()) {
-        // Each cell: the first of its list << 12 | its count; then the lists.
-        u32 offset = 0;
-        for (u32 c = 0; c < cells; ++c) {
-            const u32 count = data[c];
-            data[c] = offset << 12 | count;
-            offset += count;
-        }
-        data.resize(cells + offset);
-        std::vector<u32> filled(cells, 0);
-        for (u32 i = 0; i < boxes.size(); ++i) {
-            const Box& b = boxes[i];
-            for (u32 z = b.z0; z <= b.z1 && b.x0 <= b.x1; ++z) {
-                for (u32 y = b.y0; y <= b.y1; ++y) {
-                    for (u32 x = b.x0; x <= b.x1; ++x) {
-                        const u32 c = (z * down + y) * across + x;
-                        if (filled[c] < (data[c] & grid_max_count)) {
-                            data[cells + (data[c] >> 12) + filled[c]++] = i;
-                        }
-                    }
-                }
-            }
-        }
         ctx.grid_tiles = {across, down, grid_slices};
         ctx.grid_cells = cells;
         ctx.grid_scale = scale;
     } else {
-        data.assign(1, 0);
         list.assign(1, GridLight{});
     }
+    const auto& data = _grid_lists.data;
     // The light variants read both whether the grid lights the pass or not (bound with their samplers).
     const u32 light_bytes = static_cast<u32>(list.size() * sizeof(GridLight));
     ensure_buffer(_grid_lights, light_bytes, 64 * sizeof(GridLight), SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);

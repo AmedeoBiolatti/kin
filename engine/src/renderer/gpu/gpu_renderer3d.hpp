@@ -5,6 +5,7 @@
 // draws around it. Experimental: see docs/3d_plan.md.
 #include "gpu_area_lights3d.hpp"
 #include "gpu_buffer.hpp"
+#include "gpu_light_grid3d.hpp"
 #include "gpu_mesh_pool.hpp"
 #include "gpu_shader.hpp"
 #include "gpu_texture.hpp"
@@ -1326,7 +1327,10 @@ private:
     std::shared_ptr<GpuBuffer> _local_instances, _local_lists, _local_joint_offsets;
     // The light grid's buffers (build_light_grid): the lights (GridLight), and the cells then their lists of lights.
     std::shared_ptr<GpuBuffer> _grid_lights, _grid_cells;
-    std::vector<u32> _grid_scratch; // the cells' counts, then their lists, as they are filled
+    LightGridLists _grid_lists;
+    std::vector<GridLight> _grid_light_scratch;
+    std::vector<std::pair<Vec3f, f32>> _grid_sphere_scratch;
+    std::vector<LightGridBox> _grid_box_scratch;
     bool _grid_warned = false;
     struct LocalEntry {
         u32 ref = 0, level = 0;
