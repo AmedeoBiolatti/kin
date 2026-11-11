@@ -62,6 +62,10 @@ struct InputSyncConfig {
     // session someone (they again) can take the slot. False: a lost player ends the session for everyone. Must match
     // on every peer.
     bool players_may_leave = true;
+    // A peer whose state differs from the host's (a state hash, every hash_interval ticks) takes the host's state and
+    // plays on (docs/networking.md#desyncs). Needs a simulation with save() and restore(). False, or three in a row
+    // with no agreeing hash between: a desync ends the session. Must match on every peer.
+    bool resync = true;
 };
 
 inline constexpr u32 max_players = 16;
@@ -82,6 +86,8 @@ struct InputSyncStats {
     u32 joins = 0;           // players who joined while this peer played (itself too, for a joiner)
     u32 leaves = 0;          // players who left while this peer played
     u32 lost = 0;            // the players this peer lost and the game has not yet let go, a bit each
+    u32 resyncs = 0;         // times this peer's state differed from the host's and it took the host's
+    bool resyncing = false;  // waiting for the host's state
     u32 start_tick = 0;      // this peer's first tick: 0, or for a joiner the tick of the state it was sent
     bool spectating = false; // a joiner that has the state and follows the game, before it plays
     u64 state_bytes_sent = 0, state_bytes_received = 0;
@@ -160,6 +166,8 @@ private:
         u32 report_frozen = 0;
         std::array<i64, max_players> report_known{};
         u64 decisions_sent_us = 0;
+        u64 resync_id = 0;     // the peer's latest request for this host's state (it differs)
+        u64 resync_served = 0; // the request this host sent a state for
     };
     // A leave the game agreed on: each player of `mask` is gone from their tick on (ticks[slot]). Numbered in the order
     // every peer applies them.
@@ -208,6 +216,10 @@ private:
     void send_inputs();
     void on_join_request(u32 slot, u64 id);
     void serve_join_requests();
+    bool make_transfer(u32 slot, Transfer& out);
+    void request_rollback(i64 tick);
+    void begin_resync();
+    void finish_resync();
     void check_joined_players();
     void fail_joining(std::string detail);
     bool check_links();
@@ -278,6 +290,13 @@ private:
     u32 _epoch = 0;                       // the leave decisions applied
     std::deque<LeaveDecision> _decisions; // the latest ones, the last being number _epoch - 1
     u64 _next_report_us = 0;
+    // Resync: this peer's state differs from the host's, and it waits for the host's.
+    bool _resyncing = false;
+    bool _resync_have = false; // the host's state arrived: taken at the next update
+    u64 _resync_id = 0;
+    u32 _resync_streak = 0; // resyncs with no hash agreeing with the host's between them
+    i64 _resync_floor = 0;  // the state is the host's from here: nothing before it runs again
+    std::vector<u32> _resync_requests;
     std::vector<JoinEvent> _created; // joins this peer decided as the host, sent with its commands
     std::vector<Transfer> _transfers;
     std::vector<u32> _join_requests; // slots that asked for the state since the last update (served after rollback)

@@ -109,7 +109,8 @@ public:
             s.ball_y = std::clamp(s.ball_y, 0, 1000);
         }
         s.rng = rng_detail::mix(s.rng + s.tick);
-        if (corrupt_at && s.tick == *corrupt_at) {
+        if ((corrupt_at && s.tick == *corrupt_at) ||
+            (corrupt_every && s.tick >= corrupt_every->first && s.tick % corrupt_every->second == 0)) {
             s.score[0] += 1; // a nondeterminism only this peer has
         }
         ++s.tick;
@@ -158,6 +159,7 @@ public:
     std::array<std::optional<u32>, max_players> joined_at{};
     std::array<std::optional<u32>, max_players> left_at{};
     std::optional<u32> corrupt_at;
+    std::optional<std::pair<u32, u32>> corrupt_every; // from this tick, every that many
     bool corrupt_restore = false;
     u32 ballast = 0;
 
@@ -850,7 +852,8 @@ void test_rollback() {
 }
 
 void test_desync() {
-    Match match(2, {.input_delay = 2, .max_prediction = 4, .hash_interval = 30});
+    // Without resync, a desync ends the session.
+    Match match(2, {.input_delay = 2, .max_prediction = 4, .hash_interval = 30, .resync = false});
     match.network.set_conditions({.latency_us = 30'000, .jitter_us = 5'000});
     match.peers[1]->arena.corrupt_at = 100;
     match.run_for(5000);
@@ -865,6 +868,74 @@ void test_desync() {
     }
     assert(match.peers[0]->session->desync().player == 1);
     assert(match.peers[1]->session->desync().player == 0);
+}
+
+// A peer whose state goes wrong takes the host's and plays on (docs/networking.md#desyncs).
+void run_resync(const char* name, const InputSyncConfig& config, u32 players, u32 wrong, u64 seed,
+                const LinkConditions& conditions = {.latency_us = 20'000, .jitter_us = 10'000, .loss = 0.05f}) {
+    Match match(players, config, seed);
+    match.network.set_conditions(conditions);
+    match.peers[wrong]->arena.corrupt_at = 200;
+    std::vector<u32> all;
+    for (u32 p = 0; p < players; ++p) {
+        all.push_back(p);
+    }
+    assert(match.run_while_not([&] { return match.min_confirmed(all) > 700; }, 30'000));
+    u32 resyncs = 0;
+    for (const u32 p : all) {
+        const InputSyncStats& stats = match.peers[p]->session->stats();
+        assert(match.peers[p]->session->status() == SessionStatus::running && !stats.resyncing);
+        resyncs += stats.resyncs;
+        // The host's state is the game's: it never takes another's. Every other peer that differs from it does.
+        assert(stats.resyncs == ((wrong == 0) ? (p == 0 ? 0u : 1u) : (p == wrong ? 1u : 0u)));
+        assert(match.peers[p]->session->desync().tick >= 200 || stats.resyncs == 0);
+    }
+    // Everyone's commands were right all along; from a while after the corruption, every state is one again.
+    const u32 ticks = static_cast<u32>(match.min_confirmed(all)) + 1;
+    for (u32 t = 0; t < ticks; ++t) {
+        for (const u32 p : all) {
+            assert(match.peers[p]->log.at(t) == match.peers[0]->log.at(t));
+            if (t >= 400) {
+                assert(match.peers[p]->arena.hash_after.at(t) == match.peers[0]->arena.hash_after.at(t));
+            }
+        }
+    }
+    std::printf("  resync %s: %u resyncs, states agree to tick %u\n", name, resyncs, ticks - 1);
+}
+
+void test_resync() {
+    const InputSyncConfig rollback{.input_delay = 2, .max_prediction = 8, .hash_interval = 10};
+    const InputSyncConfig lockstep{.input_delay = 4, .max_prediction = 0, .hash_interval = 10};
+    run_resync("a player", rollback, 3, 2, 71);
+    run_resync("the host", rollback, 3, 0, 72); // the others take the host's (wrong, but shared) state
+    run_resync("lockstep", lockstep, 3, 1, 73);
+    run_resync("two players", rollback, 2, 1, 74);
+    // Deep predictions over a rough network: when the host's state arrives, the peer still runs ticks before it on
+    // predictions, whose real commands come later. Those need no rollback: the host's state has them.
+    for (u64 seed = 1; seed <= 8; ++seed) {
+        run_resync("deep predictions", {.input_delay = 1, .max_prediction = 12, .hash_interval = 5}, 3,
+                   static_cast<u32>(seed % 3), 80 + seed, {.latency_us = 50'000, .jitter_us = 50'000, .loss = 0.2f});
+    }
+    {
+        // A simulation that goes wrong every tick on one peer: three resyncs that do not hold, then the session ends.
+        Match match(3, rollback, 75);
+        match.peers[1]->arena.corrupt_every = std::pair{200u, 1u};
+        assert(
+            match.run_while_not([&] { return match.peers[1]->session->status() == SessionStatus::desynced; }, 30'000));
+        assert(match.peers[1]->session->stats().resyncs == 3);
+        assert(match.peers[1]->session->status_detail().find("after 3 resyncs") != std::string::npos);
+        assert(match.peers[0]->session->status() == SessionStatus::running); // the others play on, without it
+        assert(match.run_while_not([&] { return match.min_confirmed({0, 2}) > 900; }, 30'000));
+        assert(match.peers[0]->session->stats().present == 0b101);
+    }
+    {
+        // One that goes wrong now and then: set right each time, and it plays on.
+        Match match(3, rollback, 76);
+        match.peers[2]->arena.corrupt_every = std::pair{150u, 50u};
+        assert(match.run_while_not([&] { return match.min_confirmed({0, 1, 2}) > 900; }, 30'000));
+        assert(match.peers[2]->session->status() == SessionStatus::running);
+        assert(match.peers[2]->session->stats().resyncs >= 10);
+    }
 }
 
 void test_time_sync() {
@@ -1802,6 +1873,7 @@ int main() {
     test_lockstep();
     test_rollback();
     test_desync();
+    test_resync();
     test_time_sync();
     test_peer_lost_and_leave();
     test_leave();

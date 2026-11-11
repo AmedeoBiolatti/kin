@@ -42,6 +42,10 @@ releases may change APIs.
   agrees on (`StepInfo::left`), in rollback and lockstep. The peers relay the commands some lack, and a player only
   one peer cannot reach leaves too. In a joinable session the slot can be taken again, by the same player too;
   `free_lobby_slot` frees any player's slot. `InputSyncStats::leaves` and `lost`.
+- A desync no longer ends the game (`InputSyncConfig::resync`, on by default;
+  [networking](networking.md#desyncs)): a peer whose state differs from the host's takes the host's state, as a
+  joiner does, and runs its ticks since again. Three resyncs in a row with no agreeing state end that peer's session,
+  and the others play on. `InputSyncStats::resyncs` and `resyncing`.
 - Lobbies and messages between players ([platform services](platform_services.md#lobbies-and-messages)):
   `PlatformServices` gains `create_lobby`, `find_lobbies` (rules over lobby data, open slots, distance), `join_lobby`,
   `leave_lobby`, the members and owner, the lobby's data and each member's, `set_lobby_joinable`, chat, and messages

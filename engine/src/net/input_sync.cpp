@@ -28,6 +28,8 @@ namespace {
 //           at those ticks
 //   leave (the decider -> every peer; any peer -> one that lacks it): u32 the decision's number, u32 the players who
 //           leave, then for each of them (lowest slot first) u32 the tick they are gone from
+//   resync request (a player whose state differs from the host's -> the host): u8 slot, u64 the request's id; the
+//           host answers with join state messages, the player with join acks
 constexpr u8 inputs_message = first_model_message;
 constexpr u8 hash_message = first_model_message + 1;
 constexpr u8 join_request_message = first_model_message + 2;
@@ -37,6 +39,9 @@ constexpr u8 join_ready_message = first_model_message + 5;
 constexpr u8 lost_message = first_model_message + 6;
 constexpr u8 relay_message = first_model_message + 7;
 constexpr u8 leave_message = first_model_message + 8;
+constexpr u8 resync_request_message = first_model_message + 9;
+// Resyncs in a row, with no state agreeing with the host's between them, before a desync ends the session.
+constexpr u32 max_resync_streak = 3;
 constexpr std::size_t inputs_header = 1 + 4 + 2 + 4 + 4 + 4 + 1;
 // Room for the joins one message carries: those decided at the ticks of its commands, at most one a slot (a slot
 // whose player leaves is taken again only after its leave, which takes longer than a message's ticks).
@@ -71,7 +76,8 @@ u64 config_hash(const InputSyncConfig& config, u32 input_size) {
                           config.input_delay,
                           config.hash_interval,
                           config.joinable ? 1u : 0u,
-                          config.players_may_leave ? 1u : 0u};
+                          config.players_may_leave ? 1u : 0u,
+                          config.resync ? 1u : 0u};
     return hash_bytes(fields, sizeof(fields));
 }
 
@@ -338,7 +344,7 @@ std::string InputSyncCore::status_detail() const {
         return "left the session";
     case SessionStatus::desynced:
         return "the state after tick " + std::to_string(_desync.tick) + " differs from player " +
-               std::to_string(_desync.player) + "'s";
+               std::to_string(_desync.player) + "'s" + (_failure.empty() ? "" : ": " + _failure);
     case SessionStatus::rejected:
     case SessionStatus::peer_lost: {
         if (!_failure.empty()) {
@@ -424,6 +430,12 @@ void InputSyncCore::update(u64 now_us) {
     if (_status != SessionStatus::running) {
         return;
     }
+    if (_resync_have) {
+        finish_resync();
+        if (_status != SessionStatus::running) {
+            return;
+        }
+    }
     roll_back();
     confirm();
     compare_hashes();
@@ -475,6 +487,15 @@ void InputSyncCore::on_message(std::size_t link, u8 type, ByteReader& payload) {
         on_report(slot, payload);
     } else if (type == relay_message) {
         on_relay(slot, payload);
+    } else if (type == resync_request_message) {
+        const u32 sender = payload.read_u8();
+        const u64 id = payload.read_u64();
+        if (payload.ok() && sender == slot && id != 0 && in_game(slot) && _can_rollback && _config.resync) {
+            _peers[slot].resync_id = id;
+            if (std::ranges::find(_resync_requests, slot) == _resync_requests.end()) {
+                _resync_requests.push_back(slot); // served after this update's rollback
+            }
+        }
     } else if (type == leave_message) {
         const u32 index = payload.read_u32();
         LeaveDecision decision{.mask = payload.read_u32()};
@@ -597,7 +618,7 @@ void InputSyncCore::take_commands(u32 slot, u32 first, u32 count, std::span<cons
         std::span<u8> stored = input(slot, t);
         if (_predicted[index] && _input_tick[index] == t && t < _tick &&
             !std::equal(command.begin(), command.end(), stored.begin())) {
-            _rollback_to = _rollback_to < 0 ? tick : std::min(_rollback_to, tick);
+            request_rollback(tick);
         }
         std::ranges::copy(command, stored.begin());
         _input_tick[index] = t;
@@ -634,7 +655,7 @@ void InputSyncCore::schedule_local(u32 tick) {
         // joins): those run again with them.
         if (next < _tick && _predicted[index] && _input_tick[index] == next &&
             !std::equal(_local_input.begin(), _local_input.end(), stored.begin())) {
-            _rollback_to = _rollback_to < 0 ? next : std::min<i64>(_rollback_to, next);
+            request_rollback(next);
         }
         std::ranges::copy(_local_input, stored.begin());
         _input_tick[index] = next;
@@ -704,6 +725,13 @@ void InputSyncCore::step_tick(u32 tick, bool resimulating) {
     if (_config.hash_interval > 0 && (tick + 1) % _config.hash_interval == 0) {
         _pending_hashes.emplace_back(tick, _hooks.state_hash());
     }
+}
+
+void InputSyncCore::request_rollback(i64 tick) {
+    if (tick < _resync_floor) {
+        return; // before the host's state this peer took: that state has every real command up to it
+    }
+    _rollback_to = _rollback_to < 0 ? tick : std::min(_rollback_to, tick);
 }
 
 void InputSyncCore::roll_back() {
@@ -784,14 +812,37 @@ void InputSyncCore::compare_hashes() {
                 continue; // older than what we keep
             }
             ++_stats.hashes_compared;
-            if (mine->second != hash) {
-                _desync = {.tick = tick, .player = slot, .local_hash = mine->second, .remote_hash = hash};
-                _status = SessionStatus::desynced;
-                if (!in_game(_config.local_player)) {
-                    _links.leave(); // a joiner whose state is wrong: it goes, the game does not wait for it
+            const u32 local = _config.local_player;
+            if (mine->second == hash) {
+                if (slot == host() && static_cast<i64>(tick) >= _resync_floor) {
+                    _resync_streak = 0; // agrees with the host since the last resync
                 }
+                continue;
+            }
+            _desync = {.tick = tick, .player = slot, .local_hash = mine->second, .remote_hash = hash};
+            if (!in_game(local)) {
+                _status = SessionStatus::desynced;
+                _links.leave(); // a joiner whose state is wrong: it goes, the game does not wait for it
                 return;
             }
+            if (!_config.resync || !_can_rollback) {
+                _status = SessionStatus::desynced;
+                return;
+            }
+            // The host's state is the game's: only a player that differs from it acts, by taking it. (The host does
+            // nothing; two others that differ from each other each compare with the host too.)
+            if (slot != host() || local == host() || _resyncing) {
+                continue;
+            }
+            if (++_resync_streak > max_resync_streak) {
+                _status = SessionStatus::desynced;
+                _failure =
+                    "the state differed from the host's again after " + std::to_string(max_resync_streak) + " resyncs";
+                _links.leave(); // the others let this peer go and play on
+                return;
+            }
+            begin_resync();
+            return;
         }
     }
 }
@@ -961,38 +1012,62 @@ void InputSyncCore::serve_join_requests() {
             continue; // (a request that was on its way while the state went: that joiner has it; a leave still open:
                       // the joiner asks again)
         }
-        if (std::ranges::any_of(_transfers, [slot](const Transfer& t) { return t.slot == slot; })) {
+        Transfer transfer;
+        if (!make_transfer(slot, transfer)) {
             continue;
         }
-        // The state from before the first tick that is not yet final everywhere: from then on the joiner gets every
-        // player's real commands, as the others do.
-        const i64 confirmed = confirmed_tick();
-        const u32 base = static_cast<u32>(std::min<i64>(confirmed + 1, _tick));
-        if (!present(_config.local_player, base > 0 ? base - 1 : 0)) {
-            continue; // we joined after the state it would get: it asks again once that is past
-        }
-        Transfer transfer{.slot = slot, .progress_us = _now_us, .acked_us = _now_us};
-        if (confirmed + 1 >= static_cast<i64>(_tick)) {
-            transfer.base = _tick;
-            _hooks.save(transfer.bytes);
-        } else {
-            transfer.base = static_cast<u32>(confirmed + 1);
-            const std::size_t ring = transfer.base % _snapshots.size();
-            if (_snapshot_tick[ring] != static_cast<i64>(transfer.base)) {
-                continue; // cannot happen: every tick past the confirmed one ran on a prediction and was saved
-            }
-            transfer.bytes = _snapshots[ring];
-        }
-        // Who played before the base: a join at the base itself comes with the host's command for it, as for every
-        // peer (the state is from before it, so it has not happened in it).
-        transfer.present = present_mask(transfer.base > 0 ? transfer.base - 1 : 0);
-        transfer.epoch = _epoch;
         // The joiner's commands to us start at its join tick; ours to it at the base.
         peer.acked = static_cast<i64>(transfer.base) - 1;
         peer.served_id = peer.join_id;
         _transfers.push_back(std::move(transfer));
     }
     _join_requests.clear();
+    // A player whose state differs from ours gets it the same way (its commands and acks go on as they were).
+    for (const u32 slot : _resync_requests) {
+        PeerTrack& peer = _peers[slot];
+        if (!in_game(slot) || host() != _config.local_player || !peer.linked || peer.resync_served == peer.resync_id ||
+            _frozen != 0) {
+            continue;
+        }
+        Transfer transfer;
+        if (!make_transfer(slot, transfer)) {
+            continue;
+        }
+        peer.resync_served = peer.resync_id;
+        _transfers.push_back(std::move(transfer));
+    }
+    _resync_requests.clear();
+}
+
+// The state from before the first tick that is not yet final everywhere: from then on the receiver gets every player's
+// real commands, as the others do.
+bool InputSyncCore::make_transfer(u32 slot, Transfer& out) {
+    if (std::ranges::any_of(_transfers, [slot](const Transfer& t) { return t.slot == slot; })) {
+        return false;
+    }
+    const i64 confirmed = confirmed_tick();
+    const u32 base = static_cast<u32>(std::min<i64>(confirmed + 1, _tick));
+    if (!present(_config.local_player, base > 0 ? base - 1 : 0)) {
+        return false; // we joined after the state it would get: it asks again once that is past
+    }
+    Transfer transfer{.slot = slot, .progress_us = _now_us, .acked_us = _now_us};
+    if (confirmed + 1 >= static_cast<i64>(_tick)) {
+        transfer.base = _tick;
+        _hooks.save(transfer.bytes);
+    } else {
+        transfer.base = static_cast<u32>(confirmed + 1);
+        const std::size_t ring = transfer.base % _snapshots.size();
+        if (_snapshot_tick[ring] != static_cast<i64>(transfer.base)) {
+            return false; // cannot happen: every tick past the confirmed one ran on a prediction and was saved
+        }
+        transfer.bytes = _snapshots[ring];
+    }
+    // Who played before the base: a join at the base itself comes with the host's command for it, as for every peer
+    // (the state is from before it, so it has not happened in it).
+    transfer.present = present_mask(transfer.base > 0 ? transfer.base - 1 : 0);
+    transfer.epoch = _epoch;
+    out = std::move(transfer);
+    return true;
 }
 
 void InputSyncCore::serve_transfers() {
@@ -1077,10 +1152,18 @@ void InputSyncCore::on_join_state(u32 slot, ByteReader& payload) {
     const u32 total = payload.read_u32();
     const u32 offset = payload.read_u32();
     const std::span<const u8> bytes = payload.read_bytes(payload.remaining());
-    if (!payload.ok() || !_config.joining || joiner != _config.local_player || _have_state) {
+    const bool joiner_waits = _config.joining && !_have_state;
+    const bool resync_waits = _resyncing && !_resync_have && in_game(_config.local_player);
+    if (!payload.ok() || joiner != _config.local_player || !(joiner_waits || resync_waits)) {
         return;
     }
     if (total > max_join_state) {
+        if (resync_waits) {
+            _status = SessionStatus::desynced;
+            _failure = "the host's state is more than a peer takes";
+            _links.leave();
+            return;
+        }
         fail_joining("the game's state is " + std::to_string(total) + " bytes, more than a joiner takes");
         return;
     }
@@ -1119,7 +1202,11 @@ void InputSyncCore::on_join_state(u32 slot, ByteReader& payload) {
     writer.write_u32(static_cast<u32>(_state.size()));
     _links.send(_peers[slot].link, join_ack_message, ack);
     if (_state.size() == total && (present_slots >> slot) & 1u) {
-        _have_state = true;
+        if (resync_waits) {
+            _resync_have = true;
+        } else {
+            _have_state = true;
+        }
     }
 }
 
@@ -1172,6 +1259,18 @@ u32 InputSyncCore::catch_up() {
 }
 
 void InputSyncCore::send_join_messages() {
+    if (_resyncing && !_resync_have && in_game(_config.local_player) && _now_us >= _next_join_message_us) {
+        const u32 to = host();
+        if (to < _config.players && to != _config.local_player && _peers[to].linked) {
+            std::vector<u8> payload;
+            ByteWriter writer(payload);
+            writer.write_u8(static_cast<u8>(_config.local_player));
+            writer.write_u64(_resync_id);
+            _links.send(_peers[to].link, resync_request_message, payload);
+        }
+        _next_join_message_us = _now_us + join_repeat_us;
+        return;
+    }
     if (!_config.joining || in_game(_config.local_player) || _now_us < _next_join_message_us) {
         return;
     }
@@ -1262,7 +1361,7 @@ void InputSyncCore::apply_join(u32 slot, u32 tick, u64 id) {
     }
     if (tick < _tick) {
         // Ticks that ran without the player run again with them.
-        _rollback_to = _rollback_to < 0 ? tick : std::min<i64>(_rollback_to, tick);
+        request_rollback(tick);
     }
 }
 
@@ -1289,6 +1388,54 @@ void InputSyncCore::check_joined_players() {
 void InputSyncCore::fail_joining(std::string detail) {
     start_failed(std::move(detail));
     _links.leave(); // the game frees the slot at once instead of waiting for a timeout
+}
+
+// --- resync (docs/networking.md#desyncs) ---
+
+void InputSyncCore::begin_resync() {
+    _resyncing = true;
+    _resync_have = false;
+    _resync_id = random_id();
+    _state_started = false;
+    _state.clear();
+    _state_early.clear();
+    _next_join_message_us = 0; // ask at once
+    _stats.resyncing = true;
+}
+
+// The host's state from before tick `base`: this peer's own from there on was wrong. It runs the ticks since again
+// from it, with the commands it has; every check of its state starts over.
+void InputSyncCore::finish_resync() {
+    _resync_have = false;
+    _resyncing = false;
+    _stats.resyncing = false;
+    if (!_hooks.restore(_state)) {
+        _status = SessionStatus::desynced;
+        _failure = "the simulation refused the host's state";
+        _links.leave();
+        return;
+    }
+    const u32 base = _state_base;
+    _state = {};
+    _state_early.clear();
+    _state_started = false;
+    ++_stats.resyncs;
+    _resync_floor = base;
+    _rollback_to = -1;
+    _local_hashes.clear();
+    _pending_hashes.clear();
+    for (PeerTrack& peer : _peers) {
+        std::erase_if(peer.hashes, [base](const auto& entry) { return entry.first < base; });
+    }
+    std::ranges::fill(_snapshot_tick, -1);
+    if (base >= _tick) {
+        _tick = base; // behind the host: the ticks up to the base are in its state
+        _accumulator_us = 0;
+        return;
+    }
+    for (u32 tick = base; tick < _tick; ++tick) {
+        step_tick(tick, true);
+    }
 }
 
 // --- leaving (docs/networking.md#leaving) ---
@@ -1505,7 +1652,7 @@ void InputSyncCore::apply_leave(u32 index, const LeaveDecision& decision) {
     ++_epoch;
     if (earliest < _tick) {
         // Ticks that ran with them (on a prediction) run again without them.
-        _rollback_to = _rollback_to < 0 ? earliest : std::min<i64>(_rollback_to, earliest);
+        request_rollback(earliest);
     }
     _next_report_us = 0;
 }

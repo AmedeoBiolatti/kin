@@ -156,9 +156,19 @@ A struct with padding has no codec and does not compile: its padding bytes would
 ### Desyncs
 
 Every `hash_interval` ticks, each peer sends the hash of its state after a tick whose commands were all real, and
-compares the hashes it gets. A difference stops the session (`SessionStatus::desynced`); `desync()` names the tick
-and the player. The [determinism check](testing.md#determinism-check) and `sync_test()` find the cause on one
-machine.
+compares the hashes it gets. `desync()` names the first tick and player that differed. The
+[determinism check](testing.md#determinism-check) and `sync_test()` find the cause on one machine.
+
+With `resync` (on by default, for a simulation with `save()` and `restore()`), the game plays on. The host's state
+(the lowest slot's) is the game's. A peer whose state differs from the host's asks for it, gets it as a joiner does,
+restores it and runs its own ticks since again; the others do not wait. Its commands were right all along, so only
+its state changes. `stats().resyncs` counts these, and `stats().resyncing` is true while one is under way. Without
+`resync`, or after three resyncs with no agreeing state between them (a game that goes wrong all the time on one
+peer), a desync ends that peer's session (`SessionStatus::desynced`); with `resync` it says goodbye, and the others
+let it go and play on.
+
+A resync hides a determinism bug from the players, not from the developer: log `desync()` and `resyncs`, and find the
+cause.
 
 ### Settings
 
@@ -177,6 +187,7 @@ machine.
 | `links` | | handshake, ping and timeout intervals (`timeout_us`: how long a quiet player takes to be lost) |
 | `joinable` | false | slots can be empty and taken while the game runs. Must match |
 | `players_may_leave` | true | a lost player leaves and the others play on; false: the session ends. Must match |
+| `resync` | true | a peer whose state differs from the host's takes it and plays on; false: a desync ends the session. Must match |
 
 `stats()` reports the current and confirmed ticks, rollbacks (count, ticks run again, deepest), waits, slowed
 updates, hashes compared, the clock advantage, who is present, joins, leaves and the players lost but not yet let go.
@@ -388,6 +399,7 @@ drive the link.
 | 38 | lost | slot `u8`, leave decisions applied `u32`, lost players not yet decided on `u32`, lost players `u32`, then for each lost player the last tick of theirs it has `i32` |
 | 39 | relay | the lost player's slot `u8`, first tick `u32`, count `u8`, the commands, then the joins they decided at those ticks (as in inputs) |
 | 40 | leave | the decision's number `u32`, the players who leave `u32`, then for each the tick they are gone from `u32` |
+| 41 | resync request | slot `u8`, the request's id `u64` (the host answers with join states; the player acks them) |
 
 In a joinable session, inputs end with the joins their sender decided at the ticks of their commands: count `u8`,
 then tick `u32`, slot `u8` and the joiner's id `u64` each.
@@ -401,7 +413,6 @@ handshake only if no matching hello follows before the connect timeout.
 ## Not yet
 
 - A joiner watches before it plays, but there is no spectator that only watches.
-- A desync ends the session: no peer is set right from the others' state yet.
 - Over UDP: no NAT traversal, encryption or authentication (a peer's address and token are its identity, so anyone
   who sees the traffic can forge it). Over Steam, `ServicesTransport` has all three: Steam's relays, its encrypted
   sessions and its accounts.
