@@ -65,8 +65,18 @@ public:
             ++resimulated;
         }
         ArenaState& s = _state;
+        present_at[info.tick] = info.present;
         for (u32 p = 0; p < s.players; ++p) {
             const Command& c = commands[p];
+            if (!((info.present >> p) & 1u)) {
+                assert(c == Command{}); // an empty slot plays the default command
+                continue;
+            }
+            if ((info.joined >> p) & 1u) {
+                s.score[p] += 1000; // a joiner arrives: a state change at exactly the tick every peer agreed on
+                s.x[p] = 500;
+                joined_at[p] = info.tick;
+            }
             s.x[p] = std::clamp(s.x[p] + c.dx * 9, 0, 1000);
             s.y[p] = std::clamp(s.y[p] + c.dy * 9, 0, 1000);
             const u32 pressed = c.buttons & ~s.buttons[p];
@@ -103,13 +113,28 @@ public:
     std::vector<u8> save() const {
         ++saves;
         const auto* bytes = reinterpret_cast<const u8*>(&_state);
-        return {bytes, bytes + sizeof(_state)};
+        std::vector<u8> out(bytes, bytes + sizeof(_state));
+        // Ballast stands in for a big world: a joiner's state then takes many datagrams.
+        for (u32 i = 0; i < ballast; ++i) {
+            out.push_back(static_cast<u8>((i * 31 + _state.tick) & 0xff));
+        }
+        return out;
     }
     bool restore(std::span<const u8> bytes) {
-        if (bytes.size() != sizeof(_state)) {
+        if (bytes.size() < sizeof(_state)) {
             return false;
         }
-        std::memcpy(&_state, bytes.data(), sizeof(_state));
+        ArenaState state;
+        std::memcpy(&state, bytes.data(), sizeof(state));
+        if (bytes.size() != sizeof(state) + ballast) {
+            return false;
+        }
+        for (u32 i = 0; i < ballast; ++i) {
+            if (bytes[sizeof(state) + i] != static_cast<u8>((i * 31 + state.tick) & 0xff)) {
+                return false;
+            }
+        }
+        _state = state;
         ++restores;
         return true;
     }
@@ -119,7 +144,10 @@ public:
     mutable u64 saves = 0;
     u64 restores = 0, steps = 0, resimulated = 0;
     std::map<u32, u64> hash_after; // the latest run of each tick
+    std::map<u32, u32> present_at; // StepInfo::present of the latest run of each tick
+    std::array<std::optional<u32>, max_players> joined_at{};
     std::optional<u32> corrupt_at;
+    u32 ballast = 0;
 
 private:
     ArenaState _state;
@@ -301,7 +329,7 @@ struct Match {
         }
         Arena reference(players);
         for (u32 t = 0; t < ticks; ++t) {
-            reference.step(peers[0]->log[t], StepInfo{.tick = t});
+            reference.step(peers[0]->log[t], StepInfo{.tick = t, .present = peers[0]->arena.present_at.at(t)});
             for (const auto& peer : peers) {
                 assert(peer->arena.hash_after.at(t) == reference.hash_after.at(t));
             }
@@ -868,6 +896,215 @@ void test_sync_test() {
 
 // --- UDP ---
 
+// --- joining a game in progress ---
+
+struct JoinRun {
+    u32 slots = 3;
+    InputSyncConfig config{};
+    LinkConditions conditions{};
+    u32 ballast = 0;
+    u32 join_after = 200; // ticks the first two play alone
+    u32 play_until = 700;
+};
+
+struct JoinPeer {
+    explicit JoinPeer(u32 slots, u32 ballast) : arena(slots) { arena.ballast = ballast; }
+    Arena arena;
+    std::unique_ptr<InputSync<Arena, Command>> session;
+    std::map<u32, std::vector<Command>> log; // tick -> confirmed commands
+};
+
+std::unique_ptr<JoinPeer> make_join_peer(std::vector<LoopbackEndpoint*>& endpoints, const JoinRun& run, u32 slot,
+                                         bool joining, std::vector<PeerId> peers) {
+    auto peer = std::make_unique<JoinPeer>(run.slots, run.ballast);
+    InputSyncConfig config = run.config;
+    config.players = run.slots;
+    config.local_player = slot;
+    config.peers = std::move(peers);
+    config.joinable = true;
+    config.joining = joining;
+    peer->session = std::make_unique<InputSync<Arena, Command>>(peer->arena, *endpoints[slot], config);
+    JoinPeer* raw = peer.get();
+    peer->session->set_on_confirmed([raw](u32 tick, std::span<const Command> commands) {
+        assert(!raw->log.contains(tick) && (raw->log.empty() || raw->log.rbegin()->first + 1 == tick));
+        raw->log[tick] = {commands.begin(), commands.end()};
+    });
+    return peer;
+}
+
+// Two play; a third joins slot 2 while they do; all three play on. Every peer's states are a single offline run's.
+void run_join(const char* name, const JoinRun& run) {
+    LoopbackNetwork network(11);
+    std::vector<LoopbackEndpoint*> endpoints;
+    for (u32 i = 0; i < run.slots; ++i) {
+        endpoints.push_back(&network.add_endpoint());
+    }
+    network.set_conditions(run.conditions);
+    std::vector<std::unique_ptr<JoinPeer>> peers;
+    peers.push_back(make_join_peer(endpoints, run, 0, false, {no_peer, LoopbackNetwork::peer(1), no_peer}));
+    peers.push_back(make_join_peer(endpoints, run, 1, false, {LoopbackNetwork::peer(0), no_peer, no_peer}));
+    u64 now_ms = 0;
+    const auto step = [&] {
+        ++now_ms;
+        network.set_time(now_ms * 1000);
+        for (u32 i = 0; i < peers.size(); ++i) {
+            peers[i]->session->set_local_input(script(i, now_ms));
+            peers[i]->session->update(now_ms * 1000);
+            if (session_over(peers[i]->session->status())) {
+                std::printf("  peer %u at %llu ms: %s\n", i, static_cast<unsigned long long>(now_ms),
+                            peers[i]->session->status_detail().c_str());
+                assert(false);
+            }
+        }
+    };
+    while (peers[0]->session->stats().confirmed_tick < static_cast<i64>(run.join_after)) {
+        step();
+        assert(now_ms < 60'000);
+    }
+    for (const auto& peer : peers) {
+        assert(peer->session->stats().present == 0b011);
+    }
+    // The third player: everyone in the game lets it in, it is told who they are.
+    peers.push_back(
+        make_join_peer(endpoints, run, 2, true, {LoopbackNetwork::peer(0), LoopbackNetwork::peer(1), no_peer}));
+    assert(peers[0]->session->allow_join(2, LoopbackNetwork::peer(2)));
+    assert(peers[1]->session->allow_join(2, LoopbackNetwork::peer(2)));
+    assert(!peers[0]->session->allow_join(1, LoopbackNetwork::peer(2))); // taken
+    const u64 joined_from = now_ms;
+    u64 has_state_ms = 0, playing_ms = 0;
+    const auto done = [&] {
+        return std::ranges::all_of(peers, [&](const auto& peer) {
+            const InputSyncStats& stats = peer->session->stats();
+            return stats.tick > run.play_until && stats.confirmed_tick >= static_cast<i64>(run.play_until);
+        });
+    };
+    while (!done()) {
+        step();
+        const InputSyncStats& stats = peers[2]->session->stats();
+        if (!has_state_ms && stats.spectating) {
+            has_state_ms = now_ms - joined_from;
+        }
+        if (!playing_ms && stats.joins == 1) {
+            playing_ms = now_ms - joined_from;
+        }
+        assert(now_ms < 120'000);
+    }
+    const InputSyncStats& joiner = peers[2]->session->stats();
+    std::printf("  join %s: state from tick %u (%llu bytes) in %llu ms, playing from tick %u after %llu ms\n", name,
+                joiner.start_tick, static_cast<unsigned long long>(joiner.state_bytes_received),
+                static_cast<unsigned long long>(has_state_ms), *peers[2]->arena.joined_at[2],
+                static_cast<unsigned long long>(playing_ms));
+    assert(joiner.start_tick >= run.join_after && !joiner.spectating && joiner.joins == 1);
+    assert(joiner.state_bytes_received >= sizeof(ArenaState) + run.ballast);
+    assert(peers[0]->session->stats().state_bytes_sent >= joiner.state_bytes_received);
+    assert(peers[1]->session->stats().state_bytes_sent == 0); // only the host sends it
+    // Every peer took the join at the same tick, and the state after every tick is the reference's.
+    const u32 joined_tick = *peers[0]->arena.joined_at[2];
+    Arena reference(run.slots);
+    for (u32 t = 0; t < run.play_until; ++t) {
+        reference.step(
+            peers[0]->log.at(t),
+            StepInfo{.tick = t, .present = peers[0]->arena.present_at.at(t), .joined = t == joined_tick ? 0b100u : 0u});
+        for (const auto& peer : peers) {
+            if (t >= peer->session->stats().start_tick) {
+                assert(peer->log.at(t) == peers[0]->log.at(t));
+                assert(peer->arena.hash_after.at(t) == reference.hash_after.at(t));
+                assert(peer->arena.present_at.at(t) == peers[0]->arena.present_at.at(t));
+            }
+        }
+    }
+    for (const auto& peer : peers) {
+        assert(peer->arena.joined_at[2] == joined_tick && peer->session->stats().present == 0b111);
+        assert(peer->session->stats().joins == 1 && peer->session->stats().hashes_compared > 0);
+    }
+    // The joiner plays: its commands reach the others (script(2, ...) is not always the default).
+    bool moved = false;
+    for (u32 t = joined_tick; t < run.play_until; ++t) {
+        moved = moved || !(peers[0]->log.at(t)[2] == Command{});
+    }
+    assert(moved);
+}
+
+void test_join() {
+    run_join("rollback", {.config = {.input_delay = 2, .max_prediction = 8, .hash_interval = 10},
+                          .conditions = {.latency_us = 30'000, .jitter_us = 10'000, .loss = 0.05f}});
+    run_join("lockstep", {.config = {.input_delay = 4, .max_prediction = 0, .hash_interval = 10},
+                          .conditions = {.latency_us = 20'000, .jitter_us = 5'000}});
+    // A big state over a lossy link: many datagrams, some sent again.
+    // A hash after every tick: a joiner's state is compared from its first tick on.
+    run_join("big state", {.config = {.input_delay = 2, .max_prediction = 8, .hash_interval = 1},
+                           .conditions = {.latency_us = 40'000, .jitter_us = 10'000, .loss = 0.1f},
+                           .ballast = 60'000});
+    run_join("soon after the start", {.config = {.input_delay = 2, .max_prediction = 8, .hash_interval = 10},
+                                      .conditions = {.latency_us = 10'000},
+                                      .join_after = 1,
+                                      .play_until = 300});
+}
+
+void test_join_failures() {
+    // A joiner that never comes: the slot stays empty, the game goes on.
+    {
+        LoopbackNetwork network(3);
+        std::vector<LoopbackEndpoint*> endpoints;
+        for (int i = 0; i < 3; ++i) {
+            endpoints.push_back(&network.add_endpoint());
+        }
+        JoinRun run{.config = {.input_delay = 2, .max_prediction = 8, .links = {.connect_timeout_us = 2'000'000}}};
+        auto a = make_join_peer(endpoints, run, 0, false, {no_peer, LoopbackNetwork::peer(1), no_peer});
+        auto b = make_join_peer(endpoints, run, 1, false, {LoopbackNetwork::peer(0), no_peer, no_peer});
+        assert(a->session->allow_join(2, LoopbackNetwork::peer(2)));
+        for (u64 ms = 1; ms <= 4000; ++ms) {
+            network.set_time(ms * 1000);
+            a->session->update(ms * 1000);
+            b->session->update(ms * 1000);
+        }
+        assert(a->session->status() == SessionStatus::running && b->session->status() == SessionStatus::running);
+        assert(a->session->stats().present == 0b011 && a->session->stats().tick > 200);
+        // The slot can be offered again.
+        assert(a->session->allow_join(2, LoopbackNetwork::peer(2)));
+    }
+    // A joiner of another session: refused, it fails, the game goes on.
+    {
+        LoopbackNetwork network(4);
+        std::vector<LoopbackEndpoint*> endpoints;
+        for (int i = 0; i < 3; ++i) {
+            endpoints.push_back(&network.add_endpoint());
+        }
+        JoinRun run{.config = {.input_delay = 2, .max_prediction = 8, .session = 1}};
+        auto a = make_join_peer(endpoints, run, 0, false, {no_peer, LoopbackNetwork::peer(1), no_peer});
+        auto b = make_join_peer(endpoints, run, 1, false, {LoopbackNetwork::peer(0), no_peer, no_peer});
+        run.config.session = 2;
+        auto c = make_join_peer(endpoints, run, 2, true, {LoopbackNetwork::peer(0), LoopbackNetwork::peer(1), no_peer});
+        a->session->allow_join(2, LoopbackNetwork::peer(2));
+        b->session->allow_join(2, LoopbackNetwork::peer(2));
+        for (u64 ms = 1; ms <= 2000; ++ms) {
+            network.set_time(ms * 1000);
+            a->session->update(ms * 1000);
+            b->session->update(ms * 1000);
+            c->session->update(ms * 1000);
+        }
+        assert(c->session->status() == SessionStatus::failed);
+        assert(a->session->status() == SessionStatus::running && a->session->stats().present == 0b011);
+    }
+    // Settings that cannot join.
+    {
+        LoopbackNetwork network(5);
+        auto& endpoint = network.add_endpoint();
+        Counter counter;
+        InputSync<Counter, Command> lockstep_only(
+            counter, endpoint, {.players = 2, .peers = {no_peer, no_peer}, .max_prediction = 0, .joinable = true});
+        assert(lockstep_only.status() == SessionStatus::failed &&
+               lockstep_only.status_detail().find("save() and restore()") != std::string::npos);
+        Arena arena(2);
+        InputSync<Arena, Command> not_joinable(arena, endpoint, {.players = 2, .peers = {no_peer, no_peer}});
+        assert(not_joinable.status() == SessionStatus::failed); // an empty slot without joinable
+        InputSync<Arena, Command> joining_alone(arena, endpoint,
+                                                {.players = 2, .peers = {no_peer, no_peer}, .joining = true});
+        joining_alone.update(1000); // nobody to ask
+        assert(joining_alone.status() == SessionStatus::failed);
+    }
+}
+
 void test_udp() {
 #ifndef __EMSCRIPTEN__
     std::string error;
@@ -931,6 +1168,8 @@ int main() {
     test_codec_command();
     test_garbage();
     test_sync_test();
+    test_join();
+    test_join_failures();
     test_udp();
     std::printf("net tests passed\n");
     return 0;

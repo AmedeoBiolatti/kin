@@ -8,10 +8,9 @@
 // Every datagram starts with a 4-byte header: 'k' 'n', the protocol version, and the message type. Types below
 // first_model_message are the links' own; a model numbers its messages from there.
 
+#include <functional>
 #include <kin/net/bytes.hpp>
 #include <kin/net/transport.hpp>
-
-#include <functional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -59,6 +58,9 @@ struct LinkInfo {
     u64 last_heard_us = 0;
     u64 packets_sent = 0, packets_received = 0;
     u64 bytes_sent = 0, bytes_received = 0;
+    // An optional link (a player joining, a spectator) failing does not fail the session: all_connected() and
+    // first_failed() skip it.
+    bool optional = false;
 };
 
 struct LinksConfig {
@@ -76,8 +78,13 @@ public:
 
     Links(Transport& transport, const SessionIdentity& identity, const LinksConfig& config = {});
 
-    // A peer expected in `slot`. Connecting starts at the next update(); returns the link's index.
-    std::size_t add(PeerId peer, u32 slot);
+    // A peer expected in `slot`. Connecting starts at the next update(); returns the link's index. Adding a peer
+    // whose earlier link failed starts that link over.
+    std::size_t add(PeerId peer, u32 slot, bool optional = false);
+    // Makes an optional link required (or back): a joiner once it plays.
+    void set_optional(std::size_t index, bool optional) { _links[index].optional = optional; }
+    // A link that failed (rejected, timed out or left).
+    bool failed(std::size_t index) const;
 
     // Reads every datagram, answers the links' own messages, hands model messages from connected peers to
     // `on_message`, then sends handshakes and pings that are due. `now_us` is any monotonic clock that never goes back.
