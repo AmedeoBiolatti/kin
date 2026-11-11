@@ -12,10 +12,9 @@
 // rollback (for sounds and effects) and ticks of real inputs from predicted ones. save_into(std::vector<u8>&) const,
 // if the game has it, is used instead of save() so that a snapshot every tick reuses its buffer.
 
-#include <kin/core/types.hpp>
-
 #include <concepts>
 #include <cstring>
+#include <kin/core/types.hpp>
 #include <span>
 #include <type_traits>
 #include <vector>
@@ -60,6 +59,11 @@ struct StepInfo {
     bool resimulating = false;
     // Every player's command is real (none is predicted): this run of the tick is final.
     bool confirmed = true;
+    // The player slots in the game at this tick, a bit each (slot 0 is bit 0). An empty slot's command is the
+    // default one. Only a joinable session has empty slots (InputSyncConfig::joinable).
+    u32 present = ~0u;
+    // The slots whose player joins at this tick: present from now on (a game spawns them here).
+    u32 joined = 0;
 };
 
 template <class Sim, class Command>

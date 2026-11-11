@@ -102,13 +102,24 @@ std::string_view reject_reason_name(RejectReason reason) {
 Links::Links(Transport& transport, const SessionIdentity& identity, const LinksConfig& config)
     : _transport(transport), _identity(identity), _config(config) {}
 
-std::size_t Links::add(PeerId peer, u32 slot) {
-    if (find(peer) != npos) {
-        return no_link;
+std::size_t Links::add(PeerId peer, u32 slot, bool optional) {
+    if (const std::size_t i = find(peer); i != npos) {
+        if (!failed(i)) {
+            return no_link;
+        }
+        // A new token: the failed link's late messages do not reach the new one.
+        _links[i] = {.peer = peer, .slot = slot, .optional = optional};
+        _tracks[i] = {.token = random_token()};
+        return i;
     }
-    _links.push_back({.peer = peer, .slot = slot});
+    _links.push_back({.peer = peer, .slot = slot, .optional = optional});
     _tracks.push_back({.token = random_token()});
     return _links.size() - 1;
+}
+
+bool Links::failed(std::size_t index) const {
+    const LinkState state = _links[index].state;
+    return state == LinkState::rejected || state == LinkState::timed_out || state == LinkState::left;
 }
 
 std::size_t Links::find(PeerId peer) const {
@@ -122,7 +133,7 @@ std::size_t Links::find(PeerId peer) const {
 
 bool Links::all_connected() const {
     for (const LinkInfo& link : _links) {
-        if (link.state != LinkState::connected) {
+        if (link.state != LinkState::connected && !link.optional) {
             return false;
         }
     }
@@ -131,8 +142,7 @@ bool Links::all_connected() const {
 
 std::size_t Links::first_failed() const {
     for (std::size_t i = 0; i < _links.size(); ++i) {
-        const LinkState state = _links[i].state;
-        if (state == LinkState::rejected || state == LinkState::timed_out || state == LinkState::left) {
+        if (!_links[i].optional && failed(i)) {
             return i;
         }
     }
