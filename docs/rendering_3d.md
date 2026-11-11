@@ -337,8 +337,11 @@ sun/moon/GI maps, enabled LOD and explicit prepared consumers keep their existin
 paths. A changed or expired source/projection invalidates its plan, including
 scene moves and edits between views of the same GPU frame.
 
-Temporary per-view selection rows reserve space from accepted ref/level counts, including cached static rows.
-This avoids repeated growth while preserving source/copy order and the existing packing and cache lifetimes.
+Temporary per-view selection rows reserve space from accepted ref/level counts. Views needing an image/history
+fingerprint include cached static rows in that reservation. Otherwise, stock spot/point views can merge saved static
+rows directly into packing alongside live rows. Scratch gaps protect unread live copies during in-place packing;
+saved source-relative indices stay read-only and current GPU table slots are resolved when packing. Source/copy
+order and the existing packing and cache lifetimes stay the same.
 
 Depth batching retains its 128-entry locality windows. Exact current comparator
 keys validate a saved sort permutation per window; a changed key sequence is

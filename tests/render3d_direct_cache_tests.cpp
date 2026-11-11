@@ -470,6 +470,27 @@ void check(Renderer2D& renderer) {
                cached.stats.local_gather_cache_hits == 2 && cached.stats.local_shadow_maps == 2);
     }
 
+    // Cached static rows can pack directly around live rows when maps redraw.
+    // Mix a deferred view with a fresh view in both orders, preserving the
+    // scratch gaps needed by later dynamic spans and by multi-copy static rows.
+    scene.lights.cache_shadows = false;
+    for (u32 edit = 0; edit < 3; ++edit) {
+        for (u32 warmup = 0; warmup < 4; ++warmup)
+            shoot(true);
+        if (edit)
+            scene.lights.spots[edit - 1].shadow_near_plane = .3f + f32(edit) * .1f;
+        move_mixed(-7.7f + f32(edit) * 7.7f);
+        const auto cached = shoot(true);
+        const auto fresh = shoot(false);
+        assert(cached.pixels == fresh.pixels && cached.pick_id == fresh.pick_id &&
+               cached.stats.local_gather_cache_hits == (edit ? 1 : 2) && cached.stats.local_shadow_cached == 0 &&
+               cached.stats.local_shadow_drawn == 2 &&
+               cached.stats.local_shadow_maps == fresh.stats.local_shadow_maps &&
+               cached.stats.local_shadow_draws == fresh.stats.local_shadow_draws &&
+               cached.stats.local_shadow_triangles == fresh.stats.local_shadow_triangles &&
+               cached.stats.local_shadow_casters == fresh.stats.local_shadow_casters);
+    }
+
     // Adjacent independent draws cross task boundaries and leave short tails.
     // Camera-edge decisions and interruptions by other submission types must
     // match the live scalar path, including source-order picking and counters.

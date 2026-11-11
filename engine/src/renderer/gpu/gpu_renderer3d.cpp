@@ -7630,6 +7630,9 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             append(dynamic_pieces);
     }
     const bool cache_on = lights.cache_shadows;
+    std::array<u8, view_limit> deferred{};
+    for (u32 v = 0; v < _local_views.size(); ++v)
+        deferred[v] = hits[v] && !cache_on && !ctx.shadow_history && !ctx.public_local && !_local_views[v].gi_sun;
     const GpuFrustum& camera = ctx.frustums[0];
     const bool culled = ctx.scene.cull;
     const Bounds3D& area = lights.shadow_area;
@@ -7918,7 +7921,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         for (u32 v = 0; v < _local_views.size(); ++v) {
             if (hits[v]) {
                 accepted += plans[v]->copies.size();
-                found_rows[v] += plans[v]->rows.size();
+                if (!deferred[v])
+                    found_rows[v] += plans[v]->rows.size();
             }
             // Tasks are ordered by view/ref, and pieces of one ref share each
             // nonempty level bucket. Reserve those rows once instead of moving
@@ -7938,8 +7942,12 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 const auto& plan = *plans[v];
                 while (row < plan.rows.size() && plan.rows[row].ref < before) {
                     const auto& cached = plan.rows[row++];
-                    found[v].push_back({cached.ref, 0, {found_copies.data() + next, cached.count}, false, {}});
-                    std::copy_n(plan.copies.data() + cached.first, cached.count, found_copies.data() + next);
+                    if (!deferred[v]) {
+                        found[v].push_back({cached.ref, 0, {found_copies.data() + next, cached.count}, false, {}});
+                        std::copy_n(plan.copies.data() + cached.first, cached.count, found_copies.data() + next);
+                    }
+                    // Keep a gap even when the saved row goes straight to packing.
+                    // Its output must not overwrite unread dynamic-copy spans.
                     next += cached.count;
                 }
             };
@@ -8288,7 +8296,27 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         if (!view.drawn) {
             continue;
         }
+        u32 row = 0;
+        const auto append_cached = [&](u32 before) {
+            if (!deferred[v])
+                return;
+            const auto& plan = *plans[v];
+            while (row < plan.rows.size() && plan.rows[row].ref < before) {
+                const auto& cached = plan.rows[row++];
+                (void)batch_of(cached.ref);
+                // Saved rows are immutable direct draws: one level, no skin or
+                // cluster runs. Resolve their current scene-table offsets here.
+                const u32 first = _refs[cached.ref].retained_first;
+                const u32 list_first = static_cast<u32>(written);
+                for (u32 i = 0; i < cached.count; ++i)
+                    found_copies[written++] = first + plan.copies[cached.first + i];
+                _local_entries.push_back(
+                    {cached.ref, 0, list_first, cached.count, false, static_cast<u32>(_local_runs.size())});
+                ++view.entry_count;
+            }
+        };
         for (const Found& f : found[v]) {
+            append_cached(f.ref);
             LocalEntry entry;
             entry.ref = f.ref;
             (void)batch_of(f.ref);
@@ -8313,6 +8341,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             _local_entries.push_back(entry);
             ++view.entry_count;
         }
+        append_cached(~0u);
     }
     {
         found_copies.resize(written);
