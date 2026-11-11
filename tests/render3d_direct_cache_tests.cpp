@@ -126,6 +126,19 @@ void check(Renderer2D& renderer) {
         stable = compare();
         assert(stable.stats.local_gather_cache_hits == 1 && stable.stats.direct_bounds_rebuilt == 0);
     }
+    // A prior batch slot is only a hint: one shared batch can use different
+    // colour tables, with its bounds moving between those tables each render.
+    u32 batch_draw = 0;
+    while (!scene.draws()[batch_draw].batch)
+        ++batch_draw;
+    for (Color color : {materials[1].color, colors::white, materials[0].color}) {
+        Material3D edited = materials[0];
+        edited.color = color;
+        assert(scene.set_draw_material(batch_draw, edited));
+        compare();
+        stable = compare();
+        assert(stable.stats.bounds_cache_rebuilt == 0 && stable.stats.direct_upload_bytes == 0);
+    }
     // Geometry keys include the actual light projection and reach, independently
     // of the source's draw revision or camera.
     const auto original_spot = scene.lights.spots.front();
@@ -560,6 +573,12 @@ void check(Renderer2D& renderer) {
     scene.camera.projection = Projection3D::Orthographic;
     scene.camera.height = 10;
     scene.camera.z_far = 60;
+    // A multi-copy ref leaves a one-copy piece at the next task's start.
+    // Keep its general prefix before the independent refs following it.
+    std::vector<MeshInstance3D> tail(513);
+    for (u32 i = 0; i < tail.size(); ++i)
+        tail[i] = {Mat4f::translation({f32(i % 17) - 8, f32(i / 17) * .4f - 6, 1}), colors::white, 5000 + i};
+    assert(scene.draw_instanced(mesh, tail, materials[1]));
     for (u32 i = 0; i < 1031; ++i) {
         if (i == 510)
             assert(scene.draw_instanced(explicit_batch, materials[0]));
@@ -598,7 +617,7 @@ void check(Renderer2D& renderer) {
                actual.stats.draws == reference.stats.draws && actual.stats.instances == reference.stats.instances &&
                actual.stats.triangles == reference.stats.triangles &&
                actual.stats.camera_instance_tests == reference.stats.camera_instance_tests &&
-               actual.stats.direct_retained_instances == 1033 && actual.stats.device_waits == 0);
+               actual.stats.direct_retained_instances == 1546 && actual.stats.device_waits == 0);
         // Both retained and streamed calls can reuse ref metadata. Force a
         // fresh identity to independently check camera/caster flag transitions.
         Scene3D moved = std::move(scene);
@@ -627,7 +646,7 @@ void check(Renderer2D& renderer) {
     renderer.present();
     const auto rebound = shoot(true);
     assert(prepared_pixels == native.pixels && rebound.pixels == native.pixels && rebound.pick_id == native.pick_id &&
-           rebound.stats.direct_retained_instances == 1033 && rebound.stats.direct_upload_bytes == 0 &&
+           rebound.stats.direct_retained_instances == 1546 && rebound.stats.direct_upload_bytes == 0 &&
            rebound.stats.direct_bounds_rebuilt == 0);
 
     // Force the general multi-level prefix path to level zero and compare it

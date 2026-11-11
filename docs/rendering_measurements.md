@@ -4,6 +4,63 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Resident prefixes and retained-batch slot hints, 2026-11-11
+
+The reference is `0eacb145`. Complete one-copy retained runs now feed their
+visibility bytes directly into draw counts, prefixes and retained indices;
+unused piece-result rows are neither written nor consumed. Their source order,
+visibility arithmetic and counters are unchanged. Multi-copy tails, groups and
+LOD/cascade consumers keep the general path. Explicit batch refs also keep their
+previous table slot as a hint, validated against the current buffer, batch ID
+and colour after collection/eviction. A claimed table with bounds bypasses a
+second pool scan; colour changes retain the original shared-bounds transfer.
+These changes add no cache payload, GPU work or quality-setting changes.
+
+Five alternating Hard pairs show **7.8% median paired caller-CPU p50 reduction**,
+range **2.9–15.4%**; all five pairs improve. Process CPU falls **8.3%** by the same
+calculation. Blender and all background workloads stay running: these results
+are **contended**, with uncontrolled clocks, thermals and host load. Conditions
+are original independent Yard submissions, 720p HDR, no AA/GI/AO, classic 1,024
+spot maps, four helpers and affinity 0–15; each run has 300 warm-up and a full
+1,440-frame route. Neither PMU counters nor image readback run during timing.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 1 | 0.560 / 0.753 / 0.794 | 0.544 / 0.716 / 0.766 | 2.7% |
+| Medium | 1 | 2.126 / 2.568 / 2.820 | 2.072 / 2.595 / 2.866 | 2.5% |
+| Hard | 5 | 5.161 / 6.188 / 6.972 | 4.919 / 5.933 / 6.529 | 7.8% |
+
+The Hard percentile columns are medians of per-run percentiles; paired reductions
+compare adjacent run medians, so dividing independently aggregated p50s gives a
+different value. Easy/Medium are single guard pairs and do not establish
+repeatability or better tails. Hard frame p50 has a **0.2% median paired increase**
+(median run medians 16.317 → 16.588 ms), with noisy tails. No frame-throughput
+gain is established, and these absolute timings do not refresh an engine ranking
+or add directly to earlier optimization percentages.
+
+A prefix-only screening had essentially flat caller timings (+0.2% median
+paired, only two of five pairs improving). The final timing result is for the
+combined change; it does not establish a separate speedup for either component.
+Raw preliminary controls remain in `out/runs/render3d-resident-prefix/`.
+
+Separate forward/reverse controls compare baseline, prefix-only and combined
+binaries using inherited P-core user-instruction/cycle counters on affinity
+0–15. Combined retired instructions fall **52.227 → 48.432 billion** and
+**52.230 → 48.447 billion**, reductions of **7.27% and 7.24%** (7.3% median).
+The prefix-only controls retire 6.6% fewer instructions, supporting reduced work
+despite their flat elapsed CPU results. PMU running coverage is 99% in each
+control. These are whole-process counts including helpers, driver threads,
+startup, warm-up, assembly and presentation, not isolated rendering-phase
+counts or a clock-normalized speedup. Their per-frame work columns also match.
+
+Ten focused NVIDIA checks and four llvmpipe checks pass, including a 513-copy draw whose last piece
+must not be treated as an independent ref, and a shared batch alternating colour
+tables without duplicating/rebuilding its bounds. All **10,080 before/after
+route-frame comparisons** preserve every non-timing work/upload/resource/cache
+column, and nine decoded-RGBA pairs across Easy/Medium/Hard at route phases
+1/541/961 are exact. Final artifacts, commands, binary hashes and the measured
+source patch are in `out/runs/render3d-batch-slot-hints/`.
+
 ### Stable culling/retention ref updates, 2026-11-11
 
 The reference is `033b9b43`, including the shadow and culling redesigns and the

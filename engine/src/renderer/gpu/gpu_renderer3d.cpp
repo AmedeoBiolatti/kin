@@ -8816,6 +8816,7 @@ GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color
 constexpr u64 retained_budget = 32 * 1024 * 1024;
 
 void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
+    const u32 previous = std::exchange(ref.retained, ~0u);
     const auto& draw = *ref.draw;
     if (!_retained_enabled || !draw.batch || ctx.taa || ctx.scene.lod.occlusion.enabled || ref.skinned ||
         ref.clustered || ref.levels != 1 || draw.material.shader.backend() ||
@@ -8828,7 +8829,14 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
     // animated colour uploads once a frame into the same table or two, as one table did, rather than leaving a table
     // behind for every colour); else a new one.
     u32 slot = ~0u, idle = ~0u;
-    for (u32 i = 0; i < _retained.size(); ++i) {
+    if (previous < _retained.size()) {
+        const RetainedTable& t = _retained[previous];
+        if (t.buffer && !t.direct && t.id == id && t.color == color)
+            slot = previous;
+    }
+    // Collection can compact slots, and earlier draws may evict this table.
+    // Only an exact live match bypasses the original lookup/replacement order.
+    for (u32 i = 0; slot == ~0u && i < _retained.size(); ++i) {
         const RetainedTable& t = _retained[i];
         if (!t.buffer || t.direct || t.id != id)
             continue;
@@ -9196,14 +9204,19 @@ void GpuRenderer3D::cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stat
     // this render.
     const u64 id = ref.draw->batch.identity();
     u32 holder = ~0u;
-    for (u32 i = 0; i < _retained.size(); ++i) {
-        const RetainedTable& t = _retained[i];
-        if (!t.buffer || t.direct || t.id != id || (holder != ~0u && t.bounds.empty()))
-            continue;
-        holder = i;
-        if (!t.bounds.empty())
-            break;
-    }
+    // A successful claim was validated immediately before this call. Bounds
+    // already on its table need no second search through the retained pool.
+    if (ref.retained != ~0u && !_retained[ref.retained].bounds.empty())
+        holder = ref.retained;
+    if (holder == ~0u)
+        for (u32 i = 0; i < _retained.size(); ++i) {
+            const RetainedTable& t = _retained[i];
+            if (!t.buffer || t.direct || t.id != id || (holder != ~0u && t.bounds.empty()))
+                continue;
+            holder = i;
+            if (!t.bounds.empty())
+                break;
+        }
     if (holder == ~0u)
         return;
     const u32 slot = ref.retained != ~0u ? ref.retained : holder;
@@ -9516,7 +9529,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     };
     const auto refresh_live = [&](DrawRef& ref, bool keep_direct) {
         if (!keep_direct || !ref.direct) {
-            ref.retained = ~0u;
+            if (!ref.batch)
+                ref.retained = ~0u; // retain_instances validates and clears its previous slot
             ref.retained_first = 0;
             ref.direct = false;
             ref.cached_spheres = nullptr;
@@ -9660,7 +9674,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             piece.resident_end = 0;
         const auto resident_piece = [&](const Piece& piece) {
             const DrawRef& ref = _refs[piece.ref];
-            return piece.group == ~0u && piece.end == piece.begin + 1 && scene_retention_eligible(ref);
+            return piece.group == ~0u && piece.begin == 0 && ref.draw->count == 1 && scene_retention_eligible(ref);
         };
         for (u32 t = 0; t + 1 < _tasks.size(); ++t)
             for (u32 p = _tasks[t]; p < _tasks[t + 1];) {
@@ -9810,6 +9824,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             std::fill_n(counts.begin(), active, 0u);
     };
     const u32 counter_cascades = ctx.cascades;
+    const bool camera_only = !any_levels && !ctx.shadows && ctx.cascades == 0;
     const auto classify = [&]<bool fast>(Piece& piece) {
         const PieceResult result = piece_result(piece);
         const DrawRef& ref = _refs[piece.ref];
@@ -9957,38 +9972,49 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 u32* results = _piece_results.data() + first.result;
                 u8* visible = _visible.data() + first.flat;
                 const Vec4f* spheres = resident.cached_spheres + first.begin;
-                const auto store = [&](u32 i, bool seen) {
-                    u32* row = results + i * stride;
-                    row[0] = resident.frustum ? 1u : 0u;
-                    row[1] = 0;
-                    row[2] = seen ? 1u : 0u;
-                    row[3] = 0;
-                    if (ctx.cascades)
-                        std::fill_n(row + 6, ctx.cascades, 0u);
+                const auto store = [&]<bool compact>(u32 i, bool seen) {
+                    if constexpr (!compact) {
+                        u32* row = results + i * stride;
+                        row[0] = resident.frustum ? 1u : 0u;
+                        row[1] = 0;
+                        row[2] = seen ? 1u : 0u;
+                        row[3] = 0;
+                        if (ctx.cascades)
+                            std::fill_n(row + 6, ctx.cascades, 0u);
+                    }
                     visible[i] = seen ? camera_bit : u8{0};
                 };
-                u32 i = 0;
-                if (!resident.frustum) {
-                    for (; i < n; ++i)
-                        store(i, true);
-                } else {
-                    if constexpr (sphere_cull4::available) {
-                        if (camera_frustum != resident.frustum) {
-                            camera_test.emplace(std::span{resident.frustum->planes.data(), resident.frustum->count},
-                                                Vec3f{}, 0, false);
-                            camera_frustum = resident.frustum;
+                const auto run = [&]<bool compact>() {
+                    u32 i = 0;
+                    if (!resident.frustum) {
+                        for (; i < n; ++i)
+                            store.template operator()<compact>(i, true);
+                    } else {
+                        if constexpr (sphere_cull4::available) {
+                            if (camera_frustum != resident.frustum) {
+                                camera_test.emplace(std::span{resident.frustum->planes.data(), resident.frustum->count},
+                                                    Vec3f{}, 0, false);
+                                camera_frustum = resident.frustum;
+                            }
+                            for (; n - i >= 4; i += 4) {
+                                const u32 mask = camera_test->mask(spheres + i);
+                                for (u32 k = 0; k < 4; ++k)
+                                    store.template operator()<compact>(i + k, (mask & (1u << k)) != 0);
+                            }
                         }
-                        for (; n - i >= 4; i += 4) {
-                            const u32 mask = camera_test->mask(spheres + i);
-                            for (u32 k = 0; k < 4; ++k)
-                                store(i + k, (mask & (1u << k)) != 0);
+                        for (; i < n; ++i) {
+                            const Vec4f& sphere = spheres[i];
+                            store.template operator()<compact>(
+                                i, sphere_in(*resident.frustum, {sphere.x, sphere.y, sphere.z}, sphere.w));
                         }
                     }
-                    for (; i < n; ++i) {
-                        const Vec4f& sphere = spheres[i];
-                        store(i, sphere_in(*resident.frustum, {sphere.x, sphere.y, sphere.z}, sphere.w));
-                    }
-                }
+                };
+                // The compact prefix consumes visibility directly; no later
+                // consumer needs these resident pieces' count/offset rows.
+                if (camera_only)
+                    run.template operator()<true>();
+                else
+                    run.template operator()<false>();
                 p = first.resident_end;
                 continue;
             }
@@ -10026,14 +10052,41 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         if (piece.group != ~0u && _cull_groups[piece.group].camera == 0)
             stats.camera_group_rejected += piece.end - piece.begin;
     };
-    const bool camera_only = !any_levels && !ctx.shadows && ctx.cascades == 0;
     if (camera_only) {
         _retained_visible.resize(static_cast<std::size_t>(stats.retained_instances));
         // Pieces are contiguous by ref. Consume each ref's counts and assign
         // its offsets while those pieces are still hot, instead of revisiting
         // both large arrays for clearing, reduction, prefixes and statistics.
         u32 p = 0;
-        for (u32 r = 0; r < _refs.size(); ++r) {
+        for (u32 r = 0; r < _refs.size();) {
+            const Piece& span = _pieces[p];
+            if (span.resident_end && _refs[r].direct) {
+                // A compiled span contains consecutive independent one-copy
+                // refs with contiguous table rows and no spatial groups. The
+                // byte decisions are also their complete counts and indices.
+                const u32 n = span.resident_end - p;
+                const DrawRef& first = _refs[r];
+                const u32 source_first = first.retained_first;
+                const u8* visible = _visible.data() + span.flat;
+                u32* counts = first.level_first;
+                const u32 start = retained_written;
+                stats.camera_instance_tests += first.frustum ? n : 0u;
+                for (u32 i = 0; i < n; ++i) {
+                    DrawRef& ref = _refs[r + i];
+                    const u32 seen = (visible[i] & camera_bit) != 0;
+                    ref.out_first = counts[3 * i] = retained_written;
+                    ref.out_count = counts[3 * i + 1] = seen;
+                    ref.out_extra = counts[3 * i + 2] = 0;
+                    if (seen)
+                        _retained_visible[retained_written++] = source_first + i;
+                }
+                const u32 seen = retained_written - start;
+                visible_total += seen;
+                stats.lod_copies_by_level[0] += seen;
+                r += n;
+                p = span.resident_end;
+                continue;
+            }
             const u32 first = p;
             u32 seen = 0;
             for (; p < _pieces.size() && _pieces[p].ref == r; ++p) {
@@ -10070,6 +10123,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 }
                 at += result.seen()[0];
             }
+            ++r;
         }
     } else {
         for (DrawRef& ref : _refs) {

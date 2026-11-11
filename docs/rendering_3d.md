@@ -213,7 +213,14 @@ separate live-update indices for batches, skins and spatial groups. Camera-culli
 refresh ref flags even without a command revision. Direct-source tables are validated after batch claims every render;
 eviction, slot compaction, changed bound storage or disabled retention rebinds or clears the affected refs. Prepared
 consumers and command revisions use the full refresh path. Writes through a still valid `add_instances()` span remain
-visible. A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
+visible. Explicit batches keep a slot hint, validated against the live buffer, batch identity and material colour before
+reuse. A claimed table already holding the batch's bounds bypasses a second pool search; colour changes still transfer
+the one shared bound array through the original lookup path.
+
+Compiled resident runs cover complete, consecutive one-copy refs with contiguous source rows and no spatial groups.
+When only camera membership is needed, their visibility bytes feed draw counts, offsets and retained indices directly;
+their unused piece-result rows are not written or consumed. Multi-copy tails, spatial groups and LOD/cascade consumers
+keep the general result path. A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
 alternating unrelated scenes replaces it. It is bounded to 16,384 pieces, 4,096 submitted spatial groups,
 128 batch stamps and 16 MiB of existing vector payload capacity.
 Optional ref-update indices cover at most 65,536 refs and count within that same 16 MiB payload budget; they are discarded
