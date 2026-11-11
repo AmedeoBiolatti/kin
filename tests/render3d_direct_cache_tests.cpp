@@ -141,6 +141,47 @@ void check(Renderer2D& renderer) {
     }
     // Geometry keys include the actual light projection and reach, independently
     // of the source's draw revision or camera.
+    // Bulk resident metadata must keep mixed caster flags current, and a
+    // single fresh view still needs static pieces while another view hits.
+    auto second_spot = scene.lights.spots.front();
+    second_spot.position.x = -3;
+    second_spot.direction = normalize(Vec3f{3, -4, -8});
+    scene.lights.spots.push_back(second_spot);
+    scene.lights.max_shadowed_spots = 2;
+    std::array<Material3D, 8> original_casters;
+    for (u32 i = 0; i < original_casters.size(); ++i)
+        original_casters[i] = scene.draws()[37 + i].material;
+    for (bool casts : {false, true}) {
+        for (u32 i = 0; i < original_casters.size(); ++i) {
+            Material3D edited = original_casters[i];
+            edited.casts_shadow = casts;
+            assert(scene.set_draw_material(37 + i, edited));
+        }
+        compare();
+        compare();
+        stable = compare();
+        assert(stable.stats.local_gather_cache_hits == 2 && stable.stats.direct_bounds_rebuilt == 0);
+    }
+    scene.lights.spots[1].position.x -= 1;
+    stable = compare();
+    assert(stable.stats.local_gather_cache_hits == 1 && stable.stats.local_gather_cache_misses == 1);
+    scene.lights.spots.pop_back();
+    scene.lights.max_shadowed_spots = 1;
+    // Entirely visible/hidden camera decisions must not change the flat-row
+    // mapping or retain stale scratch when local views leave and re-enter.
+    const Camera3D original_camera = scene.camera;
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    scene.camera.projection = Projection3D::Orthographic;
+    scene.camera.height = 32;
+    scene.camera.z_far = 60;
+    const auto all_seen = compare();
+    assert(all_seen.stats.culled == 0);
+    scene.camera = Camera3D::look_at({0, 0, 13}, {0, 0, 14});
+    scene.camera.z_far = 60;
+    const auto hidden = compare();
+    assert(hidden.stats.instances == 0 && hidden.pick_id == 0);
+    scene.camera = original_camera;
+    compare();
     const auto original_spot = scene.lights.spots.front();
     for (u32 edit = 0; edit < 4; ++edit) {
         auto& spot = scene.lights.spots.front();
@@ -255,9 +296,15 @@ void check(Renderer2D& renderer) {
         assert(overlay.draw(mesh, Mat4f::translation({f32(i % 32) * .6f - 9.f, f32(i / 32) * .6f - 4.f, 0}),
                             materials[i % 2]));
     shoot(true);
+    shoot(true); // both retained sources and the main scene's selection program are warm
     const auto overlay_reference = shoot(false);
     const auto overlay_cached = shoot(true);
-    assert(overlay_cached.pixels == overlay_reference.pixels && overlay_cached.stats.direct_retained_instances == 1026);
+    assert(overlay_cached.pixels == overlay_reference.pixels &&
+           overlay_cached.stats.direct_retained_instances == 1026 &&
+           overlay_cached.stats.local_gather_cache_hits == 1 &&
+           overlay_cached.stats.local_shadow_draws == overlay_reference.stats.local_shadow_draws &&
+           overlay_cached.stats.local_shadow_casters == overlay_reference.stats.local_shadow_casters &&
+           overlay_cached.stats.local_shadow_triangles == overlay_reference.stats.local_shadow_triangles);
     overlay.clear();
     compare();
 

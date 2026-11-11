@@ -7601,26 +7601,37 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     }
     // Each copy's flat place, shared with _visible and the bounds computed by cull_and_upload.
     std::vector<u32> base(_refs.size() + 1, 0);
-    for (u32 r = 0; r < _refs.size(); ++r) {
-        base[r + 1] = base[r] + _refs[r].draw->count;
-    }
     std::vector<u8> caster(_refs.size(), 0);
     constexpr u32 local_chunk = 2048;
     JobSystem* jobs = _owner->_jobs;
     bool any_skinned = false, direct = false;
     u32 main_refs = 0;
-    for (u32 r = 0; r < _refs.size(); ++r) {
+    for (u32 p = 0; p < _pieces.size();) {
+        const Piece& span = _pieces[p];
+        const u32 r = span.ref;
         const DrawRef& ref = _refs[r];
+        if (span.resident_end && ref.direct) {
+            // Complete one-copy refs share the source and caster eligibility.
+            // Derive their flat places and membership without a strided ref walk.
+            const u32 n = span.resident_end - p;
+            std::iota(base.begin() + r + 1, base.begin() + r + n + 1, base[r] + 1);
+            std::fill_n(caster.begin() + r, n, u8(ref.scene == 0 && casts_into_local(ref.draw->material)));
+            main_refs += ref.scene == 0 ? n : 0u;
+            direct = direct || ref.scene == 0;
+            p = span.resident_end;
+            continue;
+        }
+        base[r + 1] = base[r] + ref.draw->count;
         main_refs += ref.scene == 0;
         direct = direct || (ref.scene == 0 && ref.direct);
-        if (ref.scene != 0 || !casts_into_local(ref.draw->material)) {
-            continue;
+        if (ref.scene == 0 && casts_into_local(ref.draw->material) &&
+            (!ref.skinned || (_skinning_available && ref.mesh->skin))) {
+            caster[r] = 1;
+            any_skinned = any_skinned || ref.skinned;
         }
-        if (ref.skinned && (!_skinning_available || !ref.mesh->skin)) {
-            continue;
-        }
-        caster[r] = 1;
-        any_skinned = any_skinned || ref.skinned;
+        do {
+            ++p;
+        } while (p < _pieces.size() && _pieces[p].ref == r);
     }
     constexpr u32 view_limit = max_local_shadow_layers + max_shadow_cascades + 1;
     std::array<LocalGatherCache*, view_limit> plans{};
@@ -7652,7 +7663,15 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         u32 ref, begin, end, group;
     };
     std::vector<Piece2> sphere_pieces, dynamic_pieces;
-    for (const Piece& p : _pieces) {
+    for (u32 index = 0; index < _pieces.size();) {
+        const Piece& p = _pieces[index];
+        // With every wanted view cached, static direct copies come from the
+        // selection programs. Only the live pieces need a new work list.
+        if (!fresh_views && p.resident_end && _refs[p.ref].direct) {
+            index = p.resident_end;
+            continue;
+        }
+        ++index;
         if (!caster[p.ref])
             continue;
         const auto append = [&](std::vector<Piece2>& pieces) {
@@ -9786,11 +9805,22 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     const bool local_bounds = !_local_views.empty();
     u32 scratch = 0;
     if (local_bounds)
-        for (DrawRef& ref : _refs) {
-            if (ref.cached_spheres || ref.scene != 0 || !casts_into_local(ref.draw->material))
+        for (u32 p = 0; p < _pieces.size();) {
+            const Piece& span = _pieces[p];
+            DrawRef& ref = _refs[span.ref];
+            if (span.resident_end && ref.direct) {
+                // A claimed direct run already has all of its current spheres.
+                p = span.resident_end;
                 continue;
-            ref.sphere_first = scratch;
-            scratch += ref.draw->count;
+            }
+            if (!ref.cached_spheres && ref.scene == 0 && casts_into_local(ref.draw->material)) {
+                ref.sphere_first = scratch;
+                scratch += ref.draw->count;
+            }
+            const u32 r = span.ref;
+            do {
+                ++p;
+            } while (p < _pieces.size() && _pieces[p].ref == r);
         }
     // When a formerly streamed batch becomes cached, release its old scratch
     // capacity instead of quietly retaining a second full array. Hysteresis avoids

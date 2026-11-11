@@ -4,6 +4,65 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Resident spans in live-culling metadata, 2026-11-11
+
+The reference is `862a9892`. Existing compiled one-copy resident runs now skip
+unchanged refs when assigning transformed-bound scratch. Local-shadow flat-row
+prefixes and caster flags are built together, deriving complete runs in bulk;
+overlay rows remain in the flat mapping with no local-caster membership. When
+all wanted shadow views hit their selection caches, direct runs also bypass
+live-piece enumeration. Any fresh view keeps the complete caster-piece path.
+Visibility arithmetic, source/copy order, cache admission, memory capacities and
+all GPU work are unchanged; no new cache or per-instance payload is added.
+
+Five alternating Hard pairs show **6.6% median paired caller-CPU p50 reduction**,
+range **4.8–19.0%**, improving in all five pairs. Process CPU falls **5.2%** by the
+same calculation. Conditions are original independent Yard submissions, 720p
+HDR, no AA/GI/AO, classic 1,024 spot maps, four helpers, affinity 0–15, and 300
+warm-up plus a full 1,440-frame route per run. Blender/background workloads stay
+untouched; clocks, thermals and load are uncontrolled: results are **contended**.
+Neither PMU counters nor image readback run during normal timing.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 3 | 0.349 / 0.495 / 0.564 | 0.333 / 0.544 / 0.577 | 4.5% |
+| Medium | 1 | 2.027 / 2.404 / 2.650 | 1.608 / 1.848 / 2.000 | 20.7% |
+| Hard | 5 | 3.860 / 4.555 / 4.913 | 3.481 / 4.231 / 4.668 | 6.6% |
+
+Percentiles are medians of per-run percentiles; paired reductions use adjacent
+run medians, so dividing independently aggregated p50s gives a different result.
+The first Easy guard regressed 4.9%; two added alternating pairs improved
+11.6%/4.5%. All three are retained, and tails remain mixed. Medium is one guard
+pair, not a repeatability/scaling study. Hard frame p50 has a 0.9% median paired
+increase (median run medians 11.142 → 12.024 ms); no frame-throughput gain or new
+cross-engine ranking is established. These gains do not add directly to earlier
+percentages from different measurement windows.
+
+Two separate forward/reverse inherited P-core user-instruction/cycle controls
+show **3.062% and 3.060% fewer retired instructions**, at 99% event running
+coverage. They cover the whole process, including helpers, driver threads,
+startup, warm-up, assembly and presentation, not isolated render-phase counts
+or a clock-normalized speedup. Every non-timing per-frame work column matches.
+
+Fresh before/after `cpu-clock:u` profiles each cover two complete Hard routes at
+499 Hz with 16 KiB DWARF user stacks. Actual per-frame render-call windows exclude
+assembly, warm-up and presentation; caller and Kin workers are separate. Local
+shadow preparation falls **26.24 → 19.08%** of caller samples. Camera/instance
+preparation is **14.87 → 15.30%** of the smaller total; combined **41.11 → 34.38%**.
+These normalized user-CPU shares are not phase medians. Caller samples number
+6,772/6,237 with under 0.8% unresolved in each. Normal timings above use the fresh
+paired controls; the baseline profile's geometry reference is a previous normal
+route of the same frozen binary.
+
+Ten focused NVIDIA suites and four llvmpipe suites pass. Regressions cover
+mixed caster/non-caster resident runs, one fresh plus one cached map, completely
+visible/hidden frames, and 512 retained overlay refs with unchanged main-scene
+shadow membership/cache reuse. All **12,960 before/after route-frame comparisons**
+preserve every non-timing work/upload/resource/cache column, and nine decoded-RGBA
+pairs across the three tiers at phases 1/541/961 are exact. Evidence, raw paired
+percentiles, commands, frozen hashes and profiles are under
+`out/runs/render3d-live-cull-spans/`.
+
 ### Resident prefixes and retained-batch slot hints, 2026-11-11
 
 The reference is `0eacb145`. Complete one-copy retained runs now feed their

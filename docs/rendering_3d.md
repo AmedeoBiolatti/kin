@@ -220,7 +220,11 @@ the one shared bound array through the original lookup path.
 Compiled resident runs cover complete, consecutive one-copy refs with contiguous source rows and no spatial groups.
 When only camera membership is needed, their visibility bytes feed draw counts, offsets and retained indices directly;
 their unused piece-result rows are not written or consumed. Multi-copy tails, spatial groups and LOD/cascade consumers
-keep the general result path. A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
+keep the general result path. The same run proofs batch flat-row/caster metadata and skip bounds-scratch assignment
+for claimed direct rows. When every wanted local-shadow view hits a selection cache, direct runs also bypass live-piece
+enumeration; any fresh view keeps the complete caster-piece path. Flat rows still include overlays, whose local-caster
+flags stay clear. These walks reuse the existing metadata and workspace capacities.
+A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
 alternating unrelated scenes replaces it. It is bounded to 16,384 pieces, 4,096 submitted spatial groups,
 128 batch stamps and 16 MiB of existing vector payload capacity.
 Optional ref-update indices cover at most 65,536 refs and count within that same 16 MiB payload budget; they are discarded
