@@ -470,6 +470,52 @@ void check(Renderer2D& renderer) {
                cached.stats.local_gather_cache_hits == 2 && cached.stats.local_shadow_maps == 2);
     }
 
+    // Adjacent independent draws cross task boundaries and leave short tails.
+    // Camera-edge decisions and interruptions by other submission types must
+    // match the live scalar path, including source-order picking and counters.
+    scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    scene.camera.projection = Projection3D::Orthographic;
+    scene.camera.height = 10;
+    scene.camera.z_far = 60;
+    for (u32 i = 0; i < 1031; ++i) {
+        if (i == 510)
+            assert(scene.draw_instanced(explicit_batch, materials[0]));
+        if (i == 769) {
+            const std::array copies{MeshInstance3D{Mat4f::translation({-2, 0, 0}), colors::white, 3000},
+                                    MeshInstance3D{Mat4f::translation({2, 0, 0}), colors::white, 3001}};
+            assert(scene.draw_instanced(mesh, copies, materials[1]));
+        }
+        constexpr std::array x{-7.19f, -6.75f, -6.4f, 0.f, 6.4f, 6.75f, 7.19f};
+        constexpr std::array y{-5.52f, -5.5f, 0.f, 5.5f, 5.52f};
+        const Vec3f at{x[i % x.size()], y[(i / x.size()) % y.size()], 0};
+        const std::array copy{MeshInstance3D{Mat4f::translation(at), colors::white, i + 1}};
+        const DrawClip3D clip = i % 17 == 0 ? DrawClip3D::whole : DrawClip3D::camera;
+        assert(scene.draw_instanced(mesh, copy, materials[i % 3], clip));
+    }
+    shoot(true);
+    shoot(true);
+    for (u32 camera = 0; camera < 5; ++camera) {
+        const f32 x = (f32(camera) - 1) * .002f;
+        scene.camera = Camera3D::look_at({x, 0, 13}, {x, 0, 0});
+        scene.camera.projection = Projection3D::Orthographic;
+        scene.camera.height = 10;
+        scene.camera.z_far = 60;
+        if (camera == 4) {
+            scene.camera.clip_plane = {1, 0, 0, 0};
+            scene.camera.window = {.25f, 0, .5f, 1};
+        }
+        scene.cull = camera != 3;
+        const auto reference = shoot(false);
+        const auto actual = shoot(true);
+        assert(actual.pixels == reference.pixels && actual.pick_id == reference.pick_id &&
+               actual.stats.draws == reference.stats.draws && actual.stats.instances == reference.stats.instances &&
+               actual.stats.triangles == reference.stats.triangles &&
+               actual.stats.camera_instance_tests == reference.stats.camera_instance_tests &&
+               actual.stats.direct_retained_instances == 1033 && actual.stats.device_waits == 0);
+    }
+
     // Oversized direct tables stream within the existing 32 MiB budget.
     scene = Scene3D{};
     scene.debug.cache_draw_commands = false;

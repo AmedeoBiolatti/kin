@@ -9666,15 +9666,79 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     // Keep the original loop free of reach state when shadows are disabled.
     // Single-map draws without cells have no plane proofs or endpoint reuse; their
     // original loop is cheaper. Compile the reference separately, without per-copy flag branches.
-    if (ctx.shadows && (!_cull_groups.empty() || ctx.cascades > 1))
-        each_task([&](Piece& piece) {
-            if (piece.group != ~0u || ctx.cascades > 1)
-                classify.operator()<true>(piece);
-            else
+    const auto classify_task = [&]<bool fast>(u32 t) {
+        const u32 end = _tasks[t + 1];
+        std::optional<sphere_cull4::Test> camera_test;
+        const GpuFrustum* camera_frustum = nullptr;
+        for (u32 p = _tasks[t]; p < end;) {
+            // Independent direct draws share one retained sphere array. Refine
+            // four adjacent one-copy draws together, without changing their
+            // source order or crossing a worker's disjoint piece range.
+            if constexpr (sphere_cull4::available) {
+                if (end - p >= 4) {
+                    const auto eligible = [&](u32 k) {
+                        const Piece& piece = _pieces[p + k];
+                        const DrawRef& ref = _refs[piece.ref];
+                        return piece.group == ~0u && piece.end == piece.begin + 1 && ref.direct && ref.cached_spheres &&
+                               ref.frustum && ref.levels == 1 && !ref.caster && !ref.skinned && !ref.clustered;
+                    };
+                    if (eligible(0)) {
+                        const Piece& first = _pieces[p];
+                        const DrawRef& ref = _refs[first.ref];
+                        bool adjacent = true;
+                        for (u32 k = 1; k < 4 && adjacent; ++k) {
+                            const Piece& next = _pieces[p + k];
+                            const DrawRef& other = _refs[next.ref];
+                            adjacent = eligible(k) && other.retained == ref.retained && other.frustum == ref.frustum &&
+                                       other.retained_first + next.begin == ref.retained_first + first.begin + k;
+                        }
+                        if (adjacent) {
+                            if (camera_frustum != ref.frustum) {
+                                camera_test.emplace(std::span{ref.frustum->planes.data(), ref.frustum->count}, Vec3f{},
+                                                    0, false);
+                                camera_frustum = ref.frustum;
+                            }
+                            const u32 mask = camera_test->mask(ref.cached_spheres + first.begin);
+                            for (u32 k = 0; k < 4; ++k) {
+                                Piece& piece = _pieces[p + k];
+                                const bool seen = (mask & (1u << k)) != 0;
+                                _visible[piece.flat] = seen ? camera_bit : u8{0};
+                                piece.camera_tests = 1;
+                                piece.bounds_tests = 0;
+                                piece.seen[0] = seen ? 1u : 0u;
+                                piece.extra[0] = 0;
+                                for (u32 c = 0; c < counter_cascades; ++c)
+                                    piece.cascade[c][0] = 0;
+                            }
+                            p += 4;
+                            continue;
+                        }
+                    }
+                }
+            }
+            Piece& piece = _pieces[p++];
+            if constexpr (fast) {
+                if (piece.group != ~0u || ctx.cascades > 1)
+                    classify.operator()<true>(piece);
+                else
+                    classify.operator()<false>(piece);
+            } else {
                 classify.operator()<false>(piece);
-        });
+            }
+        }
+    };
+    const auto classify_tasks = [&]<bool fast>() {
+        if (jobs && _tasks.size() > 2)
+            jobs->parallel_for(static_cast<i32>(_tasks.size() - 1),
+                               [&](i32 t) { classify_task.operator()<fast>(static_cast<u32>(t)); });
+        else
+            for (u32 t = 0; t + 1 < _tasks.size(); ++t)
+                classify_task.operator()<fast>(t);
+    };
+    if (ctx.shadows && (!_cull_groups.empty() || ctx.cascades > 1))
+        classify_tasks.operator()<true>();
     else
-        each_task([&](Piece& piece) { classify.operator()<false>(piece); });
+        classify_tasks.operator()<false>();
     // Each draw's copies: by level, and in each those seen, then those only the sun sees.
     for (DrawRef& ref : _refs) {
         ref.out_count = ref.out_extra = 0;

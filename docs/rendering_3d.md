@@ -254,6 +254,9 @@ The camera classifier reuses current cached spheres for single-level, non-skinne
 membership bits. It fills camera-inside/outside ranges and tests partial ranges four copies at a time, using the existing
 local-shadow SIMD helper (or its scalar fallback), in source order with the original boundary comparisons. Local shadow
 selection remains independent of camera rejection. No sphere cache or GPU resource is added.
+On supported SIMD targets, four adjacent single-copy direct pieces can share that test when their spheres are contiguous
+in the same retained table and use the same camera frustum. Frustum setup is reused within each task; groups, sun casters,
+LOD, skinning and other ineligible pieces keep their existing classification path. Task boundaries and source order stay intact.
 Classification and prefix reduction also clear only the LOD/cascade counter prefixes consumed by the current render;
 enabling more levels/cascades clears those newly active slots before use.
 
