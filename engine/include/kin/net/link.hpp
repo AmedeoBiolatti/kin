@@ -49,6 +49,9 @@ enum class LinkState : u8 {
 
 enum class RejectReason : u8 { none, protocol, model, game, config, session, slot };
 
+// A random number, never 0 and different every call: link tokens and joiners' ids. Not for a simulation.
+u64 random_id();
+
 std::string_view link_state_name(LinkState state);
 std::string_view reject_reason_name(RejectReason reason);
 

@@ -142,20 +142,26 @@ private:
         i64 last_ack_sent = -2;
         std::deque<std::pair<u32, u64>> hashes; // the peer's hashes not yet compared
         bool linked = false;                    // the slot has a link (a player in the game, or one joining)
+        u64 join_id = 0;     // what the joiner on this link calls itself (its join requests say), 0 until heard
+        u64 expected_id = 0; // the joiner the game let into this slot (0 for a player from the start)
+        u64 served_id = 0;   // the joiner this host sent a state to (a repeated request from it is not a new one)
+        u64 joined_at_us = 0;
     };
     struct JoinEvent {
         u32 tick = 0;
         u32 slot = 0;
+        u64 id = 0; // the joiner's join id
     };
     // The state on its way to a joiner (this peer is the game's host).
     struct Transfer {
         u32 slot = 0;
         u32 base = 0;    // the state is from before this tick
-        u32 present = 0; // the slots in the game at `base`
+        u32 present = 0; // the slots in the game before `base`
         std::vector<u8> bytes;
         u32 acked = 0; // bytes the joiner has, from the start
         u32 next = 0;  // the next byte to send
         u64 progress_us = 0;
+        u64 acked_us = 0; // when the joiner last acknowledged more
     };
 
     bool start_failed(std::string detail);
@@ -170,11 +176,14 @@ private:
     void compare_hashes();
     void advance(u64 elapsed_us);
     void send_inputs();
-    void on_join_request(u32 slot);
+    void on_join_request(u32 slot, u64 id);
+    void serve_join_requests();
+    void check_joined_players();
+    void fail_joining(std::string detail);
     void on_join_state(u32 slot, ByteReader& payload);
     void on_join_ack(u32 slot, ByteReader& payload);
-    void on_join_ready(u32 slot);
-    void apply_join(u32 slot, u32 tick);
+    void on_join_ready(u32 slot, u64 id);
+    void apply_join(u32 slot, u32 tick, u64 id);
     void start_from_state();
     void serve_transfers();
     void send_join_messages();
@@ -184,7 +193,8 @@ private:
     bool present(u32 slot, u32 tick) const { return _active_from[slot] <= static_cast<i64>(tick); }
     u32 present_mask(u32 tick) const;
     u32 host() const;
-    f32 remote_now(u32 slot) const;
+    u32 host_at(u32 tick) const;
+    f64 remote_now(u32 slot) const;
     f32 own_view(u32 slot) const;
     f32 measure_advantage() const;
 
@@ -217,6 +227,10 @@ private:
     std::vector<i64> _active_from;
     std::vector<JoinEvent> _created; // joins this peer decided as the host, sent with its commands
     std::vector<Transfer> _transfers;
+    std::vector<u32> _join_requests; // slots that asked for the state since the last update (served after rollback)
+    // A joiner's own id, random: every join message names the player, so each peer can tell it is the one it allowed.
+    u64 _join_id = 0;
+    u64 _state_progress_us = 0;
     // A joiner's incoming state.
     bool _have_state = false;
     bool _state_started = false;

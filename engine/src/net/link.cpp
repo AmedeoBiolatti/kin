@@ -24,8 +24,10 @@ enum class LinkMessage : u8 {
 
 constexpr std::size_t npos = std::numeric_limits<std::size_t>::max();
 
+} // namespace
+
 // Not part of any simulation: it only has to differ between links and matches, and be hard to guess.
-u64 random_token() {
+u64 random_id() {
     static std::atomic<u64> counter{0};
     std::random_device device;
     const u64 parts[] = {(static_cast<u64>(device()) << 32) ^ device(),
@@ -34,6 +36,8 @@ u64 random_token() {
     const u64 token = hash_bytes(parts, sizeof(parts));
     return token != 0 ? token : 1; // 0 means "not heard yet"
 }
+
+namespace {
 
 u64 read_token(std::span<const u8> header) {
     u64 token = 0;
@@ -109,11 +113,11 @@ std::size_t Links::add(PeerId peer, u32 slot, bool optional) {
         }
         // A new token: the failed link's late messages do not reach the new one.
         _links[i] = {.peer = peer, .slot = slot, .optional = optional};
-        _tracks[i] = {.token = random_token()};
+        _tracks[i] = {.token = random_id()};
         return i;
     }
     _links.push_back({.peer = peer, .slot = slot, .optional = optional});
-    _tracks.push_back({.token = random_token()});
+    _tracks.push_back({.token = random_id()});
     return _links.size() - 1;
 }
 
