@@ -10970,8 +10970,7 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
         std::vector<u32>().swap(_main_draw_list);
         _main_draw_indices.reset();
     };
-    if (!budget || _refs.size() > 8192 ||
-        _refs.size() * (sizeof(DrawCommand) + sizeof(DrawBindingKey) + sizeof(u32)) > budget) {
+    if (!budget || _refs.size() * (sizeof(DrawCommand) + sizeof(DrawBindingKey) + sizeof(u32)) > budget) {
         clear();
         return;
     }

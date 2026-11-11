@@ -349,9 +349,10 @@ count fresh work only. The Yard CLI exposes `--cache-local-shadow-gather 0|1`;
 benchmark `--mode local-gather` keeps direct retention enabled in both controls.
 
 The native main pass retains draw decisions and source ordering after an unchanged
-command revision has been observed twice. A plan holds up to 8,192 draw refs and
-4 MiB of CPU vector payload, keyed by both scenes' identities, revisions and
-storage. It caches stock material uniforms, texture/sampler compatibility classes
+command revision has been observed twice. A plan is limited to 4 MiB of CPU vector payload,
+keyed by both scenes' identities, revisions and storage. Admission accounts for the draw records and
+worst-case binding count; actual vector capacities and camera-index scratch are checked against the same cap.
+It caches stock material uniforms, texture/sampler compatibility classes
 and pipeline pointers. Target format, samples, TAA, velocity, fog, local-light and
 indexed-storage changes select current pipeline variants; pipeline-cache
 forget/destroy events invalidate saved pointers. Failed pipeline allocations

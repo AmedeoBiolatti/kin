@@ -273,6 +273,30 @@ void check(Renderer2D& renderer) {
     const auto capped = shoot(true, view);
     assert(capped.stats.draw_plan_bytes <= scene.debug.draw_command_budget && capped.stats.main_batched_draws == 0);
     assert(capped.pixels == shoot(false, view).pixels);
+    // A stable plan with many small draws can fit the byte budget past 8192
+    // refs. Shared storage/bindings must not change pixels or equal-depth order.
+    scene = Scene3D{};
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    for (u32 i = 0; i < 16000; ++i)
+        assert(scene.draw(box, Mat4f::translation({f32(i % 128) * .6f - 38, f32(i / 128) * .6f - 37, 0}),
+                          materials[i % materials.size()], colors::white, i + 1));
+    assert(scene.draw(box, Mat4f::scaling({2, 2, 2}), materials[0], colors::white, 17000));
+    assert(scene.draw(box, Mat4f::scaling({2, 2, 2}), materials[1], colors::white, 17001));
+    shoot(true, view);
+    shoot(true, view);
+    const auto large = compare(view);
+    assert(large.stats.prepared_draws > 8192 && large.stats.draw_plan_builds == 1 &&
+           large.stats.main_merged_draws > 200);
+    const auto large_warm = shoot(true, view);
+    assert(large_warm.stats.draw_plan_hits == 1 && large_warm.stats.draw_pipeline_misses == 0 &&
+           large_warm.stats.draw_material_upload_bytes == 0);
+    // Reduced budgets still select the reference, and restoring one retries
+    // the same source rather than leaving a failed plan cached indefinitely.
+    scene.debug.draw_command_budget = 1;
+    const auto large_capped = compare(view, false);
+    assert(large_capped.stats.draw_plan_bytes == 0 && large_capped.stats.main_merged_draws == 0);
+    scene.debug.draw_command_budget = 4 * 1024 * 1024;
+    compare(view);
     std::cout << "draw commands: exact pixels/picks/order, heterogeneous materials, sampling/texture edits, "
                  "fog/lights/MSAA/AO, poses, overlays, source moves, raw spans, budgets and same-frame views passed\n";
 }
