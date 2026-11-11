@@ -161,3 +161,5 @@ kin_declare_component(PYTHON DEFAULT OFF DESCRIPTION "Build the experimental Pyt
     EXTERNAL_DEPENDENCIES PocketPy TESTS kin-python-scripts)
 kin_declare_component(NET DEFAULT OFF DESCRIPTION "Build the experimental networking: transports and sync models (kin/net)"
     TESTS kin-net kin-net-services)
+kin_declare_component(VOICE DEFAULT OFF DESCRIPTION "Build voice chat: Opus voice, noise suppression, echo gate (kin/voice)"
+    REQUIRES AUDIO EXTERNAL_DEPENDENCIES Opus RNNoise TESTS kin-voice)

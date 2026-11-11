@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/audio/audio_capture.hpp>
 #include <kin/audio/audio_catalog.hpp>
 #include <kin/audio/audio_clip.hpp>
 #include <kin/audio/audio_decoder.hpp>

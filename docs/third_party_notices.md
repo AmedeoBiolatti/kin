@@ -31,6 +31,8 @@ fonts and additional libraries through its `LICENSE_FILES` argument.
 | [cgltf](https://github.com/jkuhlmann/cgltf) (with `KIN_EXPERIMENTAL_3D`) | 1.14 | MIT | Johannes Kuhlmann |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `KIN_EXPERIMENTAL_3D`; simplifier, meshlet builder, cluster partitioner, index and vertex-cache tools) | 0.25 | MIT | Arseny Kapoulkine |
 | [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (with `KIN_EXPERIMENTAL_3D`; the rigid body engine behind `kin/physics3d`) | 5.5.0 | MIT | Jorrit Rouwe |
+| [Opus](https://opus-codec.org) (with `KIN_ENABLE_VOICE`; the voice codec) | 1.5.2 | BSD-3-Clause | Xiph.Org Foundation, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon |
+| [RNNoise](https://github.com/xiph/rnnoise) (with `KIN_ENABLE_VOICE`; the microphone's noise suppression, with its trained model) | 0.2 | BSD-3-Clause | Xiph.Org Foundation, Mozilla, Amazon, Jean-Marc Valin |
 
 Native GPU builds use a marked, generated variant of SDL's Vulkan translation unit
 to include compute shader reads in sampler barriers. The original source and zlib

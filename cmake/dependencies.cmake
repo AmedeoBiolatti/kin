@@ -541,3 +541,56 @@ if(KIN_ENABLE_PYTHON)
     file(WRITE "${CMAKE_BINARY_DIR}/licenses/PocketPy.txt" "${_kin_pocketpy_notice}")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};PocketPy.txt|${CMAKE_BINARY_DIR}/licenses/PocketPy.txt" CACHE INTERNAL "")
 endif()
+
+# Opus (the voice codec) and RNNoise (the microphone's noise suppressor), only with KIN_ENABLE_VOICE
+# (kin/voice/voice.hpp, docs/voice.md): static libraries without their programs, tests or install files. Opus comes
+# from Xiph's GitHub release first, downloads.xiph.org second (the same file; the hash pins both). RNNoise's release
+# carries its trained model (src/rnnoise_data.c, which upstream's git leaves to a download); it has no CMake build, so
+# it is built here from its sources, in plain C (without its x86 run-time dispatch). Opus's neural-network code has
+# functions of the same names, so RNNoise's are renamed, should Opus ever be built with DRED or OSCE.
+if(KIN_ENABLE_VOICE)
+    set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(opus
+        URL https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz
+            https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz
+        URL_HASH SHA256=65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    # (Opus adds its own tests to CTest whenever BUILD_TESTING is on.)
+    set(_kin_voice_testing ${BUILD_TESTING})
+    set(BUILD_TESTING OFF)
+    FetchContent_MakeAvailable(opus)
+    set(BUILD_TESTING ${_kin_voice_testing})
+    unset(_kin_voice_testing)
+
+    FetchContent_Declare(rnnoise
+        URL https://github.com/xiph/rnnoise/releases/download/v0.2/rnnoise-0.2.tar.gz
+        URL_HASH SHA256=90fce4b00b9ff24c08dbfe31b82ffd43bae383d85c5535676d28b0a2b11c0d37
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(rnnoise)
+    set(_kin_rnnoise_sources denoise.c rnn.c pitch.c kiss_fft.c celt_lpc.c nnet.c nnet_default.c
+        parse_lpcnet_weights.c rnnoise_data.c rnnoise_tables.c)
+    list(TRANSFORM _kin_rnnoise_sources PREPEND "${rnnoise_SOURCE_DIR}/src/")
+    add_library(kin_rnnoise STATIC ${_kin_rnnoise_sources})
+    unset(_kin_rnnoise_sources)
+    target_include_directories(kin_rnnoise SYSTEM PUBLIC "${rnnoise_SOURCE_DIR}/include"
+        PRIVATE "${rnnoise_SOURCE_DIR}/src")
+    target_compile_definitions(kin_rnnoise PRIVATE RNNOISE_BUILD DISABLE_DEBUG_FLOAT=1
+        compute_generic_conv1d=rnn_compute_generic_conv1d compute_generic_dense=rnn_compute_generic_dense
+        compute_generic_gru=rnn_compute_generic_gru compute_glu=rnn_compute_glu conv2d_init=rnn_conv2d_init
+        linear_init=rnn_linear_init parse_weights=rnn_parse_weights)
+    # It warns that it is built without AVX2 (it runs at a few percent of a core all the same).
+    target_compile_options(kin_rnnoise PRIVATE "$<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-Wno-cpp;-w>"
+        "$<$<C_COMPILER_ID:MSVC>:/w>")
+    if(NOT MSVC)
+        target_link_libraries(kin_rnnoise PRIVATE m)
+    endif()
+    set(KIN_THIRD_PARTY_LICENSES
+        "${KIN_THIRD_PARTY_LICENSES};Opus.txt|${opus_SOURCE_DIR}/COPYING;RNNoise.txt|${rnnoise_SOURCE_DIR}/COPYING"
+        CACHE INTERNAL "")
+endif()

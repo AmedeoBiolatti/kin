@@ -37,6 +37,13 @@ releases may change APIs.
   for it. Nobody waits for a joiner, and one that never comes leaves the slot free. `StepInfo` gains `present` and
   `joined`. A lost optional link no longer fails a session (`LinkInfo::optional`). Lobby matches can keep free
   slots (`start_lobby_match(..., free_slots)`, `seat_lobby_joiners`, `free_lobby_slot`, `allow_lobby_joiners`).
+- Voice chat (`KIN_ENABLE_VOICE`, `kin::voice`; [voice chat](voice.md)): each player's microphone, cleaned of noise
+  (RNNoise) and of the speakers playing back into it (an echo gate), gated (open or push to talk), coded with Opus
+  and sent to the others over the platform's messages (`ServicesVoiceLink`, on Steam through its relays) or a game's
+  own transport (`VoiceLink`); a jitter buffer per speaker (`VoiceStream`) that recovers lost frames; voices played
+  where the speakers stand (`add_voice_clip`, `voice_cue`); `voice_level()` for a game's commands. The AUDIO
+  component gains microphone capture (`open_audio_capture`, `list_audio_input_devices`) and
+  `AudioEngine::open_output_tap`.
 - Players leave a game that goes on (`InputSyncConfig::players_may_leave`, on by default;
   [networking](networking.md#leaving)): a player who quits or whose connection is lost is gone from a tick every peer
   agrees on (`StepInfo::left`), in rollback and lockstep. The peers relay the commands some lack, and a player only

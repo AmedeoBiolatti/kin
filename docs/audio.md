@@ -452,6 +452,19 @@ audio.update(dt)
 render
 ```
 
+## Recording and the output tap
+
+`kin/audio/audio_capture.hpp` records a microphone: `open_audio_capture({.sample_rate, .device})` gives mono float
+samples at the rate asked for (the device's own format converted), and `read()` takes what arrived since the last
+call without waiting. It returns nothing, with a reason, when there is no microphone or the system refused access.
+`list_audio_input_devices()` names the devices; `set_paused(true)` lets the device go, so the system shows the
+microphone off. `make_memory_audio_capture()` plays samples from memory as if recorded, for tests.
+
+`AudioEngine::open_output_tap(seconds)` keeps a copy of the final output, after the limiter, as each block is mixed,
+for another thread to read: what the speakers play, for an echo gate ([voice chat](voice.md)) or a recording. Each
+frame is numbered from the engine's first; what is not read in time is lost, oldest first, and counted. One tap at a
+time.
+
 ## Backend
 
 `IAudioBackend` is where the mix goes. A device backend calls the engine's
