@@ -207,8 +207,11 @@ if(KIN_ENABLE_PHYSICS)
 endif()
 
 if(KIN_ENABLE_SCRIPTING)
+    # lua.org is the one dependency host outside GitHub and sometimes times out (CI), so a copy of the same tarball
+    # on the kin repo's `deps` release is tried first; the hash pins both.
     FetchContent_Declare(lua
-        URL https://www.lua.org/ftp/lua-5.4.6.tar.gz
+        URL https://github.com/AmedeoBiolatti/kin/releases/download/deps/lua-5.4.6.tar.gz
+            https://www.lua.org/ftp/lua-5.4.6.tar.gz
         URL_HASH SHA256=7d5ea1b9cb6aa0b59ca3dde1c6adcb57ef83a1ba8e5432c0ecd06bf439b3ad88
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
