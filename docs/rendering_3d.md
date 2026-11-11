@@ -197,9 +197,11 @@ of valid groups stays the same. GPU tables and CPU spheres continue to use the f
 This reuses the renderer's existing arrays, not a copy of scene instances or visibility results. Camera frustums, shadow
 membership, group plane proofs, retained-table slots/bounds and uploads are refreshed each render. Writes through a still
 valid `add_instances()` span remain visible. A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
-alternating unrelated scenes replaces it. It is bounded to 8,192 draw references,
-16,384 pieces, 4,096 submitted spatial groups, 128 batch stamps and 16 MiB of existing vector payload capacity.
-Exact structural descriptors add at most 1 MiB of bounded vector payload (plus weak-owner control-block overhead).
+alternating unrelated scenes replaces it. It is bounded to 16,384 pieces, 4,096 submitted spatial groups,
+128 batch stamps and 16 MiB of existing vector payload capacity.
+Exact structural descriptors cover up to 8,192 source draws and add at most 1 MiB of bounded vector payload
+(plus weak-owner control-block overhead). Larger persistent command sets reuse the layout only while their exact
+scene identity and command revision remain unchanged; resubmission rebuilds without allocating more descriptors.
 They keep no owning mesh/batch handles and no second instance array. LOD-enabled
 scenes use the original construction path; oversized layouts and structural command edits rebuild it too. Skinned commands
 can reuse the layout: joint pointers/offsets, posed bounds, visibility, shadows and GPU uploads refresh each render.

@@ -360,6 +360,64 @@ void check(Renderer2D& renderer) {
                updated.stats.local_shadow_triangles == reference.stats.local_shadow_triangles);
     }
 
+    // A persistent source beyond the structural-descriptor cap can still reuse
+    // its revision-proven layout, without allocating more descriptor payload.
+    scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    const auto large_source = [&](bool changed) {
+        scene.clear();
+        for (u32 i = 0; i < 8193; ++i)
+            assert(scene.draw(
+                mesh, Mat4f::translation({f32(i % 96) * .4f - 19, f32(i / 96) * .4f - 17, changed ? -.5f : 0.f}),
+                materials[(i + u32(changed)) % 3], colors::white, i + 1));
+        const std::array pose{Mat4f::identity()};
+        assert(scene.draw_skinned(skinned, pose, Mat4f::translation({0, 0, 2}), materials[0]));
+    };
+    const auto fresh_layout = [&] {
+        Scene3D moved = std::move(scene);
+        scene = std::move(moved);
+        const auto result = shoot(false);
+        assert(result.stats.prepared_reused == 0);
+        return result;
+    };
+    large_source(false);
+    const auto large_reference = shoot(false);
+    const auto large_cached = shoot(false);
+    assert(large_reference.stats.prepared_reused == 0 && large_cached.stats.prepared_reused == 1 &&
+           large_cached.stats.prepared_draws > 8192 && large_cached.stats.prepared_cache_bytes < 4096 &&
+           large_cached.stats.prepared_layout_bytes <= 16 * 1024 * 1024);
+    assert(large_cached.pixels == large_reference.pixels && large_cached.pick_id == large_reference.pick_id &&
+           large_cached.stats.instances == large_reference.stats.instances &&
+           large_cached.stats.triangles == large_reference.stats.triangles);
+    scene.camera = Camera3D::look_at({2, 1, 13}, {});
+    assert(scene.update_joint_matrices(0, std::array{Mat4f::translation({.5f, 0, 0})}));
+    const auto posed = shoot(false);
+    assert(posed.stats.prepared_reused == 1 && posed.pixels == fresh_layout().pixels);
+    // Clear/resubmit into the same storage must rebuild without descriptors.
+    large_source(true);
+    assert(shoot(false).stats.prepared_reused == 0);
+    const auto resubmitted = shoot(false);
+    assert(resubmitted.stats.prepared_reused == 1 && resubmitted.pixels != large_reference.pixels &&
+           resubmitted.pixels == fresh_layout().pixels);
+    // Unannounced writes through a valid exposed span still refresh content.
+    auto large_span = scene.add_instances(mesh, 1, materials[1]).value_or({});
+    assert(large_span.size() == 1);
+    large_span[0] = {Mat4f::translation({0, 0, 3}), colors::white, 9000};
+    shoot(false);
+    assert(shoot(false).stats.prepared_reused == 1);
+    large_span[0].transform = Mat4f::translation({3, 0, 3});
+    const auto raw_large = shoot(false);
+    assert(raw_large.stats.prepared_reused == 1 && raw_large.pixels == fresh_layout().pixels);
+    // The existing piece/layout budgets still force a live rebuild beyond them.
+    for (u32 i = 0; i < 8193; ++i)
+        assert(scene.draw(mesh, Mat4f::translation({1000, 0, 0}), materials[i % 3]));
+    for (u32 i = 0; i < 2; ++i) {
+        const auto oversized_layout = shoot(false);
+        assert(oversized_layout.stats.prepared_draws > 16384 && oversized_layout.stats.prepared_reused == 0 &&
+               oversized_layout.pixels == raw_large.pixels);
+    }
+
     // Oversized direct tables stream within the existing 32 MiB budget.
     scene = Scene3D{};
     scene.debug.cache_draw_commands = false;

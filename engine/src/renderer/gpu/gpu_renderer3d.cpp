@@ -9095,7 +9095,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             draw_count += submitted->draws().size();
             group_count += submitted->instance_groups().size();
         }
-    eligible = eligible && draw_count <= 8192 && group_count <= 4096;
+    eligible = eligible && group_count <= 4096;
     bool reuse = eligible && _prepared_valid && keys == _prepared_keys;
     const auto same_bounds = [](const Bounds3D& a, const Bounds3D& b) { return a.min == b.min && a.max == b.max; };
     if (eligible && _prepared_valid && !reuse && draw_count == _prepared_draws.size() &&
@@ -9363,7 +9363,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     stats.bounds_cache_bytes = _bounds_cache_bytes;
     stats.spatial_groups = static_cast<u32>(_cull_groups.size());
 
-    eligible = eligible && _refs.size() <= 8192 && _cull_groups.size() <= 4096;
+    eligible = eligible && _cull_groups.size() <= 4096;
     ctx.joint_total = joint_total;
     ctx.joint_base = joint_base;
 
@@ -9412,7 +9412,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                              _tasks.capacity() * sizeof(u32) + _cull_groups.capacity() * sizeof(CullGroup);
     eligible = eligible && _pieces.size() <= 16384 && layout_bytes <= 16 * 1024 * 1024;
     if (eligible) {
-        if (!reuse) {
+        if (!reuse && draw_count <= 8192) {
             _prepared_draws.clear();
             _prepared_groups.clear();
             for (const auto* submitted : ctx.scenes)
@@ -9424,6 +9424,11 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                     _prepared_groups.insert(_prepared_groups.end(), submitted->instance_groups().begin(),
                                             submitted->instance_groups().end());
                 }
+        } else if (!reuse) {
+            // The unchanged identity/revision proves a persistent layout without
+            // a second descriptor per draw. Larger resubmissions rebuild instead.
+            std::vector<PreparedDraw>().swap(_prepared_draws);
+            std::vector<Scene3D::InstanceGroup>().swap(_prepared_groups);
         }
         _prepared_keys = keys;
         _prepared_total = total;
