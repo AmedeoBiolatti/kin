@@ -178,6 +178,25 @@ public:
     bool owns(std::string_view) const override { return false; }
     std::string join_on_launch() const override { return {}; }
 
+    // No lobbies and no other players without a platform.
+    u32 create_lobby(const LobbyOptions&) override { return 0; }
+    u32 join_lobby(std::string_view) override { return 0; }
+    void leave_lobby() override {}
+    u32 find_lobbies(const LobbyFilter&) override { return 0; }
+    std::string lobby() const override { return {}; }
+    std::vector<LobbyMember> lobby_members() const override { return {}; }
+    std::string lobby_owner() const override { return {}; }
+    bool set_lobby_data(std::string_view, std::string_view) override { return false; }
+    std::string lobby_data(std::string_view) const override { return {}; }
+    bool set_member_data(std::string_view, std::string_view) override { return false; }
+    std::string member_data(std::string_view, std::string_view) const override { return {}; }
+    bool set_lobby_joinable(bool) override { return false; }
+    bool send_lobby_message(std::string_view) override { return false; }
+    bool send_message(std::string_view, std::span<const u8>, MessageDelivery, u32) override { return false; }
+    void receive_messages(u32, std::vector<PlayerMessage>&) override {}
+    void close_messages(std::string_view) override {}
+    std::size_t max_message() const override { return 0; }
+
 private:
     struct Best {
         bool set = false;
