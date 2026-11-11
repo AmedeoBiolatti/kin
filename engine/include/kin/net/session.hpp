@@ -30,6 +30,11 @@ inline bool session_over(SessionStatus status) {
 
 class Session {
 public:
+    Session() = default;
+    // A session hands references to itself and to what it was given (the simulation, the transport) to the layers
+    // under it, so a copy or a move would leave them pointing at the old one: keep it in place, or behind a pointer.
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
     virtual ~Session() = default;
 
     // Receives, simulates what is due and sends. `now_us` is a monotonic clock that never goes back; tests pass a

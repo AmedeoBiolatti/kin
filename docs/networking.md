@@ -183,9 +183,10 @@ updates, hashes compared and the clock advantage.
 jitter, loss and duplication, or can be cut; the same seed always loses and delays the same datagrams. Its clock is
 whatever time the owner sets, so a test plays a minute of a laggy four-player match in milliseconds.
 
-**`UdpTransport`** binds a non-blocking socket (`port = 0` picks a free one). `add_peer()` resolves an address; a
-datagram from an address it does not know gets a new peer id (up to `max_peers`), which is how a host learns its
-players. It does not cross NATs: that comes with the Steam and WebRTC transports.
+**`UdpTransport`** binds a non-blocking socket (`port = 0` picks a free one). `add_peer()` resolves an address.
+Datagrams from other addresses are ignored, unless `accept_unknown` is on: then one that starts like kin's messages
+gets a new peer id (up to `max_peers`, never reused), which is how a host learns its players. It does not cross NATs:
+that comes with the Steam and WebRTC transports.
 
 A transport delivers datagrams or loses them; the layers above repeat what matters. Input sync sends every command a
 peer has not acknowledged in each datagram, so a lost datagram costs nothing.
@@ -208,25 +209,32 @@ back (Jolt can; flecs and 2D physics cannot yet, so they suit lockstep).
 
 ## Wire format
 
-Every datagram starts with `'k' 'n'`, the protocol version (1) and a message type; numbers are little-endian.
+Every datagram starts with a 12-byte header: `'k' 'n'`, the protocol version (1), a message type and the receiver's
+token `u64`; numbers are little-endian. Each side picks a random token per link and sends it in its hello. A message
+that does not carry the token this side picked is ignored (a hello or a protocol reject may carry 0 before the
+handshake ends), so a late datagram from an earlier match between the same addresses, or a forged one, cannot end or
+drive the link.
 
 | Type | Message | Payload |
 |---|---|---|
-| 1 | hello | model `u32`, game `u64`, config `u64`, session `u64`, sender's slot `u32`, heard you `u8` |
-| 2 | reject | reason `u8` (this layout never changes) |
+| 1 | hello | model `u32`, game `u64`, config `u64`, session `u64`, sender's slot `u32`, sender's token `u64` |
+| 2 | reject | reason `u8` (the header and this layout never change) |
 | 3, 4 | ping, pong | the pinger's clock `u64` |
 | 5 | bye | |
 | 32 | inputs | slot `u8`, sender's tick `u32`, its advantage `i16` (1/256 tick), next tick it lacks from the receiver `u32`, first tick `u32`, count `u8`, the commands |
 | 33 | hash | slot `u8`, tick `u32`, state hash `u64` |
 
-A peer sends hellos until it hears one that says the other side heard it. Any later message from the peer completes
-the handshake too, so one lost hello costs nothing. A hello whose model, game, configuration, session or slot differs
-is answered with a reject naming the first difference.
+A peer sends hellos until it hears one that carries its token (the other side heard it). Any later message from the
+peer completes the handshake too, so one lost hello costs nothing. A hello whose model, game, configuration, session or
+slot differs is answered with a reject naming the first difference, and so is every hello after it, so a lost reject
+costs one more hello. A differing hello without our token may be a late one from an earlier match: it ends the
+handshake only if no matching hello follows before the connect timeout.
 
 ## Not yet
 
 - No joining a game in progress and no spectators; a lost peer ends the session.
-- No NAT traversal, encryption or authentication (a peer's address is its identity).
+- No NAT traversal, encryption or authentication: a peer's address and token are its identity, so anyone who sees
+  the traffic can forge it.
 - Commands are copied in the machine's byte order: little-endian peers only (every desktop and console today).
 - No engine integration yet: a game calls `update()` itself and draws its own simulation.
 

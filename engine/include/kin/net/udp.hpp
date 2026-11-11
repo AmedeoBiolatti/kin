@@ -19,10 +19,11 @@ namespace kin::net {
 struct UdpOptions {
     u16 port = 0;      // 0 lets the system pick one (local_port() says which)
     bool ipv6 = false; // dual-stack: IPv6 peers and IPv4 ones
-    // Datagrams from an address that add_peer() did not name get a new id (a host learns its players this way), up
-    // to this many peers in all; later strangers are ignored.
     u32 max_peers = 64;
-    bool accept_unknown = true;
+    // A host that learns its players' addresses from their hellos turns this on: a datagram from an address
+    // add_peer() did not name, starting like kin's messages, gets a new id, up to max_peers in all (later strangers
+    // are ignored, and an id is never reused). Off, only named peers are heard.
+    bool accept_unknown = false;
 };
 
 class UdpTransport final : public Transport {

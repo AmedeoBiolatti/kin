@@ -5,8 +5,10 @@
 // model (input_sync.hpp; later a replication model) owns one Links and sends its messages through it, so each model
 // is only what goes on the wire for it.
 //
-// Every datagram starts with a 4-byte header: 'k' 'n', the protocol version, and the message type. Types below
-// first_model_message are the links' own; a model numbers its messages from there.
+// Every datagram starts with a 12-byte header: 'k' 'n', the protocol version, the message type, and the receiver's
+// token: a random number each side picks per link and sends in its hello. A message whose token is not the one this
+// side picked (a late one from an earlier match, or a forged one) is ignored, so only the peer of this handshake can
+// end or drive the link. Types below first_model_message are the links' own; a model numbers its messages from there.
 
 #include <kin/net/bytes.hpp>
 #include <kin/net/transport.hpp>
@@ -20,7 +22,7 @@ namespace kin::net {
 
 inline constexpr u8 protocol_version = 1;
 inline constexpr u8 first_model_message = 32;
-inline constexpr std::size_t message_header_size = 4;
+inline constexpr std::size_t message_header_size = 12;
 
 // What two peers must agree on to play together. A peer whose identity differs is refused, with the first field that
 // differs as the reason.
@@ -76,7 +78,10 @@ public:
 
     Links(Transport& transport, const SessionIdentity& identity, const LinksConfig& config = {});
 
-    // A peer expected in `slot`. Connecting starts at the next update(); returns the link's index.
+    static constexpr std::size_t no_link = static_cast<std::size_t>(-1);
+
+    // A peer expected in `slot`. Connecting starts at the next update(); returns the link's index, or no_link if the
+    // peer already has a link (its datagrams could reach only one of them).
     std::size_t add(PeerId peer, u32 slot);
 
     // Reads every datagram, answers the links' own messages, hands model messages from connected peers to
@@ -102,6 +107,10 @@ public:
 private:
     struct Track {
         bool heard = false; // a hello from the peer arrived
+        u64 token = 0;      // ours: the peer's messages must carry it
+        u64 their_token = 0;
+        // A hello that differed but may be a late one from an earlier match: the reason, if the link times out.
+        RejectReason mismatch = RejectReason::none;
         u64 added_us = 0;
         u64 next_hello_us = 0;
         u64 next_ping_us = 0;
@@ -109,9 +118,10 @@ private:
     };
 
     void receive(const Datagram& datagram, const MessageHandler& on_message);
-    void on_hello(std::size_t index, ByteReader& reader);
-    void send_hello(std::size_t index, bool heard_you);
-    void send_reject(PeerId peer, RejectReason reason);
+    void on_hello(std::size_t index, ByteReader& reader, bool heard_you, std::size_t size);
+    void heard(LinkInfo& link, std::size_t bytes);
+    void send_hello(std::size_t index);
+    void send_reject(PeerId peer, RejectReason reason, u64 token);
     bool send_raw(std::size_t index, u8 type, std::span<const u8> payload);
     void connected(std::size_t index);
     std::size_t find(PeerId peer) const;

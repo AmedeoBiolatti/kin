@@ -127,6 +127,9 @@ private:
 
 static_assert(NetCommand<Command>);
 static_assert(RollbackSim<Arena, Command>);
+// The session holds references to itself: a copy or a move would leave them pointing at the original.
+static_assert(!std::is_copy_constructible_v<InputSync<Arena, Command>>);
+static_assert(!std::is_move_constructible_v<InputSync<Arena, Command>>);
 
 // Lockstep only: no save/restore.
 class Counter {
@@ -211,9 +214,23 @@ struct Peer {
     u32 max_ticks_per_update = 0;          // the most ticks one update() moved the clock on
 };
 
+// A transport that keeps the last datagram its session sent: a test reads the header a real message carries.
+struct Tap final : Transport {
+    explicit Tap(Transport& inner) : inner(inner) {}
+    bool send(PeerId to, std::span<const u8> bytes) override {
+        last_sent.assign(bytes.begin(), bytes.end());
+        return inner.send(to, bytes);
+    }
+    void receive(std::vector<Datagram>& out) override { inner.receive(out); }
+    std::size_t max_datagram() const override { return inner.max_datagram(); }
+    Transport& inner;
+    std::vector<u8> last_sent;
+};
+
 struct Match {
     LoopbackNetwork network;
     std::vector<LoopbackEndpoint*> endpoints;
+    std::vector<std::unique_ptr<Tap>> taps;
     std::vector<std::unique_ptr<Peer>> peers;
     u64 now_ms = 0;
     std::function<Command(u32 player, u64 now_ms)> input = script;
@@ -223,6 +240,7 @@ struct Match {
         : network(seed) {
         for (u32 i = 0; i < players; ++i) {
             endpoints.push_back(&network.add_endpoint());
+            taps.push_back(std::make_unique<Tap>(*endpoints.back()));
         }
         for (u32 i = 0; i < players; ++i) {
             InputSyncConfig config = base;
@@ -236,7 +254,7 @@ struct Match {
                 adjust(i, config);
             }
             auto peer = std::make_unique<Peer>(players);
-            peer->session = std::make_unique<InputSync<Arena, Command>>(peer->arena, *endpoints[i], config);
+            peer->session = std::make_unique<InputSync<Arena, Command>>(peer->arena, *taps[i], config);
             Peer* raw = peer.get();
             peer->session->set_on_confirmed([raw](u32 tick, std::span<const Command> commands) {
                 assert(tick == raw->log.size());
@@ -455,6 +473,10 @@ struct LinkPair {
     u64 now_us = 0;
 
     LinkPair(SessionIdentity id_a, SessionIdentity id_b, u32 slot_b_expected = 1, LinksConfig config = {}) {
+        start(id_a, id_b, slot_b_expected, config);
+    }
+    // New links on the same endpoints: the next match between the same two addresses.
+    void start(SessionIdentity id_a, SessionIdentity id_b, u32 slot_b_expected = 1, LinksConfig config = {}) {
         LinksConfig config_a = config;
         config_a.local_slot = 0;
         LinksConfig config_b = config;
@@ -531,7 +553,100 @@ void test_handshake() {
         pair.run(400);
         assert(pair.links_a->link(0).state == LinkState::timed_out);
     }
+    {
+        // Rejects are lost half the time: each side still learns the reason, long before the connect timeout.
+        SessionIdentity other = id;
+        other.config = 10;
+        LinkPair pair(id, other);
+        pair.network.set_conditions({.latency_us = 10'000, .loss = 0.5f});
+        pair.run(1500);
+        assert(pair.links_a->link(0).state == LinkState::rejected);
+        assert(pair.links_a->link(0).reason == RejectReason::config);
+        assert(pair.links_b->link(0).state == LinkState::rejected);
+        assert(pair.links_b->link(0).reason == RejectReason::config);
+    }
+    {
+        // A slot only one side objects to (a expects b in slot 2): both still end rejected.
+        LinkPair pair(id, id, 2);
+        pair.network.set_conditions({.latency_us = 10'000, .loss = 0.5f});
+        pair.run(1500);
+        assert(pair.links_a->link(0).reason == RejectReason::slot);
+        assert(pair.links_b->link(0).state == LinkState::rejected);
+    }
+    {
+        // A peer of another protocol version.
+        LinkPair pair(id, id);
+        pair.links_b.reset();
+        for (int i = 0; i < 5; ++i) {
+            const std::vector<u8> hello = {'k', 'n', protocol_version + 1, 1};
+            pair.b.send(LoopbackNetwork::peer(0), hello);
+            pair.run(20, false);
+        }
+        assert(pair.links_a->link(0).state == LinkState::rejected);
+        assert(pair.links_a->link(0).reason == RejectReason::protocol);
+    }
     assert(compatibility_hash("ab", "c") != compatibility_hash("a", "bc"));
+}
+
+// Datagrams that look like the links' own messages but are not from this match's peer: late ones from an earlier
+// match between the same addresses, and forged ones from the peer's address. None may end or change a link.
+void test_stale_and_forged_messages() {
+    const SessionIdentity id{.model = 1, .game = 7, .config = 9, .session = 4};
+    const auto header = [](u8 version, u8 type, u64 token) {
+        std::vector<u8> bytes = {'k', 'n', version, type};
+        for (int i = 0; i < 8; ++i) {
+            bytes.push_back(static_cast<u8>(token >> (8 * i)));
+        }
+        return bytes;
+    };
+    {
+        LinkPair pair(id, id);
+        pair.run(300);
+        assert(pair.links_a->all_connected() && pair.links_b->all_connected());
+        const u64 tokens[] = {0, 1, 0x0123456789abcdefull};
+        for (const u64 token : tokens) {
+            pair.b.send(LoopbackNetwork::peer(0), header(protocol_version, 5, token)); // bye
+            std::vector<u8> reject = header(protocol_version, 2, token);
+            reject.push_back(static_cast<u8>(RejectReason::protocol));
+            pair.b.send(LoopbackNetwork::peer(0), reject);
+            std::vector<u8> hello = header(protocol_version, 1, token); // another session's hello
+            ByteWriter writer(hello);
+            writer.write_u32(id.model);
+            writer.write_u64(id.game);
+            writer.write_u64(id.config);
+            writer.write_u64(id.session + 1);
+            writer.write_u32(1);
+            writer.write_u64(token | 1);
+            pair.b.send(LoopbackNetwork::peer(0), hello);
+        }
+        pair.b.send(LoopbackNetwork::peer(0), header(protocol_version + 1, 1, 0)); // another version's hello
+        pair.b.send(LoopbackNetwork::peer(0), std::vector<u8>{'k', 'n', protocol_version, 5}); // a bye, cut short
+        pair.run(50);
+        assert(pair.links_a->all_connected());
+        assert(pair.links_a->link(0).reason == RejectReason::none);
+    }
+    {
+        // b leaves the first match; its goodbyes are still on the way when the same two addresses start the next one.
+        LinkPair pair(id, id);
+        pair.network.set_conditions({.latency_us = 50'000});
+        pair.run(500);
+        assert(pair.links_a->all_connected());
+        pair.links_b->leave();
+        pair.start(id, id);
+        pair.run(500);
+        assert(pair.links_a->all_connected() && pair.links_b->all_connected());
+    }
+    {
+        // Hellos of the first match (session 4) arrive while the next one (session 5) handshakes.
+        SessionIdentity next = id;
+        next.session = 5;
+        LinkPair pair(id, id);
+        pair.network.set_conditions({.latency_us = 50'000});
+        pair.run(30);
+        pair.start(next, next);
+        pair.run(500);
+        assert(pair.links_a->all_connected() && pair.links_b->all_connected());
+    }
     assert(compatibility_hash("a", "b", "", 1) != compatibility_hash("a", "b", "", 2));
 }
 
@@ -758,6 +873,14 @@ void test_rejected_and_failed() {
         assert(session.status() == SessionStatus::failed);
     }
     {
+        // Two players at one address: its datagrams could reach only one of them.
+        Arena three(3);
+        const PeerId twice = LoopbackNetwork::peer(1);
+        InputSync<Arena, Command> session(three, endpoint, {.players = 3, .peers = {no_peer, twice, twice}});
+        assert(session.status() == SessionStatus::failed);
+        assert(session.status_detail().find("same transport peer") != std::string::npos);
+    }
+    {
         // A lockstep-only simulation cannot roll back.
         Counter counter;
         InputSync<Counter, Command> rollback(counter, endpoint, {.players = 1, .max_prediction = 4});
@@ -797,7 +920,10 @@ void test_garbage() {
     match.network.set_conditions({.latency_us = 20'000});
     assert(match.run_until(60, 10'000));
     // Datagrams from peer 1's address that are not what it would send: random bytes, cut-off messages, another
-    // player's slot. None may crash or change a confirmed command.
+    // player's slot. They carry the token peer 0 expects (read off a real message), so they reach the parsers. None
+    // may crash or change a confirmed command.
+    const std::vector<u8> real = match.taps[1]->last_sent;
+    assert(real.size() >= message_header_size);
     RngKey key = make_key(99);
     for (int i = 0; i < 2000; ++i) {
         auto [next, sub] = split(key);
@@ -810,7 +936,8 @@ void test_garbage() {
                 datagram.push_back(static_cast<u8>(rng_u32(make_key(i * 131 + b))));
             }
         } else {
-            datagram = {'k', 'n', protocol_version, static_cast<u8>(kind == 1 ? 1 : first_model_message + kind - 2)};
+            datagram.assign(real.begin(), real.begin() + message_header_size);
+            datagram[3] = static_cast<u8>(kind == 1 ? 1 : first_model_message + kind - 2);
             if (kind == 3) {
                 datagram.push_back(0); // the inputs of slot 0, from peer 1: refused
             }
@@ -928,6 +1055,7 @@ int main() {
     test_time_sync();
     test_peer_lost_and_leave();
     test_rejected_and_failed();
+    test_stale_and_forged_messages();
     test_codec_command();
     test_garbage();
     test_sync_test();

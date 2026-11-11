@@ -118,6 +118,10 @@ InputSyncCore::InputSyncCore(Transport& transport, InputSyncHooks& hooks, const 
             return;
         }
         _peers[slot].link = _links.add(_config.peers[slot], slot);
+        if (_peers[slot].link == Links::no_link) {
+            start_failed("player " + std::to_string(slot) + " has the same transport peer as another player");
+            return;
+        }
         _peers[slot].acked = static_cast<i64>(_config.input_delay) - 1;
     }
     if (_config.max_prediction > 0) {

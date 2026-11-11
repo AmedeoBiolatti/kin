@@ -83,6 +83,33 @@ bool start_sockets(std::string*) {
 }
 #endif
 
+bool set_non_blocking(Socket socket) {
+#ifdef _WIN32
+    u_long non_blocking = 1;
+    if (ioctlsocket(socket, FIONBIO, &non_blocking) != 0) {
+        return false;
+    }
+    // Without this, an ICMP "port unreachable" for an earlier datagram fails the next recvfrom (a peer that left).
+    BOOL report_resets = FALSE;
+    DWORD returned = 0;
+    WSAIoctl(socket, SIO_UDP_CONNRESET, &report_resets, sizeof(report_resets), nullptr, 0, &returned, nullptr, nullptr);
+    return true;
+#else
+    const int flags = fcntl(socket, F_GETFL, 0);
+    // Not inherited by processes the game starts (SOCK_CLOEXEC where socket() takes it).
+    fcntl(socket, F_SETFD, FD_CLOEXEC);
+    return flags != -1 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) != -1;
+#endif
+}
+
+std::string resolve_error(int status) {
+#ifdef _WIN32
+    return gai_strerrorA(status); // gai_strerror is the wide version in UNICODE builds
+#else
+    return gai_strerror(status);
+#endif
+}
+
 struct Address {
     sockaddr_storage storage{};
     AddressLength length = 0;
@@ -165,7 +192,11 @@ std::unique_ptr<UdpTransport> UdpTransport::open(const UdpOptions& options, std:
     auto impl = std::make_unique<Impl>();
     impl->options = options;
     const int family = options.ipv6 ? AF_INET6 : AF_INET;
+#ifdef SOCK_CLOEXEC
+    impl->socket = ::socket(family, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+#else
     impl->socket = ::socket(family, SOCK_DGRAM, IPPROTO_UDP);
+#endif
     if (impl->socket == invalid_socket) {
         if (error) {
             *error = "socket: " + last_error();
@@ -196,18 +227,12 @@ std::unique_ptr<UdpTransport> UdpTransport::open(const UdpOptions& options, std:
         }
         return nullptr;
     }
-#ifdef _WIN32
-    u_long non_blocking = 1;
-    ioctlsocket(impl->socket, FIONBIO, &non_blocking);
-    // Without this, an ICMP "port unreachable" for an earlier datagram fails the next recvfrom (a peer that left).
-    BOOL report_resets = FALSE;
-    DWORD returned = 0;
-    WSAIoctl(impl->socket, SIO_UDP_CONNRESET, &report_resets, sizeof(report_resets), nullptr, 0, &returned, nullptr,
-             nullptr);
-#else
-    const int flags = fcntl(impl->socket, F_GETFL, 0);
-    fcntl(impl->socket, F_SETFL, flags | O_NONBLOCK);
-#endif
+    if (!set_non_blocking(impl->socket)) {
+        if (error) {
+            *error = "cannot make the socket non-blocking: " + last_error();
+        }
+        return nullptr;
+    }
     return std::unique_ptr<UdpTransport>(new UdpTransport(std::move(impl)));
 }
 
@@ -241,7 +266,10 @@ void UdpTransport::receive(std::vector<Datagram>& out) {
             return;
         }
         PeerId peer = _impl->find(from);
-        if (peer == no_peer && _impl->options.accept_unknown) {
+        // Only a datagram that starts like kin's (a hello) earns a stranger a place: port scans and stray packets
+        // would otherwise fill the table for good.
+        if (peer == no_peer && _impl->options.accept_unknown && received >= 2 && _impl->buffer[0] == 'k' &&
+            _impl->buffer[1] == 'n') {
             peer = _impl->insert(from);
         }
         if (peer == no_peer) {
@@ -267,25 +295,36 @@ u16 UdpTransport::local_port() const {
 
 PeerId UdpTransport::add_peer(std::string_view host, u16 port, std::string* error) {
     addrinfo hints{};
-    hints.ai_family = _impl->options.ipv6 ? AF_INET6 : AF_INET;
+    // A dual-stack socket takes IPv4 peers as IPv4-mapped IPv6 addresses. They are mapped here rather than with
+    // AI_V4MAPPED, which Android's resolver refuses.
+    hints.ai_family = _impl->options.ipv6 ? AF_UNSPEC : AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
     hints.ai_protocol = IPPROTO_UDP;
-    if (_impl->options.ipv6) {
-        hints.ai_flags = AI_V4MAPPED;
-    }
     addrinfo* results = nullptr;
     const std::string host_text(host);
     const std::string port_text = std::to_string(port);
     if (const int status = getaddrinfo(host_text.c_str(), port_text.c_str(), &hints, &results);
         status != 0 || !results) {
         if (error) {
-            *error = "cannot resolve " + host_text + ": " + gai_strerror(status);
+            *error = "cannot resolve " + host_text + ": " + resolve_error(status);
         }
         return no_peer;
     }
     Address address;
-    std::memcpy(&address.storage, results->ai_addr, results->ai_addrlen);
-    address.length = static_cast<AddressLength>(results->ai_addrlen);
+    if (_impl->options.ipv6 && results->ai_family == AF_INET) {
+        const auto& v4 = *reinterpret_cast<const sockaddr_in*>(results->ai_addr);
+        auto& v6 = reinterpret_cast<sockaddr_in6&>(address.storage);
+        v6.sin6_family = AF_INET6;
+        v6.sin6_port = v4.sin_port;
+        auto* bytes = reinterpret_cast<u8*>(&v6.sin6_addr);
+        bytes[10] = 0xff;
+        bytes[11] = 0xff;
+        std::memcpy(bytes + 12, &v4.sin_addr, 4);
+        address.length = sizeof(sockaddr_in6);
+    } else {
+        std::memcpy(&address.storage, results->ai_addr, results->ai_addrlen);
+        address.length = static_cast<AddressLength>(results->ai_addrlen);
+    }
     freeaddrinfo(results);
     const PeerId peer = _impl->insert(address);
     if (peer == no_peer && error) {
