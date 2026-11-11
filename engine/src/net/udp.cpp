@@ -16,6 +16,10 @@
 #include <ws2tcpip.h>
 #include <mstcpip.h>
 // clang-format on
+#ifndef SIO_UDP_CONNRESET
+// mstcpip.h declares it only for some Windows versions; its value is fixed.
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 #else
 #include <arpa/inet.h>
 #include <cerrno>
