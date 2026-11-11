@@ -37,6 +37,11 @@ releases may change APIs.
   for it. Nobody waits for a joiner, and one that never comes leaves the slot free. `StepInfo` gains `present` and
   `joined`. A lost optional link no longer fails a session (`LinkInfo::optional`). Lobby matches can keep free
   slots (`start_lobby_match(..., free_slots)`, `seat_lobby_joiners`, `free_lobby_slot`, `allow_lobby_joiners`).
+- Players leave a game that goes on (`InputSyncConfig::players_may_leave`, on by default;
+  [networking](networking.md#leaving)): a player who quits or whose connection is lost is gone from a tick every peer
+  agrees on (`StepInfo::left`), in rollback and lockstep. The peers relay the commands some lack, and a player only
+  one peer cannot reach leaves too. In a joinable session the slot can be taken again, by the same player too;
+  `free_lobby_slot` frees any player's slot. `InputSyncStats::leaves` and `lost`.
 - Lobbies and messages between players ([platform services](platform_services.md#lobbies-and-messages)):
   `PlatformServices` gains `create_lobby`, `find_lobbies` (rules over lobby data, open slots, distance), `join_lobby`,
   `leave_lobby`, the members and owner, the lobby's data and each member's, `set_lobby_joinable`, chat, and messages

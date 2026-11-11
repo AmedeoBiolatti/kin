@@ -57,8 +57,9 @@ std::optional<LobbyMatch> read_lobby_match(const PlatformServices& services);
 // The owner gives lobby members who have no slot the free ones (in the order they joined), and closes the lobby
 // when none is left. Returns how many it seated. Call it on LobbyMemberJoined.
 u32 seat_lobby_joiners(PlatformServices& services);
-// The owner frees a latecomer's slot when they leave the lobby (on LobbyMemberLeft), for someone else to take. One
-// who had started playing ended the session by going (a lost player ends it); one who had not yet left no trace.
+// The owner frees a player's slot in a joinable match when they leave the lobby (on LobbyMemberLeft), or the game
+// (StepInfo::left), for someone to take: they again, once seat_lobby_joiners() seats them, or another member. The
+// game played on without them (InputSyncConfig::players_may_leave). False for a match that is not joinable.
 bool free_lobby_slot(PlatformServices& services, std::string_view player);
 
 // Sets an InputSyncConfig's players, local_player, peers (added to `transport`), session, joinable and joining from

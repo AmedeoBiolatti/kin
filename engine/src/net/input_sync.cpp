@@ -9,29 +9,45 @@ namespace {
 
 // Model messages (after the link header).
 //   inputs: u8 sender slot, u32 sender's next tick, i16 how far the sender thinks it is ahead of the receiver
-//           (1/256 ticks), u32 the next of the receiver's ticks the sender lacks, u32 first tick, u8 count,
-//           count * input_size bytes (the sender's commands from the first tick on)
+//           (1/256 ticks), u32 the next of the receiver's ticks the sender lacks, u32 the leave decisions the sender
+//           applied, u32 first tick, u8 count, count * input_size bytes (the sender's commands from the first tick on)
 //           then u8 joins, joins * (u32 tick, u8 slot, u64 joiner's id): the joins the sender decided at the ticks
 //           those commands are for (a receiver takes a join with the sender's command for its tick, so every peer
 //           applies it there)
 //   hash:   u8 sender slot, u32 tick, u64 state hash after that tick (confirmed)
 //   join request (joiner -> every peer; the host answers): u8 joiner's slot, u64 joiner's id
-//   join state (host -> joiner): u8 joiner's slot, u32 base tick, u32 slots present before it, u32 total bytes,
-//           u32 offset, the bytes from there
+//   join state (host -> joiner): u8 joiner's slot, u32 base tick, u32 slots present before it, u32 leave decisions
+//           the state has seen, u32 total bytes, u32 offset, the bytes from there
 //   join ack (joiner -> host): u8 joiner's slot, u32 bytes received from the start
 //   join ready (joiner -> every peer, once it has caught up; the host decides): u8 joiner's slot, u64 joiner's id
+//   lost (every peer that lost a player -> every peer, repeated until the game let them go): u8 sender slot, u32
+//           leave decisions applied, u32 lost players not yet decided on, u32 lost players, then for each lost
+//           player (lowest slot first) i32 the last tick the sender has their command for
+//   relay (to a peer that has fewer of a lost player's commands): u8 the lost player's slot, u32 first tick, u8
+//           count, count * input_size bytes, u8 joins, joins * (u32 tick, u8 slot, u64 id) the lost player decided
+//           at those ticks
+//   leave (the decider -> every peer; any peer -> one that lacks it): u32 the decision's number, u32 the players who
+//           leave, then for each of them (lowest slot first) u32 the tick they are gone from
 constexpr u8 inputs_message = first_model_message;
 constexpr u8 hash_message = first_model_message + 1;
 constexpr u8 join_request_message = first_model_message + 2;
 constexpr u8 join_state_message = first_model_message + 3;
 constexpr u8 join_ack_message = first_model_message + 4;
 constexpr u8 join_ready_message = first_model_message + 5;
-constexpr std::size_t inputs_header = 1 + 4 + 2 + 4 + 4 + 1;
-// Room for every join one message can carry: a slot joins at most once (a player lost ends the game), so at most
-// max_players - 1 in all.
+constexpr u8 lost_message = first_model_message + 6;
+constexpr u8 relay_message = first_model_message + 7;
+constexpr u8 leave_message = first_model_message + 8;
+constexpr std::size_t inputs_header = 1 + 4 + 2 + 4 + 4 + 4 + 1;
+// Room for the joins one message carries: those decided at the ticks of its commands, at most one a slot (a slot
+// whose player leaves is taken again only after its leave, which takes longer than a message's ticks).
 constexpr std::size_t join_entry = 4 + 1 + 8;
 constexpr std::size_t join_trailer = 1 + join_entry * (max_players - 1);
-constexpr std::size_t join_state_header = 1 + 4 + 4 + 4 + 4;
+constexpr std::size_t join_state_header = 1 + 4 + 4 + 4 + 4 + 4;
+constexpr std::size_t relay_header = 1 + 4 + 1;
+// Leaving: how often a peer that lost a player says so, and how many decisions each keeps to send a peer that missed
+// them.
+constexpr u64 lost_repeat_us = 100'000;
+constexpr std::size_t kept_decisions = 32;
 
 // Joining: how often requests and readiness are repeated, how many state bytes may be in flight, how long without
 // progress before the host sends again from the last acknowledged byte, and how many ticks a joiner runs in one
@@ -49,8 +65,13 @@ constexpr u64 keepalive_us = 50'000;
 constexpr std::size_t kept_hashes = 64;
 
 u64 config_hash(const InputSyncConfig& config, u32 input_size) {
-    const u32 fields[] = {config.players,     input_size,           config.tick_rate,
-                          config.input_delay, config.hash_interval, config.joinable ? 1u : 0u};
+    const u32 fields[] = {config.players,
+                          input_size,
+                          config.tick_rate,
+                          config.input_delay,
+                          config.hash_interval,
+                          config.joinable ? 1u : 0u,
+                          config.players_may_leave ? 1u : 0u};
     return hash_bytes(fields, sizeof(fields));
 }
 
@@ -147,6 +168,7 @@ InputSyncCore::InputSyncCore(Transport& transport, InputSyncHooks& hooks, const 
     }
     _peers.resize(players);
     _active_from.assign(players, never);
+    _active_until.assign(players, never);
     if (!_config.joining) {
         _active_from[_config.local_player] = 0;
     }
@@ -204,11 +226,22 @@ std::span<u8> InputSyncCore::input(u32 player, u32 tick) {
 i64 InputSyncCore::confirmed_tick() const {
     i64 confirmed = never;
     for (u32 slot = 0; slot < _config.players; ++slot) {
-        if (in_game(slot)) {
+        // A player who left counts until this peer has all their commands from before they went.
+        const bool missing = _active_until[slot] != never && _known[slot] < _active_until[slot] - 1;
+        if (in_game(slot) || missing) {
             confirmed = std::min(confirmed, _known[slot]);
         }
     }
     return confirmed == never ? -1 : confirmed;
+}
+
+bool InputSyncCore::present(u32 slot, u32 tick) const {
+    const i64 t = tick;
+    if (_active_from[slot] <= t && t < _active_until[slot]) {
+        return true;
+    }
+    return std::ranges::any_of(_past,
+                               [&](const PastPlayer& p) { return p.slot == slot && p.from <= t && t < p.until; });
 }
 
 u32 InputSyncCore::present_mask(u32 tick) const {
@@ -250,7 +283,7 @@ bool InputSyncCore::allow_join(u32 slot, PeerId peer) {
     }
     PeerTrack& track = _peers[slot];
     if (track.linked) {
-        if (_links.link(track.link).peer == peer) {
+        if (_links.link(track.link).peer == peer && !_links.failed(track.link)) {
             return true;
         }
         if (in_game(slot)) {
@@ -308,6 +341,9 @@ std::string InputSyncCore::status_detail() const {
                std::to_string(_desync.player) + "'s";
     case SessionStatus::rejected:
     case SessionStatus::peer_lost: {
+        if (!_failure.empty()) {
+            return _failure;
+        }
         const std::size_t failed = _links.first_failed();
         if (failed >= _links.links().size()) {
             return std::string(session_status_name(_status));
@@ -344,8 +380,7 @@ void InputSyncCore::update(u64 now_us) {
     if (session_over(_status)) {
         return; // a message ended it (a joiner that failed): keep that reason
     }
-    if (const std::size_t failed = _links.first_failed(); failed < _links.links().size()) {
-        _status = _links.link(failed).state == LinkState::rejected ? SessionStatus::rejected : SessionStatus::peer_lost;
+    if (!check_links()) {
         return;
     }
     drop_failed_joiners();
@@ -359,6 +394,10 @@ void InputSyncCore::update(u64 now_us) {
                 if (!any) {
                     start_failed("no player in the game answered");
                     return;
+                }
+                if (_state_started && _peers[_state_from].linked && _links.failed(_peers[_state_from].link)) {
+                    _state_started = false; // the host sending it went: the next host sends it from the start
+                    _state_progress_us = _now_us;
                 }
                 if (_state_started && _now_us - _state_progress_us > _config.links.timeout_us) {
                     fail_joining("the game's state stopped arriving");
@@ -381,6 +420,10 @@ void InputSyncCore::update(u64 now_us) {
     }
     const u64 elapsed = _now_us - _last_update_us;
     _last_update_us = _now_us;
+    resolve_leaves();
+    if (_status != SessionStatus::running) {
+        return;
+    }
     roll_back();
     confirm();
     compare_hashes();
@@ -428,6 +471,21 @@ void InputSyncCore::on_message(std::size_t link, u8 type, ByteReader& payload) {
         if (payload.ok() && joiner == slot && id != 0) {
             on_join_ready(slot, id);
         }
+    } else if (type == lost_message) {
+        on_report(slot, payload);
+    } else if (type == relay_message) {
+        on_relay(slot, payload);
+    } else if (type == leave_message) {
+        const u32 index = payload.read_u32();
+        LeaveDecision decision{.mask = payload.read_u32()};
+        for (u32 p = 0; p < _config.players && payload.ok(); ++p) {
+            if ((decision.mask >> p) & 1u) {
+                decision.ticks[p] = payload.read_u32();
+            }
+        }
+        if (payload.ok() && _status == SessionStatus::running) {
+            apply_leave(index, decision);
+        }
     }
 }
 
@@ -436,6 +494,7 @@ void InputSyncCore::on_inputs(u32 slot, ByteReader& payload) {
     const u32 sender_tick = payload.read_u32();
     const auto reported_advantage = static_cast<i16>(payload.read_u16());
     const u32 ack_next = payload.read_u32();
+    const u32 epoch = payload.read_u32();
     const u32 first = payload.read_u32();
     const u32 count = payload.read_u8();
     const std::span<const u8> commands = payload.read_bytes(static_cast<std::size_t>(count) * _input_size);
@@ -465,9 +524,21 @@ void InputSyncCore::on_inputs(u32 slot, ByteReader& payload) {
     }
     peer.reported_advantage = static_cast<f32>(reported_advantage) / 256.0f;
     peer.acked = std::max(peer.acked, static_cast<i64>(ack_next) - 1);
-    if (!in_game(slot)) {
-        return; // a joiner still catching up: it sends only acks
+    if (epoch < _epoch && _status == SessionStatus::running && _now_us - peer.decisions_sent_us >= lost_repeat_us) {
+        send_decisions(slot, epoch); // it missed a leave the game agreed on
+        peer.decisions_sent_us = _now_us;
     }
+    if (!in_game(slot) || lost(slot)) {
+        return; // a joiner still catching up sends only acks; a lost player's commands stay where they stopped
+    }
+    take_commands(slot, first, count, commands, std::span<const JoinEvent>(joins.data(), join_count), false);
+}
+
+// A player's commands from `first` on, from the player itself or (`relayed`) from a peer that has more of a lost
+// player's commands than this one.
+void InputSyncCore::take_commands(u32 slot, u32 first, u32 count, std::span<const u8> commands,
+                                  std::span<const JoinEvent> joins, bool relayed) {
+    const PeerTrack& peer = _peers[slot];
     // A tick this far ahead would overwrite ring slots still in use; the sender resends it later.
     const i64 limit = static_cast<i64>(_tick) + ring_ticks - _config.max_prediction - 4;
     for (u32 i = 0; i < count; ++i) {
@@ -475,8 +546,11 @@ void InputSyncCore::on_inputs(u32 slot, ByteReader& payload) {
         if (tick <= _known[slot]) {
             continue;
         }
+        if (tick >= _active_until[slot]) {
+            break; // gone from there
+        }
         if (tick != _known[slot] + 1 || tick >= limit) {
-            if (_stats.spectating && tick > _known[slot] + 1 && peer.acked >= 0) {
+            if (!relayed && _stats.spectating && tick > _known[slot] + 1 && peer.acked >= 0) {
                 // The commands after our state are gone from the peer's history: the game moved on too far. Usually
                 // because a player's commands never came: say which.
                 for (u32 other = 0; other < _config.players; ++other) {
@@ -492,19 +566,31 @@ void InputSyncCore::on_inputs(u32 slot, ByteReader& payload) {
             break;
         }
         const u32 t = static_cast<u32>(tick);
-        for (u32 j = 0; j < join_count; ++j) {
-            if (joins[j].tick != t) {
+        bool wait = false;
+        for (const JoinEvent& join : joins) {
+            if (join.tick != t) {
                 continue;
             }
             if (host_at(t) != slot) {
+                if (_frozen != 0) {
+                    wait = true; // a leave this peer has not applied yet may make the sender the host: later
+                    break;
+                }
                 start_failed("player " + std::to_string(slot) + " let a player in at tick " + std::to_string(t) +
                              ", where it is not the host");
                 return;
             }
-            apply_join(joins[j].slot, t, joins[j].id); // with the command for its tick, as on every peer
+            if (join.slot < _config.players && lost(join.slot)) {
+                wait = true; // the slot's last player's commands are still on their way
+                break;
+            }
+            apply_join(join.slot, t, join.id); // with the command for its tick, as on every peer
             if (_status != SessionStatus::running && _status != SessionStatus::connecting) {
                 return;
             }
+        }
+        if (wait) {
+            break; // the sender sends these again
         }
         const std::span<const u8> command = commands.subspan(static_cast<std::size_t>(i) * _input_size, _input_size);
         const std::size_t index = static_cast<std::size_t>(slot) * ring_ticks + t % ring_ticks;
@@ -524,7 +610,7 @@ void InputSyncCore::on_hash(u32 slot, ByteReader& payload) {
     const u32 sender = payload.read_u8();
     const u32 tick = payload.read_u32();
     const u64 hash = payload.read_u64();
-    if (!payload.ok() || sender != slot || !in_game(slot)) {
+    if (!payload.ok() || sender != slot || !in_game(slot) || lost(slot)) {
         return; // a joiner's hashes count once it plays: until then a bad state of its own fails only itself
     }
     auto& hashes = _peers[slot].hashes;
@@ -575,8 +661,12 @@ void InputSyncCore::step_tick(u32 tick, bool resimulating) {
         _snapshot_tick[slot] = tick;
     }
     u32 joined = 0;
+    u32 left = 0;
     for (u32 player = 0; player < _config.players; ++player) {
         if (!present(player, tick)) {
+            if (tick > 0 && present(player, tick - 1)) {
+                left |= 1u << player;
+            }
             std::ranges::copy(_default_command,
                               _step_buffer.begin() + static_cast<std::ptrdiff_t>(player * _input_size));
             continue;
@@ -604,11 +694,13 @@ void InputSyncCore::step_tick(u32 tick, bool resimulating) {
         }
         std::ranges::copy(command, _step_buffer.begin() + static_cast<std::ptrdiff_t>(player * _input_size));
     }
-    _hooks.step(_step_buffer, StepInfo{.tick = tick,
-                                       .resimulating = resimulating,
-                                       .confirmed = all_known,
-                                       .present = _config.joinable ? present_mask(tick) : ~0u,
-                                       .joined = joined});
+    _hooks.step(_step_buffer,
+                StepInfo{.tick = tick,
+                         .resimulating = resimulating,
+                         .confirmed = all_known,
+                         .present = _config.joinable || _config.players_may_leave ? present_mask(tick) : ~0u,
+                         .joined = joined,
+                         .left = left});
     if (_config.hash_interval > 0 && (tick + 1) % _config.hash_interval == 0) {
         _pending_hashes.emplace_back(tick, _hooks.state_hash());
     }
@@ -726,7 +818,7 @@ f32 InputSyncCore::measure_advantage() const {
     for (u32 slot = 0; slot < _config.players; ++slot) {
         const PeerTrack& peer = _peers[slot];
         // A joiner catching up is far behind: it is not waited for.
-        if (slot == _config.local_player || !peer.linked || peer.remote_tick < 0 || !in_game(slot) ||
+        if (slot == _config.local_player || !peer.linked || peer.remote_tick < 0 || !in_game(slot) || lost(slot) ||
             !in_game(_config.local_player)) {
             continue;
         }
@@ -779,7 +871,7 @@ void InputSyncCore::send_inputs() {
     const std::size_t max_count = std::min<std::size_t>(255, (_links.max_payload() - header) / _input_size);
     std::vector<u8> payload;
     for (u32 slot = 0; slot < _config.players; ++slot) {
-        if (slot == local || !_peers[slot].linked) {
+        if (slot == local || !_peers[slot].linked || lost(slot) || _links.failed(_peers[slot].link)) {
             continue;
         }
         PeerTrack& peer = _peers[slot];
@@ -805,6 +897,7 @@ void InputSyncCore::send_inputs() {
         writer.write_u32(_tick);
         writer.write_u16(static_cast<u16>(static_cast<i16>(std::clamp(own_view(slot) * 256.0f, -32000.0f, 32000.0f))));
         writer.write_u32(static_cast<u32>(ack_next));
+        writer.write_u32(_epoch);
         writer.write_u32(static_cast<u32>(first));
         writer.write_u8(static_cast<u8>(count));
         for (std::size_t i = 0; i < count; ++i) {
@@ -864,8 +957,9 @@ void InputSyncCore::serve_join_requests() {
     for (const u32 slot : _join_requests) {
         PeerTrack& peer = _peers[slot];
         if (!_config.joinable || in_game(slot) || host() != _config.local_player || !peer.linked ||
-            peer.served_id == peer.join_id) {
-            continue; // (a request that was on its way while the state went: that joiner has it)
+            peer.served_id == peer.join_id || _frozen != 0) {
+            continue; // (a request that was on its way while the state went: that joiner has it; a leave still open:
+                      // the joiner asks again)
         }
         if (std::ranges::any_of(_transfers, [slot](const Transfer& t) { return t.slot == slot; })) {
             continue;
@@ -892,6 +986,7 @@ void InputSyncCore::serve_join_requests() {
         // Who played before the base: a join at the base itself comes with the host's command for it, as for every
         // peer (the state is from before it, so it has not happened in it).
         transfer.present = present_mask(transfer.base > 0 ? transfer.base - 1 : 0);
+        transfer.epoch = _epoch;
         // The joiner's commands to us start at its join tick; ours to it at the base.
         peer.acked = static_cast<i64>(transfer.base) - 1;
         peer.served_id = peer.join_id;
@@ -927,6 +1022,7 @@ void InputSyncCore::serve_transfers() {
             writer.write_u8(static_cast<u8>(transfer.slot));
             writer.write_u32(transfer.base);
             writer.write_u32(transfer.present);
+            writer.write_u32(transfer.epoch);
             writer.write_u32(total);
             writer.write_u32(offset);
             writer.write_bytes(std::span<const u8>(transfer.bytes).subspan(offset, length));
@@ -977,6 +1073,7 @@ void InputSyncCore::on_join_state(u32 slot, ByteReader& payload) {
     const u32 joiner = payload.read_u8();
     const u32 base = payload.read_u32();
     const u32 present_slots = payload.read_u32();
+    const u32 epoch = payload.read_u32();
     const u32 total = payload.read_u32();
     const u32 offset = payload.read_u32();
     const std::span<const u8> bytes = payload.read_bytes(payload.remaining());
@@ -988,7 +1085,7 @@ void InputSyncCore::on_join_state(u32 slot, ByteReader& payload) {
         return;
     }
     if (!_state_started || _state_from != slot || _state_base != base || _state_total != total ||
-        _state_present != present_slots) {
+        _state_present != present_slots || _state_epoch != epoch) {
         // The first chunk, or the host started over: begin again.
         _state_progress_us = _now_us;
         _state_started = true;
@@ -996,6 +1093,7 @@ void InputSyncCore::on_join_state(u32 slot, ByteReader& payload) {
         _state_base = base;
         _state_total = total;
         _state_present = present_slots;
+        _state_epoch = epoch;
         _state.clear();
         _state.reserve(std::min<u64>(total, join_state_reserve));
         _state_early.clear();
@@ -1035,6 +1133,7 @@ void InputSyncCore::start_from_state() {
     _tick = _state_base;
     _stats.start_tick = _state_base;
     _stats.spectating = true;
+    _epoch = _state_epoch; // the leaves before the state are in it
     _reported = static_cast<i64>(_state_base) - 1;
     _accumulator_us = 0;
     for (u32 slot = 0; slot < _config.players; ++slot) {
@@ -1057,7 +1156,8 @@ u32 InputSyncCore::catch_up() {
     }
     f64 target = 0.0;
     for (u32 slot = 0; slot < _config.players; ++slot) {
-        if (slot != _config.local_player && _peers[slot].linked && in_game(slot) && _peers[slot].remote_tick >= 0) {
+        if (slot != _config.local_player && _peers[slot].linked && in_game(slot) && !lost(slot) &&
+            _peers[slot].remote_tick >= 0) {
             target = std::max(target, remote_now(slot));
         }
     }
@@ -1112,8 +1212,9 @@ void InputSyncCore::send_join_messages() {
 
 void InputSyncCore::on_join_ready(u32 slot, u64 id) {
     _peers[slot].join_id = id;
-    if (!_config.joinable || _status != SessionStatus::running || in_game(slot) || !_peers[slot].linked) {
-        return;
+    if (!_config.joinable || _status != SessionStatus::running || in_game(slot) || !_peers[slot].linked ||
+        _frozen != 0) {
+        return; // (a leave still open: the joiner says it is ready again)
     }
     // The first tick none of our commands has been sent for: no peer can have finished it, and each takes the join
     // with our command for it.
@@ -1132,6 +1233,16 @@ void InputSyncCore::apply_join(u32 slot, u32 tick, u64 id) {
     if (slot == _config.local_player && id != _join_id) {
         fail_joining("the game let another player into this slot");
         return;
+    }
+    if (_active_until[slot] != never) {
+        // Someone takes the slot of a player who left: that player's time in it stays as it was.
+        if (static_cast<i64>(tick) < _active_until[slot]) {
+            start_failed("player " + std::to_string(slot) + " joined before the player who left the slot had gone");
+            return;
+        }
+        _past.push_back(
+            {.slot = slot, .from = _active_from[slot], .until = _active_until[slot], .id = _peers[slot].expected_id});
+        _active_until[slot] = never;
     }
     _active_from[slot] = tick;
     _known[slot] = static_cast<i64>(tick) - 1;
@@ -1178,6 +1289,415 @@ void InputSyncCore::check_joined_players() {
 void InputSyncCore::fail_joining(std::string detail) {
     start_failed(std::move(detail));
     _links.leave(); // the game frees the slot at once instead of waiting for a timeout
+}
+
+// --- leaving (docs/networking.md#leaving) ---
+//
+// A peer that loses a player in the game (their link timed out, or they said goodbye) freezes their commands where
+// they stopped and says so to every peer, with how far it has them; a peer told that someone lost a player freezes
+// them too. The peers send each other the lost player's commands that some lack. Once every remaining player reports
+// the same lost players, the lowest of them decides the tick they are gone from: one past the furthest anyone has
+// their commands, so no peer has run a tick with them that the game then runs without them. Decisions are numbered,
+// and every peer applies them in that order.
+
+std::string InputSyncCore::describe_link(std::size_t index) const {
+    const LinkInfo& link = _links.link(index);
+    std::string text = "player " + std::to_string(link.slot) + ": " + std::string(link_state_name(link.state));
+    if (link.state == LinkState::rejected) {
+        text += " (" + std::string(reject_reason_name(link.reason)) + ")";
+    }
+    return text;
+}
+
+// False when a failed link ends the session: a peer of another game, a player lost before the start, or any player
+// lost when players may not leave. A player lost while the game runs leaves it instead.
+bool InputSyncCore::check_links() {
+    for (std::size_t i = 0; i < _links.links().size(); ++i) {
+        const LinkInfo& link = _links.link(i);
+        if (link.optional || !_links.failed(i)) {
+            continue;
+        }
+        const u32 slot = link.slot;
+        if (slot >= _config.players || !_peers[slot].linked || _peers[slot].link != i) {
+            continue; // a link the slot no longer uses (a player who left, whose slot someone else took)
+        }
+        if (link.state == LinkState::rejected) {
+            _status = SessionStatus::rejected;
+            _failure = describe_link(i);
+            return false;
+        }
+        if (!_config.players_may_leave || _status != SessionStatus::running) {
+            _status = SessionStatus::peer_lost;
+            _failure = describe_link(i);
+            return false;
+        }
+        if (in_game(slot) && !lost(slot)) {
+            freeze(slot, link.state == LinkState::timed_out);
+        }
+    }
+    return true;
+}
+
+void InputSyncCore::freeze(u32 slot, bool timed_out) {
+    _frozen |= 1u << slot;
+    _undecided |= 1u << slot;
+    if (timed_out) {
+        _timed_out |= 1u << slot;
+    }
+    _next_report_us = 0; // say so at once
+}
+
+void InputSyncCore::resolve_leaves() {
+    const u32 local = _config.local_player;
+    // A player the game let go, and this peer has all their commands from before: done.
+    for (u32 slot = 0; slot < _config.players; ++slot) {
+        if (lost(slot) && !((_undecided >> slot) & 1u) && _active_until[slot] != never &&
+            _known[slot] >= _active_until[slot] - 1) {
+            _frozen &= ~(1u << slot);
+        }
+    }
+    if (_undecided != 0) {
+        u32 others = 0;
+        for (u32 slot = 0; slot < _config.players; ++slot) {
+            if (slot != local && in_game(slot)) {
+                others |= 1u << slot;
+            }
+        }
+        const bool everyone = others != 0 && (others & ~_undecided) == 0;
+        if (everyone && !in_game(local)) {
+            fail_joining("this joiner lost every player in the game");
+            return;
+        }
+        if (everyone && (_timed_out & _undecided) != 0) {
+            // Every other player gone quiet at once: most likely this peer's own connection. (Players who said
+            // goodbye leave the game to this peer, which plays on.)
+            u32 first = 0;
+            while (!((_timed_out >> first) & 1u)) {
+                ++first;
+            }
+            _status = SessionStatus::peer_lost;
+            _failure = "lost every other player (" + describe_link(_peers[first].link) + ")";
+            _links.leave();
+            return;
+        }
+        if (in_game(local)) {
+            decide_leave();
+            if (_status != SessionStatus::running) {
+                return;
+            }
+        }
+    }
+    _stats.lost = _frozen;
+    if (_frozen != 0 && _now_us >= _next_report_us) {
+        send_report();
+    }
+}
+
+void InputSyncCore::decide_leave() {
+    const u32 leaving = _undecided;
+    u32 decider = _config.players;
+    for (u32 slot = 0; slot < _config.players; ++slot) {
+        if (in_game(slot) && !((leaving >> slot) & 1u)) {
+            decider = slot;
+            break;
+        }
+    }
+    if (decider != _config.local_player) {
+        return;
+    }
+    // Every remaining player must have lost the same players (and applied the same decisions): then none takes more
+    // of their commands, and the furthest any has each one's is final. Each is gone from the tick after it.
+    std::array<i64, max_players> last;
+    for (u32 p = 0; p < _config.players; ++p) {
+        last[p] = _known[p];
+    }
+    for (u32 slot = 0; slot < _config.players; ++slot) {
+        if (slot == _config.local_player || !in_game(slot) || ((leaving >> slot) & 1u)) {
+            continue;
+        }
+        const PeerTrack& peer = _peers[slot];
+        if (!peer.reported || peer.report_epoch != _epoch || peer.report_undecided != leaving) {
+            return;
+        }
+        for (u32 p = 0; p < _config.players; ++p) {
+            if ((leaving >> p) & 1u) {
+                last[p] = std::max(last[p], peer.report_known[p]);
+            }
+        }
+    }
+    LeaveDecision decision{.mask = leaving};
+    for (u32 p = 0; p < _config.players; ++p) {
+        if ((leaving >> p) & 1u) {
+            decision.ticks[p] = static_cast<u32>(std::max<i64>(last[p] + 1, 0));
+        }
+    }
+    const u32 index = _epoch;
+    apply_leave(index, decision);
+    if (_status != SessionStatus::running) {
+        return;
+    }
+    for (u32 slot = 0; slot < _config.players; ++slot) {
+        if (slot != _config.local_player && _peers[slot].linked) {
+            send_decisions(slot, index);
+        }
+    }
+}
+
+void InputSyncCore::apply_leave(u32 index, const LeaveDecision& decision) {
+    if (index != _epoch) {
+        return; // one this peer applied, or one after a decision it still lacks (each is sent again, in order)
+    }
+    const u32 mask = decision.mask;
+    const u32 all = (1u << _config.players) - 1;
+    if (mask == 0 || (mask & ~all) != 0) {
+        start_failed("a leave named no player of this game");
+        return;
+    }
+    const u32 local = _config.local_player;
+    if ((mask >> local) & 1u) {
+        // The others lost this peer: the game goes on without it.
+        _status = SessionStatus::peer_lost;
+        _failure =
+            "the other players lost this peer (it left the game at tick " + std::to_string(decision.ticks[local]) + ")";
+        _links.leave();
+        return;
+    }
+    u32 earliest = std::numeric_limits<u32>::max();
+    for (u32 p = 0; p < _config.players; ++p) {
+        if (!((mask >> p) & 1u)) {
+            continue;
+        }
+        if (!in_game(p)) {
+            start_failed("a leave named player " + std::to_string(p) + ", who is not in the game");
+            return;
+        }
+        // Cannot happen to a player (the tick is past every remaining player's commands of theirs); a joiner may
+        // have taken commands no player reported.
+        if (_known[p] >= static_cast<i64>(decision.ticks[p]) && confirmed_tick() >= decision.ticks[p]) {
+            if (!in_game(local)) {
+                fail_joining("a player left at a tick this joiner had already run: join again");
+            } else {
+                start_failed("player " + std::to_string(p) + " left at tick " + std::to_string(decision.ticks[p]) +
+                             ", which this peer ran with them");
+            }
+            return;
+        }
+        earliest = std::min(earliest, decision.ticks[p]);
+    }
+    for (u32 p = 0; p < _config.players; ++p) {
+        if (!((mask >> p) & 1u)) {
+            continue;
+        }
+        const u32 bit = 1u << p;
+        const u32 tick = decision.ticks[p];
+        _active_until[p] = tick;
+        _known[p] = std::min<i64>(_known[p], static_cast<i64>(tick) - 1);
+        _frozen |= bit; // until this peer has their commands from before `tick`
+        _undecided &= ~bit;
+        _timed_out &= ~bit;
+        std::erase_if(_peers[p].hashes, [tick](const auto& entry) { return entry.first >= tick; });
+        ++_stats.leaves;
+    }
+    _decisions.push_back(decision);
+    if (_decisions.size() > kept_decisions) {
+        _decisions.pop_front();
+    }
+    ++_epoch;
+    if (earliest < _tick) {
+        // Ticks that ran with them (on a prediction) run again without them.
+        _rollback_to = _rollback_to < 0 ? earliest : std::min<i64>(_rollback_to, earliest);
+    }
+    _next_report_us = 0;
+}
+
+void InputSyncCore::on_report(u32 slot, ByteReader& payload) {
+    const u32 sender = payload.read_u8();
+    const u32 epoch = payload.read_u32();
+    const u32 undecided = payload.read_u32();
+    const u32 frozen = payload.read_u32();
+    const u32 all = (1u << _config.players) - 1;
+    if (!payload.ok() || sender != slot || (frozen & ~all) != 0 || (undecided & ~frozen) != 0) {
+        return;
+    }
+    std::array<i64, max_players> known{};
+    for (u32 p = 0; p < _config.players; ++p) {
+        if ((frozen >> p) & 1u) {
+            known[p] = static_cast<i32>(payload.read_u32());
+        }
+    }
+    if (!payload.ok()) {
+        return;
+    }
+    PeerTrack& peer = _peers[slot];
+    peer.reported = true;
+    peer.report_epoch = epoch;
+    peer.report_undecided = undecided;
+    peer.report_frozen = frozen;
+    peer.report_known = known;
+    if (_status != SessionStatus::running) {
+        return;
+    }
+    if (epoch < _epoch) {
+        send_decisions(slot, epoch);
+    }
+    if (_active_until[slot] != never) {
+        return; // a player the game let go: the decisions tell it so
+    }
+    // Who they lost, this peer loses too: a player some peer cannot reach leaves the game. Unless they lost everyone,
+    // which is their own connection (they go).
+    u32 others = 0;
+    for (u32 p = 0; p < _config.players; ++p) {
+        if (p != slot && in_game(p)) {
+            others |= 1u << p;
+        }
+    }
+    const bool cut_off = (others & ~undecided) == 0;
+    const u32 local = _config.local_player;
+    if (in_game(slot) && !lost(slot) && !cut_off) {
+        for (u32 p = 0; p < _config.players; ++p) {
+            if (((undecided >> p) & 1u) && p != local && in_game(p) && !lost(p)) {
+                freeze(p, false);
+            }
+        }
+    }
+    // Their commands it lacks, of a player this peer lost too (or has let go already: it may be done before them).
+    // Only a remaining player relays: what it has of them is what it reported (a joiner's and the lost player's own
+    // are not counted when the game decides).
+    if (in_game(local) && !lost(local)) {
+        for (u32 p = 0; p < _config.players; ++p) {
+            if (((frozen >> p) & 1u) && p != slot && p != local && (lost(p) || _active_until[p] != never)) {
+                send_relay(slot, p, known[p]);
+            }
+        }
+    }
+}
+
+void InputSyncCore::on_relay(u32 slot, ByteReader& payload) {
+    const u32 player = payload.read_u8();
+    const u32 first = payload.read_u32();
+    const u32 count = payload.read_u8();
+    const std::span<const u8> commands = payload.read_bytes(static_cast<std::size_t>(count) * _input_size);
+    const u32 join_count = payload.read_u8();
+    if (!payload.ok() || join_count >= _config.players) {
+        return;
+    }
+    std::array<JoinEvent, max_players> joins;
+    for (u32 i = 0; i < join_count; ++i) {
+        joins[i].tick = payload.read_u32();
+        joins[i].slot = payload.read_u8();
+        joins[i].id = payload.read_u64();
+        if (!payload.ok() || joins[i].slot >= _config.players) {
+            return;
+        }
+    }
+    if (_status != SessionStatus::running || player >= _config.players || player == slot ||
+        player == _config.local_player || !lost(player) || !in_game(slot) || lost(slot)) {
+        return;
+    }
+    take_commands(player, first, count, commands, std::span<const JoinEvent>(joins.data(), join_count), true);
+}
+
+void InputSyncCore::send_report() {
+    std::vector<u8> payload;
+    ByteWriter writer(payload);
+    writer.write_u8(static_cast<u8>(_config.local_player));
+    writer.write_u32(_epoch);
+    writer.write_u32(_undecided);
+    writer.write_u32(_frozen);
+    for (u32 p = 0; p < _config.players; ++p) {
+        if (lost(p)) {
+            writer.write_u32(static_cast<u32>(static_cast<i32>(std::max<i64>(_known[p], -1))));
+        }
+    }
+    for (u32 slot = 0; slot < _config.players; ++slot) {
+        if (slot != _config.local_player && _peers[slot].linked && !lost(slot) && !_links.failed(_peers[slot].link)) {
+            _links.send(_peers[slot].link, lost_message, payload);
+        }
+    }
+    _next_report_us = _now_us + lost_repeat_us;
+}
+
+void InputSyncCore::send_relay(u32 to, u32 player, i64 they_have) {
+    const PeerTrack& peer = _peers[to];
+    if (!peer.linked || _links.failed(peer.link)) {
+        return;
+    }
+    i64 last = _known[player];
+    if (_active_until[player] != never) {
+        last = std::min(last, _active_until[player] - 1);
+    }
+    const i64 first = std::max<i64>(they_have + 1, 0);
+    const std::size_t fixed = relay_header + 1 + join_entry * (_config.players - 1);
+    if (first > last || _links.max_payload() < fixed + _input_size) {
+        return;
+    }
+    const u32 max_count = static_cast<u32>(std::min<std::size_t>(255, (_links.max_payload() - fixed) / _input_size));
+    u32 count = 0;
+    while (count < max_count && first + count <= last) {
+        const u32 t = static_cast<u32>(first + count);
+        const std::size_t index = static_cast<std::size_t>(player) * ring_ticks + t % ring_ticks;
+        if (_input_tick[index] != t || _predicted[index]) {
+            break; // gone from the ring (cannot happen: a lost player's commands stop near the present)
+        }
+        ++count;
+    }
+    if (count == 0) {
+        return;
+    }
+    std::vector<u8> payload;
+    ByteWriter writer(payload);
+    writer.write_u8(static_cast<u8>(player));
+    writer.write_u32(static_cast<u32>(first));
+    writer.write_u8(static_cast<u8>(count));
+    for (u32 i = 0; i < count; ++i) {
+        writer.write_bytes(input(player, static_cast<u32>(first + i)));
+    }
+    // The joins the lost player decided at those ticks (as its own inputs would have carried them).
+    std::array<JoinEvent, max_players> joins;
+    u32 join_count = 0;
+    const auto add = [&](u32 slot, i64 from, u64 id) {
+        if (from > 0 && from >= first && from < first + count && join_count + 1 < _config.players &&
+            host_at(static_cast<u32>(from)) == player) {
+            joins[join_count++] = {.tick = static_cast<u32>(from), .slot = slot, .id = id};
+        }
+    };
+    for (u32 slot = 0; slot < _config.players; ++slot) {
+        if (_active_from[slot] != never) {
+            add(slot, _active_from[slot], _peers[slot].expected_id);
+        }
+    }
+    for (const PastPlayer& past : _past) {
+        add(past.slot, past.from, past.id);
+    }
+    writer.write_u8(static_cast<u8>(join_count));
+    for (u32 i = 0; i < join_count; ++i) {
+        writer.write_u32(joins[i].tick);
+        writer.write_u8(static_cast<u8>(joins[i].slot));
+        writer.write_u64(joins[i].id);
+    }
+    _links.send(peer.link, relay_message, payload);
+}
+
+void InputSyncCore::send_decisions(u32 to, u32 from_epoch) {
+    const PeerTrack& peer = _peers[to];
+    if (!peer.linked || _links.failed(peer.link)) {
+        return;
+    }
+    const u32 oldest = _epoch - static_cast<u32>(_decisions.size());
+    std::vector<u8> payload;
+    for (u32 index = std::max(from_epoch, oldest); index < _epoch; ++index) {
+        const LeaveDecision& decision = _decisions[index - oldest];
+        payload.clear();
+        ByteWriter writer(payload);
+        writer.write_u32(index);
+        writer.write_u32(decision.mask);
+        for (u32 p = 0; p < _config.players; ++p) {
+            if ((decision.mask >> p) & 1u) {
+                writer.write_u32(decision.ticks[p]);
+            }
+        }
+        _links.send(peer.link, leave_message, payload);
+    }
 }
 
 } // namespace kin::net

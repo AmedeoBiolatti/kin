@@ -11,12 +11,14 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -66,6 +68,11 @@ public:
         }
         ArenaState& s = _state;
         present_at[info.tick] = info.present;
+        for (u32 p = 0; p < s.players; ++p) {
+            if ((info.left >> p) & 1u) {
+                left_at[p] = info.tick;
+            }
+        }
         for (u32 p = 0; p < s.players; ++p) {
             const Command& c = commands[p];
             if (!((info.present >> p) & 1u)) {
@@ -149,6 +156,7 @@ public:
     std::map<u32, u64> hash_after; // the latest run of each tick
     std::map<u32, u32> present_at; // StepInfo::present of the latest run of each tick
     std::array<std::optional<u32>, max_players> joined_at{};
+    std::array<std::optional<u32>, max_players> left_at{};
     std::optional<u32> corrupt_at;
     bool corrupt_restore = false;
     u32 ballast = 0;
@@ -337,6 +345,53 @@ struct Match {
         for (u64 i = 0; i < ms; ++i) {
             step_ms();
         }
+    }
+
+    template <class Done> bool run_while_not(Done done, u64 limit_ms) {
+        const u64 end = now_ms + limit_ms;
+        while (now_ms < end) {
+            step_ms();
+            if (done()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // A player's game stops (a crash, a pulled cable): no goodbye, nothing more from it.
+    void drop(u32 player) {
+        peers[player]->frozen = true;
+        for (u32 other = 0; other < peers.size(); ++other) {
+            network.set_connected(player, other, false);
+            network.set_connected(other, player, false);
+        }
+    }
+
+    // `who` agree on every command and state of the first `ticks` ticks, and on who was there: one offline run's.
+    void check_players(const std::vector<u32>& who, u32 ticks) const {
+        const Peer& r = *peers[who.front()];
+        Arena reference(static_cast<u32>(peers.size()));
+        for (u32 t = 0; t < ticks; ++t) {
+            reference.step(r.log.at(t), StepInfo{.tick = t, .present = r.arena.present_at.at(t)});
+            for (const u32 i : who) {
+                const Peer& peer = *peers[i];
+                assert(peer.log.at(t) == r.log.at(t));
+                assert(peer.arena.present_at.at(t) == r.arena.present_at.at(t));
+                assert(peer.arena.hash_after.at(t) == reference.hash_after.at(t));
+            }
+        }
+        for (const u32 i : who) {
+            assert(peers[i]->arena.left_at == r.arena.left_at);
+        }
+    }
+
+    i64 min_confirmed(const std::vector<u32>& who) const {
+        i64 confirmed = std::numeric_limits<i64>::max();
+        for (const u32 i : who) {
+            const InputSyncStats& stats = peers[i]->session->stats();
+            confirmed = std::min({confirmed, stats.confirmed_tick, static_cast<i64>(stats.tick) - 1}); // and ran
+        }
+        return confirmed;
     }
 
     // Every peer agrees on the commands of the first `ticks` ticks, and each one's state after each tick is what
@@ -841,6 +896,7 @@ void test_peer_lost_and_leave() {
     InputSyncConfig config{.input_delay = 2, .max_prediction = 8};
     config.links.timeout_us = 500'000;
     {
+        // Two players lose each other: to each it looks like its own connection went, so both sessions end.
         Match match(2, config);
         assert(match.run_until(120, 10'000));
         match.network.set_connected(0, 1, false);
@@ -852,13 +908,150 @@ void test_peer_lost_and_leave() {
         }
     }
     {
+        // A player who quits says goodbye: the other plays on alone, from a tick both agree on.
+        Match match(2, config);
+        assert(match.run_until(60, 10'000));
+        match.peers[0]->session->leave();
+        assert(match.run_while_not([&] { return match.peers[1]->session->stats().confirmed_tick > 300; }, 10'000));
+        assert(match.peers[0]->session->status() == SessionStatus::ended);
+        const InputSyncStats& stats = match.peers[1]->session->stats();
+        assert(match.peers[1]->session->status() == SessionStatus::running);
+        assert(stats.present == 0b10 && stats.leaves == 1 && stats.lost == 0);
+        const u32 left = *match.peers[1]->arena.left_at[0];
+        assert(left > 60 && match.peers[1]->arena.present_at.at(left - 1) == 0b11);
+        assert(match.peers[1]->arena.present_at.at(left) == 0b10);
+        // Up to the leave, its game is the one both played.
+        for (u32 t = 0; t < left - 1 && t < match.peers[0]->log.size(); ++t) {
+            assert(match.peers[0]->log[t] == match.peers[1]->log[t]);
+        }
+    }
+    {
+        // Players who may not leave: a lost player ends the session, as it did before leaving existed.
+        config.players_may_leave = false;
         Match match(2, config);
         assert(match.run_until(60, 10'000));
         match.peers[0]->session->leave();
         match.run_for(200);
-        assert(match.peers[0]->session->status() == SessionStatus::ended);
         assert(match.peers[1]->session->status() == SessionStatus::peer_lost);
         assert(match.peers[1]->session->status_detail().find("left") != std::string::npos);
+    }
+}
+
+// Players leave a running game (docs/networking.md#leaving): the others agree on the tick each is gone from, and on
+// every command before it, and play on.
+void run_leave(const char* name, InputSyncConfig config, const LinkConditions& conditions, u32 players, u32 drops,
+               u64 seed) {
+    config.links.timeout_us = 400'000;
+    Match match(players, config, seed);
+    match.network.set_conditions(conditions);
+    assert(match.run_until(150, 20'000));
+    std::vector<u32> remaining;
+    for (u32 p = 0; p < players; ++p) {
+        if ((drops >> p) & 1u) {
+            match.drop(p);
+        } else {
+            remaining.push_back(p);
+        }
+    }
+    const auto done = [&] {
+        return std::ranges::all_of(remaining,
+                                   [&](u32 p) { return match.peers[p]->session->stats().confirmed_tick > 700; });
+    };
+    if (!match.run_while_not(done, 30'000)) {
+        print_stats(name, match);
+        for (u32 p = 0; p < players; ++p) {
+            const InputSyncStats& st = match.peers[p]->session->stats();
+            std::printf("  peer %u: %s (%s) present %x lost %x leaves %u\n", p,
+                        std::string(session_status_name(match.peers[p]->session->status())).c_str(),
+                        match.peers[p]->session->status_detail().c_str(), st.present, st.lost, st.leaves);
+        }
+        assert(false);
+    }
+    const u32 present = ((1u << players) - 1) & ~drops;
+    for (const u32 p : remaining) {
+        const InputSyncStats& stats = match.peers[p]->session->stats();
+        assert(match.peers[p]->session->status() == SessionStatus::running);
+        assert(stats.present == present && stats.leaves == static_cast<u32>(std::popcount(drops)) && stats.lost == 0);
+    }
+    match.check_players(remaining, static_cast<u32>(match.min_confirmed(remaining)) + 1);
+    std::printf("  leave %s: gone from tick %u, played on to %lld\n", name,
+                *match.peers[remaining.front()]->arena.left_at[std::countr_zero(drops)],
+                static_cast<long long>(match.min_confirmed(remaining)));
+}
+
+void test_leave() {
+    const InputSyncConfig rollback{.input_delay = 2, .max_prediction = 8, .hash_interval = 10};
+    const InputSyncConfig lockstep{.input_delay = 4, .max_prediction = 0, .hash_interval = 10};
+    const LinkConditions rough{.latency_us = 25'000, .jitter_us = 15'000, .loss = 0.08f};
+    run_leave("rollback", rollback, rough, 4, 0b0100, 41);
+    run_leave("lockstep", lockstep, rough, 4, 0b0100, 42);
+    run_leave("the host", rollback, rough, 4, 0b0001, 43); // the lowest slot, which decides joins
+    run_leave("lockstep host", lockstep, rough, 3, 0b001, 44);
+    run_leave("two at once", rollback, rough, 4, 0b1010, 45);
+    {
+        // Everyone else goes quiet at once: to this peer that is its own connection, and its session ends; the
+        // others, who still reach each other, let it go and play on.
+        InputSyncConfig config = rollback;
+        config.links.timeout_us = 400'000;
+        Match match(3, config, 46);
+        match.network.set_conditions(rough);
+        assert(match.run_until(150, 20'000));
+        for (u32 other = 1; other < 3; ++other) {
+            match.network.set_connected(0, other, false);
+            match.network.set_connected(other, 0, false);
+        }
+        assert(match.run_while_not([&] { return match.min_confirmed({1, 2}) > 500; }, 20'000));
+        assert(match.peers[0]->session->status() == SessionStatus::peer_lost);
+        assert(match.peers[0]->session->status_detail().find("lost every other player") != std::string::npos);
+        assert(match.peers[1]->session->stats().present == 0b110);
+        match.check_players({1, 2}, static_cast<u32>(match.min_confirmed({1, 2})) + 1);
+    }
+    for (const u32 deaf : {1u, 0u}) {
+        // Player `deaf` stops hearing player 2, who still reaches the other one: that one has more of 2's commands
+        // and sends the deaf one those it lacks. Player 2 is let go (a player someone cannot reach leaves) and told
+        // so. When the deaf one is player 0, the one who decides, the other must not take more of 2's commands once
+        // it reported how far it has them.
+        InputSyncConfig config = rollback;
+        config.links.timeout_us = 400'000;
+        Match match(3, config, 47 + deaf);
+        assert(match.run_until(150, 20'000));
+        match.network.set_connected(2, deaf, false);
+        assert(match.run_while_not([&] { return match.min_confirmed({0, 1}) > 600; }, 20'000));
+        assert(match.peers[2]->session->status() == SessionStatus::peer_lost);
+        assert(match.peers[2]->session->status_detail().find("other players lost this peer") != std::string::npos);
+        assert(match.peers[0]->session->stats().present == 0b011 && match.peers[1]->session->stats().present == 0b011);
+        match.check_players({0, 1}, static_cast<u32>(match.min_confirmed({0, 1})) + 1);
+        const u32 left = *match.peers[0]->arena.left_at[2];
+        // Player 2 played every tick before it went, as far as the other had its commands: past what `deaf` heard.
+        bool real = false;
+        for (u32 t = 150; t < left; ++t) {
+            real = real || !(match.peers[deaf]->log[t][2] == Command{});
+        }
+        assert(real);
+    }
+    {
+        // Players 0 and 3 lose each other, and only each other: they cannot both play on. The one the others hear
+        // about first goes (a report from a player already let go counts for nothing); the other plays on with 1 and 2.
+        InputSyncConfig config = rollback;
+        config.links.timeout_us = 400'000;
+        Match match(4, config, 48);
+        assert(match.run_until(150, 20'000));
+        match.network.set_connected(0, 3, false);
+        match.network.set_connected(3, 0, false);
+        const auto gone = [&](u32 p) { return match.peers[p]->session->status() == SessionStatus::peer_lost; };
+        assert(match.run_while_not([&] { return (gone(0) || gone(3)) && match.min_confirmed({1, 2}) > 600; }, 20'000));
+        assert(gone(0) != gone(3));
+        const u32 stays = gone(0) ? 3 : 0;
+        const std::vector<u32> players = stays == 0 ? std::vector<u32>{0, 1, 2} : std::vector<u32>{1, 2, 3};
+        for (const u32 p : players) {
+            assert(match.peers[p]->session->status() == SessionStatus::running);
+            assert(match.peers[p]->session->stats().present == (0b1111u & ~(1u << (3 - stays))));
+        }
+        match.check_players(players, static_cast<u32>(match.min_confirmed(players)) + 1);
+    }
+    for (u64 seed = 1; seed <= 6; ++seed) {
+        run_leave("deep predictions", {.input_delay = 1, .max_prediction = 12, .hash_interval = 1},
+                  {.latency_us = 40'000, .jitter_us = 40'000, .loss = 0.15f}, 3, 1u << (seed % 3), 50 + seed);
     }
 }
 
@@ -1515,6 +1708,43 @@ void test_join_failures() {
     }
 }
 
+// A player's game crashes; the others play on without them, and they come back into the same slot.
+void test_rejoin() {
+    for (const bool rollback : {true, false}) {
+        JoinGame game({.config = {.input_delay = rollback ? 2u : 4u,
+                                  .max_prediction = rollback ? 8u : 0u,
+                                  .hash_interval = 10,
+                                  .links = {.timeout_us = 400'000}},
+                       .conditions = {.latency_us = 20'000, .jitter_us = 10'000, .loss = 0.05f}},
+                      rollback ? 61 : 62);
+        game.start(0, false, 0b111);
+        game.start(1, false, 0b111);
+        game.start(2, false, 0b111);
+        game.run_until([&] { return game.confirmed(150); }, 10'000);
+        game.peers[2].reset(); // crashed: no goodbye
+        game.run_until([&] { return game.stats(0).present == 0b011 && game.stats(1).present == 0b011; }, 10'000);
+        assert(game.stats(0).leaves == 1 && game.stats(0).lost == 0);
+        game.run_until([&] { return game.confirmed(400); }, 10'000);
+        // The same player comes back (the same transport peer): the game lets them into their old slot.
+        game.start(2, true, 0b011);
+        game.allow(2);
+        game.run_until([&] { return game.stats(0).present == 0b111 && !game.stats(2).spectating && game.running(2); },
+                       20'000);
+        game.run_until(
+            [&] {
+                return game.confirmed(900) &&
+                       std::ranges::all_of(game.peers, [](const auto& p) { return p->session->stats().tick > 901; });
+            },
+            20'000);
+        const u32 left = *game.peers[0]->arena.left_at[2];
+        const u32 back = *game.peers[0]->arena.joined_at[2];
+        assert(left > 150 && left < 400 && back > left);
+        assert(game.peers[1]->arena.left_at[2] == left && game.peers[1]->arena.joined_at[2] == back);
+        game.check(0, 900);
+        std::printf("  rejoin %s: left at tick %u, back at tick %u\n", rollback ? "rollback" : "lockstep", left, back);
+    }
+}
+
 void test_udp() {
 #ifndef __EMSCRIPTEN__
     std::string error;
@@ -1574,6 +1804,7 @@ int main() {
     test_desync();
     test_time_sync();
     test_peer_lost_and_leave();
+    test_leave();
     test_rejected_and_failed();
     test_stale_and_forged_messages();
     test_codec_command();
@@ -1584,6 +1815,7 @@ int main() {
     test_join_while_rolling_back();
     test_join_late_requests();
     test_join_failures();
+    test_rejoin();
     test_udp();
     std::printf("net tests passed\n");
     return 0;

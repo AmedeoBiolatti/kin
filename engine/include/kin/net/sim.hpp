@@ -60,10 +60,13 @@ struct StepInfo {
     // Every player's command is real (none is predicted): this run of the tick is final.
     bool confirmed = true;
     // The player slots in the game at this tick, a bit each (slot 0 is bit 0). An empty slot's command is the
-    // default one. Only a joinable session has empty slots (InputSyncConfig::joinable).
+    // default one. Slots are empty in a joinable session (InputSyncConfig::joinable) and after a player leaves.
     u32 present = ~0u;
     // The slots whose player joins at this tick: present from now on (a game spawns them here).
     u32 joined = 0;
+    // The slots whose player is gone from this tick on (they quit, or their connection was lost): a game removes
+    // them here, or keeps their character for them to come back to.
+    u32 left = 0;
 };
 
 template <class Sim, class Command>

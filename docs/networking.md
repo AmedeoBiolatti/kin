@@ -174,10 +174,12 @@ machine.
 | `max_catchup` | 8 | the most ticks one `update()` runs after a hitch |
 | `game` | 0 | the compatibility hash; peers of another game, version, build or content refuse each other |
 | `session` | 0 | the match, as a lobby numbers it |
-| `links` | | handshake, ping and timeout intervals |
+| `links` | | handshake, ping and timeout intervals (`timeout_us`: how long a quiet player takes to be lost) |
+| `joinable` | false | slots can be empty and taken while the game runs. Must match |
+| `players_may_leave` | true | a lost player leaves and the others play on; false: the session ends. Must match |
 
 `stats()` reports the current and confirmed ticks, rollbacks (count, ticks run again, deepest), waits, slowed
-updates, hashes compared and the clock advantage.
+updates, hashes compared, the clock advantage, who is present, joins, leaves and the players lost but not yet let go.
 
 ## Transports
 
@@ -280,18 +282,72 @@ can join at once. A joiner fails alone, and the game goes on, if:
 - a player in the game does not answer it, or it was not told about one: the reason names the player.
 
 A joiner that never comes, or leaves before it plays, leaves the slot empty, and nobody waits for it. A slot can then
-go to someone else. Once it plays, a joiner is a player like the others: losing it ends the session.
+go to someone else. Once it plays, a joiner is a player like the others, and leaves as they do (below).
 
-**Through a lobby.** `start_lobby_match(services, {}, 0, free_slots)` keeps `free_slots` open. The lobby stays
-joinable while one is free. The owner seats newcomers with `seat_lobby_joiners()` (on `LobbyMemberJoined`), and frees
-the seat of one who leaves before playing with `free_lobby_slot()`. Every member, on `LobbyDataChanged`, reads the
-match:
+**Through a lobby.** `start_lobby_match(services, {}, 0, free_slots)` keeps `free_slots` open; one is enough for
+players to drop in and out all game. The lobby stays joinable while one is free. The owner seats newcomers with
+`seat_lobby_joiners()` (on `LobbyMemberJoined`), and frees the seat of one who goes with `free_lobby_slot()` (on
+`LobbyMemberLeft`). Every member, on `LobbyDataChanged`, reads the match:
 
 - a seated latecomer's `configure_input_sync` sets `joining`;
 - the players in the game call `allow_lobby_joiners(match, transport, session)`.
 
 `kin-net-services` plays it: two players start a four-slot match, Cyd joins, Dan is seated and leaves before playing,
 Eve takes the slot, the lobby closes when full, and every peer's states agree tick by tick from each one's first.
+
+## Leaving
+
+A player who quits, or whose connection is lost, leaves the game, and the others play on
+(`players_may_leave`, on by default). Every peer agrees on the tick the player is gone from: `StepInfo::left` says
+so at that tick, and from then on the slot is empty (`present` without it, the default command). The game removes
+the player's character there, or keeps it for them to come back to.
+
+```cpp
+void step(std::span<const Command> commands, const kin::net::StepInfo& info) {
+    for (u32 slot = 0; slot < players; ++slot) {
+        if (info.left & (1u << slot)) drop_to_the_floor(slot); // their character stays, asleep
+        if (info.joined & (1u << slot)) wake(slot);            // they (or someone) came back
+        if (info.present & (1u << slot)) move(slot, commands[slot]);
+    }
+}
+```
+
+How the peers agree:
+
+1. A peer that loses a player in the game (no word for `links.timeout_us`, or a goodbye from `leave()`) stops taking
+   their commands, and tells every peer how far it has them. A peer told that someone lost a player stops taking
+   theirs too: a player someone cannot reach leaves.
+2. The peers send each other the commands of the player that some lack.
+3. When every remaining player reports the same lost players, the lowest of them decides the tick each is gone from:
+   one past the furthest any peer has that player's commands. No peer ran a tick with those commands that the game
+   then runs without them, in lockstep too. A peer that ran later ticks on a prediction runs them again.
+4. Decisions are numbered, and every peer applies them in order. Any peer sends one that a peer missed.
+
+A game stalls for the link timeout when a player's connection drops (five seconds by default; a lower one finds a
+lost player sooner but drops a player on a long hitch), and not at all when a player quits: the goodbye arrives at
+once.
+
+Special cases:
+
+- **Everyone else goes quiet at once.** To this peer, that looks like its own connection: its session ends
+  (`peer_lost`, "lost every other player"). The others let it go and play on. With two players a crash looks the same,
+  so both sessions end; a player who quits says goodbye, and the other plays on alone.
+- **Two players lose only each other.** They cannot both stay. The one the others hear about first goes; a report from
+  a player already let go counts for nothing.
+- **The others let this peer go** (it could not reach one of them): its session ends with `peer_lost`, "the other
+  players lost this peer".
+- **A joiner** waits while a leave is being decided. The host serves no state and decides no join until then.
+
+**Coming back.** In a joinable session a slot whose player left can be taken again through the usual join: the same
+player (their old transport peer starts a new link) or anyone the game allows. Through a lobby, the owner frees the
+slot on `LobbyMemberLeft`. When the player starts the game again and rejoins the lobby, `seat_lobby_joiners()` seats
+them, and they join the game in progress. Call `ServicesTransport::remove_peer()` on `LobbyMemberLeft` too, so their
+place among `max_peers` is free. `kin-net-services` plays it: Cyd's game crashes, Ann and Bob play on, and Cyd comes
+back into the same slot.
+
+`kin-net` loses players in rollback and lockstep, under loss and jitter, with deep predictions: the host, two at once,
+one who only one peer cannot hear (the other relays their commands), two who lose each other, and a crashed player who
+comes back. The remaining peers' states agree with one offline run, tick by tick.
 
 ## Testing a networked game
 
@@ -323,12 +379,15 @@ drive the link.
 | 2 | reject | reason `u8` (the header and this layout never change) |
 | 3, 4 | ping, pong | the pinger's clock `u64` |
 | 5 | bye | |
-| 32 | inputs | slot `u8`, sender's tick `u32`, its advantage `i16` (1/256 tick), next tick it lacks from the receiver `u32`, first tick `u32`, count `u8`, the commands |
+| 32 | inputs | slot `u8`, sender's tick `u32`, its advantage `i16` (1/256 tick), next tick it lacks from the receiver `u32`, leave decisions applied `u32`, first tick `u32`, count `u8`, the commands |
 | 33 | hash | slot `u8`, tick `u32`, state hash `u64` |
 | 34 | join request | the joiner's slot `u8`, its id `u64` |
-| 35 | join state | the joiner's slot `u8`, base tick `u32`, slots in the game before it `u32`, total bytes `u32`, offset `u32`, bytes |
+| 35 | join state | the joiner's slot `u8`, base tick `u32`, slots in the game before it `u32`, leave decisions before it `u32`, total bytes `u32`, offset `u32`, bytes |
 | 36 | join ack | the joiner's slot `u8`, bytes received from the start `u32` |
 | 37 | join ready | the joiner's slot `u8`, its id `u64` |
+| 38 | lost | slot `u8`, leave decisions applied `u32`, lost players not yet decided on `u32`, lost players `u32`, then for each lost player the last tick of theirs it has `i32` |
+| 39 | relay | the lost player's slot `u8`, first tick `u32`, count `u8`, the commands, then the joins they decided at those ticks (as in inputs) |
+| 40 | leave | the decision's number `u32`, the players who leave `u32`, then for each the tick they are gone from `u32` |
 
 In a joinable session, inputs end with the joins their sender decided at the ticks of their commands: count `u8`,
 then tick `u32`, slot `u8` and the joiner's id `u64` each.
@@ -341,8 +400,8 @@ handshake only if no matching hello follows before the connect timeout.
 
 ## Not yet
 
-- A lost player ends the session: nobody leaves a game that goes on. A joiner watches before it plays, but there is
-  no spectator that only watches.
+- A joiner watches before it plays, but there is no spectator that only watches.
+- A desync ends the session: no peer is set right from the others' state yet.
 - Over UDP: no NAT traversal, encryption or authentication (a peer's address and token are its identity, so anyone
   who sees the traffic can forge it). Over Steam, `ServicesTransport` has all three: Steam's relays, its encrypted
   sessions and its accounts.

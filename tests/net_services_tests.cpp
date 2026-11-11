@@ -523,6 +523,109 @@ void test_lobby_late_join() {
                 players[2].session->stats().start_tick, players[4].session->stats().start_tick, compared);
 }
 
+// The friend-slop case: three friends play; one's game crashes; the others play on without them; they start the game
+// again, rejoin the lobby, and take their old slot back.
+void test_lobby_leave_and_rejoin() {
+    FakeNetwork network;
+    network.drop_every = 11;
+    std::vector<std::unique_ptr<Player>> players(3);
+    const char* names[] = {"Ann", "Bob", "Cyd"};
+    const auto start = [&](u32 i) {
+        players[i] = std::make_unique<Player>();
+        players[i]->services = std::make_unique<FakeServices>(
+            network, ServicePlayer{.id = std::string{"fake:"} + names[i], .name = names[i]});
+        players[i]->transport = std::make_unique<ServicesTransport>(*players[i]->services);
+    };
+    for (u32 i = 0; i < 3; ++i) {
+        start(i);
+    }
+    FakeServices& host = *players[0]->services;
+    host.create_lobby({.max_members = 4, .visibility = LobbyVisibility::Public});
+    players[1]->services->join_lobby(host.lobby());
+    players[2]->services->join_lobby(host.lobby());
+    assert(start_lobby_match(host, {}, 0xf00d, 1)); // one free slot: the match stays joinable
+    InputSyncConfig base{
+        .input_delay = 2, .max_prediction = 8, .hash_interval = 5, .game = compatibility_hash("w", "1")};
+    base.links.timeout_us = 500'000;
+    u64 now_ms = 0;
+    const auto frame = [&] {
+        now_ms += 4;
+        for (u32 i = 0; i < players.size(); ++i) {
+            if (!players[i]) {
+                continue;
+            }
+            Player& p = *players[i];
+            p.services->update();
+            for (const ServiceEvent& event : p.services->events()) {
+                if (event.kind == ServiceEventKind::LobbyMemberJoined) {
+                    seat_lobby_joiners(*p.services);
+                }
+                if (event.kind == ServiceEventKind::LobbyMemberLeft) {
+                    free_lobby_slot(*p.services, event.id);
+                    p.transport->remove_peer(event.id);
+                }
+            }
+            if (const std::optional<LobbyMatch> match = read_lobby_match(*p.services)) {
+                if (!p.session) {
+                    InputSyncConfig config = base;
+                    configure_input_sync(*match, *p.transport, config);
+                    p.walk = std::make_unique<Walk>(config.players, match->session);
+                    p.session = std::make_unique<InputSync<Walk, Command>>(*p.walk, *p.transport, config);
+                }
+                allow_lobby_joiners(*match, *p.transport, *p.session);
+            }
+            if (p.session) {
+                const u64 h = (now_ms / 40) * 29 + i * 13;
+                p.session->set_local_input(
+                    {.dx = static_cast<i8>(static_cast<i32>(h % 3) - 1), .buttons = static_cast<u8>((h >> 2) & 1)});
+                p.session->update(now_ms * 1000);
+                assert(!session_over(p.session->status()));
+            }
+        }
+    };
+    const auto run_until = [&](auto&& done) {
+        const u64 limit = now_ms + 30'000;
+        while (!done()) {
+            frame();
+            assert(now_ms < limit);
+        }
+    };
+    const auto stats = [&](u32 i) -> const InputSyncStats& { return players[i]->session->stats(); };
+    run_until([&] { return players[0]->session && stats(0).confirmed_tick >= 150 && players[2]->session; });
+    assert(stats(0).present == 0b0111);
+
+    // Cyd's game crashes: Cyd leaves the lobby without a word, and the game without a goodbye.
+    players[2].reset();
+    run_until([&] { return stats(0).present == 0b0011 && stats(1).present == 0b0011 && stats(0).lost == 0; });
+    const std::optional<LobbyMatch> freed = read_lobby_match(host);
+    assert(freed && freed->players[2].empty() && stats(0).leaves == 1);
+    run_until([&] { return stats(0).confirmed_tick >= 400 && stats(1).confirmed_tick >= 400; });
+
+    // Cyd starts the game again and joins the lobby: seated in the old slot, Cyd joins the game in progress.
+    start(2);
+    players[2]->services->join_lobby(host.lobby());
+    run_until([&] {
+        return players[2]->session && stats(0).present == 0b0111 && !stats(2).spectating && stats(1).present == 0b0111;
+    });
+    assert(players[2]->session->config().joining && players[2]->session->config().local_player == 2);
+    run_until([&] {
+        return std::ranges::all_of(std::array{0u, 1u, 2u},
+                                   [&](u32 i) { return stats(i).confirmed_tick >= 800 && stats(i).tick > 800; });
+    });
+    u32 compared = 0;
+    for (u32 t = stats(2).start_tick; t < 800; ++t) {
+        for (u32 i = 0; i < 3; ++i) {
+            assert(players[i]->walk->hash_after.at(t) == players[0]->walk->hash_after.at(t));
+            ++compared;
+        }
+    }
+    for (u32 t = 0; t < 800; ++t) {
+        assert(players[1]->walk->hash_after.at(t) == players[0]->walk->hash_after.at(t));
+    }
+    std::printf("  lobby leave and rejoin ok: Cyd back from tick %u, %u states compared\n", stats(2).start_tick,
+                compared);
+}
+
 } // namespace
 
 int main() {
@@ -533,6 +636,7 @@ int main() {
     test_lobby_match();
     test_lobby_joiners_session();
     test_lobby_late_join();
+    test_lobby_leave_and_rejoin();
     std::printf("net services tests passed\n");
     return 0;
 }

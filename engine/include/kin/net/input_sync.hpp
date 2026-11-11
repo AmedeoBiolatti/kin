@@ -57,6 +57,11 @@ struct InputSyncConfig {
     // slots. One of them sends the state; this peer catches up as a spectator, then plays from a tick the game
     // agrees on (StepInfo::joined says which).
     bool joining = false;
+    // A player who quits or whose connection is lost leaves the game, and the others play on
+    // (docs/networking.md#leaving): every peer agrees on the tick they are gone from (StepInfo::left). In a joinable
+    // session someone (they again) can take the slot. False: a lost player ends the session for everyone. Must match
+    // on every peer.
+    bool players_may_leave = true;
 };
 
 inline constexpr u32 max_players = 16;
@@ -75,6 +80,8 @@ struct InputSyncStats {
     f32 advantage = 0.0f;    // ticks this peer is ahead of the furthest-behind one (smoothed)
     u32 present = 0;         // the slots in the game at the current tick, a bit each
     u32 joins = 0;           // players who joined while this peer played (itself too, for a joiner)
+    u32 leaves = 0;          // players who left while this peer played
+    u32 lost = 0;            // the players this peer lost and the game has not yet let go, a bit each
     u32 start_tick = 0;      // this peer's first tick: 0, or for a joiner the tick of the state it was sent
     bool spectating = false; // a joiner that has the state and follows the game, before it plays
     u64 state_bytes_sent = 0, state_bytes_received = 0;
@@ -146,6 +153,26 @@ private:
         u64 expected_id = 0; // the joiner the game let into this slot (0 for a player from the start)
         u64 served_id = 0;   // the joiner this host sent a state to (a repeated request from it is not a new one)
         u64 joined_at_us = 0;
+        // The peer's last report of the players it lost (docs/networking.md#leaving).
+        bool reported = false;
+        u32 report_epoch = 0;
+        u32 report_undecided = 0;
+        u32 report_frozen = 0;
+        std::array<i64, max_players> report_known{};
+        u64 decisions_sent_us = 0;
+    };
+    // A leave the game agreed on: each player of `mask` is gone from their tick on (ticks[slot]). Numbered in the order
+    // every peer applies them.
+    struct LeaveDecision {
+        u32 mask = 0;
+        std::array<u32, max_players> ticks{};
+    };
+    // A slot's earlier time in the game, before its player left (and someone took it again).
+    struct PastPlayer {
+        u32 slot = 0;
+        i64 from = 0;
+        i64 until = 0;
+        u64 id = 0;
     };
     struct JoinEvent {
         u32 tick = 0;
@@ -157,6 +184,7 @@ private:
         u32 slot = 0;
         u32 base = 0;    // the state is from before this tick
         u32 present = 0; // the slots in the game before `base`
+        u32 epoch = 0;   // the leave decisions the state has seen
         std::vector<u8> bytes;
         u32 acked = 0; // bytes the joiner has, from the start
         u32 next = 0;  // the next byte to send
@@ -171,6 +199,8 @@ private:
     void schedule_local(u32 tick);
     bool can_step(u32 tick);
     void step_tick(u32 tick, bool resimulating);
+    void take_commands(u32 slot, u32 first, u32 count, std::span<const u8> commands, std::span<const JoinEvent> joins,
+                       bool relayed);
     void roll_back();
     void confirm();
     void compare_hashes();
@@ -180,6 +210,17 @@ private:
     void serve_join_requests();
     void check_joined_players();
     void fail_joining(std::string detail);
+    bool check_links();
+    std::string describe_link(std::size_t link) const;
+    void freeze(u32 slot, bool timed_out);
+    void resolve_leaves();
+    void decide_leave();
+    void apply_leave(u32 index, const LeaveDecision& decision);
+    void on_report(u32 slot, ByteReader& payload);
+    void on_relay(u32 slot, ByteReader& payload);
+    void send_report();
+    void send_relay(u32 to, u32 player, i64 they_have);
+    void send_decisions(u32 to, u32 from_epoch);
     void on_join_state(u32 slot, ByteReader& payload);
     void on_join_ack(u32 slot, ByteReader& payload);
     void on_join_ready(u32 slot, u64 id);
@@ -189,8 +230,9 @@ private:
     void send_join_messages();
     void drop_failed_joiners();
     u32 catch_up();
-    bool in_game(u32 slot) const { return _active_from[slot] != never; }
-    bool present(u32 slot, u32 tick) const { return _active_from[slot] <= static_cast<i64>(tick); }
+    bool in_game(u32 slot) const { return _active_from[slot] != never && _active_until[slot] == never; }
+    bool present(u32 slot, u32 tick) const;
+    bool lost(u32 slot) const { return ((_frozen >> slot) & 1u) != 0; }
     u32 present_mask(u32 tick) const;
     u32 host() const;
     u32 host_at(u32 tick) const;
@@ -222,9 +264,20 @@ private:
     std::vector<u8> _local_input;
     std::vector<u8> _step_buffer;
     std::vector<PeerTrack> _peers; // remote players, by slot (the local slot's entry is unused)
-    // The tick each slot's player is in the game from (never: an empty slot).
+    // The tick each slot's player is in the game from (never: an empty slot), and until (never: still in it).
     static constexpr i64 never = std::numeric_limits<i64>::max();
     std::vector<i64> _active_from;
+    std::vector<i64> _active_until;
+    std::vector<PastPlayer> _past; // players who left a slot someone took again
+    // Leaving: the players this peer lost (their commands are frozen where they stopped) until the game has let them
+    // go and this peer has all their commands before it; the ones the game has not decided on yet; the ones whose
+    // link timed out here (not a goodbye).
+    u32 _frozen = 0;
+    u32 _undecided = 0;
+    u32 _timed_out = 0;
+    u32 _epoch = 0;                       // the leave decisions applied
+    std::deque<LeaveDecision> _decisions; // the latest ones, the last being number _epoch - 1
+    u64 _next_report_us = 0;
     std::vector<JoinEvent> _created; // joins this peer decided as the host, sent with its commands
     std::vector<Transfer> _transfers;
     std::vector<u32> _join_requests; // slots that asked for the state since the last update (served after rollback)
@@ -237,6 +290,7 @@ private:
     u32 _state_from = 0;
     u32 _state_base = 0;
     u32 _state_present = 0;
+    u32 _state_epoch = 0;
     u32 _state_total = 0;
     std::vector<u8> _state;
     std::map<u32, std::vector<u8>> _state_early; // chunks that came before one that was lost, by offset
