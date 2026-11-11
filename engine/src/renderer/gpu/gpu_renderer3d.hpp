@@ -1462,15 +1462,22 @@ private:
         u32 out_first = 0;                                    // where its copies go in the instance buffer:
         u32 out_count = 0;                                    // those the camera sees,
         u32 out_extra = 0;                                    // then those only the sun sees (casting into view)
-        std::array<u32, max_shadow_cascades> cascade_first{}; // with cascades: each one's list of copies,
-        std::array<u32, max_shadow_cascades> cascade_count{}; // in _caster_list
+        u32* cascade_first = nullptr;                         // active per-cascade outputs in _ref_results
+        u32* cascade_count = nullptr;
         // With levels of detail (Scene3D::lod, a mesh with levels): the copies are grouped by the level each is
         // drawn at, and within a level the seen ones come first, then the sun's. `levels` is 1 without, and then
         // all of this is the run above (level_first[0] == out_first, level_seen[0] == out_count, ...).
         u32 levels = 1;
-        std::array<u32, max_mesh_levels> level_first{}, level_seen{}, level_extra{};
-        // And each cascade's list is in runs by level.
-        std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> cascade_level_first{}, cascade_level_count{};
+        u32* level_first = nullptr;
+        u32* level_seen = nullptr;
+        u32* level_extra = nullptr;
+        struct LevelRows {
+            u32* words = nullptr;
+            u32 levels = 0;
+            std::span<u32> operator[](u32 row) const { return {words + row * levels, levels}; }
+        };
+        // Each active cascade's list is in runs by level.
+        LevelRows cascade_level_first, cascade_level_count;
         // A mesh with clusters, cut by Scene3D::lod this render: its copies are drawn one by one from the frame's
         // compacted indices (`levels` is 1: the copies keep to the seen-then-sun order).
         bool clustered = false;
@@ -1627,13 +1634,25 @@ private:
         u32 begin = 0, end = 0; // its copies, within the draw
         u32 flat = 0;           // the first's place among all the frame's copies
         u32 group = ~0u;        // no group for unbounded gaps
-        u32 camera_tests = 0, bounds_tests = 0;
-        // By level of detail (index 0 alone without): the copies seen, and those only the sun sees; where they go.
-        std::array<u32, max_mesh_levels> seen{}, extra{};
-        std::array<u32, max_mesh_levels> out{}, out_extra{};
-        // Copies casting into each cascade, by level, and where they go in its list.
-        std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> cascade{}, cascade_out{};
+        u32 resident_end = 0;   // a compiled contiguous run, within one worker task
+        std::size_t result = 0; // active counters/offsets in _piece_results
     };
+    static_assert(sizeof(Piece) <= 32);
+    struct PieceResult {
+        u32* words;
+        u32 levels, cascades;
+        u32& camera_tests() const { return words[0]; }
+        u32& bounds_tests() const { return words[1]; }
+        std::span<u32> seen() const { return {words + 2, levels}; }
+        std::span<u32> extra() const { return {words + 2 + levels, levels}; }
+        std::span<u32> out() const { return {words + 2 + 2 * levels, levels}; }
+        std::span<u32> out_extra() const { return {words + 2 + 3 * levels, levels}; }
+        std::span<u32> cascade(u32 k) const { return {words + 2 + (4 + k) * levels, levels}; }
+        std::span<u32> cascade_out(u32 k) const { return {words + 2 + (4 + cascades + k) * levels, levels}; }
+    };
+    PieceResult piece_result(const Piece& piece) {
+        return {_piece_results.data() + piece.result, _refs[piece.ref].levels, _piece_cascades};
+    }
     // The cut through each cluster mesh's hierarchy, per copy (render3d/mesh_clusters3d.hpp): the clusters chosen, as
     // runs in one index buffer made for the frame. A copy has a run for the camera's passes (main, pre-pass, velocity,
     // pick: the clusters in the camera's view) and one for each shadow map (a cascade, or the one map): those in its
@@ -1758,8 +1777,17 @@ private:
     } _gc;
     bool _gc_overflow_warned = false;
     std::vector<DrawRef> _refs;
+    std::vector<u32> _ref_results; // active level/cascade outputs, separate from draw inputs
     std::vector<CullGroup> _cull_groups;
     std::vector<Piece> _pieces;
+    std::vector<u32> _piece_results; // only the current LOD/cascade shape; refreshed each render
+    u32 _piece_cascades = ~0u;
+    struct PackPiece {
+        u32 piece;
+        bool alpha;
+    };
+    std::vector<PackPiece> _pack_pieces; // only selected streamed output work
+    std::vector<u32> _pack_tasks;
     std::vector<u32> _tasks;  // where each task's pieces start
     std::vector<u8> _visible; // a copy: the bits of camera_bit, sun_bit and cascade_bit(k) (gpu_renderer3d.cpp)
     std::vector<u8>

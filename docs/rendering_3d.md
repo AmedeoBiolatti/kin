@@ -257,11 +257,24 @@ selection remains independent of camera rejection. No sphere cache or GPU resour
 On supported SIMD targets, four adjacent single-copy direct pieces can share that test when their spheres are contiguous
 in the same retained table and use the same camera frustum. Frustum setup is reused within each task; groups, sun casters,
 LOD, skinning and other ineligible pieces keep their existing classification path. Task boundaries and source order stay intact.
-Classification and prefix reduction also clear only the LOD/cascade counter prefixes consumed by the current render;
-enabling more levels/cascades clears those newly active slots before use.
-For a single-level view without sun shadows, prefix construction consumes each ref's adjacent pieces together and assigns
-counts, offsets and statistics while those records are local. Local shadows can still be enabled. Multi-level and sun-shadow
-views use the general reduction path; visibility tests, source order and retained/streamed buffer indexing stay the same.
+Culling separates compact input records from dense active results. A piece has a 32-byte source/range/group/work
+record; result words contain statistics, the active LOD counts/output offsets and active cascade counts/offsets.
+Draw references also keep their active level/cascade outputs in a separate dense buffer, rather than carrying
+maximum-size arrays. Output views rebind after layout or shape changes; no view survives a backing-buffer change.
+The common single-level, camera-only result uses six words (24 bytes), instead of carrying maximum-level/cascade
+arrays in every piece. Results refresh every render. A changed counter shape rebuilds offsets independently of
+command-layout reuse, and result/work capacities count against the existing 16 MiB layout cap.
+
+Unchanged command keys can reuse compiled runs of adjacent resident one-copy pieces within each worker task.
+The runs prove submission kind, clip, material eligibility and source adjacency; each render resolves current
+retained bounds and frustums. Structural reuse after command edits recompiles these proofs. Visibility still runs
+for every consumer using the original scalar/SIMD arithmetic; no camera result or posed bound is retained here.
+
+For a single-level view without sun shadows, prefix construction also emits retained indices in source/copy order.
+Other views keep the general LOD/cascade prefix and scatter. Upload scheduling contains only selected streamed
+pieces and transparent refs, skipping whole resident runs. It reuses its workspace and parallelizes actual opaque
+packing work. Transparent sorting, skin/history offsets, prepared-upload mappings and GPU buffer lifetimes stay
+the same. Local shadows can remain enabled, with no additional transform/skin-bound pass.
 
 For a compiler-only experiment, configure `-DKIN_RENDERER3D_O3=ON`. In GCC/Clang Release builds this appends `-O3`
 only to `gpu_renderer3d.cpp`, after the engine target's `-O2`; other engine sources, floating-point flags and GPU

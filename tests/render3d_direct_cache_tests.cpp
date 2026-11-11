@@ -360,6 +360,43 @@ void check(Renderer2D& renderer) {
                updated.stats.local_shadow_triangles == reference.stats.local_shadow_triangles);
     }
 
+    // Structural layout reuse does not prove material eligibility. Recompile
+    // resident runs after command revisions, including streamed/transparent
+    // interruptions inside a previously resident run.
+    scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    for (u32 i = 0; i < 1031; ++i) {
+        const Vec3f at{f32(i % 41) * .25f - 5, f32(i / 41) * .25f - 3, 0};
+        const std::array copy{MeshInstance3D{Mat4f::translation(at), colors::white, i + 1}};
+        assert(scene.draw_instanced(mesh, copy, materials[i % 3]));
+    }
+    assert(scene.draws().size() == 1031);
+    for (u32 edit = 0; edit < 3; ++edit) {
+        if (edit) {
+            Material3D alpha = materials[257 % 3], edge = materials[511 % 3];
+            alpha.blend = edit == 1 ? Blend3D::Alpha : Blend3D::Additive;
+            alpha.color.a = 137;
+            edge.wireframe = edit == 1;
+            assert(scene.set_draw_material(257, alpha));
+            assert(scene.set_draw_material(511, edge));
+        }
+        const auto layout = shoot(true);
+        if (edit)
+            assert(layout.stats.prepared_reused == 1);
+        for (u32 warmup = 0; warmup < 3; ++warmup)
+            shoot(true);
+        const auto actual = shoot(true);
+        const auto reference = shoot(false);
+        assert(actual.pixels == reference.pixels && actual.pick_id == reference.pick_id &&
+               actual.stats.instances == reference.stats.instances &&
+               actual.stats.triangles == reference.stats.triangles && actual.stats.culled == reference.stats.culled &&
+               actual.stats.camera_instance_tests == reference.stats.camera_instance_tests &&
+               actual.stats.direct_retained_instances == 1031 - (edit == 1   ? 2
+                                                                 : edit == 2 ? 1
+                                                                             : 0));
+    }
+
     // A persistent source beyond the structural-descriptor cap can still reuse
     // its revision-proven layout, without allocating more descriptor payload.
     scene = Scene3D{};
