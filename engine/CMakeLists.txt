@@ -152,6 +152,7 @@ add_library(kin_engine STATIC
     src/platform/services.cpp
     src/platform/services_catalog.cpp
     src/platform/services_steam.cpp
+    src/platform/services_fake_network.cpp
     src/platform/user_data.cpp
     src/platform/window.cpp
     src/particles/animation_particles.cpp
@@ -410,7 +411,9 @@ if(KIN_ENABLE_NET)
     add_library(kin_net STATIC
         src/net/input_sync.cpp
         src/net/link.cpp
-        src/net/loopback.cpp)
+        src/net/loopback.cpp
+        src/net/lobby_match.cpp
+        src/net/services_transport.cpp)
     if(NOT EMSCRIPTEN)
         target_sources(kin_net PRIVATE src/net/udp.cpp)
     endif()

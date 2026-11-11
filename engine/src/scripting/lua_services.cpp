@@ -1,5 +1,6 @@
 #include "lua_services.hpp"
 
+#include <algorithm>
 #include <kin/platform/services.hpp>
 #include <sol/sol.hpp>
 #include <string>
@@ -44,6 +45,24 @@ std::string_view event_name(ServiceEventKind kind) {
         return "disconnected";
     case ServiceEventKind::Reconnected:
         return "reconnected";
+    case ServiceEventKind::LobbyEntered:
+        return "lobby_entered";
+    case ServiceEventKind::LobbyFailed:
+        return "lobby_failed";
+    case ServiceEventKind::LobbyList:
+        return "lobby_list";
+    case ServiceEventKind::LobbyMemberJoined:
+        return "lobby_member_joined";
+    case ServiceEventKind::LobbyMemberLeft:
+        return "lobby_member_left";
+    case ServiceEventKind::LobbyDataChanged:
+        return "lobby_data_changed";
+    case ServiceEventKind::LobbyMessage:
+        return "lobby_message";
+    case ServiceEventKind::LobbyLeft:
+        return "lobby_left";
+    case ServiceEventKind::MessagesFailed:
+        return "messages_failed";
     }
     return "unknown";
 }
@@ -91,6 +110,46 @@ sol::table entries_table(sol::state_view lua, const std::vector<LeaderboardEntry
         out[i++] = row;
     }
     return out;
+}
+
+sol::table data_table(sol::state_view lua, const std::vector<std::pair<std::string, std::string>>& data) {
+    sol::table out = lua.create_table();
+    for (const auto& [key, value] : data) {
+        out[key] = value;
+    }
+    return out;
+}
+
+std::vector<std::pair<std::string, std::string>> data_pairs(const sol::optional<sol::table>& table) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (table) {
+        for (const auto& [key, value] : *table) {
+            if (key.get_type() != sol::type::string) {
+                continue;
+            }
+            if (value.get_type() == sol::type::string) {
+                out.emplace_back(key.as<std::string>(), value.as<std::string>());
+            } else if (value.get_type() == sol::type::number) {
+                value.push();
+                const bool whole = lua_isinteger(value.lua_state(), -1);
+                lua_pop(value.lua_state(), 1);
+                out.emplace_back(key.as<std::string>(),
+                                 whole ? std::to_string(value.as<lua_Integer>()) : std::to_string(value.as<double>()));
+            }
+        }
+        std::ranges::sort(out); // a Lua table has no order: keep one
+    }
+    return out;
+}
+
+LobbyVisibility visibility(std::string_view name) {
+    if (name == "private")
+        return LobbyVisibility::Private;
+    if (name == "public")
+        return LobbyVisibility::Public;
+    if (name == "invisible")
+        return LobbyVisibility::Invisible;
+    return LobbyVisibility::FriendsOnly;
 }
 
 } // namespace
@@ -217,6 +276,75 @@ void bind_services(sol::state_view lua) {
     };
     t["owns"] = [](const std::string& dlc) { return active() && active()->owns(dlc); };
     t["join_on_launch"] = []() -> std::string { return active() ? active()->join_on_launch() : std::string{}; };
+    // Lobbies.
+    t["create_lobby"] = [](const sol::optional<sol::table>& options) -> u32 {
+        PlatformServices* s = active();
+        if (!s) {
+            return 0;
+        }
+        LobbyOptions lobby;
+        if (options) {
+            lobby.max_members = options->get_or<u32>("max_members", lobby.max_members);
+            lobby.visibility = visibility(options->get_or<std::string>("visibility", "friends"));
+            lobby.data = data_pairs(options->get<sol::optional<sol::table>>("data"));
+        }
+        return s->create_lobby(lobby);
+    };
+    t["join_lobby"] = [](const std::string& lobby) -> u32 { return active() ? active()->join_lobby(lobby) : 0; };
+    t["leave_lobby"] = [] {
+        if (PlatformServices* s = active())
+            s->leave_lobby();
+    };
+    // find_lobbies({ data = { mode = "coop" }, open_slots = 1, worldwide = true, max = 20 })
+    t["find_lobbies"] = [](const sol::optional<sol::table>& options) -> u32 {
+        PlatformServices* s = active();
+        if (!s) {
+            return 0;
+        }
+        LobbyFilter filter;
+        if (options) {
+            for (auto& [key, value] : data_pairs(options->get<sol::optional<sol::table>>("data"))) {
+                filter.rules.push_back({.key = std::move(key), .value = std::move(value)});
+            }
+            filter.open_slots = options->get_or<u32>("open_slots", 0);
+            if (options->get_or("worldwide", false)) {
+                filter.distance = LobbyDistance::Worldwide;
+            }
+            filter.max_results = options->get_or<u32>("max", filter.max_results);
+        }
+        return s->find_lobbies(filter);
+    };
+    t["lobby"] = []() -> std::string { return active() ? active()->lobby() : std::string{}; };
+    t["lobby_owner"] = []() -> std::string { return active() ? active()->lobby_owner() : std::string{}; };
+    t["lobby_members"] = [](sol::this_state state) {
+        sol::state_view view{state};
+        sol::table out = view.create_table();
+        if (PlatformServices* s = active()) {
+            int i = 1;
+            for (const LobbyMember& member : s->lobby_members()) {
+                sol::table row = view.create_table();
+                row["id"] = member.id;
+                row["name"] = member.name;
+                out[i++] = row;
+            }
+        }
+        return out;
+    };
+    t["set_lobby_data"] = [](const std::string& key, const std::string& value) {
+        return active() && active()->set_lobby_data(key, value);
+    };
+    t["lobby_data"] = [](const std::string& key) -> std::string {
+        return active() ? active()->lobby_data(key) : std::string{};
+    };
+    t["set_member_data"] = [](const std::string& key, const std::string& value) {
+        return active() && active()->set_member_data(key, value);
+    };
+    t["member_data"] = [](const std::string& member, const std::string& key) -> std::string {
+        return active() ? active()->member_data(member, key) : std::string{};
+    };
+    t["set_lobby_joinable"] = [](bool joinable) { return active() && active()->set_lobby_joinable(joinable); };
+    t["lobby_message"] = [](const std::string& text) { return active() && active()->send_lobby_message(text); };
+
     t["flush"] = [] {
         if (PlatformServices* s = active())
             s->flush();
@@ -237,6 +365,19 @@ void bind_services(sol::state_view lua) {
                 row["rank"] = event.rank;
                 if (!event.entries.empty()) {
                     row["entries"] = entries_table(view, event.entries);
+                }
+                if (event.kind == ServiceEventKind::LobbyList) {
+                    sol::table lobbies = view.create_table();
+                    int l = 1;
+                    for (const LobbyInfo& lobby : event.lobbies) {
+                        sol::table entry = view.create_table();
+                        entry["id"] = lobby.id;
+                        entry["members"] = lobby.members;
+                        entry["max_members"] = lobby.max_members;
+                        entry["data"] = data_table(view, lobby.data);
+                        lobbies[l++] = entry;
+                    }
+                    row["lobbies"] = lobbies;
                 }
                 out[i++] = row;
             }

@@ -20,11 +20,14 @@ std::unique_ptr<PlatformServices> start_steam(const ServicesConfig&, ServicesSta
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <kin/platform/log.hpp>
 #include <kin/platform/resource_paths.hpp>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,9 +66,11 @@ struct SteamApi {
 #define KIN_STEAM_FIELD(field, symbol, ret, params) sf::field##_fn field = nullptr;
     KIN_STEAM_FUNCTIONS(KIN_STEAM_FIELD)
     KIN_STEAM_OPTIONAL_FUNCTIONS(KIN_STEAM_FIELD)
+    KIN_STEAM_NETWORK_FUNCTIONS(KIN_STEAM_FIELD)
     KIN_STEAM_LEGACY_FUNCTIONS(KIN_STEAM_FIELD)
 #undef KIN_STEAM_FIELD
     std::string missing;
+    std::string missing_network; // lobbies and messages need every one of theirs
 
     ~SteamApi() {
         if (library) {
@@ -104,6 +109,13 @@ struct SteamApi {
         KIN_STEAM_OPTIONAL_FUNCTIONS(KIN_STEAM_LOAD_OPTIONAL)
         KIN_STEAM_LEGACY_FUNCTIONS(KIN_STEAM_LOAD_OPTIONAL)
 #undef KIN_STEAM_LOAD_OPTIONAL
+#define KIN_STEAM_LOAD_NETWORK(field, symbol, ret, params)                                                             \
+    field = reinterpret_cast<sf::field##_fn>(SDL_LoadFunction(library, #symbol));                                      \
+    if (!field) {                                                                                                      \
+        missing_network += missing_network.empty() ? #symbol : ", " #symbol;                                           \
+    }
+        KIN_STEAM_NETWORK_FUNCTIONS(KIN_STEAM_LOAD_NETWORK)
+#undef KIN_STEAM_LOAD_NETWORK
         return missing.empty();
     }
 
@@ -122,6 +134,31 @@ struct SteamApi {
 
 std::string steam_player_id(u64 id) {
     return "steam:" + std::to_string(id);
+}
+
+std::string steam_lobby_id(u64 id) {
+    return "lobby:" + std::to_string(id);
+}
+
+// "steam:<id>" (a player) or "lobby:<id>" (a lobby), or the bare number.
+std::optional<u64> steam_id_of(std::string_view text, std::string_view prefix) {
+    if (text.starts_with(prefix)) {
+        text.remove_prefix(prefix.size());
+    }
+    const std::optional<u64> id = parse_u64(text);
+    return id && *id != 0 ? id : std::nullopt;
+}
+
+sf::NetworkingIdentity identity(u64 steam_id) {
+    sf::NetworkingIdentity out{};
+    out.type = sf::identity_steam_id;
+    out.size = sizeof(u64);
+    out.steam_id = steam_id;
+    return out;
+}
+
+u64 steam_id_of(const sf::NetworkingIdentity& identity) {
+    return identity.type == sf::identity_steam_id ? identity.steam_id : 0;
 }
 
 // Where Steam started us to join: "+connect_lobby <id>" or "+connect <text>".
@@ -148,6 +185,14 @@ public:
         _apps = _api->interface("SteamApps", sf::apps_versions);
         _stats = _api->interface("SteamUserStats", sf::stats_versions);
         _storage = _api->interface("SteamRemoteStorage", sf::storage_versions);
+        if (_api->missing_network.empty()) {
+            _matchmaking = _api->interface("SteamMatchmaking", sf::matchmaking_versions);
+            _messages = _api->interface("SteamNetworkingMessages_SteamAPI", sf::messages_versions);
+            _net_utils = _api->interface("SteamNetworkingUtils_SteamAPI", sf::networking_utils_versions);
+        } else {
+            KIN_LOG_WARN_F("services", "steam api library lacks lobby and message functions: no lobbies",
+                           (LogFields{{.name = "missing", .value = _api->missing_network}}));
+        }
         if (_utils) {
             _app_id = _api->utils_app_id(_utils);
         }
@@ -160,6 +205,9 @@ public:
     }
 
     ~SteamServices() override {
+        if (_lobby != 0 && _matchmaking) {
+            _api->mm_leave(_matchmaking, _lobby);
+        }
         flush();
         _api->shutdown();
     }
@@ -349,6 +397,232 @@ public:
     }
     std::string join_on_launch() const override { return _join_on_launch; }
 
+    // Lobbies.
+
+    u32 create_lobby(const LobbyOptions& options) override {
+        if (!_matchmaking) {
+            return 0;
+        }
+        start_relays();
+        leave_lobby();
+        const sf::SteamAPICall call = _api->mm_create(_matchmaking, static_cast<i32>(options.visibility),
+                                                      static_cast<int>(std::clamp<u32>(options.max_members, 1, 250)));
+        if (call == 0) {
+            return 0;
+        }
+        const u32 request = _next_request++;
+        _calls[call] = {.kind = Call::Kind::LobbyCreate, .request = request};
+        _lobby_options[request] = options.data;
+        return request;
+    }
+    u32 join_lobby(std::string_view lobby) override {
+        const std::optional<u64> id = steam_id_of(lobby, "lobby:");
+        if (!_matchmaking || !id) {
+            return 0;
+        }
+        start_relays();
+        const u32 request = _next_request++;
+        if (*id == _lobby) {
+            _pending.push_back(
+                {.kind = ServiceEventKind::LobbyEntered, .id = steam_lobby_id(_lobby), .request = request, .ok = true});
+            return request;
+        }
+        leave_lobby();
+        const sf::SteamAPICall call = _api->mm_join(_matchmaking, *id);
+        if (call == 0) {
+            return 0;
+        }
+        _calls[call] = {.kind = Call::Kind::LobbyJoin, .request = request};
+        _entering[*id] = request;
+        return request;
+    }
+    void leave_lobby() override {
+        if (_lobby != 0 && _matchmaking) {
+            _api->mm_leave(_matchmaking, _lobby);
+        }
+        _lobby = 0;
+    }
+    u32 find_lobbies(const LobbyFilter& filter) override {
+        if (!_matchmaking) {
+            return 0;
+        }
+        for (const LobbyFilter::Rule& rule : filter.rules) {
+            if (rule.numeric) {
+                _api->mm_filter_number(_matchmaking, rule.key.c_str(), std::atoi(rule.value.c_str()),
+                                       static_cast<i32>(rule.compare));
+            } else {
+                _api->mm_filter_string(_matchmaking, rule.key.c_str(), rule.value.c_str(),
+                                       static_cast<i32>(rule.compare));
+            }
+        }
+        if (filter.open_slots > 0) {
+            _api->mm_filter_slots(_matchmaking, static_cast<int>(filter.open_slots));
+        }
+        _api->mm_filter_distance(_matchmaking, static_cast<i32>(filter.distance));
+        _api->mm_filter_count(_matchmaking, static_cast<int>(std::max<u32>(filter.max_results, 1)));
+        const sf::SteamAPICall call = _api->mm_request_list(_matchmaking);
+        if (call == 0) {
+            return 0;
+        }
+        const u32 request = _next_request++;
+        _calls[call] = {.kind = Call::Kind::LobbyList, .request = request};
+        return request;
+    }
+    std::string lobby() const override { return _lobby != 0 ? steam_lobby_id(_lobby) : std::string{}; }
+    std::vector<LobbyMember> lobby_members() const override {
+        std::vector<LobbyMember> out;
+        if (_lobby == 0) {
+            return out;
+        }
+        const int count = _api->mm_member_count(_matchmaking, _lobby);
+        for (int i = 0; i < count; ++i) {
+            const u64 member = _api->mm_member_by_index(_matchmaking, _lobby, i);
+            const char* name = _api->friends_friend_name(_friends, member);
+            out.push_back({.id = steam_player_id(member), .name = name ? name : ""});
+        }
+        return out;
+    }
+    std::string lobby_owner() const override {
+        const u64 owner = _lobby != 0 ? _api->mm_owner(_matchmaking, _lobby) : 0;
+        return owner != 0 ? steam_player_id(owner) : std::string{};
+    }
+    bool set_lobby_data(std::string_view key, std::string_view value) override {
+        return _lobby != 0 && !key.empty() &&
+               _api->mm_set_data(_matchmaking, _lobby, std::string{key}.c_str(), std::string{value}.c_str());
+    }
+    std::string lobby_data(std::string_view key) const override {
+        const char* value = _lobby != 0 ? _api->mm_get_data(_matchmaking, _lobby, std::string{key}.c_str()) : nullptr;
+        return value ? value : "";
+    }
+    bool set_member_data(std::string_view key, std::string_view value) override {
+        if (_lobby == 0 || key.empty()) {
+            return false;
+        }
+        _api->mm_set_member_data(_matchmaking, _lobby, std::string{key}.c_str(), std::string{value}.c_str());
+        return true;
+    }
+    std::string member_data(std::string_view member, std::string_view key) const override {
+        const std::optional<u64> id = steam_id_of(member, "steam:");
+        const char* value =
+            _lobby != 0 && id ? _api->mm_get_member_data(_matchmaking, _lobby, *id, std::string{key}.c_str()) : nullptr;
+        return value ? value : "";
+    }
+    bool set_lobby_joinable(bool joinable) override {
+        return _lobby != 0 && _api->mm_set_joinable(_matchmaking, _lobby, joinable);
+    }
+    bool send_lobby_message(std::string_view text) override {
+        // Steam counts the terminating zero in a chat message.
+        const std::string line{text};
+        return _lobby != 0 && !line.empty() &&
+               _api->mm_send_chat(_matchmaking, _lobby, line.c_str(), static_cast<int>(line.size() + 1));
+    }
+
+    // Messages between players (ISteamNetworkingMessages: across NATs, relayed where needed).
+
+    bool send_message(std::string_view player, std::span<const u8> bytes, MessageDelivery delivery,
+                      u32 channel) override {
+        const std::optional<u64> id = steam_id_of(player, "steam:");
+        if (!_messages || !id || bytes.empty() ||
+            (delivery == MessageDelivery::Unreliable && bytes.size() > max_message())) {
+            return false;
+        }
+        start_relays();
+        // Unreliable messages still open a session first (no NoDelay), and a broken session starts again.
+        const int flags = (delivery == MessageDelivery::Reliable ? sf::send_reliable : sf::send_unreliable) |
+                          sf::send_no_nagle | sf::send_auto_restart;
+        const sf::NetworkingIdentity to = identity(*id);
+        return _api->msg_send(_messages, to, bytes.data(), static_cast<u32>(bytes.size()), flags,
+                              static_cast<int>(channel)) == sf::result_ok;
+    }
+    void receive_messages(u32 channel, std::vector<PlayerMessage>& out) override {
+        if (!_messages) {
+            return;
+        }
+        constexpr int batch = 64;
+        sf::NetworkingMessage* messages[batch] = {};
+        for (;;) {
+            const int count = _api->msg_receive(_messages, static_cast<int>(channel), messages, batch);
+            for (int i = 0; i < count; ++i) {
+                sf::NetworkingMessage* m = messages[i];
+                const u64 from = steam_id_of(m->peer);
+                if (from != 0 && m->size > 0) {
+                    const auto* data = static_cast<const u8*>(m->data);
+                    out.push_back({.from = steam_player_id(from), .bytes = {data, data + m->size}});
+                }
+                _api->msg_release(m);
+            }
+            if (count < batch) {
+                break;
+            }
+        }
+    }
+    void close_messages(std::string_view player) override {
+        if (const std::optional<u64> id = steam_id_of(player, "steam:"); id && _messages) {
+            _api->msg_close(_messages, identity(*id));
+        }
+    }
+    std::size_t max_message() const override { return _messages ? 1200 : 0; }
+
+private:
+    // Relays are found once, on first use: the first connection is quicker for it.
+    void start_relays() {
+        if (!_relays_started && _net_utils) {
+            _relays_started = true;
+            _api->net_init_relay(_net_utils);
+        }
+    }
+
+    bool lobby_member(u64 player) const {
+        if (_lobby == 0) {
+            return false;
+        }
+        const int count = _api->mm_member_count(_matchmaking, _lobby);
+        for (int i = 0; i < count; ++i) {
+            if (_api->mm_member_by_index(_matchmaking, _lobby, i) == player) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void entered(u64 lobby) {
+        if (lobby == 0 || lobby == _lobby) {
+            return;
+        }
+        _lobby = lobby;
+        u32 request = 0;
+        if (const auto it = _entering.find(lobby); it != _entering.end()) {
+            request = it->second;
+            _entering.erase(it);
+        }
+        _pending.push_back(
+            {.kind = ServiceEventKind::LobbyEntered, .id = steam_lobby_id(lobby), .request = request, .ok = true});
+    }
+
+    std::vector<LobbyInfo> lobby_list(u32 count) const {
+        std::vector<LobbyInfo> out;
+        for (u32 i = 0; i < count; ++i) {
+            const u64 lobby = _api->mm_lobby_by_index(_matchmaking, static_cast<int>(i));
+            if (lobby == 0) {
+                continue;
+            }
+            LobbyInfo info{.id = steam_lobby_id(lobby),
+                           .members = static_cast<u32>(std::max(_api->mm_member_count(_matchmaking, lobby), 0)),
+                           .max_members = static_cast<u32>(std::max(_api->mm_member_limit(_matchmaking, lobby), 0))};
+            const int entries = _api->mm_data_count(_matchmaking, lobby);
+            for (int e = 0; e < entries; ++e) {
+                char key[256] = {};
+                std::vector<char> value(8192);
+                if (_api->mm_data_by_index(_matchmaking, lobby, e, key, static_cast<int>(sizeof key), value.data(),
+                                           static_cast<int>(value.size()))) {
+                    info.data.emplace_back(key, value.data());
+                }
+            }
+            out.push_back(std::move(info));
+        }
+        return out;
+    }
+
 private:
     enum class Op : u8 { Unlock, Clear, SetInt, SetFloat };
     struct Waiting {
@@ -373,7 +647,7 @@ private:
         std::vector<BoardOp> queued;
     };
     struct Call {
-        enum class Kind : u8 { Find, Upload, Download } kind{};
+        enum class Kind : u8 { Find, Upload, Download, LobbyCreate, LobbyJoin, LobbyList } kind{};
         std::string board;
         u32 request = 0;
     };
@@ -593,6 +867,79 @@ private:
             }
             break;
         }
+        case sf::cb_lobby_enter: {
+            const auto enter = payload<sf::LobbyEnter>(data, size);
+            if (enter.response == sf::enter_success) {
+                entered(enter.lobby); // a failure is answered by JoinLobby's call result
+            }
+            break;
+        }
+        case sf::cb_lobby_data_update: {
+            const auto update = payload<sf::LobbyDataUpdate>(data, size);
+            if (update.lobby == _lobby && _lobby != 0 && update.success) {
+                _pending.push_back(
+                    {.kind = ServiceEventKind::LobbyDataChanged,
+                     .id = update.member == update.lobby ? std::string{} : steam_player_id(update.member)});
+            }
+            break;
+        }
+        case sf::cb_lobby_chat_update: {
+            const auto update = payload<sf::LobbyChatUpdate>(data, size);
+            if (update.lobby != _lobby || _lobby == 0) {
+                break;
+            }
+            if (update.state_change & sf::member_entered) {
+                const char* name = _api->friends_friend_name(_friends, update.changed);
+                _pending.push_back({.kind = ServiceEventKind::LobbyMemberJoined,
+                                    .id = steam_player_id(update.changed),
+                                    .text = name ? name : ""});
+            } else if (update.state_change & sf::member_gone) {
+                _pending.push_back({.kind = ServiceEventKind::LobbyMemberLeft, .id = steam_player_id(update.changed)});
+            }
+            break;
+        }
+        case sf::cb_lobby_chat_msg: {
+            const auto chat = payload<sf::LobbyChatMsg>(data, size);
+            if (chat.lobby != _lobby || _lobby == 0 || chat.type != sf::chat_message) {
+                break;
+            }
+            std::vector<char> text(4097);
+            sf::SteamId user{};
+            i32 type = 0;
+            const int length = _api->mm_chat_entry(_matchmaking, _lobby, static_cast<int>(chat.chat_id), &user,
+                                                   text.data(), static_cast<int>(text.size() - 1), &type);
+            if (length > 0 && type == sf::chat_message) {
+                text[static_cast<std::size_t>(length)] = '\0';
+                _pending.push_back(
+                    {.kind = ServiceEventKind::LobbyMessage, .id = steam_player_id(user.id), .text = text.data()});
+            }
+            break;
+        }
+        case sf::cb_lobby_kicked: {
+            const auto kicked = payload<sf::LobbyKicked>(data, size);
+            if (kicked.lobby == _lobby && _lobby != 0) {
+                _lobby = 0;
+                _pending.push_back({.kind = ServiceEventKind::LobbyLeft, .id = steam_lobby_id(kicked.lobby)});
+            }
+            break;
+        }
+        case sf::cb_messages_session_request: {
+            // Players the game sent to first are let in by Steam itself; here, the lobby's members.
+            const auto request = payload<sf::MessagesSessionRequest>(data, size);
+            if (const u64 from = steam_id_of(request.remote); from != 0 && lobby_member(from)) {
+                _api->msg_accept(_messages, request.remote);
+            }
+            break;
+        }
+        case sf::cb_messages_session_failed: {
+            const auto failed = payload<sf::MessagesSessionFailed>(data, size);
+            if (const u64 with = steam_id_of(failed.remote); with != 0) {
+                _pending.push_back({.kind = ServiceEventKind::MessagesFailed,
+                                    .id = steam_player_id(with),
+                                    .text = "end reason " + std::to_string(failed.end_reason)});
+            }
+            break;
+        }
         default:
             break;
         }
@@ -605,6 +952,71 @@ private:
         }
         const Call call = std::move(found->second);
         _calls.erase(found);
+        if (call.kind == Call::Kind::LobbyCreate) {
+            const auto created = payload<sf::LobbyCreated>(data, size);
+            std::vector<std::pair<std::string, std::string>> initial = std::move(_lobby_options[call.request]);
+            _lobby_options.erase(call.request);
+            if (!ok || id != sf::cb_lobby_created || created.result != sf::result_ok || created.lobby == 0) {
+                _pending.push_back({.kind = ServiceEventKind::LobbyFailed,
+                                    .text = "CreateLobby failed: EResult " + std::to_string(created.result),
+                                    .request = call.request});
+                return;
+            }
+            _entering[created.lobby] = call.request;
+            const bool was_in = created.lobby == _lobby;
+            _lobby = created.lobby; // the creator is in it already: its data can be set now
+            for (const auto& [key, value] : initial) {
+                _api->mm_set_data(_matchmaking, _lobby, key.c_str(), value.c_str());
+            }
+            if (!was_in) {
+                _lobby = 0;
+                entered(created.lobby);
+            }
+            return;
+        }
+        if (call.kind == Call::Kind::LobbyJoin) {
+            const auto enter = payload<sf::LobbyEnter>(data, size);
+            if (!ok || id != sf::cb_lobby_enter || enter.response != sf::enter_success) {
+                static constexpr const char* reasons[] = {"",
+                                                          "",
+                                                          "no such lobby",
+                                                          "not allowed",
+                                                          "the lobby is full",
+                                                          "error",
+                                                          "banned",
+                                                          "limited",
+                                                          "clan disabled",
+                                                          "community ban",
+                                                          "blocked by a member",
+                                                          "blocked a member",
+                                                          "",
+                                                          "",
+                                                          "",
+                                                          "too many attempts: try again shortly"};
+                const u32 r = enter.response;
+                const std::string why = ok && r < std::size(reasons) && reasons[r][0] ? reasons[r] : "JoinLobby failed";
+                for (auto it = _entering.begin(); it != _entering.end();) {
+                    it = it->second == call.request ? _entering.erase(it) : std::next(it);
+                }
+                _pending.push_back({.kind = ServiceEventKind::LobbyFailed, .text = why, .request = call.request});
+                return;
+            }
+            entered(enter.lobby);
+            return;
+        }
+        if (call.kind == Call::Kind::LobbyList) {
+            const auto list = payload<sf::LobbyMatchList>(data, size);
+            if (!ok || id != sf::cb_lobby_match_list) {
+                _pending.push_back(
+                    {.kind = ServiceEventKind::LobbyList, .text = "RequestLobbyList failed", .request = call.request});
+                return;
+            }
+            _pending.push_back({.kind = ServiceEventKind::LobbyList,
+                                .request = call.request,
+                                .ok = true,
+                                .lobbies = lobby_list(list.count)});
+            return;
+        }
         if (call.kind == Call::Kind::Find) {
             const auto result = payload<sf::LeaderboardFindResult>(data, size);
             if (!ok || id != sf::cb_leaderboard_find_result || !result.found || result.board == 0) {
@@ -694,6 +1106,13 @@ private:
     void* _apps = nullptr;
     void* _stats = nullptr;
     void* _storage = nullptr;
+    void* _matchmaking = nullptr;
+    void* _messages = nullptr;
+    void* _net_utils = nullptr;
+    bool _relays_started = false;
+    u64 _lobby = 0;
+    std::map<u64, u32> _entering;                                                   // lobby, request
+    std::map<u32, std::vector<std::pair<std::string, std::string>>> _lobby_options; // request, initial data
     bool _stats_ready = true;
     double _stats_retry_at = 0.0; // when to ask for the player's stats again (0: not)
     bool _connected = true;

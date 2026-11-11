@@ -9,8 +9,10 @@
 #ifdef KIN_REAL_STEAM_DIR
 #include "steam_flat.hpp"
 #endif
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <kin/platform/services.hpp>
@@ -182,9 +184,50 @@ void test_lua_services_table() {
     assert(kinds && kinds->find("join_requested:lobby:9") != std::string::npos);
     assert(kinds->find("achievement_unlocked:") != std::string::npos);
     kin::set_active_services(nullptr);
+
+    // Lobbies, on a fake network with another player.
+    kin::FakeNetwork network;
+    kin::FakeServices ann(network, {.id = "fake:ann", .name = "Ann"});
+    kin::FakeServices bob(network, {.id = "fake:bob", .name = "Bob"});
+    kin::set_active_services(&ann);
+    kin::LuaScript lobby_script;
+    assert(lobby_script.load_string(R"(
+        function make()
+            return services.create_lobby({max_members = 3, visibility = "public", data = {mode = "coop", level = 3}}) > 0
+        end
+        function check()
+            local entered = false
+            for _, e in ipairs(services.events()) do entered = entered or e.kind == "lobby_entered" end
+            assert(entered)
+            assert(services.lobby():sub(1, 6) == "lobby:")
+            assert(services.lobby_owner() == "fake:ann")
+            assert(services.lobby_data("level") == "3" and services.lobby_data("mode") == "coop")
+            assert(services.set_member_data("ready", "1") and services.member_data("fake:ann", "ready") == "1")
+            assert(#services.lobby_members() == 1 and services.lobby_members()[1].name == "Ann")
+            assert(services.lobby_message("hi"))
+            return services.find_lobbies({data = {mode = "coop"}, open_slots = 1}) > 0
+        end
+        function found()
+            for _, e in ipairs(services.events()) do
+                if e.kind == "lobby_list" then
+                    return #e.lobbies == 1 and e.lobbies[1].data.mode == "coop" and e.lobbies[1].max_members == 3
+                end
+            end
+            return false
+        end
+    )"));
+    assert(lobby_script.call_for<bool>("make") == true);
+    ann.update();
+    assert(lobby_script.call_for<bool>("check") == true);
+    ann.update();
+    assert(lobby_script.call_for<bool>("found") == true);
+    assert(bob.join_lobby(ann.lobby()) != 0 && ann.lobby_members().size() == 2);
+    kin::set_active_services(nullptr);
+
     // Without services: nothing, no errors.
     kin::LuaScript bare;
-    assert(bare.load_string("function run() return services.unlock('X') == false and services.stat('x') == nil end"));
+    assert(bare.load_string("function run() return services.unlock('X') == false and services.stat('x') == nil and "
+                            "services.create_lobby() == 0 and services.lobby() == '' end"));
     assert(bare.call_for<bool>("run") == true);
 }
 
@@ -319,8 +362,8 @@ void test_steam_backend_through_the_library() {
         const kin::u32 scores = services->request_scores("arena", kin::LeaderboardRange::Top, 1, 2);
         const kin::u32 missing = services->upload_score("missing", 1);
         assert(upload && scores && missing);
-        std::vector<ServiceEvent> seen;
-        for (int i = 0; i < 2; ++i) { // find results arrive and the queued requests go out; then their results
+        std::deque<ServiceEvent> seen; // events stay where they are while more arrive
+        for (int i = 0; i < 2; ++i) {  // find results arrive and the queued requests go out; then their results
             services->update();
             seen.insert(seen.end(), services->events().begin(), services->events().end());
         }
@@ -385,6 +428,135 @@ void test_steam_backend_through_the_library() {
     }
 }
 
+// Lobbies and messages through Steam's matchmaking and networking messages.
+void test_steam_lobbies_and_messages() {
+    using kin::u64;
+    using kin::u8;
+    FakeSteam steam;
+    kin::ServicesStart start = kin::ServicesStart::Offline;
+    auto services = start_fake_steam(start);
+    assert(start == kin::ServicesStart::Ready);
+    const std::string self = services->player().id;
+    const auto pump = [&] { services->update(); };
+
+    // Finding lobbies: the filters go to Steam as they are.
+    steam.get<void (*)(u64, u64, int, const char*, const char*)>("kin_fake_steam_add_lobby")(500, 2, 4, "mode", "coop");
+    const kin::u32 search = services->find_lobbies(
+        {.rules = {{.key = "mode", .value = "coop"},
+                   {.key = "level", .value = "2", .compare = kin::LobbyCompare::AtLeast, .numeric = true}},
+         .open_slots = 1,
+         .distance = kin::LobbyDistance::Worldwide,
+         .max_results = 10});
+    assert(search != 0);
+    pump();
+    const ServiceEvent* list = find_event(*services, ServiceEventKind::LobbyList);
+    assert(list && list->request == search && list->ok && list->lobbies.size() == 1);
+    assert(list->lobbies[0].id == "lobby:500" && list->lobbies[0].members == 1 && list->lobbies[0].max_members == 4);
+    assert(list->lobbies[0].data.size() == 1 && list->lobbies[0].data[0].second == "coop");
+    assert(std::string_view{steam.get<const char* (*)()>("kin_fake_steam_filters")()} ==
+           "mode=coop;level>=2;slots1;distance3;count10;");
+
+    // Joining: entered once (the callback and the call result both say so).
+    const kin::u32 joined = services->join_lobby("lobby:500");
+    pump();
+    const ServiceEvent* entered = find_event(*services, ServiceEventKind::LobbyEntered);
+    assert(entered && entered->request == joined && entered->id == "lobby:500");
+    assert(std::ranges::count_if(services->events(),
+                                 [](const ServiceEvent& e) { return e.kind == ServiceEventKind::LobbyEntered; }) == 1);
+    assert(services->lobby() == "lobby:500" && services->lobby_owner() == "steam:2");
+    assert(services->lobby_members().size() == 2 && services->lobby_members()[1].id == self);
+    assert(services->lobby_data("mode") == "coop" && !services->set_lobby_data("mode", "x")); // not the owner
+    assert(steam.get<int (*)()>("kin_fake_steam_relays")() == 1); // relays are found once, on first use
+
+    steam.get<void (*)(u64, u64)>("kin_fake_steam_member_joins")(500, 3);
+    pump();
+    const ServiceEvent* arrived = find_event(*services, ServiceEventKind::LobbyMemberJoined);
+    assert(arrived && arrived->id == "steam:3" && arrived->text == "First");
+
+    // A member may open a message session with us; a stranger may not.
+    steam.get<void (*)(u64)>("kin_fake_steam_session_request")(3);
+    steam.get<void (*)(u64)>("kin_fake_steam_session_request")(9);
+    pump();
+    assert(steam.get<bool (*)(u64)>("kin_fake_steam_accepted")(3));
+    assert(!steam.get<bool (*)(u64)>("kin_fake_steam_accepted")(9));
+
+    // Messages: to a Steam id, unreliable (but not dropped before the session opens) or reliable, by channel.
+    const std::vector<u8> bytes = {1, 2, 3};
+    assert(services->max_message() == 1200);
+    assert(services->send_message("steam:3", bytes));
+    assert(services->send_message("steam:3", std::vector<u8>(5000), kin::MessageDelivery::Reliable, 2));
+    assert(!services->send_message("steam:3", std::vector<u8>(1201)));
+    assert(!services->send_message("steam:x", bytes) && !services->send_message("lobby:500x", bytes));
+    const auto sent = steam.get<int (*)(int, u8*, int, u64*, int*, int*)>("kin_fake_steam_sent");
+    u8 out[16] = {};
+    u64 to = 0;
+    int flags = 0, channel = 0;
+    assert(sent(0, out, sizeof out, &to, &flags, &channel) == 3 && to == 3 && channel == 0 && out[2] == 3);
+    assert(flags == (1 | 32));
+    assert(sent(1, out, sizeof out, &to, &flags, &channel) == 5000 && channel == 2);
+    assert(flags == (8 | 1 | 32));
+    assert(steam.get<int (*)()>("kin_fake_steam_sent_count")() == 2);
+
+    const auto message_from = steam.get<void (*)(u64, int, const u8*, int)>("kin_fake_steam_message_from");
+    const u8 a[] = {9, 8}, b[] = {7};
+    message_from(3, 0, a, 2);
+    message_from(3, 1, b, 1);
+    std::vector<kin::PlayerMessage> got;
+    services->receive_messages(0, got);
+    assert(got.size() == 1 && got[0].from == "steam:3" && got[0].bytes == std::vector<u8>({9, 8}));
+    services->receive_messages(1, got);
+    assert(got.size() == 2 && got[1].bytes == std::vector<u8>({7}));
+    assert(steam.get<int (*)()>("kin_fake_steam_released")() == 2); // every message handed back to Steam
+    services->close_messages("steam:3");
+    assert(steam.get<bool (*)(u64)>("kin_fake_steam_closed")(3));
+    steam.get<void (*)(u64, kin::i32)>("kin_fake_steam_session_failed")(3, 5001);
+    pump();
+    const ServiceEvent* failed = find_event(*services, ServiceEventKind::MessagesFailed);
+    assert(failed && failed->id == "steam:3" && failed->text == "end reason 5001");
+
+    // Member data and chat.
+    assert(services->set_member_data("ready", "1"));
+    assert(services->send_lobby_message("hi"));
+    pump();
+    const ServiceEvent* changed = find_event(*services, ServiceEventKind::LobbyDataChanged);
+    assert(changed && changed->id == self && services->member_data(self, "ready") == "1");
+    const ServiceEvent* chat = find_event(*services, ServiceEventKind::LobbyMessage);
+    assert(chat && chat->id == self && chat->text == "hi");
+
+    steam.get<void (*)(u64, u64)>("kin_fake_steam_member_leaves")(500, 2);
+    pump();
+    const ServiceEvent* left = find_event(*services, ServiceEventKind::LobbyMemberLeft);
+    assert(left && left->id == "steam:2" && services->lobby_owner() == self); // Steam gave it to us
+    steam.get<void (*)(u64)>("kin_fake_steam_kicked")(500);
+    pump();
+    assert(find_event(*services, ServiceEventKind::LobbyLeft) && services->lobby().empty());
+
+    // Lobbies that cannot be joined.
+    steam.get<void (*)(u64, u64, int, const char*, const char*)>("kin_fake_steam_add_lobby")(600, 2, 1, "mode", "coop");
+    const kin::u32 full = services->join_lobby("lobby:600");
+    const kin::u32 missing = services->join_lobby("lobby:700");
+    pump();
+    for (const ServiceEvent& event : services->events()) {
+        if (event.kind == ServiceEventKind::LobbyFailed) {
+            assert((event.request == full && event.text == "the lobby is full") ||
+                   (event.request == missing && event.text == "no such lobby"));
+        }
+        assert(event.kind != ServiceEventKind::LobbyEntered);
+    }
+    assert(services->lobby().empty() && services->join_lobby("nonsense") == 0);
+
+    // Making one: its data is set before anyone can see it, and only the owner closes it.
+    const kin::u32 made = services->create_lobby(
+        {.max_members = 3, .visibility = kin::LobbyVisibility::Public, .data = {{"mode", "versus"}}});
+    pump();
+    entered = find_event(*services, ServiceEventKind::LobbyEntered);
+    assert(entered && entered->request == made && entered->id == services->lobby());
+    assert(services->lobby_owner() == self && services->lobby_data("mode") == "versus");
+    assert(services->set_lobby_joinable(false) && services->set_lobby_data("round", "2"));
+    services->leave_lobby();
+    assert(services->lobby().empty());
+}
+
 #ifdef KIN_REAL_STEAM_DIR
 // Valve's own library (KIN_STEAMWORKS_SDK_DIR): every function and newest
 // interface kin uses is there, and starting works, or falls back offline when
@@ -397,18 +569,25 @@ void test_real_steam_library() {
     SDL_SharedObject* library = SDL_LoadObject(path.string().c_str());
     assert(library);
     int missing = 0;
-#define KIN_REQUIRE(field, symbol, ret, params)                                    \
-    if (!SDL_LoadFunction(library, #symbol)) {                                     \
-        std::fprintf(stderr, "real steam library lacks %s\n", #symbol);           \
-        ++missing;                                                                 \
+#define KIN_REQUIRE(field, symbol, ret, params)                                                                        \
+    if (!SDL_LoadFunction(library, #symbol)) {                                                                         \
+        std::fprintf(stderr, "real steam library lacks %s\n", #symbol);                                                \
+        ++missing;                                                                                                     \
     }
     KIN_STEAM_FUNCTIONS(KIN_REQUIRE)
     KIN_STEAM_OPTIONAL_FUNCTIONS(KIN_REQUIRE)
+    KIN_STEAM_NETWORK_FUNCTIONS(KIN_REQUIRE)
 #undef KIN_REQUIRE
     const std::pair<const char*, const char*> newest[] = {
-        {"SteamUser", sf::user_versions[0]},   {"SteamFriends", sf::friends_versions[0]},
-        {"SteamUtils", sf::utils_versions[0]}, {"SteamApps", sf::apps_versions[0]},
-        {"SteamUserStats", sf::stats_versions[0]}, {"SteamRemoteStorage", sf::storage_versions[0]},
+        {"SteamUser", sf::user_versions[0]},
+        {"SteamFriends", sf::friends_versions[0]},
+        {"SteamUtils", sf::utils_versions[0]},
+        {"SteamApps", sf::apps_versions[0]},
+        {"SteamUserStats", sf::stats_versions[0]},
+        {"SteamRemoteStorage", sf::storage_versions[0]},
+        {"SteamMatchmaking", sf::matchmaking_versions[0]},
+        {"SteamNetworkingMessages_SteamAPI", sf::messages_versions[0]},
+        {"SteamNetworkingUtils_SteamAPI", sf::networking_utils_versions[0]},
     };
     for (const auto& [name, version] : newest) {
         const std::string symbol = std::string{"SteamAPI_"} + name + "_" + version;
@@ -421,23 +600,36 @@ void test_real_steam_library() {
     assert(missing == 0);
 
     kin::ServicesStart start{};
-    auto services = kin::start_platform_services({.game_id = "kin_steam_probe", .steam_app_id = 480,
+    auto services = kin::start_platform_services({.game_id = "kin_steam_probe",
+                                                  .steam_app_id = 480,
                                                   .steam_restart_through_client = false,
-                                                  .steam_library = KIN_REAL_STEAM_DIR, .offline_in_memory = true},
+                                                  .steam_library = KIN_REAL_STEAM_DIR,
+                                                  .offline_in_memory = true},
                                                  &start);
     assert(services && start != kin::ServicesStart::Restarting);
     std::printf("real steam: backend=%s online=%d player=%s language=%s handheld=%d\n",
-                std::string{services->backend()}.c_str(), services->online() ? 1 : 0,
-                services->player().name.c_str(), services->language().c_str(), services->handheld() ? 1 : 0);
+                std::string{services->backend()}.c_str(), services->online() ? 1 : 0, services->player().name.c_str(),
+                services->language().c_str(), services->handheld() ? 1 : 0);
     if (services->backend() != "steam") {
         return; // Steam not running or not signed in: loading and starting were checked
     }
     // Read-only, on Spacewar's own achievements, stats and leaderboard: nothing
     // is unlocked, uploaded or shown to friends.
     const kin::u32 request = services->request_scores("Feet Traveled", kin::LeaderboardRange::Top, 1, 3);
+    // Spacewar's public lobbies, as anyone sees them (nothing is made or joined).
+    const kin::u32 search = services->find_lobbies({.distance = kin::LobbyDistance::Worldwide, .max_results = 5});
+    assert(search != 0);
     const ServiceEvent* scores = nullptr;
-    std::vector<ServiceEvent> seen;
-    for (int i = 0; i < 200 && !scores; ++i) {
+    std::deque<ServiceEvent> seen; // events stay where they are while more arrive
+    const auto found_lobbies = [&]() -> const ServiceEvent* {
+        for (const ServiceEvent& event : seen) {
+            if (event.kind == ServiceEventKind::LobbyList && event.request == search) {
+                return &event;
+            }
+        }
+        return nullptr;
+    };
+    for (int i = 0; i < 200 && (!scores || !found_lobbies()); ++i) {
         services->update();
         for (const ServiceEvent& event : services->events()) {
             seen.push_back(event);
@@ -445,8 +637,8 @@ void test_real_steam_library() {
                         event.text.c_str());
         }
         for (const ServiceEvent& event : seen) {
-            if (event.request == request &&
-                (event.kind == ServiceEventKind::LeaderboardScores || event.kind == ServiceEventKind::LeaderboardFailed)) {
+            if (event.request == request && (event.kind == ServiceEventKind::LeaderboardScores ||
+                                             event.kind == ServiceEventKind::LeaderboardFailed)) {
                 scores = &event;
             }
         }
@@ -466,6 +658,13 @@ void test_real_steam_library() {
         assert(entry.rank >= 1 && entry.player_id.starts_with("steam:"));
     }
     assert(!scores->entries.empty());
+    const ServiceEvent* lobbies = found_lobbies();
+    assert(lobbies && lobbies->ok);
+    std::printf("real steam: %zu Spacewar lobbies\n", lobbies->lobbies.size());
+    for (const kin::LobbyInfo& lobby : lobbies->lobbies) {
+        std::printf("  %s %u/%u, %zu data\n", lobby.id.c_str(), lobby.members, lobby.max_members, lobby.data.size());
+        assert(lobby.id.starts_with("lobby:") && lobby.max_members >= lobby.members);
+    }
 }
 #endif
 
@@ -596,6 +795,28 @@ void test_catalog_services() {
     assert(passing->set_stat("anything", 1) && fake.calls.back().id == "anything");
     assert(passing->upload_score("anyboard", 3) != 0 && fake.calls.back().id == "anyboard");
 
+    // Lobbies and messages go through as they are.
+    kin::FakeNetwork network;
+    kin::FakeServices ann(network, {.id = "fake:ann", .name = "Ann"});
+    kin::FakeServices bob(network, {.id = "fake:bob", .name = "Bob"});
+    const auto ann_listed = kin::catalog_services(ann, catalog);
+    assert(ann_listed->create_lobby({.max_members = 2, .visibility = kin::LobbyVisibility::Public, .data = {{"mode", "coop"}}}) != 0);
+    ann_listed->update();
+    assert(!ann_listed->lobby().empty() && ann_listed->lobby() == ann.lobby());
+    assert(ann_listed->lobby_owner() == "fake:ann" && ann_listed->lobby_data("mode") == "coop");
+    assert(bob.join_lobby(ann_listed->lobby()) != 0);
+    bob.update();
+    ann_listed->update();
+    assert(ann_listed->lobby_members().size() == 2 && ann_listed->max_message() == ann.max_message());
+    const kin::u8 hello[] = {1, 2, 3};
+    assert(ann_listed->send_message("fake:bob", hello, kin::MessageDelivery::Reliable, 4));
+    bob.update();
+    std::vector<kin::PlayerMessage> got;
+    bob.receive_messages(4, got);
+    assert(got.size() == 1 && got[0].bytes.size() == 3);
+    ann_listed->leave_lobby();
+    assert(ann.lobby().empty());
+
     // Lower is better, as listed: kin's offline backend keeps the best by it.
     const auto offline = kin::make_offline_services({.offline_in_memory = true});
     const auto listed = kin::catalog_services(*offline, catalog);
@@ -646,5 +867,6 @@ int main(int argc, char** argv) {
     test_services_catalog_file();
     test_catalog_services();
     test_steam_backend_through_the_library();
+    test_steam_lobbies_and_messages();
     return 0;
 }
