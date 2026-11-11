@@ -259,6 +259,9 @@ in the same retained table and use the same camera frustum. Frustum setup is reu
 LOD, skinning and other ineligible pieces keep their existing classification path. Task boundaries and source order stay intact.
 Classification and prefix reduction also clear only the LOD/cascade counter prefixes consumed by the current render;
 enabling more levels/cascades clears those newly active slots before use.
+For a single-level view without sun shadows, prefix construction consumes each ref's adjacent pieces together and assigns
+counts, offsets and statistics while those records are local. Local shadows can still be enabled. Multi-level and sun-shadow
+views use the general reduction path; visibility tests, source order and retained/streamed buffer indexing stay the same.
 
 For a compiler-only experiment, configure `-DKIN_RENDERER3D_O3=ON`. In GCC/Clang Release builds this appends `-O3`
 only to `gpu_renderer3d.cpp`, after the engine target's `-O2`; other engine sources, floating-point flags and GPU

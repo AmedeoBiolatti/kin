@@ -9740,79 +9740,113 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     else
         classify_tasks.operator()<false>();
     // Each draw's copies: by level, and in each those seen, then those only the sun sees.
-    for (DrawRef& ref : _refs) {
-        ref.out_count = ref.out_extra = 0;
-        clear_counts(ref.cascade_count, ctx.cascades);
-        clear_counts(ref.level_seen, ref.levels);
-        clear_counts(ref.level_extra, ref.levels);
-        for (u32 k = 0; k < counter_cascades; ++k)
-            clear_counts(ref.cascade_level_count[k], ref.levels);
-    }
-    for (const Piece& piece : _pieces) {
+    u32 written = 0, retained_written = 0, listed = 0, visible_total = 0;
+    const auto account_piece = [&](const Piece& piece) {
         stats.camera_instance_tests += piece.camera_tests;
         stats.bounds_instance_tests += piece.bounds_tests;
         if (camera_range(piece))
             stats.camera_range_accepted += piece.end - piece.begin;
         if (piece.group != ~0u && _cull_groups[piece.group].camera == 0)
             stats.camera_group_rejected += piece.end - piece.begin;
-        DrawRef& ref = _refs[piece.ref];
-        for (u32 l = 0; l < ref.levels; ++l) {
-            ref.level_seen[l] += piece.seen[l];
-            ref.level_extra[l] += piece.extra[l];
-            for (u32 k = 0; k < ctx.cascades; ++k) {
-                ref.cascade_level_count[k][l] += piece.cascade[k][l];
+    };
+    if (!any_levels && !ctx.shadows && ctx.cascades == 0) {
+        // Pieces are contiguous by ref. Consume each ref's counts and assign
+        // its offsets while those pieces are still hot, instead of revisiting
+        // both large arrays for clearing, reduction, prefixes and statistics.
+        u32 p = 0;
+        for (u32 r = 0; r < _refs.size(); ++r) {
+            const u32 first = p;
+            u32 seen = 0;
+            for (; p < _pieces.size() && _pieces[p].ref == r; ++p) {
+                const Piece& piece = _pieces[p];
+                account_piece(piece);
+                seen += piece.seen[0];
+            }
+            DrawRef& ref = _refs[r];
+            u32& cursor = ref.retained != ~0u ? retained_written : written;
+            ref.out_first = ref.level_first[0] = cursor;
+            ref.out_count = ref.level_seen[0] = seen;
+            ref.out_extra = ref.level_extra[0] = 0;
+            cursor += seen;
+            stats.lod_copies_by_level[0] += seen;
+            visible_total += seen;
+            stats.skinned_copies += ref.skinned ? seen : 0u;
+            u32 at = ref.out_first;
+            for (u32 q = first; q < p; ++q) {
+                Piece& piece = _pieces[q];
+                piece.out[0] = at;
+                piece.out_extra[0] = cursor;
+                at += piece.seen[0];
             }
         }
-    }
-    u32 written = 0, retained_written = 0, listed = 0;
-    for (DrawRef& ref : _refs) {
-        u32& cursor = ref.retained != ~0u ? retained_written : written;
-        ref.out_first = cursor;
-        for (u32 l = 0; l < ref.levels; ++l) {
-            ref.level_first[l] = cursor;
-            cursor += ref.level_seen[l] + ref.level_extra[l];
-            ref.out_count += ref.level_seen[l];
-            ref.out_extra += ref.level_extra[l];
-            ctx.stats.lod_copies_by_level[l] += ref.level_seen[l];
+    } else {
+        for (DrawRef& ref : _refs) {
+            ref.out_count = ref.out_extra = 0;
+            clear_counts(ref.cascade_count, ctx.cascades);
+            clear_counts(ref.level_seen, ref.levels);
+            clear_counts(ref.level_extra, ref.levels);
+            for (u32 k = 0; k < counter_cascades; ++k)
+                clear_counts(ref.cascade_level_count[k], ref.levels);
         }
-        for (u32 k = 0; k < ctx.cascades && ctx.cascades > 1; ++k) {
-            ref.cascade_first[k] = listed;
+        for (const Piece& piece : _pieces) {
+            account_piece(piece);
+            DrawRef& ref = _refs[piece.ref];
             for (u32 l = 0; l < ref.levels; ++l) {
-                ref.cascade_level_first[k][l] = listed;
-                listed += ref.cascade_level_count[k][l];
-                ref.cascade_count[k] += ref.cascade_level_count[k][l];
-            }
-        }
-    }
-    {
-        u32 current = ~0u;
-        std::array<u32, max_mesh_levels> seen{}, extra{};
-        std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> in_list{};
-        for (Piece& piece : _pieces) {
-            if (piece.ref != current) {
-                current = piece.ref;
-                clear_counts(seen, _refs[current].levels);
-                clear_counts(extra, _refs[current].levels);
-                for (u32 k = 0; k < counter_cascades; ++k)
-                    clear_counts(in_list[k], _refs[current].levels);
-            }
-            const DrawRef& ref = _refs[piece.ref];
-            for (u32 l = 0; l < ref.levels; ++l) {
-                piece.out[l] = ref.level_first[l] + seen[l];
-                piece.out_extra[l] = ref.level_first[l] + ref.level_seen[l] + extra[l];
-                seen[l] += piece.seen[l];
-                extra[l] += piece.extra[l];
+                ref.level_seen[l] += piece.seen[l];
+                ref.level_extra[l] += piece.extra[l];
                 for (u32 k = 0; k < ctx.cascades; ++k) {
-                    piece.cascade_out[k][l] = ref.cascade_level_first[k][l] + in_list[k][l];
-                    in_list[k][l] += piece.cascade[k][l];
+                    ref.cascade_level_count[k][l] += piece.cascade[k][l];
                 }
             }
         }
-    }
-    u32 visible_total = 0;
-    for (const DrawRef& ref : _refs) {
-        visible_total += ref.out_count;
-        stats.skinned_copies += ref.skinned ? ref.out_count : 0u;
+        for (DrawRef& ref : _refs) {
+            u32& cursor = ref.retained != ~0u ? retained_written : written;
+            ref.out_first = cursor;
+            for (u32 l = 0; l < ref.levels; ++l) {
+                ref.level_first[l] = cursor;
+                cursor += ref.level_seen[l] + ref.level_extra[l];
+                ref.out_count += ref.level_seen[l];
+                ref.out_extra += ref.level_extra[l];
+                ctx.stats.lod_copies_by_level[l] += ref.level_seen[l];
+            }
+            for (u32 k = 0; k < ctx.cascades && ctx.cascades > 1; ++k) {
+                ref.cascade_first[k] = listed;
+                for (u32 l = 0; l < ref.levels; ++l) {
+                    ref.cascade_level_first[k][l] = listed;
+                    listed += ref.cascade_level_count[k][l];
+                    ref.cascade_count[k] += ref.cascade_level_count[k][l];
+                }
+            }
+        }
+        {
+            u32 current = ~0u;
+            std::array<u32, max_mesh_levels> seen{}, extra{};
+            std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> in_list{};
+            for (Piece& piece : _pieces) {
+                if (piece.ref != current) {
+                    current = piece.ref;
+                    clear_counts(seen, _refs[current].levels);
+                    clear_counts(extra, _refs[current].levels);
+                    for (u32 k = 0; k < counter_cascades; ++k)
+                        clear_counts(in_list[k], _refs[current].levels);
+                }
+                const DrawRef& ref = _refs[piece.ref];
+                for (u32 l = 0; l < ref.levels; ++l) {
+                    piece.out[l] = ref.level_first[l] + seen[l];
+                    piece.out_extra[l] = ref.level_first[l] + ref.level_seen[l] + extra[l];
+                    seen[l] += piece.seen[l];
+                    extra[l] += piece.extra[l];
+                    for (u32 k = 0; k < ctx.cascades; ++k) {
+                        piece.cascade_out[k][l] = ref.cascade_level_first[k][l] + in_list[k][l];
+                        in_list[k][l] += piece.cascade[k][l];
+                    }
+                }
+            }
+        }
+        for (const DrawRef& ref : _refs) {
+            visible_total += ref.out_count;
+            stats.skinned_copies += ref.skinned ? ref.out_count : 0u;
+        }
     }
     stats.culled = total - visible_total;
     if (any_skinned) {

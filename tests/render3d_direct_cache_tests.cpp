@@ -516,6 +516,43 @@ void check(Renderer2D& renderer) {
                actual.stats.direct_retained_instances == 1033 && actual.stats.device_waits == 0);
     }
 
+    // Force the general multi-level prefix path to level zero and compare it
+    // with the single-level path. Mix retained and streamed refs, including a
+    // streamed draw spanning multiple worker pieces and partially visible rows.
+    const auto prefix_mesh = r3d.create_mesh(meshes::sphere(.2f, 16, 8), {.levels = 3}).value_or({});
+    assert(prefix_mesh && prefix_mesh.level_count() > 1);
+    std::vector<MeshInstance3D> prefix_copies;
+    for (u32 i = 0; i < 1025; ++i)
+        prefix_copies.push_back(
+            {Mat4f::translation({f32(i % 41) * .5f - 10, f32(i / 41) * .5f - 6, 0}), colors::white, 4000 + i});
+    auto prefix_batch =
+        InstanceBatch3D::create(mesh,
+                                std::vector<MeshInstance3D>(32, {Mat4f::translation({-2, 0, 2}), colors::white, 6000}))
+            .value_or({});
+    assert(prefix_batch);
+    scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    scene.camera.projection = Projection3D::Orthographic;
+    scene.camera.height = 8;
+    assert(scene.draw_instanced(prefix_mesh, prefix_copies, materials[0]));
+    assert(scene.draw_instanced(prefix_batch, materials[1]));
+    assert(scene.draw(mesh, Mat4f::translation({0, -3, 1}), materials[1], colors::white, 6001));
+    for (u32 repeat = 0; repeat < 2; ++repeat) {
+        scene.lod.enabled = false;
+        shoot(false);
+        const auto single = shoot(false);
+        scene.lod.enabled = true;
+        scene.debug.force_level = 0;
+        const auto general = shoot(false);
+        assert(single.pixels == general.pixels && single.pick_id == general.pick_id &&
+               single.stats.instances == general.stats.instances && single.stats.triangles == general.stats.triangles &&
+               single.stats.culled == general.stats.culled &&
+               single.stats.skinned_copies == general.stats.skinned_copies &&
+               single.stats.camera_instance_tests == general.stats.camera_instance_tests &&
+               single.stats.retained_instances >= 32 && single.stats.instances > 32 && single.stats.culled > 0);
+    }
+
     // Oversized direct tables stream within the existing 32 MiB budget.
     scene = Scene3D{};
     scene.debug.cache_draw_commands = false;
