@@ -415,7 +415,9 @@ if(KIN_ENABLE_NET)
         src/net/loopback.cpp
         src/net/lobby_match.cpp
         src/net/services_transport.cpp)
-    if(NOT EMSCRIPTEN)
+    if(EMSCRIPTEN)
+        target_sources(kin_net PRIVATE src/net/udp_browser.cpp) # no UDP in a page: open() fails and says so
+    else()
         target_sources(kin_net PRIVATE src/net/udp.cpp)
     endif()
     add_library(kin::net ALIAS kin_net)

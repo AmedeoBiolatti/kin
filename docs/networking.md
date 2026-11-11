@@ -54,7 +54,7 @@ flowchart TB
 |---|---|
 | `kin/net/transport.hpp` | `Transport`: unreliable datagrams of at most `max_datagram()` (1200) bytes to numbered peers |
 | `kin/net/loopback.hpp` | `LoopbackNetwork`: in-process endpoints with latency, jitter, loss and duplication per link, on a clock the owner sets |
-| `kin/net/udp.hpp` | `UdpTransport`: IPv4, or IPv6 with IPv4 mapped in; non-blocking; not in web builds |
+| `kin/net/udp.hpp` | `UdpTransport`: IPv4, or IPv6 with IPv4 mapped in; non-blocking. In a browser `open()` fails and says so (a page has no UDP) |
 | `kin/net/services_transport.hpp` | `ServicesTransport`: the platform's messages between players (Steam's, across NATs and through relays); peers are players |
 | `kin/net/lobby_match.hpp` | From a lobby to a match: `start_lobby_match()`, `read_lobby_match()`, `configure_input_sync()` |
 | `kin/net/link.hpp` | `Links`: the handshake every model shares, round trips, timeouts, goodbye; `compatibility_hash()` |
