@@ -24,6 +24,12 @@ releases may change APIs.
   - kin's code that must give the same bits is compiled without fused
     multiply-adds on clang-cl and AppleClang too; test assertions stay on in
     AppleClang Release builds.
+- Add experimental networking (`KIN_ENABLE_NET`, `kin::net`): a shared layer of
+  transports (loopback with a link simulator, UDP), handshakes that refuse
+  another game, build, model or setting, round trips and timeouts, under a first
+  sync model, deterministic input sync, with lockstep and rollback, clock sync
+  between peers, desync detection by state hashes and a rollback sync test.
+  See [networking](networking.md).
 
 ## [0.3.0] — 2026-11-10
 
