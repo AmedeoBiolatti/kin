@@ -232,6 +232,34 @@ void check(Renderer2D& renderer) {
     assert(r.render(third, scene));
     assert(read(view) == reference.pixels && read(third) == reference.pixels);
     renderer.present();
+    // Invisible incompatibilities are not batch barriers. Moving the camera
+    // exposes those rows without changing the compiled source schedule; world
+    // decal rounds and overlay transparency must preserve equal-depth winners.
+    scene = Scene3D{};
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    scene.lights.ambient = {.4f, .4f, .4f};
+    auto& layers = scene.overlay();
+    layers.camera = scene.camera;
+    for (auto* source : {&scene, &layers}) {
+        for (u32 i = 0; i < 144; ++i) {
+            auto material = materials[i % materials.size()];
+            material.receives_decals = i % 3 != 0;
+            assert(source->draw(box, Mat4f::trs({source == &scene ? 0.f : 2.f, 0, 0}, Quatf::identity(), {2, 2, 2}),
+                                material, colors::white, 2000 + i));
+            material.texture_samplers[0] = TextureSampler3D{.wrap_u = Wrap3D::Clamp};
+            assert(source->draw(box, Mat4f::translation({30, 0, 0}), material));
+        }
+        assert(source->draw(box, Mat4f::translation({0, 0, 2}),
+                            {.color = Color::rgba(30, 90, 220, 90), .blend = Blend3D::Alpha}));
+    }
+    const auto bridged = compare(view, false);
+    assert(bridged.stats.direct_retained_instances >= 576 && bridged.stats.main_merged_draws > 10);
+    scene.camera = layers.camera = Camera3D::look_at({15, 0, 40}, {15, 0, 0});
+    compare(view, false);
+    scene.camera = layers.camera = Camera3D::look_at({0, 0, 13}, {});
+    assert(scene.draw_decal({.transform = Mat4f::scaling({3, 3, 3}), .texture = texture}));
+    const auto decal = compare(view, false);
+    assert(decal.stats.decals_drawn > 0 && decal.stats.main_merged_draws > 20);
     // Instance retention can fit while the independent material budget cannot.
     // That source must still draw completely with per-draw uniforms.
     scene = Scene3D{};

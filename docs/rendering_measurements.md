@@ -4,6 +4,79 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Compiled opaque spans and direct batch emission, 2026-11-11
+
+The reference is `db636c6f`. Stable source order, scene/pass/decal classes and
+material-table compatibility now compile into contiguous opaque spans. The main
+pass emits final batches directly, resolving one pipeline per eligible span.
+Within a span only live instance-table boundaries need another compatibility
+check; consecutive camera-index ranges copy together after explicit gap checks.
+This removes temporary per-source main items, block rotations, repeated static
+compatibility decisions and individual index inserts. Transparent meshes and
+particles still sort by current depth in a separate stream. Current visibility,
+pipeline generations, target variants, textures, samplers and fallback admission
+remain live. Hidden incompatible spans permit the same visible adjacency as
+before; equal-depth ties, decals, overlay blocks and all GPU work keep their order.
+
+Five alternating Hard pairs show **8.2% median paired caller-CPU p50 reduction**,
+improving in four of five pairs; individual reductions are **6.1%, −1.4%, 17.6%,
+8.2% and 16.4%**. Process CPU falls **6.4%** by the same calculation. The unchanged
+workload is independent Yard submissions, 720p HDR, no AA/GI/AO, classic 1,024
+spot maps, four helpers, affinity 0–15, and 300 warm-up plus a full 1,440-frame
+route per run. Blender/background workloads stay untouched; clocks, thermals
+and load are uncontrolled: results are **contended**. Normal timing excludes
+PMU sampling and image readback.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 1 | 0.537 / 0.720 / 0.778 | 0.490 / 0.671 / 0.711 | 8.8% |
+| Medium | 1 | 1.721 / 2.080 / 2.234 | 1.591 / 1.901 / 1.991 | 7.6% |
+| Hard | 5 | 4.889 / 5.780 / 6.239 | 4.139 / 5.109 / 5.577 | 8.2% |
+
+Percentiles are medians of per-run percentiles; paired reductions compare
+adjacent run medians, so dividing independently aggregated p50s gives a different
+result. Easy/Medium are single guard pairs, not repeatability studies. Hard frame
+p50 has a 0.9% median paired increase; no frame-throughput gain or new engine
+ranking is established. These numbers do not compound with earlier campaigns.
+
+Hard median pipeline-cache hits fall **8,718 → 325**, while eight batched main draws,
+317 main draws and 4,712 local-shadow draws remain unchanged. CPU plan capacity
+grows only **192 bytes** (2,290,172 → 2,290,364 bytes) and shares the existing
+4 MiB cap. Per-frame GPU-resource and upload bytes match. Peak process RSS, which
+includes startup and driver allocations, is 195.6 → 241.8 MiB in this campaign;
+no total-process memory reduction is claimed. The composition scratch counter
+now includes both vectors. `transparent_sort_ms` now includes direct batching
+and its material/index preparation, so use end-to-end CPU for old/new comparisons.
+
+Two separate forward/reverse inherited P-core user-instruction/cycle controls
+show **4.957% and 4.979% fewer retired instructions**, with 99% event running
+coverage. Counts include helpers, driver threads, startup, warm-up, assembly and
+presentation; they are not isolated render-phase counts or clock-normalized
+speedups. Both controls preserve the same non-timing work columns, except the
+documented pipeline lookup counters and CPU plan capacity.
+
+Fresh `cpu-clock:u` profiles each cover two complete Hard routes at 499 Hz with
+16 KiB DWARF user stacks. Actual render-call windows exclude assembly, warm-up
+and presentation; caller, Kin workers and other threads are separate. Combined
+draw planning/lookup falls **23.29 → 14.11%** of caller samples (ordering itself
+18.35 → 13.87%, lookup 4.94 → 0.24%). Caller samples number 7,292/6,667, with
+under 0.7% unresolved phase attribution in each. These are normalized user-CPU
+shares, not phase medians. Remaining caller shares are local-shadow preparation
+18.49%, camera/instance preparation 18.31%, shadow recording 17.20% and light grid
+15.96%. The span interpreter and auxiliary visible-ref filtering account for
+most remaining draw-planning work.
+
+Eleven focused NVIDIA suites and four llvmpipe suites pass. The draw-command
+regression exercises hidden incompatible rows, camera changes exposing them,
+world decal rounds and overlay transparency with equal-depth winners. Existing
+coverage includes texture/sampler edits, live poses, source moves, raw spans,
+MSAA/HDR/TAA, surfaces, budgets and multiple views in one GPU frame. All **10,080
+before/after route-frame comparisons** preserve every non-timing work/resource/
+upload/cache column except documented pipeline-lookup counts and CPU plan bytes.
+Nine decoded-RGBA pairs at route phases 1/541/961 across all tiers are exact.
+Evidence, commands, frozen hashes, raw percentiles, instruction controls and
+fresh profiles are under `out/runs/render3d-draw-span-ranges/`.
+
 ### Resident spans in live-culling metadata, 2026-11-11
 
 The reference is `862a9892`. Existing compiled one-copy resident runs now skip

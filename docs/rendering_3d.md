@@ -412,21 +412,30 @@ benchmark `--mode local-gather` keeps direct retention enabled in both controls.
 The native main pass retains draw decisions and source ordering after an unchanged
 command revision has been observed twice. A plan is limited to 4 MiB of CPU vector payload,
 keyed by both scenes' identities, revisions and storage. Admission accounts for the draw records and
-worst-case binding count; actual vector capacities and camera-index scratch are checked against the same cap.
+worst-case binding count; actual vector capacities, compiled spans and camera-index scratch
+are checked against the same cap.
 It caches stock material uniforms, texture/sampler compatibility classes
 and pipeline pointers. Target format, samples, TAA, velocity, fog, local-light and
 indexed-storage changes select current pipeline variants; pipeline-cache
 forget/destroy events invalidate saved pointers. Failed pipeline allocations
 remain retryable. Custom shaders keep their live selection/binding path.
 
-The source's complete opaque order is sorted once, then filtered by current
-visibility. Transparent mesh copies and particles still sort by current depth.
-The world/overlay opaque and transparent blocks are assembled in the original
-stable order, without repeatedly sorting the opaque items. Sources resubmitted
+The source's complete order is sorted once, then filtered by current visibility
+for depth/reactive passes. The main pass compiles contiguous opaque spans with
+the same scene, decal round and material-table compatibility. Each render emits
+final batches directly from those spans, resolving a pipeline once per eligible
+span rather than producing, rotating and compacting one main item per source.
+Within a compatible span only the live instance table can split a batch; adjacent
+camera-index ranges are copied together, with gaps checked explicitly.
+Current visibility and retention still determine adjacency: a hidden incompatible
+span is no barrier, while a visible fallback or instance-table change splits a
+batch. Transparent mesh copies and particles retain a separate stream sorted by
+current depth. World opaque/transparent and overlay opaque/transparent blocks
+keep their original stable order, including equal-depth ties. Sources resubmitted
 every render retain the immediate path rather than repeatedly build this plan.
 
 For eligible static direct draws, a stock shader can read its material constants
-from a retained GPU table: 64 bytes per source row, at most 4 MiB across eight
+from a retained GPU table: 80 bytes per source row, at most 4 MiB across eight
 source tables, independently of the CPU cap and existing instance-table budget.
 The vertex shader passes the original retained row to the fragment shader.
 Consecutive commands can then merge when scene, mesh, pipeline, instance table
@@ -451,7 +460,11 @@ each clamped to 4 MiB. The immutable batch-kind flag reused by culling is common
 to both controls. `draw_plan_hits/builds/bytes`, `draw_pipeline_hits/misses`,
 `main_batched_draws`, `main_merged_draws`, `draw_material_gpu_bytes/upload_bytes`
 and `draw_index_gpu_bytes/upload_bytes` expose the work and logical payload.
-Pipeline hits count decisions reused before merging as well as recorded commands.
+Pipeline hits count actual cached pipeline lookups, including span representatives
+and recorded commands; rows consumed by a compiled span need no lookup. Composition
+scratch accounting includes both the final commands and transparent stream capacities.
+`transparent_sort_ms` now includes direct batch composition and its material/index
+preparation; use end-to-end CPU measurements for comparisons with the old two-pass path.
 These GPU bytes exclude staging and additional driver backings in flight.
 The Yard CLI exposes `--cache-draw-commands 0|1`; benchmark `--mode draw-commands`
 keeps instance and local-gather retention on in both controls and verifies that

@@ -1528,10 +1528,21 @@ private:
     std::vector<DrawCommand> _draw_commands;
     std::vector<DrawBindingKey> _draw_bindings;
     std::vector<u32> _draw_order;
+    // Contiguous ranges in the source order with identical main-pass ordering
+    // and material-table compatibility. Visibility and retention stay live.
+    struct DrawSpan {
+        u32 first, count;
+        u8 scene;
+        Pass pass;
+        bool decals, materials;
+    };
+    std::vector<DrawSpan> _draw_spans;
     bool _draw_plan_valid = false;
+    u64 draw_plan_bytes() const;
     void prepare_draw_plan(FrameCtx& ctx);
     DrawCommand* main_command(FrameCtx& ctx, u32 ref, bool materials);
-    void batch_main_commands(FrameCtx& ctx);
+    bool prepare_main_indices(FrameCtx& ctx);
+    void emit_draw_span(FrameCtx& ctx, const DrawSpan& span, bool materials);
     void retain_draw_materials(FrameCtx& ctx);
     struct DrawMaterials {
         u64 scene = 0, revision = 0, upload_frame = ~0ull, used_frame = 0;
@@ -1813,6 +1824,7 @@ private:
         bool materials = false;
     };
     std::vector<MainItem> _main_order;
+    std::vector<MainItem> _main_transparent;  // camera-dependent copies, separate from compiled opaque spans
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first
 };
 

@@ -11526,6 +11526,12 @@ bool GpuRenderer3D::read_cluster_picks(IViewBackend3D&, std::vector<ClusterPick3
     return true;
 }
 
+u64 GpuRenderer3D::draw_plan_bytes() const {
+    return _draw_commands.capacity() * sizeof(DrawCommand) + _draw_bindings.capacity() * sizeof(DrawBindingKey) +
+           _draw_order.capacity() * sizeof(u32) + _draw_spans.capacity() * sizeof(DrawSpan) +
+           _main_draw_list.capacity() * sizeof(u32);
+}
+
 void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
     const u32 budget =
         ctx.scene.debug.cache_draw_commands ? std::min<u32>(ctx.scene.debug.draw_command_budget, 4 * 1024 * 1024) : 0;
@@ -11534,6 +11540,7 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
         std::vector<DrawCommand>().swap(_draw_commands);
         std::vector<DrawBindingKey>().swap(_draw_bindings);
         std::vector<u32>().swap(_draw_order);
+        std::vector<DrawSpan>().swap(_draw_spans);
         std::vector<u32>().swap(_main_draw_list);
         _main_draw_indices.reset();
     };
@@ -11541,9 +11548,7 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
         clear();
         return;
     }
-    if (_draw_commands.capacity() * sizeof(DrawCommand) + _draw_bindings.capacity() * sizeof(DrawBindingKey) +
-            _draw_order.capacity() * sizeof(u32) + _main_draw_list.capacity() * sizeof(u32) >
-        budget)
+    if (draw_plan_bytes() > budget)
         clear();
     std::array<PreparedKey, 2> keys{};
     for (u32 s = 0; s < ctx.scenes.size(); ++s)
@@ -11559,9 +11564,7 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
         // every frame. Observe an unchanged command revision before admission.
         _draw_plan_keys = keys;
         _draw_plan_valid = false;
-        ctx.stats.draw_plan_bytes = _draw_commands.capacity() * sizeof(DrawCommand) +
-                                    _draw_bindings.capacity() * sizeof(DrawBindingKey) +
-                                    _draw_order.capacity() * sizeof(u32) + _main_draw_list.capacity() * sizeof(u32);
+        ctx.stats.draw_plan_bytes = draw_plan_bytes();
         return;
     }
     if (_draw_plan_valid && keys == _draw_plan_keys && _draw_commands.size() == _refs.size()) {
@@ -11609,13 +11612,38 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
             const u64 ag = group(a), bg = group(b);
             return ag != bg ? ag < bg : _refs[a].mesh->serial < _refs[b].mesh->serial;
         });
+        _draw_spans.clear();
+        for (u32 i = 0; i < _draw_order.size(); ++i) {
+            const u32 r = _draw_order[i];
+            const auto& ref = _refs[r];
+            const auto& m = ref.draw->material;
+            if (m.blend == Blend3D::Alpha || m.blend == Blend3D::Additive)
+                continue;
+            const bool materials = !m.unlit && !m.wireframe && !m.shader.backend() && !ref.skinned;
+            if (!_draw_spans.empty()) {
+                auto& span = _draw_spans.back();
+                const u32 before = _draw_order[span.first];
+                const auto& prior = _refs[before];
+                const auto& pm = prior.draw->material;
+                // Scalar material values, including mask cutoffs, come from
+                // source rows. A material-table pipeline depends only on these
+                // structural fields; its actual allocation is checked live.
+                if (span.first + span.count == i && span.scene == ref.scene && span.pass == pass_of(m) &&
+                    span.decals == m.receives_decals && span.materials == materials &&
+                    (!materials ||
+                     (prior.mesh == ref.mesh && _draw_commands[before].binding == _draw_commands[r].binding &&
+                      pm.double_sided == m.double_sided && pm.surface.backend() == m.surface.backend()))) {
+                    ++span.count;
+                    continue;
+                }
+            }
+            _draw_spans.push_back({i, 1, static_cast<u8>(ref.scene), pass_of(m), m.receives_decals, materials});
+        }
         _draw_plan_keys = keys;
         _draw_plan_valid = true;
         ++ctx.stats.draw_plan_builds;
     }
-    const u64 bytes = _draw_commands.capacity() * sizeof(DrawCommand) +
-                      _draw_bindings.capacity() * sizeof(DrawBindingKey) + _draw_order.capacity() * sizeof(u32) +
-                      _main_draw_list.capacity() * sizeof(u32);
+    const u64 bytes = draw_plan_bytes();
     if (bytes > budget) {
         clear();
         return;
@@ -11784,78 +11812,110 @@ void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
     ctx.stats.draw_material_gpu_bytes = _draw_material_bytes;
 }
 
-void GpuRenderer3D::batch_main_commands(FrameCtx& ctx) {
+bool GpuRenderer3D::prepare_main_indices(FrameCtx& ctx) {
     retain_draw_materials(ctx);
     _main_draw_list.clear();
     ctx.stats.draw_index_gpu_bytes = _main_draw_indices ? _main_draw_indices->size() : 0;
     if (!_draw_plan_valid)
-        return;
+        return false;
     u32 rows = 0;
     for (u32 slot : _draw_material_slots)
         if (slot != ~0u)
             rows += _draw_material_tables[slot].buffer->size() / sizeof(MaterialUniforms);
     if (!rows)
-        return;
-    const u64 metadata = _draw_commands.capacity() * sizeof(DrawCommand) +
-                         _draw_bindings.capacity() * sizeof(DrawBindingKey) + _draw_order.capacity() * sizeof(u32);
+        return false;
+    const u64 metadata = draw_plan_bytes() - _main_draw_list.capacity() * sizeof(u32);
     const std::size_t capacity = std::max<std::size_t>(_main_draw_list.capacity(), std::bit_ceil(rows));
-    if (metadata + capacity * sizeof(u32) > ctx.scene.debug.draw_command_budget)
-        return;
-    // Reserve for every admitted source row before compacting commands. Camera
-    // changes then need no growth and cannot push the CPU payload over its cap.
+    const u32 budget = std::min<u32>(ctx.scene.debug.draw_command_budget, 4 * 1024 * 1024);
+    if (metadata + capacity * sizeof(u32) > budget)
+        return false;
+    // Reserve every admitted source row before interpreting the spans. Camera
+    // changes then cannot grow the payload beyond the shared CPU cap.
     _main_draw_list.reserve(capacity);
-    if (metadata + _main_draw_list.capacity() * sizeof(u32) > ctx.scene.debug.draw_command_budget) {
+    if (draw_plan_bytes() > budget) {
         std::vector<u32>().swap(_main_draw_list);
         ctx.stats.draw_plan_bytes = metadata;
-        return;
+        return false;
     }
-    u32 written = 0;
-    for (auto item : _main_order) {
-        if (item.particle) {
-            _main_order[written++] = item;
+    ctx.stats.draw_plan_bytes = draw_plan_bytes();
+    return true;
+}
+
+void GpuRenderer3D::emit_draw_span(FrameCtx& ctx, const DrawSpan& span, bool materials) {
+    DrawCommand* command = nullptr;
+    u32 command_ref = ~0u, batch = ~0u, table = ~0u;
+    u32 pending_first = 0, pending_count = 0;
+    const auto flush = [&] {
+        if (pending_count)
+            _main_draw_list.insert(_main_draw_list.end(), _retained_visible.begin() + pending_first,
+                                   _retained_visible.begin() + pending_first + pending_count);
+    };
+    for (u32 i = span.first; i < span.first + span.count; ++i) {
+        const u32 r = _draw_order[i];
+        const auto& ref = _refs[r];
+        if (!ref.out_count)
+            continue;
+        if (!(materials && span.materials && ref.direct && ref.levels == 1 && !ref.clustered &&
+              _draw_material_slots[ref.scene] != ~0u)) {
+            _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
+            batch = ~0u;
             continue;
         }
-        const auto& ref = _refs[item.ref];
-        DrawCommand* command = nullptr;
-        if (!item.transparent && ref.direct && ref.levels == 1 && !ref.clustered && !ref.draw->material.unlit &&
-            !ref.draw->material.wireframe && _draw_material_slots[ref.scene] != ~0u) {
-            command = main_command(ctx, item.ref, true);
-            if (command && (command->selection.unlit != Unlit::Off || !command->pipeline ||
-                            command->selection.pass != Pass::Opaque))
-                command = nullptr;
-        }
-        if (command) {
-            item.materials = true;
-            item.first = static_cast<u32>(_main_draw_list.size());
-            item.count = ref.level_seen[0];
-            _main_draw_list.insert(_main_draw_list.end(), _retained_visible.begin() + ref.level_first[0],
-                                   _retained_visible.begin() + ref.level_first[0] + item.count);
-            if (written && _main_order[written - 1].materials) {
-                auto& previous = _main_order[written - 1];
-                const auto& before = _refs[previous.ref];
-                const auto& prior = _draw_commands[previous.ref];
-                if (before.scene == ref.scene && before.mesh == ref.mesh && before.retained == ref.retained &&
-                    prior.pipeline == command->pipeline && prior.binding == command->binding &&
-                    before.draw->material.receives_decals == ref.draw->material.receives_decals) {
-                    previous.count += item.count;
-                    ++ctx.stats.main_merged_draws;
-                    continue;
-                }
+        if (!command) {
+            command = main_command(ctx, r, true);
+            command_ref = r;
+            if (!command || command->selection.unlit != Unlit::Off || !command->pipeline ||
+                command->selection.pass != Pass::Opaque) {
+                command = nullptr; // allocation failures remain retryable
+                batch = ~0u;
+                _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
+                continue;
             }
         }
-        _main_order[written++] = item;
+        const u32 first = static_cast<u32>(_main_draw_list.size()) + pending_count, count = ref.level_seen[0];
+        // Visibility prefixing often places successive rows next to one
+        // another. Copy each contiguous index range once, without assuming
+        // that sun-only rows or fallback draws share that layout.
+        if (ref.level_first[0] != pending_first + pending_count) {
+            flush();
+            pending_first = ref.level_first[0];
+            pending_count = 0;
+        }
+        pending_count += count;
+        if (batch != ~0u && table == ref.retained) {
+            // Static compatibility was proved by the span compiler. Within
+            // it only a live instance-table change can split this batch.
+            _main_order[batch].count += count;
+            ++ctx.stats.main_merged_draws;
+            continue;
+        }
+        if (!_main_order.empty() && _main_order.back().materials) {
+            auto& previous = _main_order.back();
+            const auto& before = _refs[previous.ref];
+            const auto& prior = _draw_commands[previous.ref];
+            // Keep the live adjacency rule: a culled incompatible span is no
+            // barrier, while a visible fallback, scene or table change is.
+            if (before.scene == ref.scene && before.mesh == ref.mesh && before.retained == ref.retained &&
+                prior.pipeline == command->pipeline && prior.binding == command->binding &&
+                before.draw->material.receives_decals == ref.draw->material.receives_decals) {
+                previous.count += count;
+                batch = static_cast<u32>(_main_order.size() - 1);
+                table = ref.retained;
+                ++ctx.stats.main_merged_draws;
+                continue;
+            }
+        }
+        // Only emitted representatives need a private command/uniform record;
+        // all other rows in this span share its material-table pipeline.
+        if (r != command_ref) {
+            command = main_command(ctx, r, true);
+            command_ref = r;
+        }
+        _main_order.push_back({r, first, count, ref.scene, 0, false, false, true});
+        batch = static_cast<u32>(_main_order.size() - 1);
+        table = ref.retained;
     }
-    _main_order.resize(written);
-    if (!_main_draw_list.empty()) {
-        const u32 bytes = static_cast<u32>(_main_draw_list.size() * sizeof(u32));
-        ensure_buffer(_main_draw_indices, bytes, 4096, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
-        _device->upload_storage_buffer(_main_draw_indices->handle(), 0, bytes, _main_draw_list.data(), true);
-        ctx.stats.draw_index_upload_bytes = bytes;
-    }
-    ctx.stats.draw_index_gpu_bytes = _main_draw_indices ? _main_draw_indices->size() : 0;
-    ctx.stats.draw_plan_bytes = _draw_commands.capacity() * sizeof(DrawCommand) +
-                                _draw_bindings.capacity() * sizeof(DrawBindingKey) +
-                                _draw_order.capacity() * sizeof(u32) + _main_draw_list.capacity() * sizeof(u32);
+    flush();
 }
 
 void GpuRenderer3D::order_draws(FrameCtx& ctx) {
@@ -11957,20 +12017,39 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
         return a.transparent && a.depth > b.depth;
     };
     if (_draw_plan_valid) {
-        // Only transparent copies/particles need camera-dependent sorting.
-        // Rotate the already ordered opaque blocks into their exact stable
-        // positions: world opaque, world transparent, overlay opaque/transparent.
+        // Camera-dependent work is confined to the transparent stream. Emit
+        // the final opaque batches directly into the four composition blocks;
+        // no per-source MainItems, compaction pass or block rotations.
+        const bool materials = prepare_main_indices(ctx);
         append_particles();
         std::stable_sort(_main_order.begin(), _main_order.end(), composition_less);
-        const std::size_t transparent = _main_order.size();
-        const std::size_t world_transparent =
-            std::count_if(_main_order.begin(), _main_order.end(), [](const MainItem& item) { return item.scene == 0; });
-        const std::size_t world_opaque = append_opaque();
-        const std::size_t opaque = _main_order.size() - transparent;
-        std::rotate(_main_order.begin(), _main_order.begin() + transparent, _main_order.end());
-        std::rotate(_main_order.begin() + world_opaque, _main_order.begin() + opaque,
-                    _main_order.begin() + opaque + world_transparent);
+        _main_transparent.swap(_main_order);
+        _main_order.clear();
+        auto transparent = _main_transparent.begin();
+        for (u32 scene = 0; scene < ctx.scenes.size(); ++scene) {
+            for (u32 round = 0; round < (ctx.decals && scene == 0 ? 2u : 1u); ++round)
+                for (const auto& span : _draw_spans) {
+                    if (span.scene != scene || (ctx.decals && scene == 0 && span.decals != (round == 0)) ||
+                        (ctx.surface_stage == SurfaceStage3D::Opaque && span.pass != Pass::Opaque) ||
+                        (ctx.surface_stage == SurfaceStage3D::Transparent && span.pass == Pass::Opaque))
+                        continue;
+                    emit_draw_span(ctx, span, materials);
+                }
+            const auto begin = transparent;
+            while (transparent != _main_transparent.end() && transparent->scene == scene)
+                ++transparent;
+            _main_order.insert(_main_order.end(), begin, transparent);
+        }
+        _main_transparent.clear();
+        if (!_main_draw_list.empty()) {
+            const u32 bytes = static_cast<u32>(_main_draw_list.size() * sizeof(u32));
+            ensure_buffer(_main_draw_indices, bytes, 4096, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+            _device->upload_storage_buffer(_main_draw_indices->handle(), 0, bytes, _main_draw_list.data(), true);
+            ctx.stats.draw_index_upload_bytes = bytes;
+        }
+        ctx.stats.draw_index_gpu_bytes = _main_draw_indices ? _main_draw_indices->size() : 0;
     } else {
+        prepare_main_indices(ctx);
         append_opaque();
         append_particles();
         std::stable_sort(_main_order.begin(), _main_order.end(), composition_less);
@@ -11991,12 +12070,11 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
     ctx.stats.transparent_draw_runs = 0;
     for (const auto& item : _main_order)
         ctx.stats.transparent_draw_runs += item.transparent ? 1u : 0u;
-    ctx.stats.composition_order_bytes = _main_order.capacity() * sizeof(MainItem);
+    ctx.stats.composition_order_bytes = (_main_order.capacity() + _main_transparent.capacity()) * sizeof(MainItem);
     ctx.stats.transparent_sort_ms =
         std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - composition_started).count();
     // The overlay in front of the world, seen by its own camera, and the velocity pass for it.
     ctx.overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });
-    batch_main_commands(ctx);
 }
 
 void GpuRenderer3D::choose_point_lights(FrameCtx& ctx) {
