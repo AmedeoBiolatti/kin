@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <kin/platform/app.hpp>
+#include <kin/render3d/material_graph3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -237,18 +238,19 @@ void recording_ranges(Fixture& f) {
     // stock/public parity alone would exercise the same recorder twice.
     const std::array requests{LocalShadowRequest3D{.kind = LocalShadowKind3D::Spot}};
     const auto clustered = f.r3d.create_mesh(meshes::sphere(.45f, 16, 8), {.clusters = true}).value_or({});
-    const auto surface_box = f.r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
     auto data = meshes::box({.7f, .7f, .7f});
     data.skin.assign(data.vertices.size(), {});
     const auto skinned = f.r3d.create_mesh(data).value_or({});
     const std::array<u8, 8> rgba{255, 255, 255, 0, 255, 255, 255, 255};
     const auto mask = f.r.create_texture_from_rgba(rgba.data(), {2, 1});
+    const std::array<u8, 8> inverse_rgba{255, 255, 255, 255, 255, 255, 255, 0};
+    const auto inverse = f.r.create_texture_from_rgba(inverse_rgba.data(), {2, 1});
     const auto batch =
         InstanceBatch3D::create(f.box, std::vector<MeshInstance3D>{{.transform = Mat4f::translation({-.6f, .5f, 1})},
                                                                    {.transform = Mat4f::translation({.6f, .5f, 1})}})
             .value_or({});
-    assert(clustered && surface_box && skinned && mask && batch);
-    SurfaceShader3D offset;
+    assert(clustered && skinned && mask && inverse && batch);
+    Material3D raised, higher, masked_left, masked_right;
     if (shader_compiler_available()) {
         const auto dir =
             std::filesystem::temp_directory_path() /
@@ -256,13 +258,35 @@ void recording_ranges(Fixture& f) {
         std::filesystem::create_directories(dir);
         const auto file = dir / "offset.kingraph.json";
         std::ofstream{file} << R"({"schema":"kin.material-graph/1","name":"shadow_recording",
-            "parameters":[],"nodes":[],"outputs":{"offset":[0,0.2,0]}})";
+            "parameters":[{"name":"rise","type":"float","default":0.2},
+                          {"name":"mask","type":"texture","slot":"emissive"}],
+            "nodes":[{"id":"lift","type":"multiply","inputs":{"a":[0,1,0],"b":"rise"}},
+                     {"id":"sample","type":"texture","texture":"mask"}],
+            "outputs":{"offset":"lift","alpha":"sample.a"}})";
         const auto graph = f.r3d.compile_material_graph(file);
-        assert(graph);
-        offset = graph->surface;
+        assert(graph && graph->graph.offset && graph->graph.cutout);
+        raised.surface = graph->surface;
+        raised.shader_params = material_graph_params3d(graph->graph);
+        higher = raised;
+        higher.shader_params = material_graph_params3d(graph->graph, {{"rise", {.75f}}});
+        std::ofstream{file} << R"({"schema":"kin.material-graph/1","name":"shadow_mask",
+            "parameters":[{"name":"mask","type":"texture","slot":"emissive"}],
+            "nodes":[{"id":"sample","type":"texture","texture":"mask"}],
+            "outputs":{"alpha":"sample.a"}})";
+        const auto cutout = f.r3d.compile_material_graph(file);
+        assert(cutout && cutout->graph.cutout && !cutout->graph.offset);
+        masked_left = raised;
+        masked_left.surface = cutout->surface;
+        masked_left.shader_params = material_graph_params3d(cutout->graph);
+        masked_left.blend = Blend3D::Mask;
+        masked_left.emissive_texture = mask;
+        masked_right = masked_left;
+        masked_right.emissive_texture = inverse;
         std::filesystem::remove_all(dir);
     }
-    const int objects = offset ? 6 : 5;
+    std::vector<int> objects{0, 1, 2, 3, 4, 9};
+    if (raised.surface)
+        objects.insert(objects.end(), {5, 6, 7, 8});
     const auto lod = f.scene.lod;
     const auto debug = f.scene.debug;
     f.scene.lod.enabled = true;
@@ -288,8 +312,20 @@ void recording_ranges(Fixture& f) {
             assert(f.scene.draw_instanced(batch));
             break;
         case 5:
-            // A distinct mesh isolates recording from depth-state merging.
-            assert(f.scene.draw(surface_box, Mat4f::translation({-.5f, 1.7f, -.5f}), {.surface = offset}));
+            assert(f.scene.draw(f.box, Mat4f::translation({-.5f, 1.7f, -.5f}), raised));
+            break;
+        case 6:
+            assert(f.scene.draw(f.box, Mat4f::translation({1, 1.5f, .5f}), higher));
+            break;
+        case 7:
+            assert(f.scene.draw(f.box, Mat4f::translation({-1, .5f, .5f}), masked_left));
+            break;
+        case 8:
+            assert(f.scene.draw(f.box, Mat4f::translation({1, .5f, .5f}), masked_right));
+            break;
+        case 9:
+            assert(f.scene.draw(f.box, Mat4f::translation({-1, .5f, 1}),
+                                {.blend = Blend3D::Mask, .texture = mask, .uv_offset = {1, 0}}));
             break;
         }
     };
@@ -304,28 +340,71 @@ void recording_ranges(Fixture& f) {
         f.r.present();
         return pixels;
     };
-    std::vector<u8> expected;
-    for (int object = 0; object < objects; ++object) {
+    std::array<std::vector<u8>, 10> reference;
+    for (const int object : objects) {
         f.clear_draws();
         add(object);
         const auto pixels = coverage();
         assert(std::count(pixels.begin(), pixels.end(), u8{255}) > size.x * size.y + 30);
-        expected.resize(pixels.size());
-        for (std::size_t i = 0; i < pixels.size(); ++i)
-            expected[i] = std::max(expected[i], pixels[i]);
+        reference[object] = pixels;
     }
-    for (const bool reverse : {false, true}) {
+    const auto check = [&](std::span<const int> group) {
+        std::vector<u8> expected(reference[0].size());
+        for (const int object : group)
+            for (std::size_t i = 0; i < expected.size(); ++i)
+                expected[i] = std::max(expected[i], reference[object][i]);
+        for (const bool reverse : {false, true}) {
+            f.clear_draws();
+            for (std::size_t i = 0; i < group.size(); ++i)
+                add(group[reverse ? group.size() - 1 - i : i]);
+            assert(coverage() == expected);
+        }
+    };
+    check(objects);
+    // Isolate each compatibility distinction so another caster cannot hide it.
+    for (const auto pair : {std::array{0, 5}, std::array{5, 6}, std::array{7, 8}, std::array{2, 9}})
+        if (!reference[pair[0]].empty() && !reference[pair[1]].empty())
+            check(pair);
+    if (raised.surface) {
+        // Fill complete retained windows, including the surface refs, then
+        // exercise compiled shadow-plan reuse and material revision changes.
+        f.scene.lod.enabled = false;
+        f.scene.debug.force_level = -1;
+        f.scene.debug.cache_draw_commands = false; // isolate shadow-plan reuse
         f.clear_draws();
-        for (int object = 0; object < objects; ++object)
-            add(reverse ? objects - 1 - object : object);
-        assert(coverage() == expected);
+        std::size_t surface_ref = 0;
+        for (int i = 0; i < 256; ++i) {
+            if (i == 32) {
+                surface_ref = f.scene.draws().size();
+                for (const int object : {5, 6, 7, 8, 9})
+                    add(object);
+            }
+            // Different colours keep Scene3D from coalescing the submissions;
+            // they still share one compatible opaque shadow state.
+            assert(f.scene.draw(f.box, Mat4f::translation({-1, .5f, -.8f}),
+                                {.color = i % 2 ? Color::rgb(255, 0, 0) : colors::white}));
+        }
+        const std::array full_requests{LocalShadowRequest3D{.kind = LocalShadowKind3D::Spot},
+                                       LocalShadowRequest3D{.kind = LocalShadowKind3D::Point, .first_layer = 1}};
+        const auto warm = [&] {
+            for (int i = 0; i < 4; ++i)
+                f.stock();
+            assert(f.r3d.debug_stats().direct_retained_instances > 0);
+            assert(f.r3d.debug_stats().local_sort_cache_hits > 0);
+            assert(f.r3d.debug_stats().local_shadow_draws < 64);
+            const auto expected = f.custom(full_requests);
+            assert(f.stock() == expected && f.r3d.debug_stats().local_sort_cache_hits > 0);
+        };
+        warm();
+        assert(f.scene.set_draw_material(surface_ref, higher));
+        warm();
     }
     f.scene.lod = lod;
     f.scene.debug = debug;
     f.objects();
     std::cout << "local graph: combined shadow ranges match independent opaque/mask/skin/cluster/batch coverage\n";
-    if (offset)
-        std::cout << "local graph: surface offset shaders interleave with stock shadow uniforms\n";
+    if (raised.surface)
+        std::cout << "local graph: shared-mesh surface params/maps and cutout UVs survive batching and cached plans\n";
 }
 
 void cube_and_camera(Fixture& f) {

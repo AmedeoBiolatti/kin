@@ -8318,6 +8318,12 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         const DrawRef& ref = _refs[r];
         const Material3D& material = ref.draw->material;
         const bool cutout = material.blend == Blend3D::Mask;
+        // A surface can read all its parameters/maps and its per-draw instance
+        // ID. Keep that draw intact rather than infer compatibility from the
+        // small stock key. Stock cut-outs with UV transforms also need their
+        // own uniforms; the key below describes identity UVs only.
+        if ((material.surface.backend() && pass_surface(material)) || (cutout && !material.uv_identity()))
+            return batch = r;
         // Opaque lighting state is unused. bind_cutout's texture, sampler and
         // cutoff must match; tint alpha is already in each instance's record.
         const BatchKey key{ref.mesh->serial,

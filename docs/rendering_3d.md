@@ -122,8 +122,14 @@ Native shadow recording keeps the projection bound across each map's stock draws
 travel in the indexed draw's first-instance parameter; only a change between direct and listed addressing uploads the
 uniform block again. This uses the native backend's Vulkan/SPIR-V instance-index semantics. Surface shaders keep their
 original per-draw uniforms and zero-based instance IDs, and GPU cluster-indirect draws retain their argument layout.
-The eight stock depth pipeline variants resolve once per recording call. Caster selection, order, draw counts, shadow
-cache ownership and rasterization settings are unchanged; no persistent recording cache or additional GPU buffer is added.
+The eight stock depth pipeline variants resolve once per recording call. Recording preserves the prepared caster
+selection and draw order, shadow cache ownership and rasterization settings; no persistent recording cache or additional
+GPU buffer is added.
+
+Local-shadow merging uses the compact stock depth-state key for ordinary materials with identity cutout UVs.
+Depth-affecting surface shaders and stock cutouts with UV transforms keep their source draws separate: their per-draw
+parameters, map bindings, UVs and instance IDs must not be borrowed from another caster sharing the mesh. This rule
+also applies when replaying cached shadow plans.
 
 Shapes made in code (`kin::meshes`): `box`, `plane`, `sphere`, `cylinder`,
 `cone`, `torus`, `star_prism`, `octahedron`, `wedge` (a ramp).

@@ -43,8 +43,30 @@ The new fixture also exposed an existing local-shadow interning issue: stock
 and offset-surface casters sharing a mesh can merge because the depth-state key
 omits surface shader/parameter state. A shared-mesh probe fails identically on
 the reconstructed `6a1a5d61` reference and candidate. This recording change leaves
-that preparation issue separate; its surface-transition regression uses a
-distinct mesh to isolate recording behavior.
+that preparation issue separate; its initial surface-transition regression used
+a distinct mesh to isolate recording behavior.
+
+#### Shadow batch compatibility correction
+
+The subsequent fix keeps each depth-affecting surface draw separate instead of
+using the compact stock key to infer equality of shader parameters, maps or
+per-draw instance IDs. Stock cutouts with nonidentity UV transforms also retain
+their own draws because the stock key omits those uniforms. Ordinary opaque and
+identity-UV stock cutout batching keep the existing key and compiled-plan path;
+the map-scoped recording redesign remains active.
+
+The regression now uses the same mesh for stock and surface casters. Independent
+object-map coverage unions verify source-order reversals, different parameters
+on one offset shader, a pure cutout surface sampling different non-base maps,
+and stock cutout UV transforms. A larger fixture forces retained full-window
+shadow-plan reuse, compares against explicit uncached shadow production, and
+repeats after a material edit while checking that ordinary opaque draws still
+merge. The original shared-mesh fixture fails before the fix. Seven focused
+NVIDIA checks and two llvmpipe checks pass. One ordinary-material full-route
+pair per tier preserves every recorded work/upload/resource/cache counter over
+4,320 paired frames; three separate decoded-RGBA pairs are exact. These are
+correctness controls, with no new performance estimate. Evidence is in
+`out/runs/render3d-shadow-batch-state-fix/`.
 
 ### Industrial Yard CPU investigation, 2026-11-03
 
