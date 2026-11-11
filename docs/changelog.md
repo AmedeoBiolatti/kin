@@ -43,8 +43,10 @@ releases may change APIs.
   to players (`send_message`, unreliable or reliable, on channels; `receive_messages`), each with its events.
   On Steam these are its matchmaking lobbies and `ISteamNetworkingMessages`, which cross NATs and go through
   Valve's relays. Offline there are none. `kin::FakeNetwork` joins `FakeServices` in one process for tests. Scripts
-  get the lobby functions in the `services` table. `kin_steam_abi_check` covers the new declarations.
-  With `KIN_ENABLE_NET`, `kin::net::ServicesTransport` plays a session over those messages, and
+  get the lobby functions and messages in the `services` table. `LobbyMemberNamed` gives a member's name once the
+  platform has it. `kin_steam_abi_check` covers the new declarations.
+  With `KIN_ENABLE_NET`, `kin::net::ServicesTransport` plays a session over those messages (`remove_peer` frees a
+  departed player's place), and
   `kin/net/lobby_match.hpp` turns a lobby into a match: `start_lobby_match`, `read_lobby_match`,
   `configure_input_sync`.
 

@@ -80,6 +80,8 @@ struct State {
     std::vector<Sent> sent;
     std::deque<std::pair<int, sf::NetworkingMessage*>> inbox; // channel, message
     std::set<u64> accepted, closed;
+    std::map<u64, std::string> names; // players whose names are not "First" (or "Second")
+    std::set<u64> requested;          // RequestUserInformation was called
     int released = 0;
     int relays = 0;
 } g;
@@ -193,7 +195,19 @@ FAKE_API const char* SteamAPI_ISteamFriends_GetPersonaName(void*) {
     return "Fake Player";
 }
 FAKE_API const char* SteamAPI_ISteamFriends_GetFriendPersonaName(void*, u64 id) {
+    if (const auto it = g.names.find(id); it != g.names.end()) {
+        return it->second.c_str(); // "[unknown]" until the persona arrives, as Steam has it
+    }
     return id == 2 ? "Second" : "First";
+}
+// True: Steam is fetching the name, and a PersonaStateChange_t follows.
+FAKE_API bool SteamAPI_ISteamFriends_RequestUserInformation(void*, u64 id, bool) {
+    const auto it = g.names.find(id);
+    if (it == g.names.end() || it->second != "[unknown]") {
+        return false;
+    }
+    g.requested.insert(id);
+    return true;
 }
 FAKE_API bool SteamAPI_ISteamFriends_SetRichPresence(void*, const char* key, const char* value) {
     g.presence[key] = value;
@@ -655,6 +669,15 @@ FAKE_API void kin_fake_steam_drop_member(u64 lobby, u64 user) {
 // The connection to Steam's servers goes away, or comes back.
 FAKE_API void kin_fake_steam_connection(bool connected) {
     push(connected ? sf::cb_servers_connected : sf::cb_servers_disconnected, u8{0});
+}
+// A player Steam has no name for yet; then the name arriving (PersonaStateChange_t), if it was asked for.
+FAKE_API void kin_fake_steam_unnamed(u64 user) {
+    g.names[user] = "[unknown]";
+}
+FAKE_API bool kin_fake_steam_name_arrives(u64 user, const char* name) {
+    g.names[user] = name;
+    push(sf::cb_persona_state_change, sf::PersonaStateChange{.steam_id = user, .change_flags = 0x0001});
+    return g.requested.contains(user);
 }
 FAKE_API void kin_fake_steam_kicked(u64 lobby) {
     push(sf::cb_lobby_kicked, sf::LobbyKicked{.lobby = lobby, .admin = lobby, .due_to_disconnect = 1});

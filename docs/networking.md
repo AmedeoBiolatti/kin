@@ -196,7 +196,9 @@ they can and through Valve's relays where they can't, so two players behind any 
 sees the other's address. Peers are players: `add_peer("steam:7656...")`. A message from a player it does not know
 gets a new peer id (unless `accept_unknown` is off). The platform takes messages only from members of the player's lobby and from
 players the game sent to first. `channel` (1 unless set) keeps a match apart from the game's other messages, which
-`send_message` puts on channel 0 unless told otherwise. The transport needs
+`send_message` puts on channel 0 unless told otherwise. `remove_peer(player)` forgets a player gone for good (on
+`LobbyMemberLeft`): it frees their place among `max_peers`, and their peer id is never given to anyone else. The
+transport needs
 the services' `update()` each frame (`run_scene_app` calls it). Offline, nothing is sent. Tests use `FakeServices`
 on a `kin::FakeNetwork`, which can drop messages (`drop_every`).
 

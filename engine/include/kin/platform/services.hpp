@@ -171,7 +171,8 @@ enum class ServiceEventKind : u8 {
     LobbyEntered,      // id: the lobby; request: create_lobby's or join_lobby's (0: joined some other way)
     LobbyFailed,       // request: which create_lobby or join_lobby failed; text: why
     LobbyList,         // request: find_lobbies'; lobbies
-    LobbyMemberJoined, // id: the player; text: their name
+    LobbyMemberJoined, // id: the player; text: their name ("" if the platform does not have it yet)
+    LobbyMemberNamed,  // id: a member; text: their name, which arrived after LobbyMemberJoined
     LobbyMemberLeft,   // id: the player (who left, lost their connection, or was removed)
     LobbyDataChanged,  // id: the member whose data changed, or "" for the lobby's own
     LobbyMessage,      // id: the sender; text: the message

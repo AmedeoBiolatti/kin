@@ -121,7 +121,8 @@ plays a match over them.
 
 Messages are taken from the members of the player's lobby, and from players the
 game sent to first. Anyone else's are dropped, so a stranger cannot send one to a
-player.
+player. A joiner's first message may come before the platform says they joined:
+Steam's backend waits a few seconds for that before dropping it.
 
 Each `update()` replaces `events()` with what happened since the one before:
 
@@ -135,7 +136,8 @@ Each `update()` replaces `events()` with what happened since the one before:
 - `DlcInstalled`;
 - `Disconnected` / `Reconnected`;
 - `LobbyEntered` / `LobbyFailed` / `LobbyList`;
-- `LobbyMemberJoined` / `LobbyMemberLeft`, `LobbyDataChanged` (`id`: the member, or `""` for the lobby's own
+- `LobbyMemberJoined` / `LobbyMemberLeft`, `LobbyMemberNamed` (the name of a member who joined before the
+  platform had it; until then `lobby_members()` gives `""`), `LobbyDataChanged` (`id`: the member, or `""` for the lobby's own
   data), `LobbyMessage`, `LobbyLeft` (removed from the lobby, or dropped from it while the connection was lost: on
   Steam this shows when it comes back);
 - `MessagesFailed`: messages to a player stopped getting through.
@@ -160,8 +162,17 @@ services.find_lobbies({data = {mode = "coop"}, open_slots = 1, worldwide = true}
 
 Scripts also get `join_lobby`, `leave_lobby`, `lobby`, `lobby_owner`,
 `lobby_members`, `set_lobby_data`, `lobby_data`, `set_member_data`,
-`member_data`, `set_lobby_joinable` and `lobby_message`. Messages between
-players are for C++, through `kin::net`.
+`member_data`, `set_lobby_joinable` and `lobby_message`, and messages between
+players as strings of bytes:
+
+```lua
+services.send_message(player, bytes, {reliable = true, channel = 2})
+for _, m in ipairs(services.receive_messages(2)) do handle(m.from, m.bytes) end
+```
+
+with `close_messages(player)` and `max_message()`. A script game plays over
+these with its own protocol; `kin::net`'s input sync and lobby matches are C++
+(kin::net is a library of its own, which scripts do not reach).
 
 Without services, every call returns `false` or `nil`. What the platform says
 (the overlay, events) is not part of a game's deterministic state. Keep it out of

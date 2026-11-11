@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <kin/net/services_transport.hpp>
 #include <kin/platform/services.hpp>
+#include <limits>
 
 namespace kin::net {
 
@@ -10,6 +11,9 @@ ServicesTransport::ServicesTransport(PlatformServices& services, const ServicesT
 ServicesTransport::~ServicesTransport() = default;
 
 PeerId ServicesTransport::find(std::string_view player) const {
+    if (player.empty()) {
+        return no_peer; // a removed peer's place
+    }
     for (std::size_t i = 0; i < _peers.size(); ++i) {
         if (_peers[i] == player) {
             return static_cast<PeerId>(i + 1);
@@ -25,11 +29,23 @@ PeerId ServicesTransport::add_peer(std::string_view player) {
     if (const PeerId known = find(player); known != no_peer) {
         return known;
     }
-    if (_peers.size() >= _options.max_peers) {
+    if (_live >= _options.max_peers || _peers.size() >= std::numeric_limits<PeerId>::max()) {
         return no_peer;
     }
     _peers.emplace_back(player);
+    ++_live;
     return static_cast<PeerId>(_peers.size());
+}
+
+bool ServicesTransport::remove_peer(std::string_view player) {
+    const PeerId peer = find(player);
+    if (peer == no_peer) {
+        return false;
+    }
+    _services.close_messages(_peers[peer - 1]);
+    _peers[peer - 1].clear();
+    --_live;
+    return true;
 }
 
 std::string ServicesTransport::peer_player(PeerId peer) const {
@@ -37,7 +53,7 @@ std::string ServicesTransport::peer_player(PeerId peer) const {
 }
 
 bool ServicesTransport::send(PeerId to, std::span<const u8> bytes) {
-    if (to == no_peer || to > _peers.size() || bytes.size() > max_datagram()) {
+    if (to == no_peer || to > _peers.size() || _peers[to - 1].empty() || bytes.size() > max_datagram()) {
         return false;
     }
     return _services.send_message(_peers[to - 1], bytes, MessageDelivery::Unreliable, _options.channel);
@@ -63,7 +79,9 @@ std::size_t ServicesTransport::max_datagram() const {
 
 void ServicesTransport::close() {
     for (const std::string& player : _peers) {
-        _services.close_messages(player);
+        if (!player.empty()) {
+            _services.close_messages(player);
+        }
     }
 }
 

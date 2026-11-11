@@ -25,7 +25,7 @@ struct ServicesTransportOptions {
     // messages go, so the transport never takes them.
     u32 channel = 1;
     // Messages from a player add_peer() did not name get a new peer id (a host learns its players this way), up to
-    // this many peers in all; later strangers are ignored.
+    // this many peers at once (remove_peer() makes room); later strangers are ignored.
     bool accept_unknown = true;
     u32 max_peers = 64;
 };
@@ -45,6 +45,12 @@ public:
     // The peer that sends to `player` (a ServicePlayer::id): the same id for the same player. no_peer for an empty
     // id, the local player, or a full peer table.
     PeerId add_peer(std::string_view player);
+    // Forgets a player who is gone for good (on LobbyMemberLeft, say): closes their messages and frees their place.
+    // Their peer id is never given again, so nothing meant for them reaches whoever comes next; if they come back,
+    // add_peer() gives them a new one. False if the player is not a peer.
+    bool remove_peer(std::string_view player);
+    // How many peers there are now.
+    u32 peers() const { return _live; }
     // The player a peer sends to, or "".
     std::string peer_player(PeerId peer) const;
     // Stops talking to every peer (the platform closes its sessions).
@@ -56,7 +62,8 @@ private:
     PlatformServices& _services;
     ServicesTransportOptions _options;
     std::string _self;
-    std::vector<std::string> _peers; // _peers[id - 1]
+    std::vector<std::string> _peers; // _peers[id - 1]; "" once removed
+    u32 _live = 0;
 };
 
 } // namespace kin::net

@@ -189,6 +189,19 @@ void test_transport() {
     in.clear();
     a.receive(in);
     assert(in.size() == 1 && in[0].from == to_bob);
+
+    // A player gone for good frees their place, and their peer id is never handed out again.
+    FakeServices cyd(network, {.id = "fake:cyd", .name = "Cyd"});
+    ServicesTransport small(cyd, {.max_peers = 2});
+    const PeerId p_ann = small.add_peer("fake:ann");
+    const PeerId p_bob = small.add_peer("fake:bob");
+    assert(small.add_peer("fake:dan") == no_peer && small.peers() == 2); // full
+    assert(small.remove_peer("fake:ann") && !small.remove_peer("fake:ann") && small.peers() == 1);
+    assert(!small.send(p_ann, bytes) && small.peer_player(p_ann).empty());
+    const PeerId p_dan = small.add_peer("fake:dan");
+    assert(p_dan != no_peer && p_dan != p_ann && p_dan != p_bob);
+    assert(small.add_peer("fake:ann") == no_peer); // full again: no old place to return to
+    assert(small.remove_peer("fake:bob") && small.add_peer("fake:ann") > p_dan);
     std::printf("  transport ok\n");
 }
 

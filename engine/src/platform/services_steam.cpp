@@ -28,6 +28,7 @@ std::unique_ptr<PlatformServices> start_steam(const ServicesConfig&, ServicesSta
 #include <kin/platform/resource_paths.hpp>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -221,6 +222,7 @@ public:
         _events.clear();
         _events.swap(_pending);
         dispatch();
+        accept_held_requests();
         if (!_stats_ready && _stats_retry_at > 0.0 && now_seconds() >= _stats_retry_at) {
             _stats_retry_at = 0.0;
             _api->stats_request_current(_stats);
@@ -491,8 +493,7 @@ public:
         const int count = _api->mm_member_count(_matchmaking, _lobby);
         for (int i = 0; i < count; ++i) {
             const u64 member = _api->mm_member_by_index(_matchmaking, _lobby, i);
-            const char* name = _api->friends_friend_name(_friends, member);
-            out.push_back({.id = steam_player_id(member), .name = name ? name : ""});
+            out.push_back({.id = steam_player_id(member), .name = player_name(member)});
         }
         return out;
     }
@@ -613,6 +614,24 @@ private:
         _lobby_joining = 0;
         _lobby = lobby;
         return true;
+    }
+    // A player's name, or "" while Steam does not have it (it says "[unknown]").
+    std::string player_name(u64 player) const {
+        const char* name = _api->friends_friend_name(_friends, player);
+        return name && std::string_view{name} != "[unknown]" ? name : "";
+    }
+    void accept_held_requests() {
+        if (_held_requests.empty()) {
+            return;
+        }
+        const double now = now_seconds();
+        std::erase_if(_held_requests, [&](const Held& held) {
+            if (lobby_member(held.from)) {
+                _api->msg_accept(_messages, held.identity);
+                return true;
+            }
+            return now >= held.until;
+        });
     }
     void lobby_lost() {
         const u64 lost = _lobby;
@@ -805,6 +824,16 @@ private:
             }
             break;
         }
+        case sf::cb_persona_state_change: {
+            const auto change = payload<sf::PersonaStateChange>(data, size);
+            if ((change.change_flags & sf::persona_change_name) != 0 && _naming.erase(change.steam_id) > 0 &&
+                lobby_member(change.steam_id)) {
+                _pending.push_back({.kind = ServiceEventKind::LobbyMemberNamed,
+                                    .id = steam_player_id(change.steam_id),
+                                    .text = player_name(change.steam_id)});
+            }
+            break;
+        }
         case sf::cb_lobby_join_requested: {
             const auto join = payload<sf::GameLobbyJoinRequested>(data, size);
             _pending.push_back({.kind = ServiceEventKind::JoinRequested,
@@ -908,10 +937,13 @@ private:
                 break;
             }
             if (update.state_change & sf::member_entered) {
-                const char* name = _api->friends_friend_name(_friends, update.changed);
+                // Steam may not know a stranger's name yet: asked for, it comes as LobbyMemberNamed.
+                if (_api->friends_request_info(_friends, update.changed, true)) {
+                    _naming.insert(update.changed);
+                }
                 _pending.push_back({.kind = ServiceEventKind::LobbyMemberJoined,
                                     .id = steam_player_id(update.changed),
-                                    .text = name ? name : ""});
+                                    .text = player_name(update.changed)});
             } else if (update.state_change & sf::member_gone) {
                 if (_user && update.changed == _api->user_steam_id(_user)) {
                     lobby_lost(); // this player was removed
@@ -947,10 +979,16 @@ private:
             break;
         }
         case sf::cb_messages_session_request: {
-            // Players the game sent to first are let in by Steam itself; here, the lobby's members.
+            // Players the game sent to first are let in by Steam itself; here, the lobby's members. A joiner's
+            // first message can come before Steam tells us they joined: held until then (or for a few seconds).
             const auto request = payload<sf::MessagesSessionRequest>(data, size);
-            if (const u64 from = steam_id_of(request.remote); from != 0 && lobby_member(from)) {
-                _api->msg_accept(_messages, request.remote);
+            if (const u64 from = steam_id_of(request.remote); from != 0) {
+                if (lobby_member(from)) {
+                    _api->msg_accept(_messages, request.remote);
+                } else if (std::ranges::none_of(_held_requests, [&](const Held& h) { return h.from == from; })) {
+                    _held_requests.push_back(
+                        {.from = from, .identity = request.remote, .until = now_seconds() + held_request_seconds});
+                }
             }
             break;
         }
@@ -1161,6 +1199,15 @@ private:
     std::map<sf::SteamAPICall, Call> _calls;
     std::vector<ServiceEvent> _events;
     std::vector<ServiceEvent> _pending;
+    // Message session requests from players not (yet) in the lobby: Steam keeps such a request a few seconds.
+    struct Held {
+        u64 from = 0;
+        sf::NetworkingIdentity identity{};
+        double until = 0.0;
+    };
+    static constexpr double held_request_seconds = 5.0;
+    std::vector<Held> _held_requests;
+    std::set<u64> _naming; // lobby members whose names Steam is fetching
 };
 
 } // namespace

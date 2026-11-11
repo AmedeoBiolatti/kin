@@ -150,6 +150,8 @@ static_assert(sf::cb_lobby_chat_update == LobbyChatUpdate_t::k_iCallback);
 static_assert(sf::cb_lobby_chat_msg == LobbyChatMsg_t::k_iCallback);
 static_assert(sf::cb_lobby_match_list == LobbyMatchList_t::k_iCallback);
 static_assert(sf::cb_lobby_kicked == LobbyKicked_t::k_iCallback);
+static_assert(sf::cb_persona_state_change == PersonaStateChange_t::k_iCallback);
+static_assert(sf::persona_change_name == (k_EPersonaChangeName | k_EPersonaChangeNameFirstSet));
 static_assert(sf::cb_lobby_created == LobbyCreated_t::k_iCallback);
 static_assert(sf::cb_messages_session_request == SteamNetworkingMessagesSessionRequest_t::k_iCallback);
 static_assert(sf::cb_messages_session_failed == SteamNetworkingMessagesSessionFailed_t::k_iCallback);
@@ -188,6 +190,9 @@ KIN_SAME_FIELD(SteamAPICallCompleted, SteamAPICallCompleted_t, callback, m_iCall
 KIN_SAME_FIELD(SteamAPICallCompleted, SteamAPICallCompleted_t, param_size, m_cubParam)
 KIN_NOT_LONGER(SteamAPICallCompleted, SteamAPICallCompleted_t)
 KIN_SAME_FIELD(GameOverlayActivated, GameOverlayActivated_t, active, m_bActive)
+KIN_SAME_FIELD(PersonaStateChange, PersonaStateChange_t, steam_id, m_ulSteamID)
+KIN_SAME_FIELD(PersonaStateChange, PersonaStateChange_t, change_flags, m_nChangeFlags)
+KIN_NOT_LONGER(PersonaStateChange, PersonaStateChange_t)
 KIN_SAME_FIELD(GameLobbyJoinRequested, GameLobbyJoinRequested_t, lobby, m_steamIDLobby)
 KIN_SAME_FIELD(GameLobbyJoinRequested, GameLobbyJoinRequested_t, friend_id, m_steamIDFriend)
 KIN_SAME_FIELD(GameRichPresenceJoinRequested, GameRichPresenceJoinRequested_t, friend_id, m_steamIDFriend)

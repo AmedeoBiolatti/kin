@@ -36,6 +36,7 @@ using SteamErrMsg = char[1024];
     X(user_steam_id, SteamAPI_ISteamUser_GetSteamID, u64, (void*))                                               \
     X(friends_persona_name, SteamAPI_ISteamFriends_GetPersonaName, const char*, (void*))                         \
     X(friends_friend_name, SteamAPI_ISteamFriends_GetFriendPersonaName, const char*, (void*, u64))               \
+    X(friends_request_info, SteamAPI_ISteamFriends_RequestUserInformation, bool, (void*, u64, bool))             \
     X(friends_set_rich_presence, SteamAPI_ISteamFriends_SetRichPresence, bool, (void*, const char*, const char*)) \
     X(friends_clear_rich_presence, SteamAPI_ISteamFriends_ClearRichPresence, void, (void*))                      \
     X(friends_overlay, SteamAPI_ISteamFriends_ActivateGameOverlay, void, (void*, const char*))                   \
@@ -171,6 +172,8 @@ inline constexpr u32 enter_success = 1;
 inline constexpr u32 member_entered = 0x1;
 inline constexpr u32 member_gone = 0x2 | 0x4 | 0x8 | 0x10; // left, disconnected, kicked, banned
 inline constexpr i32 chat_message = 1;
+// EPersonaChange: the name changed, or arrived for the first time.
+inline constexpr int persona_change_name = 0x0001 | 0x0400;
 // ESteamNetworkingIdentityType
 inline constexpr i32 identity_steam_id = 16;
 // k_nSteamNetworkingSend_*
@@ -184,6 +187,7 @@ inline constexpr int send_auto_restart = 32;
 // Callback ids (k_iCallback).
 inline constexpr int cb_servers_connected = 101;
 inline constexpr int cb_servers_disconnected = 103;
+inline constexpr int cb_persona_state_change = 304;
 inline constexpr int cb_overlay_activated = 331;
 inline constexpr int cb_lobby_join_requested = 333;
 inline constexpr int cb_rich_presence_join_requested = 337;
@@ -264,6 +268,11 @@ struct SteamAPICallCompleted {
 
 struct GameOverlayActivated {
     u8 active;
+};
+
+struct PersonaStateChange {
+    u64 steam_id;
+    int change_flags;
 };
 
 struct GameLobbyJoinRequested {

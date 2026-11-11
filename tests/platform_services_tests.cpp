@@ -222,6 +222,32 @@ void test_lua_services_table() {
     ann.update();
     assert(lobby_script.call_for<bool>("found") == true);
     assert(bob.join_lobby(ann.lobby()) != 0 && ann.lobby_members().size() == 2);
+
+    // Messages between players, as byte strings (zeros too), and counts that do not wrap.
+    const std::vector<kin::u8> from_bob = {0, 'k', 0, 200};
+    assert(bob.send_message("fake:ann", from_bob, kin::MessageDelivery::Reliable, 2));
+    assert(lobby_script.load_string(R"(
+        function messages()
+            local got = services.receive_messages(2)
+            assert(#got == 1 and got[1].from == "fake:bob" and got[1].bytes == "\0k\0\200")
+            assert(#services.receive_messages(2) == 0 and services.max_message() == 1200)
+            assert(services.send_message("fake:bob", "\1\0\2", {reliable = true, channel = 5}))
+            assert(services.send_message("fake:bob", "x") and not services.send_message("fake:zed", "x"))
+            services.close_messages("fake:bob")
+            return services.find_lobbies({open_slots = -1, max = -5}) > 0 and services.create_lobby({max_members = -3}) > 0
+        end
+    )"));
+    assert(lobby_script.call_for<bool>("messages") == true);
+    std::vector<kin::PlayerMessage> at_bob;
+    bob.receive_messages(5, at_bob);
+    assert(at_bob.size() == 1 && at_bob[0].from == "fake:ann" && at_bob[0].bytes == std::vector<kin::u8>({1, 0, 2}));
+    bob.receive_messages(0, at_bob);
+    assert(at_bob.size() == 2 && at_bob[1].bytes == std::vector<kin::u8>({'x'}));
+    for (const kin::FakeServices::Call& call : ann.calls) {
+        if (call.what == "create_lobby") {
+            assert(call.value == "3" || call.value == "0"); // -3 is 0, not 4294967293
+        }
+    }
     kin::set_active_services(nullptr);
 
     // Without services: nothing, no errors.
@@ -479,6 +505,26 @@ void test_steam_lobbies_and_messages() {
     pump();
     assert(steam.get<bool (*)(u64)>("kin_fake_steam_accepted")(3));
     assert(!steam.get<bool (*)(u64)>("kin_fake_steam_accepted")(9));
+    // A joiner's first message can beat the news that they joined: the request waits, and is accepted once they are
+    // a member. Steam has no name for this stranger yet: it is asked for, and comes as LobbyMemberNamed.
+    steam.get<void (*)(u64)>("kin_fake_steam_session_request")(4);
+    pump();
+    assert(!steam.get<bool (*)(u64)>("kin_fake_steam_accepted")(4));
+    steam.get<void (*)(u64)>("kin_fake_steam_unnamed")(4);
+    steam.get<void (*)(u64, u64)>("kin_fake_steam_member_joins")(500, 4);
+    pump();
+    assert(steam.get<bool (*)(u64)>("kin_fake_steam_accepted")(4));
+    const ServiceEvent* unnamed = find_event(*services, ServiceEventKind::LobbyMemberJoined);
+    assert(unnamed && unnamed->id == "steam:4" && unnamed->text.empty());
+    assert(services->lobby_members().back().id == "steam:4" && services->lobby_members().back().name.empty());
+    assert(steam.get<bool (*)(u64, const char*)>("kin_fake_steam_name_arrives")(4, "Fourth"));
+    pump();
+    const ServiceEvent* named = find_event(*services, ServiceEventKind::LobbyMemberNamed);
+    assert(named && named->id == "steam:4" && named->text == "Fourth");
+    assert(services->lobby_members().back().name == "Fourth");
+    steam.get<bool (*)(u64, const char*)>("kin_fake_steam_name_arrives")(4, "Renamed"); // once is enough
+    pump();
+    assert(!find_event(*services, ServiceEventKind::LobbyMemberNamed));
 
     // Messages: to a Steam id, unreliable (but not dropped before the session opens) or reliable, by channel.
     const std::vector<u8> bytes = {1, 2, 3};

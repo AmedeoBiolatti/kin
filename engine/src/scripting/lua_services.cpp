@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <kin/platform/services.hpp>
 #include <sol/sol.hpp>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,8 @@ std::string_view event_name(ServiceEventKind kind) {
         return "lobby_list";
     case ServiceEventKind::LobbyMemberJoined:
         return "lobby_member_joined";
+    case ServiceEventKind::LobbyMemberNamed:
+        return "lobby_member_named";
     case ServiceEventKind::LobbyMemberLeft:
         return "lobby_member_left";
     case ServiceEventKind::LobbyDataChanged:
@@ -140,6 +143,12 @@ std::vector<std::pair<std::string, std::string>> data_pairs(const sol::optional<
         std::ranges::sort(out); // a Lua table has no order: keep one
     }
     return out;
+}
+
+// A count from a script's table: negative, fractional or absurd values do not wrap around.
+u32 count_or(const sol::table& table, const char* key, u32 fallback) {
+    const sol::optional<double> value = table.get<sol::optional<double>>(key);
+    return value ? static_cast<u32>(std::clamp(*value, 0.0, 1'000'000.0)) : fallback;
 }
 
 LobbyVisibility visibility(std::string_view name) {
@@ -284,7 +293,7 @@ void bind_services(sol::state_view lua) {
         }
         LobbyOptions lobby;
         if (options) {
-            lobby.max_members = options->get_or<u32>("max_members", lobby.max_members);
+            lobby.max_members = count_or(*options, "max_members", lobby.max_members);
             lobby.visibility = visibility(options->get_or<std::string>("visibility", "friends"));
             lobby.data = data_pairs(options->get<sol::optional<sol::table>>("data"));
         }
@@ -306,11 +315,11 @@ void bind_services(sol::state_view lua) {
             for (auto& [key, value] : data_pairs(options->get<sol::optional<sol::table>>("data"))) {
                 filter.rules.push_back({.key = std::move(key), .value = std::move(value)});
             }
-            filter.open_slots = options->get_or<u32>("open_slots", 0);
+            filter.open_slots = count_or(*options, "open_slots", 0);
             if (options->get_or("worldwide", false)) {
                 filter.distance = LobbyDistance::Worldwide;
             }
-            filter.max_results = options->get_or<u32>("max", filter.max_results);
+            filter.max_results = count_or(*options, "max", filter.max_results);
         }
         return s->find_lobbies(filter);
     };
@@ -344,6 +353,41 @@ void bind_services(sol::state_view lua) {
     };
     t["set_lobby_joinable"] = [](bool joinable) { return active() && active()->set_lobby_joinable(joinable); };
     t["lobby_message"] = [](const std::string& text) { return active() && active()->send_lobby_message(text); };
+    // Messages between players, as strings of bytes:
+    //   services.send_message(player, bytes, { reliable = true, channel = 2 })
+    //   for _, m in ipairs(services.receive_messages(2)) do ... m.from, m.bytes ... end
+    t["send_message"] = [](const std::string& player, const std::string& bytes, const sol::optional<sol::table>& how) {
+        PlatformServices* s = active();
+        if (!s) {
+            return false;
+        }
+        const bool reliable = how && how->get_or("reliable", false);
+        const u32 channel = how ? count_or(*how, "channel", 0) : 0;
+        const auto* data = reinterpret_cast<const u8*>(bytes.data());
+        return s->send_message(player, std::span<const u8>(data, bytes.size()),
+                               reliable ? MessageDelivery::Reliable : MessageDelivery::Unreliable, channel);
+    };
+    t["receive_messages"] = [](const sol::optional<double>& channel, sol::this_state state) {
+        sol::state_view view{state};
+        sol::table out = view.create_table();
+        if (PlatformServices* s = active()) {
+            std::vector<PlayerMessage> messages;
+            s->receive_messages(channel ? static_cast<u32>(std::clamp(*channel, 0.0, 1'000'000.0)) : 0, messages);
+            int i = 1;
+            for (const PlayerMessage& message : messages) {
+                sol::table row = view.create_table();
+                row["from"] = message.from;
+                row["bytes"] = std::string(reinterpret_cast<const char*>(message.bytes.data()), message.bytes.size());
+                out[i++] = row;
+            }
+        }
+        return out;
+    };
+    t["close_messages"] = [](const std::string& player) {
+        if (PlatformServices* s = active())
+            s->close_messages(player);
+    };
+    t["max_message"] = []() -> std::size_t { return active() ? active()->max_message() : 0; };
 
     t["flush"] = [] {
         if (PlatformServices* s = active())
