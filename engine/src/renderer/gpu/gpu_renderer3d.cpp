@@ -7473,6 +7473,7 @@ void GpuRenderer3D::clear_local_gather(LocalGatherCache& cache) {
     std::vector<u64>().swap(cache.sort_keys);
     std::vector<u8>().swap(cache.sort_order);
     std::vector<u16>().swap(cache.sort_counts);
+    cache.program = {};
     cache.valid = false;
 }
 
@@ -7648,15 +7649,17 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     struct Found {
         u32 ref, level;
         std::span<u32> copies;
-        bool clustered = false;               // its copies are cut for the light's map (below)
-        std::vector<std::array<u32, 2>> runs; // clustered: first index and count, a copy each
+        bool clustered = false; // its copies are cut for the light's map (below)
+        u32 run_first = 0;      // one final _local_runs entry per kept clustered copy
     };
+    static_assert(sizeof(Found) <= 32);
     struct ViewCull {
         const GpuFrustum* frustum;
         bool reaches(Vec3f c, f32 r) const { return sphere_in(*frustum, c, r); }
         u32 views(Vec3f c, f32 r) const { return sphere_in(*frustum, c, r) ? 1u : 0u; }
     };
     _local_cluster_indices.clear();
+    _local_runs.clear();
     std::vector<SelectedCluster3D> picks;
     std::vector<u8> seen;
     std::vector<u32> stack;
@@ -7667,10 +7670,9 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     // task/level. Workers own disjoint byte ranges and counts. A flat copy list is packed after they finish; Found only
     // holds spans into it, so even many one-copy draws need no per-draw allocation.
     constexpr u8 cut_bucket = max_mesh_levels, rejected = 255;
-    std::vector<u32> found_copies;
-    // Reuse the upload list as the accepted-copy backing store. Its spans stay valid
-    // through cache keys and cluster cuts, then are compacted/remapped in place.
-    found_copies.swap(_local_list);
+    // Selection storage is independent of the final GPU list. Fingerprints and
+    // cluster cuts finish before source-order slot assignment and window emission.
+    std::vector<u32>& found_copies = _local_selection_list;
     const auto find_copies = [&]() {
         struct GatherTask {
             u32 view, ref, begin, end;
@@ -7919,10 +7921,9 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             }
         }
         for (u32 v = 0; v < _local_views.size(); ++v) {
-            if (hits[v]) {
+            if (hits[v] && !deferred[v]) {
                 accepted += plans[v]->copies.size();
-                if (!deferred[v])
-                    found_rows[v] += plans[v]->rows.size();
+                found_rows[v] += plans[v]->rows.size();
             }
             // Tasks are ordered by view/ref, and pieces of one ref share each
             // nonempty level bucket. Reserve those rows once instead of moving
@@ -7937,17 +7938,13 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         for (u32 v = 0; v < _local_views.size(); ++v) {
             u32 row = 0;
             const auto append_cached = [&](u32 before) {
-                if (!hits[v])
+                if (!hits[v] || deferred[v])
                     return;
                 const auto& plan = *plans[v];
                 while (row < plan.rows.size() && plan.rows[row].ref < before) {
                     const auto& cached = plan.rows[row++];
-                    if (!deferred[v]) {
-                        found[v].push_back({cached.ref, 0, {found_copies.data() + next, cached.count}, false, {}});
-                        std::copy_n(plan.copies.data() + cached.first, cached.count, found_copies.data() + next);
-                    }
-                    // Keep a gap even when the saved row goes straight to packing.
-                    // Its output must not overwrite unread dynamic-copy spans.
+                    found[v].push_back({cached.ref, 0, {found_copies.data() + next, cached.count}, false, {}});
+                    std::copy_n(plan.copies.data() + cached.first, cached.count, found_copies.data() + next);
                     next += cached.count;
                 }
             };
@@ -8157,17 +8154,22 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         ++drawing;
     }
     // The cuts of the clustered copies, for the maps to be drawn (a map kept has not had them made).
+    std::size_t output_copies = 0;
     for (u32 v = 0; v < _local_views.size(); ++v) {
         const LocalView& view = _local_views[v];
         if (!view.drawn) {
             continue;
         }
+        if (deferred[v])
+            output_copies += plans[v]->copies.size();
         for (Found& f : found[v]) {
             if (!f.clustered) {
+                output_copies += f.copies.size();
                 continue;
             }
             const DrawRef& ref = _refs[f.ref];
             const LodView& lv = ctx.lod[0];
+            f.run_first = static_cast<u32>(_local_runs.size());
             u32 kept = 0;
             for (const u32 i : f.copies) {
                 // The map is an image: the error is judged in its texels, from where the light is.
@@ -8196,9 +8198,10 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                     at += ref.mesh->clusters->clusters[pick.cluster].triangle_count * 3u;
                 }
                 f.copies[kept++] = i;
-                f.runs.push_back({first, triangles * 3u});
+                _local_runs.push_back({first, triangles * 3u});
             }
             f.copies = f.copies.first(kept);
+            output_copies += kept;
         }
         // A clustered draw none of whose copies has a triangle in the view has nothing to draw.
         std::erase_if(found[v], [](const Found& f) { return f.copies.empty(); });
@@ -8211,10 +8214,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     }
     stats.local_shadow_drawn = drawing;
     if (drawing == 0) {
-        stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity() + _local_batch_list.capacity() +
-                                  _local_batch_refs.capacity()) *
-                                 sizeof(u32);
-        found_copies.swap(_local_list);
+        stats.local_copy_bytes =
+            (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity()) * sizeof(u32);
         stats.local_slot_bytes = _local_slot.capacity() * sizeof(u32);
         return;
     }
@@ -8232,8 +8233,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     stats.local_slot_bytes = _local_slot.capacity() * sizeof(u32);
     _local_copies.clear();
     _local_joint_list.clear();
-    _local_list.clear();
-    _local_runs.clear();
+    _local_list.resize(output_copies);
     u32 union_count = 0;
     bool skinned_in_use = false;
     std::size_t written = 0;
@@ -8289,87 +8289,24 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         batch = batch_refs.try_emplace(key, r).first->second;
         return batch;
     };
+    // Compile selections directly into the final GPU list and merged depth
+    // commands. Only one locality window is materialized, never a whole map.
+    constexpr u32 batch_window = 128;
+    struct Selected {
+        const u32* copies;
+        u32 ref, level, count, run_first, first;
+        bool clustered;
+    };
+    static_assert(sizeof(Selected) <= 32);
     for (u32 v = 0; v < _local_views.size(); ++v) {
         LocalView& view = _local_views[v];
         view.entry_first = static_cast<u32>(_local_entries.size());
         view.entry_count = 0;
-        if (!view.drawn) {
+        if (!view.drawn)
             continue;
-        }
-        u32 row = 0;
-        const auto append_cached = [&](u32 before) {
-            if (!deferred[v])
-                return;
-            const auto& plan = *plans[v];
-            while (row < plan.rows.size() && plan.rows[row].ref < before) {
-                const auto& cached = plan.rows[row++];
-                (void)batch_of(cached.ref);
-                // Saved rows are immutable direct draws: one level, no skin or
-                // cluster runs. Resolve their current scene-table offsets here.
-                const u32 first = _refs[cached.ref].retained_first;
-                const u32 list_first = static_cast<u32>(written);
-                for (u32 i = 0; i < cached.count; ++i)
-                    found_copies[written++] = first + plan.copies[cached.first + i];
-                _local_entries.push_back(
-                    {cached.ref, 0, list_first, cached.count, false, static_cast<u32>(_local_runs.size())});
-                ++view.entry_count;
-            }
-        };
-        for (const Found& f : found[v]) {
-            append_cached(f.ref);
-            LocalEntry entry;
-            entry.ref = f.ref;
-            (void)batch_of(f.ref);
-            entry.level = f.level;
-            entry.list_first = static_cast<u32>(written);
-            entry.clustered = !f.runs.empty();
-            entry.run_first = static_cast<u32>(_local_runs.size());
-            {
-                // Found spans are in packing order. Cached views and cluster cuts only
-                // remove copies, so the write cursor never overtakes unread input.
-                if (_refs[f.ref].retained != ~0u && _refs[f.ref].retained_first == 0) {
-                    std::memmove(found_copies.data() + written, f.copies.data(), f.copies.size_bytes());
-                    written += f.copies.size();
-                } else {
-                    for (const u32 i : f.copies)
-                        found_copies[written++] = slot_of(f.ref, i);
-                }
-            }
-            _local_runs.insert(_local_runs.end(), f.runs.begin(), f.runs.end());
-            entry.count = static_cast<u32>(f.copies.size());
-            skinned_in_use = skinned_in_use || _refs[f.ref].skinned;
-            _local_entries.push_back(entry);
-            ++view.entry_count;
-        }
-        append_cached(~0u);
-    }
-    {
-        found_copies.resize(written);
-        found_copies.swap(_local_list);
-    }
-    // Cache keys and the streamed union retain their original order. Only the
-    // depth draws change: compatible entries share one contiguous caster list.
-    const auto shadow_less = [&](const LocalEntry& a, const LocalEntry& b) {
-        const u32 ar = _local_batch_refs[a.ref], br = _local_batch_refs[b.ref];
-        return ar != br ? ar < br : a.level < b.level;
-    };
-    _local_batch_list.resize(_local_list.size());
-    u32 batches = 0, copies = 0;
-    for (u32 v = 0; v < _local_views.size(); ++v) {
-        LocalView& view = _local_views[v];
-        if (!view.entry_count) {
-            view.entry_first = batches;
-            continue;
-        }
-        const auto first = _local_entries.begin() + view.entry_first;
-        const auto last = first + view.entry_count;
-        // Keep nearby source draws together: sorting the entire map by mesh
-        // destroys caster locality and can increase GPU depth-pass work.
-        constexpr std::ptrdiff_t batch_window = 128;
+        const u32 row_count = static_cast<u32>(found[v].size() + (deferred[v] ? plans[v]->rows.size() : 0));
         LocalGatherCache* sort_plan = plans[v] && plans[v]->valid ? plans[v] : nullptr;
-        if (sort_plan && sort_plan->sort_keys.empty()) {
-            // Each source ref contributes at most one entry with LOD disabled.
-            // Size once for the source, so dynamic visibility causes no growth.
+        if (row_count && sort_plan && sort_plan->sort_keys.empty()) {
             const u32 windows = (main_refs + batch_window - 1) / batch_window;
             const u64 bytes = u64(main_refs) * (sizeof(u64) + sizeof(u8)) + u64(windows) * sizeof(u16);
             if (bytes <= gather_budget - _local_gather_bytes) {
@@ -8380,69 +8317,168 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 _local_gather_bytes += sort_plan->bytes() - before;
             }
         }
-        if (sort_plan && sort_plan->sort_keys.size() < view.entry_count)
+        if (sort_plan && sort_plan->sort_keys.size() < row_count)
             sort_plan = nullptr;
-        u32 offset = 0, window = 0;
-        for (auto block = first; block != last;) {
-            const auto end = block + std::min(batch_window, last - block);
-            const u32 count = static_cast<u32>(end - block);
-            if (sort_plan) {
-                std::array<u64, batch_window> keys;
-                std::array<u8, batch_window> order;
-                std::array<LocalEntry, batch_window> sorted;
-                for (u32 i = 0; i < count; ++i)
-                    keys[i] = (u64(_local_batch_refs[block[i].ref]) << 32) | block[i].level;
-                const bool same = sort_plan->sort_counts[window] == count &&
-                                  std::equal(keys.begin(), keys.begin() + count, sort_plan->sort_keys.begin() + offset);
-                if (same) {
-                    std::copy_n(sort_plan->sort_order.data() + offset, count, order.data());
-                    ++stats.local_sort_cache_hits;
-                    stats.local_sort_cached_entries += count;
-                } else {
-                    // The original position breaks ties exactly as stable_sort.
-                    std::iota(order.begin(), order.begin() + count, u8{0});
-                    std::sort(order.begin(), order.begin() + count,
-                              [&](u8 a, u8 b) { return keys[a] != keys[b] ? keys[a] < keys[b] : a < b; });
+        using Program = LocalGatherCache::Program;
+        u32 prefix_rows = 0;
+        if (deferred[v] && sort_plan) {
+            const auto& rows = sort_plan->rows;
+            const u32 live = found[v].empty() ? ~0u : found[v].front().ref;
+            const auto end = std::lower_bound(rows.begin(), rows.end(), live,
+                                              [](const LocalGatherCache::Row& row, u32 ref) { return row.ref < ref; });
+            prefix_rows = static_cast<u32>(end - rows.begin()) / batch_window * batch_window;
+        }
+        bool replay = prefix_rows && sort_plan->program.rows == prefix_rows;
+        if (replay)
+            for (const auto& group : sort_plan->program.groups) {
+                // Visit group leaders in source order, just as full compilation
+                // would. Earlier maps may select a different representative.
+                const u32 batch = batch_of(group.ref);
+                replay = replay && batch == group.batch && _refs[group.ref].direct;
+            }
+        if (sort_plan && !replay && sort_plan->program.rows) {
+            _local_gather_bytes -= sort_plan->program.bytes();
+            sort_plan->program = {};
+        }
+        Program compiled;
+        std::unordered_map<u32, u32> program_groups;
+        const u32 prefix_first = static_cast<u32>(written);
+        bool compile_prefix = false;
+        if (prefix_rows && !replay) {
+            const auto& last = sort_plan->rows[prefix_rows - 1];
+            const u64 bytes = u64(prefix_rows) * (sizeof(Program::Entry) + 2 * sizeof(Program::Group)) +
+                              u64(last.first + last.count) * sizeof(u32);
+            // Check a conservative bound before building, then admit actual
+            // vector capacities. Pressure keeps the ordinary streaming path.
+            compile_prefix = bytes <= gather_budget - _local_gather_bytes;
+        }
+        std::array<Selected, batch_window> selected;
+        std::array<u64, batch_window> keys;
+        u32 count = 0, offset = 0, window = 0;
+        const auto emit_window = [&]() {
+            if (!count)
+                return;
+            std::array<u8, batch_window> order;
+            const u8* permutation = order.data();
+            const bool same = sort_plan && sort_plan->sort_counts[window] == count &&
+                              std::equal(keys.begin(), keys.begin() + count, sort_plan->sort_keys.begin() + offset);
+            if (same) {
+                ++stats.local_sort_cache_hits;
+                stats.local_sort_cached_entries += count;
+            } else {
+                // Source position breaks ties exactly as the old stable sort.
+                std::iota(order.begin(), order.begin() + count, u8{0});
+                std::sort(order.begin(), order.begin() + count,
+                          [&](u8 a, u8 b) { return keys[a] != keys[b] ? keys[a] < keys[b] : a < b; });
+                if (sort_plan) {
                     std::copy_n(keys.data(), count, sort_plan->sort_keys.data() + offset);
                     std::copy_n(order.data(), count, sort_plan->sort_order.data() + offset);
                     sort_plan->sort_counts[window] = static_cast<u16>(count);
                     ++stats.local_sort_cache_misses;
                 }
-                for (u32 i = 0; i < count; ++i)
-                    sorted[i] = block[order[i]];
-                std::copy_n(sorted.data(), count, block);
-            } else {
-                std::stable_sort(block, end, shadow_less);
+            }
+            if (sort_plan)
+                permutation = sort_plan->sort_order.data() + offset;
+            for (u32 i = 0; i < count; ++i) {
+                const Selected& row = selected[permutation[i]];
+                const u32 first = static_cast<u32>(written);
+                if (row.count == 1) {
+                    _local_list[written++] = row.first + *row.copies;
+                } else if (!row.first) {
+                    std::copy_n(row.copies, row.count, _local_list.data() + written);
+                    written += row.count;
+                } else {
+                    for (u32 c = 0; c < row.count; ++c)
+                        _local_list[written++] = row.first + row.copies[c];
+                }
+                // Cluster runs keep their original per-copy correspondence.
+                // Compatible ordinary rows can also merge across windows.
+                if (view.entry_count && !row.clustered && !_local_entries.back().clustered &&
+                    _local_batch_refs[_local_entries.back().ref] == _local_batch_refs[row.ref] &&
+                    _local_entries.back().level == row.level) {
+                    _local_entries.back().count += row.count;
+                } else {
+                    _local_entries.push_back({row.ref, row.level, first, row.count, row.clustered, row.run_first});
+                    ++view.entry_count;
+                }
             }
             offset += count;
             ++window;
-            block = end;
-        }
-        view.entry_first = batches;
-        view.entry_count = 0;
-        for (auto it = first; it != last; ++it) {
-            LocalEntry entry = *it;
-            std::copy_n(_local_list.data() + entry.list_first, entry.count, _local_batch_list.data() + copies);
-            entry.list_first = copies;
-            copies += entry.count;
-            // Cluster cuts have a different index run per copy. Keep their
-            // draw records intact, including their correspondence to the list.
-            if (view.entry_count && !entry.clustered && !_local_entries[batches - 1].clustered &&
-                _local_batch_refs[_local_entries[batches - 1].ref] == _local_batch_refs[entry.ref] &&
-                _local_entries[batches - 1].level == entry.level) {
-                _local_entries[batches - 1].count += entry.count;
-            } else {
-                _local_entries[batches++] = entry;
-                ++view.entry_count;
+            count = 0;
+            if (compile_prefix && offset == prefix_rows) {
+                compiled.rows = prefix_rows;
+                compiled.copies.assign(_local_list.begin() + prefix_first, _local_list.begin() + written);
+                compiled.entries.resize(view.entry_count);
+                for (u32 i = 0; i < view.entry_count; ++i) {
+                    const auto& entry = _local_entries[view.entry_first + i];
+                    compiled.entries[i] = {entry.ref, entry.list_first - prefix_first, entry.count,
+                                           program_groups.at(_local_batch_refs[entry.ref])};
+                }
+                if (compiled.bytes() <= gather_budget - _local_gather_bytes) {
+                    _local_gather_bytes += compiled.bytes();
+                    sort_plan->program = std::move(compiled);
+                }
+                compile_prefix = false;
             }
+        };
+        u32 cached_row = 0;
+        if (replay) {
+            const auto& program = sort_plan->program;
+            std::copy(program.copies.begin(), program.copies.end(), _local_list.begin() + written);
+            for (const auto& entry : program.entries) {
+                _local_batch_refs[entry.ref] = program.groups[entry.group].batch;
+                _local_entries.push_back(
+                    {entry.ref, 0, static_cast<u32>(written) + entry.first, entry.count, false, 0});
+            }
+            view.entry_count = static_cast<u32>(program.entries.size());
+            written += program.copies.size();
+            cached_row = offset = program.rows;
+            window = offset / batch_window;
+            stats.local_sort_cache_hits += window;
+            stats.local_sort_cached_entries += offset;
         }
+        const auto append_cached = [&](u32 before) {
+            if (!deferred[v])
+                return;
+            const auto& plan = *plans[v];
+            while (cached_row < plan.rows.size() && plan.rows[cached_row].ref < before) {
+                const auto& row = plan.rows[cached_row++];
+                const u32 batch = batch_of(row.ref);
+                keys[count] = u64(batch) << 32;
+                if (compile_prefix && offset < prefix_rows) {
+                    const auto [group, added] = program_groups.try_emplace(batch, compiled.groups.size());
+                    if (added)
+                        compiled.groups.push_back({row.ref, batch});
+                }
+                // Cached rows have one level and no skin/cluster runs. The
+                // saved indices stay read-only and relative to their source.
+                selected[count++] = {
+                    plan.copies.data() + row.first, row.ref, 0, row.count, static_cast<u32>(_local_runs.size()),
+                    _refs[row.ref].retained_first,  false};
+                if (count == batch_window)
+                    emit_window();
+            }
+        };
+        for (Found& f : found[v]) {
+            append_cached(f.ref);
+            keys[count] = (u64(batch_of(f.ref)) << 32) | f.level;
+            // Allocate union slots in source order before ordering the window,
+            // preserving prepared upload reuse and the old slot/skin layout.
+            if (_refs[f.ref].retained == ~0u || _refs[f.ref].retained_first)
+                for (u32& i : f.copies)
+                    i = slot_of(f.ref, i);
+            selected[count++] = {f.copies.data(), f.ref, f.level,    static_cast<u32>(f.copies.size()),
+                                 f.run_first,     0,     f.clustered};
+            skinned_in_use = skinned_in_use || _refs[f.ref].skinned;
+            if (count == batch_window)
+                emit_window();
+        }
+        append_cached(~0u);
+        emit_window();
     }
-    _local_entries.resize(batches);
     stats.local_gather_cache_bytes = _local_gather_bytes;
-    _local_batch_list.swap(_local_list);
-    stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity() + _local_batch_list.capacity() +
-                              _local_batch_refs.capacity()) *
-                             sizeof(u32);
+    stats.local_copy_bytes =
+        (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity()) * sizeof(u32);
     if (union_count > 0) {
         const u32 instance_bytes = union_count * static_cast<u32>(sizeof(GpuInstance3D));
         // No CPU mirror of the 128-byte GPU records: build each once in disjoint staging ranges.

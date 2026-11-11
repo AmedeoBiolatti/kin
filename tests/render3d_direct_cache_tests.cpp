@@ -418,23 +418,23 @@ void check(Renderer2D& renderer) {
                oversized_layout.pixels == raw_large.pixels);
     }
 
-    // Pre-sized selections preserve source/copy order through GPU slot packing.
-    // Mix multi-copy static rows with moving rows, including
-    // a cached map before/after a redrawn map in the packing order.
+    // Multiple shadow-order windows mix multi-copy static rows, masked state
+    // and live batch rows around window boundaries. Views can be cached or
+    // redrawn independently, with the same union slots and final pixels.
     scene = Scene3D{};
     scene.debug.cache_draw_commands = false;
     scene.camera = Camera3D::look_at({0, 0, 13}, {});
     auto mixed_batch = InstanceBatch3D::create(mesh, stationary).value_or({});
     assert(mixed_batch);
-    for (u32 row = 0; row < 32; ++row) {
+    for (u32 row = 0; row < 1025; ++row) {
         std::vector<MeshInstance3D> copies;
-        for (u32 i = 0; i < 16; ++i) {
-            const u32 n = row * 16 + i;
+        for (u32 i = 0; i < 2; ++i) {
+            const u32 n = (row * 2 + i) % 512;
             copies.push_back(
                 {Mat4f::translation({f32(n % 32) * .65f - 10, f32(n / 32) * .65f - 5, 0}), colors::white, n + 1});
         }
         assert(scene.draw_instanced(mesh, copies, materials[row % 3]));
-        if (row == 16)
+        if (row == 63 || row == 127 || row == 128 || row == 255)
             assert(scene.draw_instanced(mixed_batch, materials[0]));
     }
     for (f32 x : {-6.f, 6.f})
@@ -470,9 +470,9 @@ void check(Renderer2D& renderer) {
                cached.stats.local_gather_cache_hits == 2 && cached.stats.local_shadow_maps == 2);
     }
 
-    // Cached static rows can pack directly around live rows when maps redraw.
-    // Mix a deferred view with a fresh view in both orders, preserving the
-    // scratch gaps needed by later dynamic spans and by multi-copy static rows.
+    // Immutable cached spans and fresh selections feed the same window stream.
+    // Mix a deferred view with a fresh view in both orders; their separate
+    // selection/output storage must preserve unread live multi-copy spans.
     scene.lights.cache_shadows = false;
     for (u32 edit = 0; edit < 3; ++edit) {
         for (u32 warmup = 0; warmup < 4; ++warmup)
@@ -482,6 +482,8 @@ void check(Renderer2D& renderer) {
         move_mixed(-7.7f + f32(edit) * 7.7f);
         const auto cached = shoot(true);
         const auto fresh = shoot(false);
+        if (!edit)
+            assert(cached.stats.local_sort_cache_hits + cached.stats.local_sort_cache_misses > 2);
         assert(cached.pixels == fresh.pixels && cached.pick_id == fresh.pick_id &&
                cached.stats.local_gather_cache_hits == (edit ? 1 : 2) && cached.stats.local_shadow_cached == 0 &&
                cached.stats.local_shadow_drawn == 2 &&
@@ -490,6 +492,27 @@ void check(Renderer2D& renderer) {
                cached.stats.local_shadow_triangles == fresh.stats.local_shadow_triangles &&
                cached.stats.local_shadow_casters == fresh.stats.local_shadow_casters);
     }
+
+    // A changed earlier projection changes the first selected representatives
+    // used to order a later, unchanged map. Its compiled static windows must
+    // validate those leaders; moving live rows also changes the static prefix.
+    for (f32 x : {6.f, -6.f}) {
+        move_mixed(-7.7f);
+        for (u32 warmup = 0; warmup < 4; ++warmup)
+            shoot(true);
+        scene.lights.spots[0].position.x = x;
+        const auto cached = shoot(true);
+        const auto fresh = shoot(false);
+        assert(cached.pixels == fresh.pixels && cached.pick_id == fresh.pick_id &&
+               cached.stats.local_gather_cache_hits == 1 &&
+               cached.stats.local_shadow_draws == fresh.stats.local_shadow_draws &&
+               cached.stats.local_shadow_triangles == fresh.stats.local_shadow_triangles &&
+               cached.stats.local_shadow_casters == fresh.stats.local_shadow_casters &&
+               cached.stats.local_gather_cache_bytes <= 4 * 1024 * 1024);
+    }
+    scene.debug.local_shadow_gather_budget = 0;
+    const auto no_program = shoot(true);
+    assert(no_program.stats.local_gather_cache_bytes == 0 && no_program.pixels == shoot(false).pixels);
 
     // Adjacent independent draws cross task boundaries and leave short tails.
     // Camera-edge decisions and interruptions by other submission types must

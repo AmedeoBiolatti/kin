@@ -337,17 +337,23 @@ sun/moon/GI maps, enabled LOD and explicit prepared consumers keep their existin
 paths. A changed or expired source/projection invalidates its plan, including
 scene moves and edits between views of the same GPU frame.
 
-Temporary per-view selection rows reserve space from accepted ref/level counts. Views needing an image/history
-fingerprint include cached static rows in that reservation. Otherwise, stock spot/point views can merge saved static
-rows directly into packing alongside live rows. Scratch gaps protect unread live copies during in-place packing;
-saved source-relative indices stay read-only and current GPU table slots are resolved when packing. Source/copy
-order and the existing packing and cache lifetimes stay the same.
+Shadow preparation compiles selected copy spans directly into final depth commands and the GPU index list.
+Live selections have independent scratch storage; unchanged static rows can feed the compiler read-only from their
+saved plan when no image/history fingerprint is needed. There is no full-map intermediate command array or
+second index-list reorder copy. Streamed union slots and cluster runs are assigned in source order before emission,
+preserving prepared-upload reuse and copy correspondence.
 
-Depth batching retains its 128-entry locality windows. Exact current comparator
-keys validate a saved sort permutation per window; a changed key sequence is
-sorted again with the original stable tie order. Current records, textures and
-samplers are still bound each render. This cache reuses CPU preparation, including
-when `lights.cache_shadows` is false; it does not retain GPU shadow images.
+The compiler holds one 128-row locality window on the stack. It orders row indices, then emits compatible depth
+runs directly, including merges across adjacent windows. Exact current comparator keys validate a saved permutation;
+a changed sequence uses the original stable tie order. Current records, textures and samplers are still bound each
+render. This cache reuses CPU preparation, including when `lights.cache_shadows` is false; it does not retain GPU
+shadow images. Fingerprints, cluster cuts, cache lifetimes and retention budgets keep their existing rules.
+
+Full static windows before the first live row can also retain a compiled program: merged commands and source-table
+indices ready for emission. The program follows the selection plan's source/projection lifetime. Each render visits
+its depth-state group leaders in source order and checks their exact current batch representatives; a changed
+representative or static/live boundary recompiles through the window stream. Current table bindings remain live.
+Program payload shares the existing gather budget; admission checks vector capacities, and pressure uses streaming.
 
 CPU vector payload is limited to 4 MiB per renderer across 64 source/light-slot
 probes, plus fixed metadata. Unstable projections are observed without allocating

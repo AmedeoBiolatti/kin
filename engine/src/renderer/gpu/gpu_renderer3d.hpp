@@ -1388,9 +1388,28 @@ private:
         std::vector<u64> sort_keys;
         std::vector<u8> sort_order;
         std::vector<u16> sort_counts;
+        // Full static locality windows before the first live row can be
+        // replayed as merged commands plus source-table indices.
+        struct Program {
+            struct Group {
+                u32 ref, batch; // first source occurrence, exact runtime representative
+            };
+            struct Entry {
+                u32 ref, first, count, group;
+            };
+            u32 rows = 0;
+            std::vector<Group> groups;
+            std::vector<Entry> entries;
+            std::vector<u32> copies;
+            u64 bytes() const {
+                return groups.capacity() * sizeof(Group) + entries.capacity() * sizeof(Entry) +
+                       copies.capacity() * sizeof(u32);
+            }
+        } program;
         u64 bytes() const {
             return rows.capacity() * sizeof(Row) + copies.capacity() * sizeof(u32) +
-                   sort_keys.capacity() * sizeof(u64) + sort_order.capacity() + sort_counts.capacity() * sizeof(u16);
+                   sort_keys.capacity() * sizeof(u64) + sort_order.capacity() + sort_counts.capacity() * sizeof(u16) +
+                   program.bytes();
         }
     };
     // CPU payload is bounded independently of GPU instance/map retention. Empty
@@ -1404,7 +1423,7 @@ private:
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
     std::vector<u32> _local_list;                  // the lists, as uploaded
-    std::vector<u32> _local_batch_list;            // reused while joining compatible depth draws
+    std::vector<u32> _local_selection_list;        // live selections; independent of the final GPU list
     std::vector<u32> _local_batch_refs;            // each ref's compatible depth-draw representative
     std::vector<std::array<u32, 2>> _local_copies; // the union's (ref, copy), packed directly into upload memory
     std::vector<u32> _local_joint_list;
