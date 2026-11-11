@@ -1,4 +1,5 @@
 #include "../engine/src/renderer/gpu/gpu_light_grid3d.hpp"
+#include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"
 #include "local_graph_shaders.hpp"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
+#include <limits>
 #include <random>
 using namespace kin;
 namespace {
@@ -89,6 +91,80 @@ void grid_lists() {
     check(limit, 2, 3, 4); // nonempty light input, all projected boxes empty
     check({}, 1, 1, 1);    // no stale headers/IDs after overflow and reuse
     std::cout << "light grid: exact packed lists, mask boundaries, reuse and overflow passed\n";
+}
+
+// Check both the original pointer API and reusable packets against independent
+// scalar decisions, including partial group proofs and ordered NaN comparisons.
+void shadow_packets() {
+    using namespace kin::gpu::sphere_cull4;
+    const std::array<Vec4f, 7> planes{{{1, 0, 0, 1},
+                                       {-1, 0, 0, 1},
+                                       {0, 1, 0, 1},
+                                       {0, -1, 0, 1},
+                                       {0, 0, 1, 1},
+                                       {0, 0, -1, 1},
+                                       {.13f, -.27f, .63f, .41f}}};
+    const Vec3f centre{0, -.2f, .1f};
+    constexpr f32 radius = .75f;
+    const f32 nan = std::numeric_limits<f32>::quiet_NaN(), inf = std::numeric_limits<f32>::infinity();
+    const std::array edge{Vec4f{0, 0, 0, 0},
+                          Vec4f{1, 1, 1, 0},
+                          Vec4f{2, 0, 0, 1},
+                          Vec4f{std::nextafter(2.f, inf), 0, 0, 1},
+                          Vec4f{nan, 0, 0, 1},
+                          Vec4f{0, nan, 0, 1},
+                          Vec4f{0, 0, 0, nan},
+                          Vec4f{inf, 0, 0, 1},
+                          Vec4f{-inf, 0, 0, 1},
+                          Vec4f{0, 0, 0, inf},
+                          Vec4f{-0.f, 0, -0.f, -0.f},
+                          Vec4f{1, -.2f, .1f, .25f},
+                          Vec4f{std::nextafter(1.f, inf), -.2f, .1f, .25f}};
+    std::mt19937 random(0x431bf);
+    std::uniform_real_distribution<f32> coordinate(-3.f, 3.f);
+    for (u32 count = 0; count <= planes.size(); ++count)
+        for (const bool bounded : {false, true}) {
+            const Test test{{planes.data(), count}, centre, radius, bounded};
+            for (u32 trial = 0; trial < 512; ++trial) {
+                const u8 active = static_cast<u8>(random() & ((1u << count) - 1));
+                const bool test_radius = random() % 2;
+                std::array<Vec4f, 4> spheres;
+                for (u32 i = 0; i < spheres.size(); ++i)
+                    spheres[i] = trial < 4 * edge.size() ? edge[(trial + i) % edge.size()]
+                                                         : Vec4f{coordinate(random), coordinate(random),
+                                                                 coordinate(random), std::abs(coordinate(random))};
+                const auto reference = [&](u8 mask, bool reach) {
+                    u32 result = 0;
+                    for (u32 i = 0; i < spheres.size(); ++i) {
+                        const auto& sp = spheres[i];
+                        const Vec3f c{sp.x, sp.y, sp.z};
+                        if (bounded && reach) {
+                            const Vec3f d = c - centre;
+                            const f32 limit = sp.w + radius;
+                            if (dot(d, d) > limit * limit)
+                                continue;
+                        }
+                        bool inside = true;
+                        for (u32 k = 0; k < count; ++k) {
+                            const auto& p = planes[k];
+                            if ((mask & (1u << k)) && p.x * c.x + p.y * c.y + p.z * c.z + p.w < -sp.w) {
+                                inside = false;
+                                break;
+                            }
+                        }
+                        if (inside)
+                            result |= 1u << i;
+                    }
+                    return result;
+                };
+                const Packet packet{spheres.data()};
+                assert(test.mask(packet, active, test_radius) == reference(active, test_radius));
+                const u32 full = reference(static_cast<u8>((1u << count) - 1), true);
+                assert(test.mask(packet) == full && test.mask(spheres.data()) == full);
+            }
+        }
+    std::cout
+        << "shadow packets: pointer/packet/scalar parity, partial planes, radius proofs, boundaries and NaNs passed\n";
 }
 
 struct Fixture {
@@ -730,6 +806,7 @@ void validation(Fixture& f) {
 } // namespace
 int main() {
     grid_lists();
+    shadow_packets();
     App app;
     auto& window = app.create_window({.title = "local graph", .width = 160, .height = 120, .hidden = true});
     Renderer2D r{make_render_backend(window, false, true)};

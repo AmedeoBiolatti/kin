@@ -17,6 +17,23 @@
 namespace kin::gpu::sphere_cull4 {
 inline constexpr bool available = KIN_NATIVE_SPHERES4 != 0;
 
+// Prepare the four AoS bounds once when several views consume the same packet.
+struct Packet {
+#if KIN_NATIVE_SPHERES4
+    __m128 x, y, z, r;
+    explicit Packet(const Vec4f* spheres) {
+        x = _mm_loadu_ps(&spheres[0].x);
+        y = _mm_loadu_ps(&spheres[1].x);
+        z = _mm_loadu_ps(&spheres[2].x);
+        r = _mm_loadu_ps(&spheres[3].x);
+        _MM_TRANSPOSE4_PS(x, y, z, r);
+    }
+#else
+    const Vec4f* data;
+    explicit Packet(const Vec4f* spheres) : data(spheres) {}
+#endif
+};
+
 class Test {
 public:
     Test(std::span<const Vec4f> planes, Vec3f centre, f32 radius, bool bounded)
@@ -37,16 +54,19 @@ public:
 
     // Exactly four valid records, lower four bits in source order. A rejection
     // comparison is ordered (< or >), so NaNs stay accepted as in the scalar path.
-    u32 mask(const Vec4f* spheres) const {
+    u32 mask(const Vec4f* spheres) const { return mask(Packet{spheres}); }
+    u32 mask(const Packet& spheres) const { return mask_impl<false>(spheres, 0x7f, true); }
+    // Current group proofs can omit planes/radius without rebuilding the view.
+    u32 mask(const Packet& spheres, u8 planes, bool radius) const { return mask_impl<true>(spheres, planes, radius); }
+
+private:
+    template <bool masked> u32 mask_impl(const Packet& spheres, u8 planes, bool radius) const {
 #if KIN_NATIVE_SPHERES4
-        static_assert(sizeof(Vec4f) == 4 * sizeof(f32));
-        __m128 x = _mm_loadu_ps(&spheres[0].x), y = _mm_loadu_ps(&spheres[1].x);
-        __m128 z = _mm_loadu_ps(&spheres[2].x), r = _mm_loadu_ps(&spheres[3].x);
-        _MM_TRANSPOSE4_PS(x, y, z, r);
+        const __m128 x = spheres.x, y = spheres.y, z = spheres.z, r = spheres.r;
         const __m128 zero = _mm_setzero_ps();
         __m128 alive = _mm_cmpeq_ps(zero, zero);
         u32 bits = 15;
-        if (_bounded) {
+        if (_bounded && (!masked || radius)) {
             const __m128 dx = _mm_sub_ps(x, _x), dy = _mm_sub_ps(y, _y), dz = _mm_sub_ps(z, _z);
             const __m128 distance = _mm_add_ps(_mm_add_ps(_mm_mul_ps(dx, dx), _mm_mul_ps(dy, dy)), _mm_mul_ps(dz, dz));
             const __m128 reach = _mm_add_ps(r, _radius);
@@ -56,6 +76,9 @@ public:
         }
         const __m128 negative_r = _mm_xor_ps(r, _mm_set1_ps(-0.0f));
         for (u32 k = 0; k < _count; ++k) {
+            if constexpr (masked)
+                if (!(planes & (1u << k)))
+                    continue;
             const auto& p = _planes[k];
             const __m128 distance = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(p.x, x), _mm_mul_ps(p.y, y)), _mm_mul_ps(p.z, z)), p.w);
             alive = _mm_andnot_ps(_mm_cmplt_ps(distance, negative_r), alive);
@@ -66,20 +89,26 @@ public:
 #else
         u32 bits = 0;
         for (u32 i = 0; i < 4; ++i) {
-            const Vec4f& sp = spheres[i]; const Vec3f c{sp.x, sp.y, sp.z};
-            if (_bounded) {
+            const Vec4f& sp = spheres.data[i];
+            const Vec3f c{sp.x, sp.y, sp.z};
+            if (_bounded && (!masked || radius)) {
                 const Vec3f d = c - _centre; const f32 reach = sp.w + _radius;
                 if (dot(d, d) > reach * reach) continue;
             }
             bool accepted = true;
-            for (const auto& p : _planes)
+            for (u32 k = 0; k < _planes.size(); ++k) {
+                if constexpr (masked)
+                    if (!(planes & (1u << k)))
+                        continue;
+                const auto& p = _planes[k];
                 if (p.x * c.x + p.y * c.y + p.z * c.z + p.w < -sp.w) { accepted = false; break; }
+            }
             if (accepted) bits |= 1u << i;
         }
         return bits;
 #endif
     }
-private:
+
 #if KIN_NATIVE_SPHERES4
     struct Plane { __m128 x, y, z, w; };
     std::array<Plane, 7> _planes;

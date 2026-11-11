@@ -380,6 +380,20 @@ sun/moon/GI maps, enabled LOD and explicit prepared consumers keep their existin
 paths. A changed or expired source/projection invalidates its plan, including
 scene moves and edits between views of the same GPU frame.
 
+With at least two wanted fixed-light views whose static selections all hit, live
+single-level, unclustered casters share one source-ordered stream. Four sphere
+bounds load/transpose once and reuse the existing arithmetic against precompiled
+per-view tests; compact opcodes carry current group plane/radius proofs. One
+64-bit visibility mask represents each classified copy across the wanted views.
+Output spans are laid out in view/ref order, then counts become write cursors so
+one source pass distributes copy indices in their original order. Fully accepted
+ranges use contiguous index fills. Current bounds and projections refresh each
+render; this adds no result cache. Single-view, fresh/uncached projection,
+moon/GI, LOD and clustered cases retain the general gather. Static selection
+admission, fingerprints, source/copy order and the 4 MiB retained-plan cap keep
+their existing rules. `local_task_bytes` includes shared ranges, clipping opcodes
+and count/cursor payload; `local_bucket_bytes` reports the visibility masks.
+
 Shadow preparation compiles selected copy spans directly into final depth commands and the GPU index list.
 Live selections have independent scratch storage; unchanged static rows can feed the compiler read-only from their
 saved plan when no image/history fingerprint is needed. There is no full-map intermediate command array or

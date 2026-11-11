@@ -4,6 +4,101 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Shared live-shadow caster selection, 2026-11-11
+
+The reference is `861e5cdc`. When at least two wanted fixed-local shadow views
+hit their existing static-selection plans, live single-level, unclustered
+casters now share one source-ordered stream. Each four-sphere packet loads and
+transposes once and reuses the existing sphere arithmetic across precompiled
+view tests. Compact per-range opcodes retain current group plane/radius proofs.
+One 64-bit visibility mask per classified source copy replaces per-view bucket
+bytes. Final view/ref spans are sized once, counts become output cursors, and
+one source pass distributes indices in their original order. Broad ranges split
+by logical sphere/view test count to preserve worker parallelism.
+
+Current bounds/projections refresh every render; this introduces no result cache.
+Fresh/uncached projections, single-view, moon/GI, LOD and clustered cases keep
+the general gather. Static admission, fingerprints, source/copy order, selected
+casters, GPU depth commands, shaders, uploads and resource allocations retain
+their rules. A four-light SIMD prototype was rejected after two full-route
+caller-CPU regressions despite lower instruction counts; the retained version
+keeps the existing four-caster lanes.
+
+Five alternating Hard pairs show **6.8% median paired caller-CPU p50 reduction**,
+improving in all five; individual reductions are **6.4%, 6.8%, 9.5%, 5.9% and
+7.8%**. Process CPU falls **7.8%** by the same calculation. Conditions are
+original independent Yard submissions, 720p HDR, no AA/GI/AO, classic 1,024 spot
+maps, four helpers, affinity 0–15, and 300 warm-up plus 1,440 measured route
+frames. Blender/background jobs stay untouched; clocks, thermals and load are
+uncontrolled: results are **contended**. PMU collection and image readback run
+separately from normal timing.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 1 | 0.478 / 0.539 / 0.593 | 0.492 / 0.584 / 0.632 | −3.0% |
+| Medium | 1 | 1.520 / 2.025 / 2.135 | 1.397 / 1.559 / 1.740 | 8.1% |
+| Hard | 5 | 4.234 / 4.774 / 5.386 | 3.959 / 4.398 / 4.812 | 6.8% |
+
+Percentiles are medians of per-run percentiles; paired reductions compare
+adjacent run medians. Easy and Medium are single guard pairs. Easy's caller
+p50 regresses 0.014 ms (3.0%), so this does not establish an improvement at every
+tier. Hard frame p50 regresses in all five pairs, by a median 2.3%, with a
+0.8–23.5% range. These contended frame results do not establish an isolated
+throughput gain or a new cross-engine ranking. CPU gains do not compound with
+earlier campaigns.
+
+All non-timing per-frame work/cache/resource/upload columns match except the
+documented CPU scratch counters: `local_task_bytes` covers shared ranges,
+clipping opcodes and count/cursor payload; `local_bucket_bytes` covers visibility
+masks. Hard task metadata falls **98,304 → 33,792 bytes (65.6%)**. Logical instance
+tests remain 42,048 per frame. Peak process RSS, including startup/driver memory,
+is 198.2 → 196.1 MiB for Hard; the scratch reduction is not a total-process memory
+claim.
+
+Two separate forward/reverse inherited P-core controls, after both binaries
+completed the normal campaign, show **3.507% and 3.504% fewer retired user
+instructions**, at 99–100% event running coverage. Each includes startup,
+300 warm-up plus **720 measured frames (half the route)**, helpers, driver
+threads, scene assembly and presentation. These are whole-process user counts,
+not isolated render-phase counts or a clock-normalized speedup. There is no
+full-route extrapolation. All work columns match apart from CPU scratch fields.
+
+An earlier first-candidate-process diagnostic retired 76.13 versus 24.08 billion
+instructions (a 216% regression); the following warm pair reduced instructions
+3.52%. Its cause is unresolved. Both initial pairs remain in
+`initial-instruction-diagnostics.json`; the steady comparison above uses the
+repeated forward/reverse warm controls, not the first-process outlier. Startup
+performance is not established by the steady comparison.
+
+Fresh before/after `cpu-clock:u` profiles each cover one full 1,440-frame Hard
+route at 499 Hz with 16 KiB DWARF user stacks. Actual render-call windows exclude
+assembly, warm-up and presentation; caller, Kin workers and other threads are
+separate. **Local-shadow preparation falls from 22.99% to 17.47% of caller
+samples**. Worker shadow-preparation shares are 56.22% → 50.98%. These are
+normalized user-CPU shares, not phase medians. Remaining caller shares are
+shadow recording 20.75%, camera/instance preparation 20.55%, draw planning/lookup
+17.74% and retained batch updates 7.82%.
+
+Caller samples number 3,154/2,891, with 1.14%/1.38% unresolved phase attribution.
+Profile work columns match their normal controls apart from the documented
+scratch fields. Normal timing above uses the adjacent unsampled controls.
+
+Nine focused NVIDIA suites and four llvmpipe suites pass. The existing local-graph
+suite adds an independent scalar oracle over **8,192 sphere packets**, covering
+both reusable-packet APIs and the original pointer API, 0–7 planes, partial
+proofs, bounded/unbounded tests, tangencies, nextafter boundaries, signed zero,
+NaN and infinity. The same oracle passes native SIMD and forced-portable builds.
+The direct-cache suite adds moving live casters with cached static rows and
+nonconsecutive wanted point-light cube faces. Existing mixed fresh/cached,
+projection mutation, budget, skin/pose, LOD, pick, lifetime and same-frame-view
+cases remain covered by the focused suites. All **10,080 paired route frames**
+preserve work columns apart from the CPU scratch accounting above. Nine
+decoded-RGBA pairs across three tiers at route phases 1/541/961 are pixel-identical.
+Commands, frozen source/binary hashes, raw paired percentiles, rejected-prototype
+notes, instruction controls and fresh profiles are under
+`out/runs/render3d-live-shadow-packets/`; the rejected prototype's raw runs are
+under `out/runs/render3d-live-shadow-stream/`.
+
 ### Axis masks for exact light-grid construction, 2026-11-11
 
 The reference is `9348edcf`. Projected light bounds are Cartesian boxes over

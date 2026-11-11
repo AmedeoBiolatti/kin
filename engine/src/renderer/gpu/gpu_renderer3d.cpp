@@ -7688,6 +7688,265 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     // Selection storage is independent of the final GPU list. Fingerprints and
     // cluster cuts finish before source-order slot assignment and window emission.
     std::vector<u32>& found_copies = _local_selection_list;
+    const auto find_live_copies = [&]() {
+        // Cached static selections need only current live rows. Complex view
+        // reach/LOD/cluster classifications retain the general gather below.
+        if (fresh_views || cached_views < 2 || dynamic_pieces.empty())
+            return false;
+        for (const auto& view : _local_views)
+            if (view.wanted && view.moon)
+                return false;
+        u64 copies = 0;
+        for (const auto& piece : dynamic_pieces) {
+            if (_refs[piece.ref].levels != 1 || _refs[piece.ref].clustered)
+                return false;
+            copies += piece.end - piece.begin;
+        }
+        u64 max_selected = copies * cached_views;
+        for (u32 v = 0; v < _local_views.size(); ++v)
+            if (hits[v] && !deferred[v])
+                max_selected += plans[v]->copies.size();
+        if (max_selected > std::numeric_limits<u32>::max())
+            return false;
+        static_assert(view_limit <= 64);
+        std::array<u32, view_limit> view_indices{};
+        u32 views = 0;
+        for (u32 v = 0; v < _local_views.size(); ++v)
+            if (_local_views[v].wanted)
+                view_indices[views++] = v;
+        std::array<std::optional<sphere_cull4::Test>, view_limit> tests;
+        std::array<u8, view_limit> full_operations{};
+        for (u32 v = 0; v < views; ++v) {
+            const auto& view = _local_views[view_indices[v]];
+            tests[v].emplace(std::span<const Vec4f>{view.frustum.planes.data(), view.frustum.count}, view.centre,
+                             view.radius, view.bounded);
+            full_operations[v] = static_cast<u8>(((1u << view.frustum.count) - 1) | (view.bounded ? 0x80u : 0u));
+        }
+        struct LiveRange {
+            const Vec4f* spheres;
+            u64 accepted, tested;
+            std::size_t first;
+            u32 ref, begin, count;
+        };
+        std::vector<LiveRange> ranges;
+        std::vector<u8> operations;
+        std::vector<u32> counts, batches{0};
+        ranges.reserve(dynamic_pieces.size());
+        operations.reserve(dynamic_pieces.size() * views);
+        counts.reserve(dynamic_pieces.size() * views);
+        std::size_t mask_count = 0, candidates = 0, classified = 0;
+        u32 in_batch = 0;
+        for (const auto& piece : dynamic_pieces) {
+            const auto& ref = _refs[piece.ref];
+            const CullGroup* group = piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
+            const u32 n = piece.end - piece.begin;
+            u64 accepted = 0, tested = 0;
+            std::array<u8, view_limit> current{};
+            for (u32 v = 0; v < views; ++v) {
+                const auto& view = _local_views[view_indices[v]];
+                const u64 bit = u64{1} << v, group_bit = u64{1} << view_indices[v];
+                if (group && !(group->local_mask & group_bit)) {
+                    stats.local_group_rejected += n;
+                    continue;
+                }
+                const u8 planes =
+                    group ? group->local_planes[view_indices[v]] : static_cast<u8>((1u << view.frustum.count) - 1);
+                const bool inside = group && (group->local_radius_inside & group_bit);
+                const bool all = group && !planes && (!view.bounded || inside);
+                candidates += n;
+                stats.local_plane_budget += u64(std::popcount(planes)) * n;
+                if (view.bounded && !inside)
+                    stats.local_radius_tests += n;
+                if (all) {
+                    accepted |= bit;
+                    continue;
+                }
+                tested |= bit;
+                classified += n;
+                current[v] = static_cast<u8>(planes | (view.bounded && !inside ? 0x80u : 0u));
+            }
+            if (!(accepted | tested))
+                continue;
+            // Balance by sphere/view tests, keeping broad multi-copy ranges
+            // parallel even though each sphere is now loaded only once.
+            const u32 per_copy = static_cast<u32>(std::popcount(tested));
+            const u32 step = local_chunk / std::max(per_copy, 1u);
+            for (u32 begin = piece.begin; begin < piece.end;) {
+                const u32 count = std::min(step, piece.end - begin);
+                const auto* spheres =
+                    ref.cached_spheres ? ref.cached_spheres : _world_spheres.data() + ref.sphere_first;
+                const std::size_t r = ranges.size();
+                ranges.push_back({spheres + begin, accepted, tested, mask_count, piece.ref, begin, count});
+                operations.insert(operations.end(), current.begin(), current.begin() + views);
+                counts.resize((r + 1) * views, 0);
+                for (u64 bits = accepted; bits; bits &= bits - 1)
+                    counts[r * views + std::countr_zero(bits)] = count;
+                if (tested)
+                    mask_count += count;
+                in_batch += count * per_copy;
+                if (in_batch >= local_chunk) {
+                    batches.push_back(static_cast<u32>(ranges.size()));
+                    in_batch = 0;
+                }
+                begin += count;
+            }
+        }
+        if (batches.back() != ranges.size())
+            batches.push_back(static_cast<u32>(ranges.size()));
+        std::vector<u64> visibility(mask_count);
+        const auto gather_batch = [&](u32 b) {
+            for (u32 r = batches[b]; r < batches[b + 1]; ++r) {
+                const auto& range = ranges[r];
+                if (!range.tested)
+                    continue;
+                u32 i = 0;
+                if constexpr (sphere_cull4::available) {
+                    constexpr std::array<u8, 16> ones{0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
+                    for (; range.count - i >= 4; i += 4) {
+                        const sphere_cull4::Packet packet{range.spheres + i};
+                        std::array<u64, 4> masks;
+                        masks.fill(range.accepted);
+                        for (u64 bits = range.tested; bits; bits &= bits - 1) {
+                            const u32 v = std::countr_zero(bits);
+                            const u8 op = operations[std::size_t(r) * views + v];
+                            u32 seen = op == full_operations[v]
+                                           ? tests[v]->mask(packet)
+                                           : tests[v]->mask(packet, static_cast<u8>(op & 0x7f), (op & 0x80) != 0);
+                            if (!seen)
+                                continue;
+                            counts[std::size_t(r) * views + v] += ones[seen];
+                            const u64 bit = u64{1} << v;
+                            while (seen) {
+                                masks[std::countr_zero(seen)] |= bit;
+                                seen &= seen - 1;
+                            }
+                        }
+                        std::copy(masks.begin(), masks.end(), visibility.begin() + range.first + i);
+                    }
+                }
+                for (; i < range.count; ++i) {
+                    const Vec4f& sphere = range.spheres[i];
+                    const Vec3f c{sphere.x, sphere.y, sphere.z};
+                    u64 mask = range.accepted;
+                    for (u64 bits = range.tested; bits; bits &= bits - 1) {
+                        const u32 v = std::countr_zero(bits);
+                        const auto& view = _local_views[view_indices[v]];
+                        const u8 op = operations[std::size_t(r) * views + v];
+                        if (op & 0x80) {
+                            const Vec3f d = c - view.centre;
+                            const f32 reach = sphere.w + view.radius;
+                            if (dot(d, d) > reach * reach)
+                                continue;
+                        }
+                        bool inside = true;
+                        u32 planes = op & 0x7f;
+                        while (planes) {
+                            const auto& p = view.frustum.planes[std::countr_zero(planes)];
+                            planes &= planes - 1;
+                            if (p.x * c.x + p.y * c.y + p.z * c.z + p.w < -sphere.w) {
+                                inside = false;
+                                break;
+                            }
+                        }
+                        if (inside) {
+                            mask |= u64{1} << v;
+                            ++counts[std::size_t(r) * views + v];
+                        }
+                    }
+                    visibility[range.first + i] = mask;
+                }
+            }
+        };
+        if (jobs && batches.size() > 2 && classified >= 4 * local_chunk)
+            jobs->parallel_for(static_cast<i32>(batches.size() - 1), [&](i32 b) { gather_batch(static_cast<u32>(b)); });
+        else
+            for (u32 b = 0; b + 1 < batches.size(); ++b)
+                gather_batch(b);
+        stats.local_candidates = candidates;
+        stats.local_instance_tests = classified;
+        stats.local_group_accepted = candidates - classified;
+        stats.local_bucket_bytes = visibility.capacity() * sizeof(u64);
+        stats.local_task_bytes = ranges.capacity() * sizeof(LiveRange) + operations.capacity() * sizeof(u8) +
+                                 counts.capacity() * sizeof(u32);
+        std::size_t accepted = 0;
+        for (u32 v = 0; v < views; ++v) {
+            const u32 index = view_indices[v];
+            u32 rows = 0, last = ~0u;
+            for (std::size_t r = 0; r < ranges.size(); ++r) {
+                const u32 count = counts[r * views + v];
+                accepted += count;
+                if (count && last != ranges[r].ref) {
+                    ++rows;
+                    last = ranges[r].ref;
+                }
+            }
+            if (!deferred[index]) {
+                accepted += plans[index] ? plans[index]->copies.size() : 0;
+                rows += plans[index] ? static_cast<u32>(plans[index]->rows.size()) : 0;
+            }
+            found[index].reserve(rows);
+        }
+        found_copies.resize(accepted);
+        std::size_t next = 0;
+        for (u32 v = 0; v < views; ++v) {
+            const u32 index = view_indices[v];
+            u32 row = 0;
+            const auto append_cached = [&](u32 before) {
+                if (!plans[index] || deferred[index])
+                    return;
+                const auto& plan = *plans[index];
+                while (row < plan.rows.size() && plan.rows[row].ref < before) {
+                    const auto& cached = plan.rows[row++];
+                    found[index].push_back({cached.ref, 0, {found_copies.data() + next, cached.count}, false, {}});
+                    std::copy_n(plan.copies.data() + cached.first, cached.count, found_copies.data() + next);
+                    next += cached.count;
+                }
+            };
+            for (std::size_t r = 0; r < ranges.size();) {
+                const std::size_t begin = r;
+                const u32 ref = ranges[r].ref;
+                append_cached(ref);
+                u32 count = 0;
+                do {
+                    count += counts[r * views + v];
+                    ++r;
+                } while (r < ranges.size() && ranges[r].ref == ref);
+                if (!count)
+                    continue;
+                found[index].push_back({ref, 0, {found_copies.data() + next, count}, false, {}});
+                const u64 bit = u64{1} << v;
+                for (std::size_t k = begin; k < r; ++k) {
+                    auto& range = ranges[k];
+                    const u32 kept = counts[k * views + v];
+                    counts[k * views + v] = static_cast<u32>(next); // reuse counts as output cursors
+                    next += kept;
+                    if (kept == range.count) {
+                        range.accepted |= bit;
+                        range.tested &= ~bit;
+                    }
+                }
+            }
+            append_cached(~0u);
+        }
+        assert(next == accepted);
+        // Spans are already laid out in view/ref order. Scatter each caster's
+        // source index once to its accepted views, rather than rereading the
+        // visibility stream for every map. Each span still receives ascending
+        // copy indices, including across independently classified chunks.
+        for (std::size_t r = 0; r < ranges.size(); ++r) {
+            const auto& range = ranges[r];
+            for (u64 bits = range.accepted; bits; bits &= bits - 1) {
+                u32& cursor = counts[r * views + std::countr_zero(bits)];
+                std::iota(found_copies.begin() + cursor, found_copies.begin() + cursor + range.count, range.begin);
+                cursor += range.count;
+            }
+            if (range.tested)
+                for (u32 i = 0; i < range.count; ++i)
+                    for (u64 bits = visibility[range.first + i] & range.tested; bits; bits &= bits - 1)
+                        found_copies[counts[r * views + std::countr_zero(bits)]++] = range.begin + i;
+        }
+        return true;
+    };
     const auto find_copies = [&]() {
         struct GatherTask {
             u32 view, ref, begin, end;
@@ -8030,7 +8289,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             append_cached(~0u);
         }
     };
-    find_copies();
+    if (!find_live_copies())
+        find_copies();
 
     // Keep source-relative copy indices. Later packing rewrites its backing
     // spans to current GPU table slots, and must never mutate the saved plan.

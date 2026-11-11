@@ -607,6 +607,28 @@ void check(Renderer2D& renderer) {
                cached.stats.local_shadow_casters == fresh.stats.local_shadow_casters &&
                cached.stats.local_gather_cache_bytes <= 4 * 1024 * 1024);
     }
+    // Cube faces leave holes in wanted-view indices. Dense view packets must
+    // map back to those exact faces while cached/static and live rows interleave.
+    scene.lights.spots.clear();
+    scene.lights.max_shadowed_spots = 0;
+    scene.lights.max_shadowed_points = 2;
+    for (f32 x : {-6.f, 6.f})
+        scene.lights.points.push_back(
+            {.position = {x, 3, 5}, .color = {4, 3, 2}, .radius = 30, .shadow_enabled = true});
+    for (f32 x : {-7.f, 0.f, 7.f}) {
+        scene.camera = Camera3D::look_at({x * .2f, 0, 13}, {});
+        move_mixed(x);
+        for (u32 warmup = 0; warmup < 4; ++warmup)
+            shoot(true);
+        const auto cached = shoot(true);
+        const auto fresh = shoot(false);
+        assert(cached.stats.local_shadow_maps >= 2 &&
+               cached.stats.local_gather_cache_hits == cached.stats.local_shadow_maps &&
+               cached.pixels == fresh.pixels && cached.pick_id == fresh.pick_id &&
+               cached.stats.local_shadow_draws == fresh.stats.local_shadow_draws &&
+               cached.stats.local_shadow_triangles == fresh.stats.local_shadow_triangles &&
+               cached.stats.local_shadow_casters == fresh.stats.local_shadow_casters);
+    }
     scene.debug.local_shadow_gather_budget = 0;
     const auto no_program = shoot(true);
     assert(no_program.stats.local_gather_cache_bytes == 0 && no_program.pixels == shoot(false).pixels);
