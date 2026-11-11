@@ -61,6 +61,7 @@ public:
         options.max_pending_commands = 8;
         options.scripts.app = &ctx.app;
         options.scripts.input = &ctx.input;
+        options.scripts.rng = ctx.rng;
         options.scripts.bind = [autoplay = ctx.app.headless()](sol::state& lua) { lua["range_autoplay"] = autoplay; };
         _session = std::make_unique<SceneSession3D>(*_renderer, *_assets, options);
         require(_session->load("scenes/lua-range.kinscene"));

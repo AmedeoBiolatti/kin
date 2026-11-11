@@ -1202,16 +1202,24 @@ bool read_le(std::span<const u8> bytes, std::size_t& offset, int size, u64& valu
 
 } // namespace
 
-// Layout: u32 system count, then per system: u32 id length, the id, u64 scheduled ticks, f32 interval clock (bits).
+// Layout: u32 system count, then per system, in id order (so peers that registered the same systems in another
+// order save the same bytes): u32 id length, the id, u8 enabled, u64 scheduled ticks, f32 interval clock (bits).
 // Little-endian, so the same state is the same bytes on every peer.
 void EcsSystemRegistry::save_schedule_state(std::vector<u8>& out) const {
-    out.clear();
-    append_le(out, _records.size(), 4);
+    std::vector<const SystemRecord*> records;
+    records.reserve(_records.size());
     for (const SystemRecord& record : _records) {
-        append_le(out, record.descriptor.id.size(), 4);
-        out.insert(out.end(), record.descriptor.id.begin(), record.descriptor.id.end());
-        append_le(out, record.scheduled_ticks, 8);
-        append_le(out, std::bit_cast<u32>(record.interval_accumulator), 4);
+        records.push_back(&record);
+    }
+    std::ranges::sort(records, {}, [](const SystemRecord* r) -> std::string_view { return r->descriptor.id; });
+    out.clear();
+    append_le(out, records.size(), 4);
+    for (const SystemRecord* record : records) {
+        append_le(out, record->descriptor.id.size(), 4);
+        out.insert(out.end(), record->descriptor.id.begin(), record->descriptor.id.end());
+        append_le(out, record->enabled ? 1u : 0u, 1);
+        append_le(out, record->scheduled_ticks, 8);
+        append_le(out, std::bit_cast<u32>(record->interval_accumulator), 4);
     }
 }
 
@@ -1221,7 +1229,13 @@ bool EcsSystemRegistry::restore_schedule_state(std::span<const u8> bytes) {
     if (!read_le(bytes, offset, 4, count) || count != _records.size()) {
         return false;
     }
-    std::vector<std::pair<SystemRecord*, std::pair<u64, f32>>> restored;
+    struct Restored {
+        SystemRecord* record;
+        bool enabled;
+        u64 ticks;
+        f32 clock;
+    };
+    std::vector<Restored> restored;
     restored.reserve(_records.size());
     for (u64 i = 0; i < count; ++i) {
         u64 length = 0;
@@ -1230,26 +1244,31 @@ bool EcsSystemRegistry::restore_schedule_state(std::span<const u8> bytes) {
         }
         const std::string_view id(reinterpret_cast<const char*>(bytes.data() + offset), static_cast<std::size_t>(length));
         offset += static_cast<std::size_t>(length);
+        u64 enabled = 0;
         u64 ticks = 0;
         u64 clock = 0;
-        if (!read_le(bytes, offset, 8, ticks) || !read_le(bytes, offset, 4, clock)) {
+        if (!read_le(bytes, offset, 1, enabled) || enabled > 1 || !read_le(bytes, offset, 8, ticks) ||
+            !read_le(bytes, offset, 4, clock)) {
             return false;
         }
         const auto record = std::ranges::find(_records, id, [](const SystemRecord& r) -> std::string_view {
             return r.descriptor.id;
         });
         if (record == _records.end() ||
-            std::ranges::any_of(restored, [&](const auto& entry) { return entry.first == &*record; })) {
+            std::ranges::any_of(restored, [&](const Restored& entry) { return entry.record == &*record; })) {
             return false;
         }
-        restored.push_back({&*record, {ticks, std::bit_cast<f32>(static_cast<u32>(clock))}});
+        restored.push_back({&*record, enabled != 0, ticks, std::bit_cast<f32>(static_cast<u32>(clock))});
     }
     if (offset != bytes.size()) {
         return false;
     }
-    for (const auto& [record, state] : restored) {
-        record->scheduled_ticks = state.first;
-        record->interval_accumulator = state.second;
+    for (const Restored& state : restored) {
+        if (state.record->enabled != state.enabled) {
+            enable(state.record->descriptor.id, state.enabled); // the flecs system too
+        }
+        state.record->scheduled_ticks = state.ticks;
+        state.record->interval_accumulator = state.clock;
     }
     return true;
 }

@@ -126,13 +126,14 @@ Rules:
 - `run_phase()` and `run_frame()` apply rate/interval gates.
 - `run_system()` is a manual/editor/debug run and bypasses rate/interval gates,
   but still skips disabled systems.
-- The gates' counters (ticks seen, interval time carried) belong to the
-  registry, not the world. A game that takes its world back to an earlier state
-  (a rollback, or a peer joining from a saved state; see
-  [networking](networking.md)) saves and restores them with it:
-  `save_schedule_state(bytes)`, `restore_schedule_state(bytes)` (false, and
-  nothing changed, unless the bytes name exactly the registered systems), and
-  `schedule_state_hash()` to compare.
+- The gates' counters (ticks seen, interval time carried) and which systems
+  are enabled belong to the registry, not the world. A game that takes its
+  world back to an earlier state (a rollback, a replay, or a peer joining from
+  a saved state; see [determinism](determinism.md)) saves and restores them
+  with it: `save_schedule_state(bytes)`, `restore_schedule_state(bytes)`
+  (false, and nothing changed, unless the bytes name exactly the registered
+  systems), and `schedule_state_hash()` to compare. The bytes are the same
+  whatever order the systems were registered in.
 
 Invalid descriptors are rejected:
 

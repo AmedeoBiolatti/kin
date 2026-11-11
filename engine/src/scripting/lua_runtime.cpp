@@ -14,6 +14,8 @@
 #include <sol/sol.hpp>
 #include <utility>
 
+extern "C" void kin_lua_set_hash_seed(unsigned int seed); // lua_state_seed.c
+
 namespace kin {
 
 namespace {
@@ -474,6 +476,11 @@ void LuaCall::closing() {
         --_runtime._protected_depth;
         _state = nullptr;
     }
+}
+
+void set_lua_hash_seed(RngKey key) {
+    constexpr u32 fixed = 0x6b696e31u; // as lua_state_seed.c starts
+    kin_lua_set_hash_seed(key == RngKey{} ? fixed : fold_in(key, 0x6c75612e68617368ull).lo); // "lua.hash"
 }
 
 LuaVm::LuaVm(LuaRuntimeLimits limits)

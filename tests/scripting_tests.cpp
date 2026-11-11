@@ -164,6 +164,15 @@ end
     const std::string other = run(8);
     assert(field(other, "order") == field(first, "order"));
     assert(field(other, "draws") != field(first, "draws"));
+
+    // A session's hash seed (a networked game's): its states agree with each other, on another order than kin's
+    // fixed seed gives; RngKey{} brings the fixed seed back.
+    kin::set_lua_hash_seed(kin::make_key(0x5e55));
+    const std::string session = run(7);
+    assert(field(run(7), "order") == field(session, "order"));
+    assert(field(session, "order") != field(first, "order"));
+    kin::set_lua_hash_seed({});
+    assert(field(run(7), "order") == field(first, "order"));
 }
 
 void test_editor_reload_coordinator() {

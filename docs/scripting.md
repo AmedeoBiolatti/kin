@@ -130,7 +130,14 @@ host that wants randomness should bind its own, seeded from the run's `RngKey`.
 
 Scene scripts (`ScriptEngine`, `ScriptScene`) keep `math.random`, seeded from
 the run's `--seed` when the scene enters (before that, from a fixed seed): the
-same numbers in every run with the same seed.
+same numbers in every run with the same seed. 3D scenes take the run's key in
+`SceneScriptOptions3D::rng`.
+
+Two limits matter when machines on different systems must agree (a networked
+game): `math.sin`, `math.cos`, `math.exp`, `math.log` and `^` call the C
+library, whose results can differ in the last bit between systems; and the
+fixed hash seed is public, so such a game sets its own from the session's key
+with `kin::set_lua_hash_seed()`. See [determinism](determinism.md).
 
 Every load and call has an **instruction budget**
 (`LuaScriptOptions::limits.instruction_limit`, 50 million by default, checked every

@@ -1,10 +1,16 @@
 #include <kin/core/dmath.hpp>
 
+#include <cfloat>
 #include <cmath>
 #include <limits>
 
 // Built with -ffp-contract=off (engine/CMakeLists.txt): a fused multiply-add rounds once where a multiply and an add
 // round twice, so a compiler that fuses them on one target and not on another would give other bits.
+
+// Each operation rounds to f32: not so with x87's extended precision (a 32-bit x86 build without SSE2).
+#if defined(FLT_EVAL_METHOD) && FLT_EVAL_METHOD >= 0
+static_assert(FLT_EVAL_METHOD == 0, "kin::dmath needs every f32 operation rounded to f32 (SSE2, not x87)");
+#endif
 
 namespace kin::dmath {
 namespace {

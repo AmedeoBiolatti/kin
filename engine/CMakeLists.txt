@@ -40,10 +40,23 @@ if(ANDROID)
     target_link_libraries(kin_foundation PUBLIC android)
 endif()
 kin_enable_release_optimizations(kin_foundation)
+# Code whose results peers or replays must agree on to the bit is compiled without fused multiply-adds: a fused one
+# rounds once where two operations round twice, so a target with FMA (aarch64, x86 with -mfma or /arch:AVX2) would give
+# other bits. GCC, Clang and AppleClang take -ffp-contract=off; clang-cl takes it only behind /clang:; MSVC's
+# /fp:precise does not contract (Visual Studio 2022 and later). KIN_STRICT_FP also undoes a game's fast-math.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(KIN_NO_FP_CONTRACT "/clang:-ffp-contract=off")
+    set(KIN_STRICT_FP "/clang:-ffp-contract=off;/fp:precise")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(KIN_NO_FP_CONTRACT "-ffp-contract=off")
+    set(KIN_STRICT_FP "-ffp-contract=off;-fno-fast-math")
+elseif(MSVC)
+    set(KIN_NO_FP_CONTRACT "")
+    set(KIN_STRICT_FP "/fp:precise")
+endif()
 # kin::dmath gives the same bits everywhere only if no compiler fuses its multiplies and adds, whatever the game's
-# own flags (docs/networking.md).
-set_source_files_properties(src/core/dmath.cpp PROPERTIES COMPILE_OPTIONS
-    "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off;-fno-fast-math>;$<$<CXX_COMPILER_ID:MSVC>:/fp:precise>")
+# own flags.
+set_source_files_properties(src/core/dmath.cpp PROPERTIES COMPILE_OPTIONS "${KIN_STRICT_FP}")
 
 # Keep reflection/template instantiations out of scene parsing and distribute
 # them across smaller files without changing the public registration sequence.
@@ -373,7 +386,7 @@ if(KIN_ENABLE_PYTHON)
     # No os, io or debugger (files, sockets); a watchdog, which the sandbox turns into an instruction budget.
     target_compile_definitions(kin_pocketpy PUBLIC PK_ENABLE_OS=0 PK_ENABLE_WATCHDOG=1)
     # -ffp-contract=off: its software math gives the same bits where a multiply-add could fuse (determinism).
-    target_compile_options(kin_pocketpy PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w;-ffp-contract=off>" "$<$<C_COMPILER_ID:MSVC>:/w>")
+    target_compile_options(kin_pocketpy PRIVATE "$<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w;-ffp-contract=off>" "$<$<C_COMPILER_ID:MSVC>:/w>")
     kin_enable_release_optimizations(kin_pocketpy)
 
     add_library(kin_python_scripts STATIC
@@ -529,8 +542,7 @@ if(KIN_EXPERIMENTAL_3D)
     # the scene session, the sparks of a seed) get the physics glue's -ffp-contract=off below: a fused multiply-add rounds
     # once where two operations round twice, so a target with FMA (aarch64, or x86 with -mfma) would give other bits.
     foreach(_kin_fp_source src/ecs/physics3d.cpp src/scene/scene_session3d.cpp src/scene/scene_frame3d.cpp src/render3d/particles3d.cpp)
-        set_property(SOURCE ${_kin_fp_source} APPEND PROPERTY COMPILE_OPTIONS
-            "$<$<CXX_COMPILER_ID:GNU,Clang>:-ffp-contract=off>")
+        set_property(SOURCE ${_kin_fp_source} APPEND PROPERTY COMPILE_OPTIONS ${KIN_NO_FP_CONTRACT})
     endforeach()
     if(KIN_ENABLE_PHYSICS3D)
         # kin/physics3d: Jolt Physics behind kin's own types (docs/physics_3d.md). Its sources are compiled apart
@@ -552,8 +564,7 @@ if(KIN_EXPERIMENTAL_3D)
         target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)
         target_include_directories(kin_physics3d_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
         target_link_libraries(kin_physics3d_objects PRIVATE Jolt)
-        target_compile_options(kin_physics3d_objects PRIVATE
-            "$<$<CXX_COMPILER_ID:GNU,Clang>:-fno-rtti;-ffp-contract=off>")
+        target_compile_options(kin_physics3d_objects PRIVATE "$<$<CXX_COMPILER_ID:GNU,Clang>:-fno-rtti>" ${KIN_NO_FP_CONTRACT})
         kin_enable_release_optimizations(kin_physics3d_objects)
         target_sources(kin_engine PRIVATE $<TARGET_OBJECTS:kin_physics3d_objects>)
         target_link_libraries(kin_engine PRIVATE $<LINK_ONLY:Jolt>)

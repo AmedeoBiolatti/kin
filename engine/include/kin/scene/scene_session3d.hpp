@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <kin/core/rng.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/scene3d.hpp>
 #include <kin/physics3d/assets3d.hpp>
@@ -188,6 +189,9 @@ struct SceneScriptOptions3D {
     App* app = nullptr;
     Input* input = nullptr;
     const ScriptComponentRegistry* components = nullptr;
+    // The run's key (SceneContext::rng): the scene script's math.random follows it from on_enter, so it draws the
+    // same numbers in every run with the same --seed.
+    RngKey rng{};
     // Applied to every fresh VM after the stock ECS and scene3d bindings.
     std::function<void(sol::state&)> bind;
 };

@@ -1,9 +1,10 @@
 #pragma once
 
-// Deterministic math: the same bits from the same input with every compiler, C library and CPU kin builds for. A
-// simulation that peers must agree on (docs/networking.md) uses these instead of std::sin and friends, whose
+// Deterministic math: the same bits from the same input with every compiler, C library and CPU. A simulation that
+// peers or replays must agree on (docs/determinism.md) uses these instead of std::sin and friends, whose
 // implementations differ between C libraries (glibc, the MSVC runtime, Apple's) in the last bit, and a last bit is
-// enough for two simulations to drift apart.
+// enough for two simulations to drift apart. A golden hash checks it in CI on x64 (GCC, Clang, MSVC); arm64 and the
+// web are not checked yet. f32 only, and no exp, log or pow yet.
 //
 // They are Cephes' single-precision polynomials, made only of +, -, *, / (and exact steps: conversion to integer,
 // std::fmod, std::sqrt), compiled without fused multiply-adds (-ffp-contract=off) in kin's own build, so no compiler

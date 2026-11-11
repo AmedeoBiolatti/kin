@@ -2,7 +2,7 @@
 # surrounding build uses a Release configuration (whose standard flags define
 # NDEBUG), and preserve setup expressions written inside legacy assertions.
 add_compile_options(
-    "$<$<CXX_COMPILER_ID:GNU,Clang>:-UNDEBUG>"
+    "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>"
     "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
 )
 

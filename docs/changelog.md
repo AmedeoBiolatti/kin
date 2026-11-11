@@ -9,13 +9,21 @@ releases may change APIs.
 
 ### Added
 
-- Determinism for networked and replayed games: `kin::dmath` (sin, cos, tan,
-  asin, acos, atan, atan2) gives the same bits with every compiler and CPU,
-  checked by a golden hash; `SceneContext::step` and `fold_in()` give every
-  update its own RNG key; Lua is built with a fixed string-hash seed, so
-  `pairs` over string keys walks in one order everywhere, and scene scripts'
-  `math.random` follows `--seed`; the ECS scheduler's rate and interval
-  counters can be saved and restored beside the world.
+- Determinism for replayed and networked games ([determinism](determinism.md)):
+  - `kin::dmath` (sin, cos, sincos, tan, asin, acos, atan, atan2 in f32) gives
+    the same bits with every compiler and CPU, checked by a golden hash on x64.
+  - `SceneContext::step` numbers the updates (a paused inspector holds it) and
+    `fold_in()` gives each update its own RNG key.
+  - Lua is built with a fixed string-hash seed, so `pairs` over string and
+    number keys walks in one order everywhere; `kin::set_lua_hash_seed()` sets a
+    session's. Scene scripts' `math.random` follows `--seed`, in 3D scenes too
+    (`SceneScriptOptions3D::rng`).
+  - The ECS scheduler's state (rate and interval counters, enabled systems) can
+    be saved and restored beside the world, in the same bytes whatever the
+    systems' registration order.
+  - kin's code that must give the same bits is compiled without fused
+    multiply-adds on clang-cl and AppleClang too; test assertions stay on in
+    AppleClang Release builds.
 
 ## [0.3.0] — 2026-11-10
 

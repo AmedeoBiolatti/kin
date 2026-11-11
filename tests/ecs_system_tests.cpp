@@ -320,6 +320,26 @@ void test_schedule_state_save_and_restore() {
     other.systems().save_schedule_state(other_bytes);
     assert(!world.systems().restore_schedule_state(other_bytes));
     assert(world.systems().schedule_state_hash() == before);
+
+    // Disabling a system is scheduler state too: a rollback past it enables the system again.
+    world.systems().save_schedule_state(saved);
+    assert(world.systems().disable("every.third"));
+    assert(run_ticks(3).find('r') == std::string::npos);
+    assert(world.systems().restore_schedule_state(saved));
+    assert(world.systems().snapshot("every.third").enabled);
+    assert(run_ticks(3).find('r') != std::string::npos);
+
+    // The same systems registered in another order save the same bytes.
+    kin::EcsWorld first_order;
+    kin::EcsWorld second_order;
+    register_components(first_order);
+    register_components(second_order);
+    first_order.systems().register_task({.id = "a", .rate = 2}, [](kin::SystemContext&) {});
+    first_order.systems().register_task({.id = "b", .rate = 3}, [](kin::SystemContext&) {});
+    second_order.systems().register_task({.id = "b", .rate = 3}, [](kin::SystemContext&) {});
+    second_order.systems().register_task({.id = "a", .rate = 2}, [](kin::SystemContext&) {});
+    assert(first_order.run_frame(0.1f) && second_order.run_frame(0.1f));
+    assert(first_order.systems().schedule_state_hash() == second_order.systems().schedule_state_hash());
 }
 
 void test_manual_run_bypasses_rate_and_interval() {
