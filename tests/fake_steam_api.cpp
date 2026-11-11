@@ -641,6 +641,21 @@ FAKE_API void kin_fake_steam_member_leaves(u64 lobby, u64 user) {
              sf::LobbyChatUpdate{.lobby = lobby, .changed = user, .making_change = user, .state_change = 0x4});
     }
 }
+// How many members a lobby has on "Steam's" side (a ghost member counts).
+FAKE_API int kin_fake_steam_member_count(u64 lobby) {
+    const State::Lobby* l = lobby_of(lobby);
+    return l ? static_cast<int>(l->members.size()) : -1;
+}
+// Takes a member out without telling anyone (as when the player was offline).
+FAKE_API void kin_fake_steam_drop_member(u64 lobby, u64 user) {
+    if (State::Lobby* l = lobby_of(lobby)) {
+        std::erase(l->members, user);
+    }
+}
+// The connection to Steam's servers goes away, or comes back.
+FAKE_API void kin_fake_steam_connection(bool connected) {
+    push(connected ? sf::cb_servers_connected : sf::cb_servers_disconnected, u8{0});
+}
 FAKE_API void kin_fake_steam_kicked(u64 lobby) {
     push(sf::cb_lobby_kicked, sf::LobbyKicked{.lobby = lobby, .admin = lobby, .due_to_disconnect = 1});
 }

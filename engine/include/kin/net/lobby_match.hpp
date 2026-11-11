@@ -66,9 +66,13 @@ bool free_lobby_slot(PlatformServices& services, std::string_view player);
 void configure_input_sync(const LobbyMatch& match, ServicesTransport& transport, InputSyncConfig& config);
 
 // Lets every player the match seated late join `session` (InputSync::allow_join). Every player in the game calls it
-// when the match changes; seats already allowed are left alone.
+// when the match changes; seats already allowed are left alone. A match of another session (the owner ended this one
+// and started the next) changes nothing.
 template <class SessionType>
 u32 allow_lobby_joiners(const LobbyMatch& match, ServicesTransport& transport, SessionType& session) {
+    if (match.session != session.config().session || match.players.size() != session.config().players) {
+        return 0;
+    }
     u32 allowed = 0;
     for (u32 slot = 0; slot < match.players.size(); ++slot) {
         if (slot != match.local_player && match.late[slot] && !match.players[slot].empty() &&

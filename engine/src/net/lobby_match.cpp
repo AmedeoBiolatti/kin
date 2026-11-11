@@ -47,11 +47,17 @@ std::optional<LobbyMatch> decode(std::string_view text) {
         if (late) {
             line.remove_prefix(1);
         }
-        if (line.empty() || (line == "-" && late)) {
+        // A player listed twice would have two slots and one peer, so the whole match is refused, as are a
+        // mangled line (from an owner of another build, or one that writes the data by hand) and a match with no one.
+        if (line.empty() || (line == "-" && late) || line.starts_with('+') || line.find('\r') != line.npos ||
+            (line != "-" && std::ranges::find(match.players, line) != match.players.end())) {
             return std::nullopt;
         }
         match.players.emplace_back(line == "-" ? std::string_view{} : line);
         match.late.push_back(late);
+    }
+    if (!std::ranges::any_of(match.players, [](const std::string& p) { return !p.empty(); })) {
+        return std::nullopt;
     }
     return match;
 }
@@ -80,7 +86,7 @@ bool start_lobby_match(PlatformServices& services, std::span<const std::string> 
         for (const std::string& player : players) {
             const bool member = std::ranges::any_of(members, [&](const LobbyMember& m) { return m.id == player; });
             if (!member || player.empty() || std::ranges::find(match.players, player) != match.players.end() ||
-                player.find('\n') != std::string::npos || player.starts_with('+') || player == "-") {
+                player.find_first_of("\r\n") != std::string::npos || player.starts_with('+') || player == "-") {
                 return false;
             }
             match.players.push_back(player);
@@ -133,7 +139,7 @@ u32 seat_lobby_joiners(PlatformServices& services) {
     u32 seated = 0;
     for (const LobbyMember& member : services.lobby_members()) {
         if (std::ranges::find(match->players, member.id) != match->players.end() || member.id.empty() ||
-            member.id.starts_with('+') || member.id == "-" || member.id.find('\n') != std::string::npos) {
+            member.id.starts_with('+') || member.id == "-" || member.id.find_first_of("\r\n") != std::string::npos) {
             continue;
         }
         const auto free = std::ranges::find(match->players, std::string{});

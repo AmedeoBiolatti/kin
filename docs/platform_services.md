@@ -108,8 +108,8 @@ plays a match over them.
 | | |
 |---|---|
 | `create_lobby({max_members, visibility, data})` | `Private` (by invitation), `FriendsOnly`, `Public` (found by search), `Invisible` (found, not shown to friends). Answered by `LobbyEntered` or `LobbyFailed`. |
-| `find_lobbies({rules, open_slots, distance, max_results})` | Rules compare a lobby's data, as text or numbers. Answered by `LobbyList` (`event.lobbies`: id, members, max members, data). |
-| `join_lobby(id)`, `leave_lobby()`, `lobby()` | One lobby at a time. Ids look like `lobby:<id>`, as `JoinRequested`, `join_on_launch()` and `invite_friends()` use them. |
+| `find_lobbies({rules, open_slots, distance, max_results})` | Rules compare a lobby's data, as text or numbers. Answered by `LobbyList` (`event.lobbies`: id, members, max members, data). One search at a time: a newer one ends the last, whose `LobbyList` fails. |
+| `join_lobby(id)`, `leave_lobby()`, `lobby()` | One lobby at a time. Ids look like `lobby:<id>`, as `JoinRequested`, `join_on_launch()` and `invite_friends()` use them. A new `create_lobby` or `join_lobby`, or `leave_lobby()`, cancels one still on its way: it is answered by `LobbyFailed` ("cancelled"), and its lobby is left. |
 | `lobby_members()`, `lobby_owner()` | Members in the order they joined, the player too. When the owner leaves, the platform picks another. |
 | `set_lobby_data`, `lobby_data` | Only the owner sets it. |
 | `set_member_data`, `member_data` | Each member's own. |
@@ -136,7 +136,8 @@ Each `update()` replaces `events()` with what happened since the one before:
 - `Disconnected` / `Reconnected`;
 - `LobbyEntered` / `LobbyFailed` / `LobbyList`;
 - `LobbyMemberJoined` / `LobbyMemberLeft`, `LobbyDataChanged` (`id`: the member, or `""` for the lobby's own
-  data), `LobbyMessage`, `LobbyLeft` (removed from the lobby, or the connection to it was lost);
+  data), `LobbyMessage`, `LobbyLeft` (removed from the lobby, or dropped from it while the connection was lost: on
+  Steam this shows when it comes back);
 - `MessagesFailed`: messages to a player stopped getting through.
 
 `run_scene_app` calls `update()` on a frame's first fixed step, so every step of

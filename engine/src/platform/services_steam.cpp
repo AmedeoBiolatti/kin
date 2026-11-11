@@ -413,6 +413,7 @@ public:
         const u32 request = _next_request++;
         _calls[call] = {.kind = Call::Kind::LobbyCreate, .request = request};
         _lobby_options[request] = options.data;
+        _lobby_request = request;
         return request;
     }
     u32 join_lobby(std::string_view lobby) override {
@@ -421,8 +422,8 @@ public:
             return 0;
         }
         start_relays();
-        const u32 request = _next_request++;
-        if (*id == _lobby) {
+        if (*id == _lobby && _lobby_request == 0) {
+            const u32 request = _next_request++;
             _pending.push_back(
                 {.kind = ServiceEventKind::LobbyEntered, .id = steam_lobby_id(_lobby), .request = request, .ok = true});
             return request;
@@ -432,15 +433,20 @@ public:
         if (call == 0) {
             return 0;
         }
+        const u32 request = _next_request++;
         _calls[call] = {.kind = Call::Kind::LobbyJoin, .request = request};
-        _entering[*id] = request;
+        _lobby_request = request;
+        _lobby_joining = *id;
         return request;
     }
+    // Also cancels a create_lobby or join_lobby still on its way: its lobby is left when the answer comes.
     void leave_lobby() override {
         if (_lobby != 0 && _matchmaking) {
             _api->mm_leave(_matchmaking, _lobby);
         }
         _lobby = 0;
+        _lobby_request = 0;
+        _lobby_joining = 0;
     }
     u32 find_lobbies(const LobbyFilter& filter) override {
         if (!_matchmaking) {
@@ -460,12 +466,20 @@ public:
         }
         _api->mm_filter_distance(_matchmaking, static_cast<i32>(filter.distance));
         _api->mm_filter_count(_matchmaking, static_cast<int>(std::max<u32>(filter.max_results, 1)));
+        // Steam keeps one search: a new one ends the last, which is answered as failed here.
+        if (const auto last = _calls.find(_list_call); last != _calls.end()) {
+            _pending.push_back({.kind = ServiceEventKind::LobbyList,
+                                .text = "replaced by a newer search",
+                                .request = last->second.request});
+            _calls.erase(last);
+        }
         const sf::SteamAPICall call = _api->mm_request_list(_matchmaking);
         if (call == 0) {
             return 0;
         }
         const u32 request = _next_request++;
         _calls[call] = {.kind = Call::Kind::LobbyList, .request = request};
+        _list_call = call;
         return request;
     }
     std::string lobby() const override { return _lobby != 0 ? steam_lobby_id(_lobby) : std::string{}; }
@@ -585,18 +599,25 @@ private:
         return false;
     }
 
-    void entered(u64 lobby) {
-        if (lobby == 0 || lobby == _lobby) {
-            return;
+    // The answer to a create_lobby or join_lobby that put the player in `lobby`: entered, or left again at once if
+    // the request was cancelled (left, or replaced by a newer one) on the way, so no ghost member stays behind.
+    bool entered(u32 request, u64 lobby) {
+        if (request != _lobby_request) {
+            if (lobby != _lobby && lobby != _lobby_joining) {
+                _api->mm_leave(_matchmaking, lobby);
+            }
+            _pending.push_back({.kind = ServiceEventKind::LobbyFailed, .text = "cancelled", .request = request});
+            return false;
         }
+        _lobby_request = 0;
+        _lobby_joining = 0;
         _lobby = lobby;
-        u32 request = 0;
-        if (const auto it = _entering.find(lobby); it != _entering.end()) {
-            request = it->second;
-            _entering.erase(it);
-        }
-        _pending.push_back(
-            {.kind = ServiceEventKind::LobbyEntered, .id = steam_lobby_id(lobby), .request = request, .ok = true});
+        return true;
+    }
+    void lobby_lost() {
+        const u64 lost = _lobby;
+        _lobby = 0;
+        _pending.push_back({.kind = ServiceEventKind::LobbyLeft, .id = steam_lobby_id(lost)});
     }
 
     std::vector<LobbyInfo> lobby_list(u32 count) const {
@@ -825,6 +846,10 @@ private:
             if (!_connected) {
                 _connected = true;
                 _pending.push_back({.kind = ServiceEventKind::Reconnected});
+                // Steam tells no one who was dropped from a lobby while away (LobbyKicked_t is unused): look.
+                if (_lobby != 0 && _user && !lobby_member(_api->user_steam_id(_user))) {
+                    lobby_lost();
+                }
             }
             break;
         case sf::cb_servers_disconnected:
@@ -867,13 +892,7 @@ private:
             }
             break;
         }
-        case sf::cb_lobby_enter: {
-            const auto enter = payload<sf::LobbyEnter>(data, size);
-            if (enter.response == sf::enter_success) {
-                entered(enter.lobby); // a failure is answered by JoinLobby's call result
-            }
-            break;
-        }
+        // LobbyEnter_t also comes as a callback, before or after the call result: the call results alone decide.
         case sf::cb_lobby_data_update: {
             const auto update = payload<sf::LobbyDataUpdate>(data, size);
             if (update.lobby == _lobby && _lobby != 0 && update.success) {
@@ -894,7 +913,12 @@ private:
                                     .id = steam_player_id(update.changed),
                                     .text = name ? name : ""});
             } else if (update.state_change & sf::member_gone) {
-                _pending.push_back({.kind = ServiceEventKind::LobbyMemberLeft, .id = steam_player_id(update.changed)});
+                if (_user && update.changed == _api->user_steam_id(_user)) {
+                    lobby_lost(); // this player was removed
+                } else {
+                    _pending.push_back(
+                        {.kind = ServiceEventKind::LobbyMemberLeft, .id = steam_player_id(update.changed)});
+                }
             }
             break;
         }
@@ -918,8 +942,7 @@ private:
         case sf::cb_lobby_kicked: {
             const auto kicked = payload<sf::LobbyKicked>(data, size);
             if (kicked.lobby == _lobby && _lobby != 0) {
-                _lobby = 0;
-                _pending.push_back({.kind = ServiceEventKind::LobbyLeft, .id = steam_lobby_id(kicked.lobby)});
+                lobby_lost();
             }
             break;
         }
@@ -957,21 +980,24 @@ private:
             std::vector<std::pair<std::string, std::string>> initial = std::move(_lobby_options[call.request]);
             _lobby_options.erase(call.request);
             if (!ok || id != sf::cb_lobby_created || created.result != sf::result_ok || created.lobby == 0) {
+                if (call.request == _lobby_request) {
+                    _lobby_request = 0;
+                }
                 _pending.push_back({.kind = ServiceEventKind::LobbyFailed,
                                     .text = "CreateLobby failed: EResult " + std::to_string(created.result),
                                     .request = call.request});
                 return;
             }
-            _entering[created.lobby] = call.request;
-            const bool was_in = created.lobby == _lobby;
-            _lobby = created.lobby; // the creator is in it already: its data can be set now
-            for (const auto& [key, value] : initial) {
+            if (!entered(call.request, created.lobby)) {
+                return;
+            }
+            for (const auto& [key, value] : initial) { // set before anyone can find it
                 _api->mm_set_data(_matchmaking, _lobby, key.c_str(), value.c_str());
             }
-            if (!was_in) {
-                _lobby = 0;
-                entered(created.lobby);
-            }
+            _pending.push_back({.kind = ServiceEventKind::LobbyEntered,
+                                .id = steam_lobby_id(_lobby),
+                                .request = call.request,
+                                .ok = true});
             return;
         }
         if (call.kind == Call::Kind::LobbyJoin) {
@@ -995,16 +1021,23 @@ private:
                                                           "too many attempts: try again shortly"};
                 const u32 r = enter.response;
                 const std::string why = ok && r < std::size(reasons) && reasons[r][0] ? reasons[r] : "JoinLobby failed";
-                for (auto it = _entering.begin(); it != _entering.end();) {
-                    it = it->second == call.request ? _entering.erase(it) : std::next(it);
+                if (call.request == _lobby_request) {
+                    _lobby_request = 0;
+                    _lobby_joining = 0;
                 }
                 _pending.push_back({.kind = ServiceEventKind::LobbyFailed, .text = why, .request = call.request});
                 return;
             }
-            entered(enter.lobby);
+            if (entered(call.request, enter.lobby)) {
+                _pending.push_back({.kind = ServiceEventKind::LobbyEntered,
+                                    .id = steam_lobby_id(_lobby),
+                                    .request = call.request,
+                                    .ok = true});
+            }
             return;
         }
         if (call.kind == Call::Kind::LobbyList) {
+            _list_call = 0;
             const auto list = payload<sf::LobbyMatchList>(data, size);
             if (!ok || id != sf::cb_lobby_match_list) {
                 _pending.push_back(
@@ -1111,7 +1144,9 @@ private:
     void* _net_utils = nullptr;
     bool _relays_started = false;
     u64 _lobby = 0;
-    std::map<u64, u32> _entering;                                                   // lobby, request
+    u32 _lobby_request = 0; // the create_lobby or join_lobby whose answer counts (0: none)
+    u64 _lobby_joining = 0; // the lobby that join_lobby is entering
+    sf::SteamAPICall _list_call = 0;
     std::map<u32, std::vector<std::pair<std::string, std::string>>> _lobby_options; // request, initial data
     bool _stats_ready = true;
     double _stats_retry_at = 0.0; // when to ask for the player's stats again (0: not)

@@ -531,6 +531,76 @@ void test_steam_lobbies_and_messages() {
     pump();
     assert(find_event(*services, ServiceEventKind::LobbyLeft) && services->lobby().empty());
 
+    // Requests answered after they were cancelled leave their lobby again: no ghost member stays behind.
+    const auto members = steam.get<int (*)(u64)>("kin_fake_steam_member_count");
+    const auto count = [&](ServiceEventKind kind) {
+        return std::ranges::count_if(services->events(), [&](const ServiceEvent& e) { return e.kind == kind; });
+    };
+    steam.get<void (*)(u64, u64, int, const char*, const char*)>("kin_fake_steam_add_lobby")(510, 2, 4, "mode", "coop");
+    const kin::u32 cancelled = services->join_lobby("lobby:510");
+    services->leave_lobby();
+    pump();
+    const ServiceEvent* failed_join = find_event(*services, ServiceEventKind::LobbyFailed);
+    assert(failed_join && failed_join->request == cancelled && failed_join->text == "cancelled");
+    assert(count(ServiceEventKind::LobbyEntered) == 0 && services->lobby().empty() && members(510) == 1);
+    const kin::u32 first = services->create_lobby({});
+    const kin::u32 second = services->create_lobby({});
+    pump();
+    const ServiceEvent* replaced = find_event(*services, ServiceEventKind::LobbyFailed);
+    entered = find_event(*services, ServiceEventKind::LobbyEntered);
+    assert(replaced && replaced->request == first && replaced->text == "cancelled");
+    assert(entered && entered->request == second && count(ServiceEventKind::LobbyEntered) == 1);
+    const u64 made_second = std::stoull(services->lobby().substr(6));
+    assert(members(made_second - 1) == 0 && members(made_second) == 1);
+    // Created, then joined elsewhere before the answer: only the joined lobby keeps us.
+    const kin::u32 dropped = services->create_lobby({});
+    const kin::u32 joined_instead = services->join_lobby("lobby:510");
+    pump();
+    replaced = find_event(*services, ServiceEventKind::LobbyFailed);
+    entered = find_event(*services, ServiceEventKind::LobbyEntered);
+    assert(replaced && replaced->request == dropped && entered && entered->request == joined_instead);
+    assert(services->lobby() == "lobby:510" && members(made_second) == 0 && members(made_second + 1) == 0);
+
+    // Removed from the lobby (the owner kicked us, or Steam dropped us): LobbyLeft, not LobbyMemberLeft.
+    const u64 self_id = std::stoull(self.substr(6));
+    steam.get<void (*)(u64, u64)>("kin_fake_steam_member_leaves")(510, self_id);
+    pump();
+    assert(count(ServiceEventKind::LobbyLeft) == 1 && count(ServiceEventKind::LobbyMemberLeft) == 0);
+    assert(services->lobby().empty());
+    // Dropped while the connection was gone: found out when it comes back.
+    services->join_lobby("lobby:510");
+    pump();
+    assert(services->lobby() == "lobby:510");
+    const auto connection = steam.get<void (*)(bool)>("kin_fake_steam_connection");
+    connection(false);
+    steam.get<void (*)(u64, u64)>("kin_fake_steam_drop_member")(510, self_id);
+    pump();
+    assert(count(ServiceEventKind::Disconnected) == 1 && services->lobby() == "lobby:510");
+    connection(true);
+    pump();
+    assert(count(ServiceEventKind::Reconnected) == 1 && count(ServiceEventKind::LobbyLeft) == 1);
+    assert(services->lobby().empty());
+    // Still a member after a short drop: nothing changes.
+    services->join_lobby("lobby:510");
+    pump();
+    connection(false);
+    connection(true);
+    pump();
+    assert(count(ServiceEventKind::LobbyLeft) == 0 && services->lobby() == "lobby:510");
+    services->leave_lobby();
+
+    // Steam keeps one search: a newer one ends the last, which is answered as failed.
+    const kin::u32 older = services->find_lobbies({});
+    const kin::u32 newer = services->find_lobbies({});
+    pump();
+    assert(count(ServiceEventKind::LobbyList) == 2);
+    for (const ServiceEvent& event : services->events()) {
+        if (event.kind == ServiceEventKind::LobbyList) {
+            assert(event.request == older ? !event.ok && event.text == "replaced by a newer search"
+                                          : event.request == newer && event.ok);
+        }
+    }
+
     // Lobbies that cannot be joined.
     steam.get<void (*)(u64, u64, int, const char*, const char*)>("kin_fake_steam_add_lobby")(600, 2, 1, "mode", "coop");
     const kin::u32 full = services->join_lobby("lobby:600");

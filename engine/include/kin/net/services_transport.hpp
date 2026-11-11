@@ -21,8 +21,9 @@ class PlatformServices;
 namespace kin::net {
 
 struct ServicesTransportOptions {
-    // The platform's message channel the transport uses: keep it apart from the game's own messages.
-    u32 channel = 0;
+    // The platform's message channel the transport uses. It is not send_message()'s default (0), where a game's own
+    // messages go, so the transport never takes them.
+    u32 channel = 1;
     // Messages from a player add_peer() did not name get a new peer id (a host learns its players this way), up to
     // this many peers in all; later strangers are ignored.
     bool accept_unknown = true;

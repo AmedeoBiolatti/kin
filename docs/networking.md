@@ -195,7 +195,8 @@ use `ServicesTransport` for that.
 they can and through Valve's relays where they can't, so two players behind any NAT reach each other, and neither
 sees the other's address. Peers are players: `add_peer("steam:7656...")`. A message from a player it does not know
 gets a new peer id (unless `accept_unknown` is off). The platform takes messages only from members of the player's lobby and from
-players the game sent to first. `channel` keeps a match apart from the game's other messages. The transport needs
+players the game sent to first. `channel` (1 unless set) keeps a match apart from the game's other messages, which
+`send_message` puts on channel 0 unless told otherwise. The transport needs
 the services' `update()` each frame (`run_scene_app` calls it). Offline, nothing is sent. Tests use `FakeServices`
 on a `kin::FakeNetwork`, which can drop messages (`drop_every`).
 
@@ -207,12 +208,13 @@ peer has not acknowledged in each datagram, so a lost datagram costs nothing.
 Players meet in a lobby (`create_lobby`, `find_lobbies`, `join_lobby`, invitations). When everyone is ready, the
 owner starts the match, and every member reads it from the lobby's data (`kin.match`). Slots go in the order the
 owner gives (the order members joined, by default). The session number keeps this match apart from the lobby's
-earlier ones. The lobby closes to newcomers until `end_lobby_match()`.
+earlier ones. The lobby closes to newcomers until `end_lobby_match()`. A `kin.match` that lists a player twice, or
+none, is not a match: `read_lobby_match` returns nothing.
 
 ```cpp
 #include <kin/net/lobby_match.hpp>
 
-kin::net::ServicesTransport transport(*services, {.channel = 1});
+kin::net::ServicesTransport transport(*services);
 
 // The owner, when everyone is ready:
 kin::net::start_lobby_match(*services);
@@ -223,9 +225,14 @@ if (const auto match = kin::net::read_lobby_match(*services)) {
                                      .game = kin::net::compatibility_hash("my_game", "1.2")};
     kin::net::configure_input_sync(*match, transport, config); // players, local_player, peers, session
     game = std::make_unique<Game>(match->session);             // the session doubles as a shared seed
+    kin::set_lua_hash_seed(kin::make_key(match->session));     // before the game's scripts start
     session = std::make_unique<kin::net::InputSync<Game, Command>>(*game, transport, config);
 }
 ```
+
+The Lua hash seed keeps `pairs` in one order on every peer. Lobby data can be read by anyone who can find the lobby,
+so in a public lobby the session is not a secret: the seed then orders tables, but does not keep outsiders from
+crafting colliding strings.
 
 `kin-net-services` plays three players this way, on a network that loses one message in seven. They find the
 lobby, join it, start the match and play it under rollback, and every state hash agrees.

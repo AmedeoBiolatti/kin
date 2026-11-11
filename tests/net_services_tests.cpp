@@ -175,7 +175,7 @@ void test_transport() {
     assert(to_bob != no_peer && a.add_peer("fake:bob") == to_bob && a.peer_player(to_bob) == "fake:bob");
     assert(a.max_datagram() == 1200 && !a.send(to_bob, std::vector<u8>(1201)) && !a.send(99, std::vector<u8>(1)));
 
-    // Bob does not accept unknown peers: Ann's datagram is dropped until Bob names her.
+    // Bob does not accept unknown peers: Ann's datagram is dropped until Bob names Ann.
     const std::vector<u8> bytes = {7, 7};
     assert(a.send(to_bob, bytes));
     std::vector<Datagram> in;
@@ -340,6 +340,51 @@ void test_lobby_match() {
     assert(end_lobby_match(host) && !read_lobby_match(host));
     late.join_lobby(host.lobby());
     assert(find(take(late), ServiceEventKind::LobbyEntered));
+
+    // A kin.match written some other way is read only if it is one: a player listed twice would get two slots.
+    const auto reads = [&](const char* text) {
+        assert(host.set_lobby_data(lobby_match_key, text));
+        return read_lobby_match(host).has_value();
+    };
+    assert(reads("1\n5eed\nfake:Ann\nfake:Bob"));
+    assert(reads("2\n5eed\nfake:Ann\n-\n+fake:Bob"));
+    assert(!reads("1\n5eed\nfake:Ann\nfake:Ann"));
+    assert(!reads("2\n5eed\nfake:Ann\n+fake:Ann"));
+    assert(!reads("1\n5eed\nfake:Ann\r\nfake:Bob"));
+    assert(!reads("1\n5eed\nfake:Ann\n++fake:Bob"));
+    assert(!reads("1\n5eed\nfake:Ann\n"));
+    assert(!reads("1\n0\nfake:Ann"));
+    assert(!reads("3\n5eed\nfake:Ann"));
+    assert(!reads("2\n5eed\n-\n-")); // nobody
+    assert(end_lobby_match(host));
+}
+
+// allow_lobby_joiners lets latecomers into the session the match is for, not into another one.
+void test_lobby_joiners_session() {
+    struct Session {
+        InputSyncConfig config_{.players = 3, .session = 0x5eed};
+        std::vector<u32> allowed;
+        const InputSyncConfig& config() const { return config_; }
+        bool allow_join(u32 slot, PeerId) {
+            allowed.push_back(slot);
+            return true;
+        }
+    };
+    FakeNetwork network;
+    FakeServices ann(network, {.id = "fake:Ann", .name = "Ann"});
+    ServicesTransport transport(ann);
+    LobbyMatch match{.session = 0x5eed,
+                     .players = {"fake:Ann", "fake:Bob", "fake:Cyd"},
+                     .late = {false, false, true},
+                     .joinable = true};
+    Session session;
+    assert(allow_lobby_joiners(match, transport, session) == 1 && session.allowed == std::vector<u32>{2});
+    match.session = 0xbeef; // the owner ended that match and started the next
+    assert(allow_lobby_joiners(match, transport, session) == 0 && session.allowed.size() == 1);
+    match.session = 0x5eed;
+    match.players.push_back("fake:Dan");
+    match.late.push_back(true);
+    assert(allow_lobby_joiners(match, transport, session) == 0 && session.allowed.size() == 1);
 }
 
 // A match with free slots: two start, two more join through the lobby while it runs, and one who was seated but left
@@ -419,7 +464,7 @@ void test_lobby_late_join() {
     });
     assert(players[2].session->config().joining && players[2].session->stats().start_tick >= 150);
 
-    // Dan is seated in the last slot, and leaves before he plays: his slot is free again, and Eve takes it.
+    // Dan is seated in the last slot and leaves before playing: the slot is free again, and Eve takes it.
     Player& dan = add_player("Dan");
     dan.services->join_lobby(host.lobby());
     for (int i = 0; i < 3; ++i) {
@@ -473,6 +518,7 @@ int main() {
     test_messages();
     test_transport();
     test_lobby_match();
+    test_lobby_joiners_session();
     test_lobby_late_join();
     std::printf("net services tests passed\n");
     return 0;
