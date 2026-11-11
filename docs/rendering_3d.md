@@ -331,6 +331,9 @@ sun/moon/GI maps, enabled LOD and explicit prepared consumers keep their existin
 paths. A changed or expired source/projection invalidates its plan, including
 scene moves and edits between views of the same GPU frame.
 
+Temporary per-view selection rows reserve space from accepted ref/level counts, including cached static rows.
+This avoids repeated growth while preserving source/copy order and the existing packing and cache lifetimes.
+
 Depth batching retains its 128-entry locality windows. Exact current comparator
 keys validate a saved sort permutation per window; a changed key sequence is
 sorted again with the original stable tie order. Current records, textures and

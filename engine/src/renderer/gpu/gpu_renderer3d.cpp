@@ -7888,19 +7888,43 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         // Put together in the original (view, draw, level, copy) order. Size the backing store
         // before creating Found spans; cache decisions and cluster cuts must not invalidate them.
         std::size_t accepted = 0;
+        std::array<std::size_t, view_limit> found_rows{};
+        u32 previous_view = ~0u, previous_ref = ~0u, buckets_seen = 0;
         for (const GatherTask& task : tasks) {
+            if (task.view != previous_view || task.ref != previous_ref) {
+                previous_view = task.view;
+                previous_ref = task.ref;
+                buckets_seen = 0;
+            }
             {
                 if (task.count_bucket != rejected) {
                     accepted += task.counts;
+                    if (task.counts && !buckets_seen) {
+                        ++found_rows[task.view];
+                        buckets_seen = 1u << task.count_bucket;
+                    }
                     continue;
                 }
             }
-            for (u32 l = 0; l <= max_mesh_levels; ++l)
-                accepted += count_of(task, l);
+            for (u32 l = 0; l <= max_mesh_levels; ++l) {
+                const u32 count = count_of(task, l);
+                accepted += count;
+                if (count && !(buckets_seen & (1u << l))) {
+                    ++found_rows[task.view];
+                    buckets_seen |= 1u << l;
+                }
+            }
         }
-        for (u32 v = 0; v < _local_views.size(); ++v)
-            if (hits[v])
+        for (u32 v = 0; v < _local_views.size(); ++v) {
+            if (hits[v]) {
                 accepted += plans[v]->copies.size();
+                found_rows[v] += plans[v]->rows.size();
+            }
+            // Tasks are ordered by view/ref, and pieces of one ref share each
+            // nonempty level bucket. Reserve those rows once instead of moving
+            // thousands of cached static rows through repeated vector growth.
+            found[v].reserve(found_rows[v]);
+        }
         stats.local_task_bytes =
             tasks.capacity() * sizeof(GatherTask) + level_counts.capacity() * sizeof(level_counts[0]);
         found_copies.resize(accepted);

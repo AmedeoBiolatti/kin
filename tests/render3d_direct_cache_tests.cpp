@@ -418,6 +418,58 @@ void check(Renderer2D& renderer) {
                oversized_layout.pixels == raw_large.pixels);
     }
 
+    // Pre-sized selections preserve source/copy order through GPU slot packing.
+    // Mix multi-copy static rows with moving rows, including
+    // a cached map before/after a redrawn map in the packing order.
+    scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    auto mixed_batch = InstanceBatch3D::create(mesh, stationary).value_or({});
+    assert(mixed_batch);
+    for (u32 row = 0; row < 32; ++row) {
+        std::vector<MeshInstance3D> copies;
+        for (u32 i = 0; i < 16; ++i) {
+            const u32 n = row * 16 + i;
+            copies.push_back(
+                {Mat4f::translation({f32(n % 32) * .65f - 10, f32(n / 32) * .65f - 5, 0}), colors::white, n + 1});
+        }
+        assert(scene.draw_instanced(mesh, copies, materials[row % 3]));
+        if (row == 16)
+            assert(scene.draw_instanced(mixed_batch, materials[0]));
+    }
+    for (f32 x : {-6.f, 6.f})
+        scene.lights.spots.push_back(
+            {.position = {x, 4, 6}, .direction = normalize(Vec3f{0, -4, -6}), .radius = 30, .shadow_enabled = true});
+    scene.lights.max_shadowed_spots = 2;
+    scene.lights.local_shadow_resolution = 128;
+    const auto move_mixed = [&](f32 x) {
+        std::vector<MeshInstance3D> copies;
+        for (u32 i = 0; i < 16; ++i)
+            copies.push_back({Mat4f::translation({x + f32(i) * .01f, 0, 2}), colors::white, 2000 + i});
+        assert(mixed_batch.update(0, copies));
+    };
+    move_mixed(-7.8f);
+    for (f32 x : {-7.5f, 7.5f, 7.8f}) {
+        scene.lights.cache_shadows = true;
+        // Admission, static selection and whole-map reuse warm independently.
+        for (u32 warmup = 0; warmup < 4; ++warmup)
+            shoot(true);
+        move_mixed(x);
+        const auto cached = shoot(true);
+        if (x != 7.5f)
+            assert(cached.stats.local_shadow_cached > 0 && cached.stats.local_shadow_drawn > 0);
+        scene.lights.cache_shadows = false;
+        const auto fresh = shoot(false);
+        if (cached.pixels != fresh.pixels || cached.pick_id != fresh.pick_id ||
+            cached.stats.local_gather_cache_hits != 2 || cached.stats.local_shadow_maps != 2)
+            std::cerr << "mixed cached rows x=" << x << " pixels_equal=" << (cached.pixels == fresh.pixels)
+                      << " picks=" << cached.pick_id << '/' << fresh.pick_id
+                      << " gather_hits=" << cached.stats.local_gather_cache_hits
+                      << " maps=" << cached.stats.local_shadow_maps << '\n';
+        assert(cached.pixels == fresh.pixels && cached.pick_id == fresh.pick_id &&
+               cached.stats.local_gather_cache_hits == 2 && cached.stats.local_shadow_maps == 2);
+    }
+
     // Oversized direct tables stream within the existing 32 MiB budget.
     scene = Scene3D{};
     scene.debug.cache_draw_commands = false;
