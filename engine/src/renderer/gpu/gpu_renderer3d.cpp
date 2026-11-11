@@ -1036,8 +1036,9 @@ public:
         _base_vertex = static_cast<i32>(mesh->vertex_offset / sizeof(GpuMeshVertex));
     }
 
-    void draw(u32 indices, u32 instances, u32 first_index) const {
-        SDL_DrawGPUIndexedPrimitives(_pass, indices, instances, first_index + _first_index, _base_vertex, 0);
+    void draw(u32 indices, u32 instances, u32 first_index, u32 first_instance = 0) const {
+        SDL_DrawGPUIndexedPrimitives(_pass, indices, instances, first_index + _first_index, _base_vertex,
+                                     first_instance);
     }
 
     // A skinned mesh's skin stream, the second vertex buffer (after bind_mesh; the pipeline is a skinned one).
@@ -1068,6 +1069,46 @@ private:
     const SDL_GPUBuffer* _indices = nullptr;
     u32 _first_index = 0;
     i32 _base_vertex = 0;
+};
+
+// A shadow map's projection is constant. Stock shaders can address each draw's
+// run through first_instance instead of uploading the same 96-byte block for
+// every draw. GpuDevice forces Vulkan/SPIR-V: gl_InstanceIndex includes that
+// base there (SDL does not promise this for every shader language/backend).
+// Surface shaders keep the original uniforms and zero-based instance IDs.
+class ShadowUniforms {
+public:
+    ShadowUniforms(SDL_GPUCommandBuffer* commands, const Mat4f& projection) : _commands(commands) {
+        std::memcpy(_uniforms.view_projection, projection.m, sizeof(_uniforms.view_projection));
+    }
+
+    u32 bind(u32 first, u32 list, bool surface) {
+        if (surface) {
+            _uniforms.first[0] = first;
+            _uniforms.first[1] = list;
+            SDL_PushGPUVertexUniformData(_commands, 0, &_uniforms, sizeof(_uniforms));
+            _mode = ~0u;
+            return 0;
+        }
+        const u32 mode = list != 0 ? 1u : 0u;
+        if (_mode != mode) {
+            _uniforms.first[0] = 0;
+            _uniforms.first[1] = mode;
+            SDL_PushGPUVertexUniformData(_commands, 0, &_uniforms, sizeof(_uniforms));
+            _mode = mode;
+        }
+        return list != 0 ? list - 1 : first;
+    }
+
+    DrawUniforms& indirect() {
+        _mode = ~0u; // the indirect recorder writes and pushes its own block
+        return _uniforms;
+    }
+
+private:
+    SDL_GPUCommandBuffer* _commands;
+    DrawUniforms _uniforms{};
+    u32 _mode = ~0u;
 };
 
 } // namespace
@@ -8642,8 +8683,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
         } else {
             set_viewport(pass, view.size, view.size);
         }
-        DrawUniforms u{};
-        std::memcpy(u.view_projection, view.view_projection.m, sizeof(u.view_projection));
+        ShadowUniforms uniforms{commands, view.view_projection};
         DrawBinder binder{pass};
         for (u32 e = view.entry_first; e < view.entry_first + view.entry_count; ++e) {
             const LocalEntry& entry = _local_entries[e];
@@ -8656,7 +8696,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             }
             const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
             // (A surface's own cut-out, or its vertices moved, is its pipeline, not one of the pass's few.)
-            const GpuSurfaceShader3D* own = pass_surface(caster);
+            const GpuSurfaceShader3D* own = caster.surface.backend() ? pass_surface(caster) : nullptr;
             SDL_GPUGraphicsPipeline* surfaced =
                 own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
                                false, ref.skinned, false, false, Unlit::Off, false, own)
@@ -8687,14 +8727,13 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             if (cutout) {
                 bind_cutout(commands, pass, caster);
             }
-            bind_offset(commands, pass, caster, ref.skinned);
+            if (own && own->offsets() && !ref.skinned)
+                bind_offset(commands, pass, caster, false);
             if (entry.clustered) {
                 for (u32 n = 0; n < entry.count; ++n) {
                     const std::array<u32, 2>& run = _local_runs[entry.run_first + n];
-                    u.first[0] = _local_list[entry.list_first + n];
-                    u.first[1] = 0;
-                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                    (void)binder.draw(run[1], 1, run[0]);
+                    const u32 first = uniforms.bind(_local_list[entry.list_first + n], 0, own != nullptr);
+                    binder.draw(run[1], 1, run[0], first);
                     ++stats.local_shadow_draws;
                     ++stats.local_shadow_casters;
                     stats.local_shadow_triangles += run[1] / 3;
@@ -8703,10 +8742,8 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             }
             const GpuMesh3D::Level& level =
                 ref.mesh->levels[std::min<std::size_t>(entry.level, ref.mesh->levels.size() - 1)];
-            u.first[0] = 0;
-            u.first[1] = entry.list_first + 1;
-            SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-            (void)binder.draw(level.index_count, entry.count, level.first_index);
+            const u32 first = uniforms.bind(0, entry.list_first + 1, own != nullptr);
+            binder.draw(level.index_count, entry.count, level.first_index, first);
             ++stats.local_shadow_draws;
             stats.local_shadow_casters += entry.count;
             stats.local_shadow_triangles += static_cast<u64>(level.index_count / 3) * entry.count;
@@ -12481,6 +12518,7 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     bool complete = ctx.shadows;
     SDL_GPUBuffer* shadow_storage[2] = {storage, _caster_lists && ctx.cascades > 1 ? _caster_lists->handle() : storage};
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
+    std::array<SDL_GPUGraphicsPipeline*, 8> pipelines{};
     for (u32 k = 0; ctx.shadows && k < ctx.cascades; ++k) {
         // Not cycled: the frames before are done with it in queue order, and
         // a frame rendering several views would otherwise be handed a new
@@ -12491,9 +12529,7 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
         complete = complete && pass != nullptr;
         if (pass) {
             set_viewport(pass, ctx.sun_size, ctx.sun_size);
-            DrawUniforms u{};
-            std::memcpy(u.view_projection, (ctx.cascades > 1 ? ctx.plan.cascade[k].view_projection : ctx.light_vp).m,
-                        sizeof(u.view_projection));
+            ShadowUniforms uniforms{commands, ctx.cascades > 1 ? ctx.plan.cascade[k].view_projection : ctx.light_vp};
             DrawBinder binder{pass};
             for (const DrawRef& ref : _refs) {
                 const u32 total = ctx.cascades > 1 ? ref.cascade_count[k] : ref.out_count + ref.out_extra;
@@ -12505,9 +12541,16 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (ref.skinned && (!storage || !ctx.joints || !ctx.joint_offsets)) {
                     continue;
                 }
+                const GpuSurfaceShader3D* own = caster.surface.backend() ? pass_surface(caster) : nullptr;
+                const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
+                SDL_GPUGraphicsPipeline*& cached = pipelines[variant];
+                if (!own && !cached)
+                    cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout,
+                                      nullptr, false, ref.skinned);
                 SDL_GPUGraphicsPipeline* p =
-                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
-                             false, ref.skinned, false, false, Unlit::Off, false, pass_surface(caster));
+                    own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout,
+                                   nullptr, false, ref.skinned, false, false, Unlit::Off, false, own)
+                        : cached;
                 if (!p) {
                     complete = false;
                     continue;
@@ -12534,10 +12577,11 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, pass, caster);
                 }
-                bind_offset(commands, pass, caster, ref.skinned);
+                if (own && own->offsets() && !ref.skinned)
+                    bind_offset(commands, pass, caster, false);
                 // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices (this map's).
                 if (ref.clustered && _gc.active) {
-                    draw_cluster_indirect(ref, commands, pass, u, ctx.cascades > 1 ? 1 + k : 1);
+                    draw_cluster_indirect(ref, commands, pass, uniforms.indirect(), ctx.cascades > 1 ? 1 + k : 1);
                     ++stats.shadow_draws;
                     stats.shadow_casters += total;
                     stats.cascade_casters[k] += total;
@@ -12552,10 +12596,9 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                         if (run.count == 0) {
                             continue;
                         }
-                        u.first[0] = ctx.cascades > 1 ? 0 : slot;
-                        u.first[1] = ctx.cascades > 1 ? position + 1 : 0;
-                        SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                        (void)binder.draw(run.count, 1, run.first);
+                        const u32 first = uniforms.bind(ctx.cascades > 1 ? 0 : slot,
+                                                        ctx.cascades > 1 ? position + 1 : 0, own != nullptr);
+                        binder.draw(run.count, 1, run.first, first);
                         ++stats.shadow_draws;
                         ++stats.shadow_casters;
                         ++stats.cascade_casters[k];
@@ -12569,12 +12612,11 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                     if (count == 0) {
                         continue;
                     }
-                    u.first[0] = ref.level_first[l];
-                    u.first[1] = ctx.cascades > 1      ? ref.cascade_level_first[k][l] + 1
-                                 : ref.retained != ~0u ? ref.level_first[l] + 1
-                                                       : 0; // the list, or the run from level_first
-                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                    (void)binder.draw(ref.mesh->levels[l].index_count, count, ref.mesh->levels[l].first_index);
+                    const u32 list = ctx.cascades > 1      ? ref.cascade_level_first[k][l] + 1
+                                     : ref.retained != ~0u ? ref.level_first[l] + 1
+                                                           : 0;
+                    const u32 first = uniforms.bind(ref.level_first[l], list, own != nullptr);
+                    binder.draw(ref.mesh->levels[l].index_count, count, ref.mesh->levels[l].first_index, first);
                     ++stats.shadow_draws;
                     stats.shadow_casters += count;
                     stats.cascade_casters[k] += count;

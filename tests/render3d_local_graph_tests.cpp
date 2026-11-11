@@ -3,13 +3,17 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 using namespace kin;
 namespace {
 constexpr Vec2i size{160, 120};
@@ -225,6 +229,103 @@ void variants(Fixture& f) {
     assert(after.upload_staging_bytes <= before.upload_staging_bytes);
     std::cout << "local graph: LOD/CPU-GPU cuts, skinning/retained/mask/transparency/overlay, particle exclusion and "
                  "stable resources\n";
+}
+
+void recording_ranges(Fixture& f) {
+    // Independent one-object maps establish the coverage union. The combined
+    // map crosses nonzero list offsets, pipelines and direct cluster ranges;
+    // stock/public parity alone would exercise the same recorder twice.
+    const std::array requests{LocalShadowRequest3D{.kind = LocalShadowKind3D::Spot}};
+    const auto clustered = f.r3d.create_mesh(meshes::sphere(.45f, 16, 8), {.clusters = true}).value_or({});
+    const auto surface_box = f.r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    auto data = meshes::box({.7f, .7f, .7f});
+    data.skin.assign(data.vertices.size(), {});
+    const auto skinned = f.r3d.create_mesh(data).value_or({});
+    const std::array<u8, 8> rgba{255, 255, 255, 0, 255, 255, 255, 255};
+    const auto mask = f.r.create_texture_from_rgba(rgba.data(), {2, 1});
+    const auto batch =
+        InstanceBatch3D::create(f.box, std::vector<MeshInstance3D>{{.transform = Mat4f::translation({-.6f, .5f, 1})},
+                                                                   {.transform = Mat4f::translation({.6f, .5f, 1})}})
+            .value_or({});
+    assert(clustered && surface_box && skinned && mask && batch);
+    SurfaceShader3D offset;
+    if (shader_compiler_available()) {
+        const auto dir =
+            std::filesystem::temp_directory_path() /
+            ("kin-shadow-recording-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(dir);
+        const auto file = dir / "offset.kingraph.json";
+        std::ofstream{file} << R"({"schema":"kin.material-graph/1","name":"shadow_recording",
+            "parameters":[],"nodes":[],"outputs":{"offset":[0,0.2,0]}})";
+        const auto graph = f.r3d.compile_material_graph(file);
+        assert(graph);
+        offset = graph->surface;
+        std::filesystem::remove_all(dir);
+    }
+    const int objects = offset ? 6 : 5;
+    const auto lod = f.scene.lod;
+    const auto debug = f.scene.debug;
+    f.scene.lod.enabled = true;
+    f.scene.debug.force_level = 0;
+    f.scene.debug.gpu_culling = false;
+    const auto add = [&](int object) {
+        switch (object) {
+        case 0:
+            assert(f.scene.draw(f.box, Mat4f::translation({-1, .5f, -.8f})));
+            break;
+        case 1:
+            assert(f.scene.draw(clustered, Mat4f::translation({0, 1.1f, -.8f}), {.double_sided = true}));
+            break;
+        case 2:
+            assert(f.scene.draw(f.box, Mat4f::translation({1, .5f, -.8f}), {.blend = Blend3D::Mask, .texture = mask}));
+            break;
+        case 3: {
+            const std::array pose{Mat4f::translation({0, 1.7f, .5f})};
+            assert(f.scene.draw_skinned(skinned, pose, {}));
+            break;
+        }
+        case 4:
+            assert(f.scene.draw_instanced(batch));
+            break;
+        case 5:
+            // A distinct mesh isolates recording from depth-state merging.
+            assert(f.scene.draw(surface_box, Mat4f::translation({-.5f, 1.7f, -.5f}), {.surface = offset}));
+            break;
+        }
+    };
+    const auto coverage = [&] {
+        f.r.clear(colors::black);
+        const auto prepared = f.r3d.prepare(f.scene).value_or({});
+        assert(prepared && f.r3d.render_local_shadows(f.array, prepared, requests, size));
+        f.r.draw_shader_surface(rect, f.probe, {}, f.array);
+        std::vector<u8> pixels;
+        Vec2i actual;
+        assert(f.r.read_rgba(rect, pixels, actual) && actual == size);
+        f.r.present();
+        return pixels;
+    };
+    std::vector<u8> expected;
+    for (int object = 0; object < objects; ++object) {
+        f.clear_draws();
+        add(object);
+        const auto pixels = coverage();
+        assert(std::count(pixels.begin(), pixels.end(), u8{255}) > size.x * size.y + 30);
+        expected.resize(pixels.size());
+        for (std::size_t i = 0; i < pixels.size(); ++i)
+            expected[i] = std::max(expected[i], pixels[i]);
+    }
+    for (const bool reverse : {false, true}) {
+        f.clear_draws();
+        for (int object = 0; object < objects; ++object)
+            add(reverse ? objects - 1 - object : object);
+        assert(coverage() == expected);
+    }
+    f.scene.lod = lod;
+    f.scene.debug = debug;
+    f.objects();
+    std::cout << "local graph: combined shadow ranges match independent opaque/mask/skin/cluster/batch coverage\n";
+    if (offset)
+        std::cout << "local graph: surface offset shaders interleave with stock shadow uniforms\n";
 }
 
 void cube_and_camera(Fixture& f) {
@@ -487,6 +588,7 @@ int main() {
     stock_without_shadow_work(f);
     parity(f);
     variants(f);
+    recording_ranges(f);
     cube_and_camera(f);
     grid_and_history(f);
     hooks(f);

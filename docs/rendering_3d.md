@@ -118,6 +118,13 @@ main, shadow, depth, velocity and picking passes. Skinned and clustered meshes k
 protect shared ranges before reuse, and empty pages are released. Local-shadow preparation packs accepted caster copies into flat lists instead of allocating
 per-mesh/per-view vectors; the stable ordering preserves shadow-cache keys and clustered cuts.
 
+Native shadow recording keeps the projection bound across each map's stock draws. Instance runs and caster-list offsets
+travel in the indexed draw's first-instance parameter; only a change between direct and listed addressing uploads the
+uniform block again. This uses the native backend's Vulkan/SPIR-V instance-index semantics. Surface shaders keep their
+original per-draw uniforms and zero-based instance IDs, and GPU cluster-indirect draws retain their argument layout.
+The eight stock depth pipeline variants resolve once per recording call. Caster selection, order, draw counts, shadow
+cache ownership and rasterization settings are unchanged; no persistent recording cache or additional GPU buffer is added.
+
 Shapes made in code (`kin::meshes`): `box`, `plane`, `sphere`, `cylinder`,
 `cone`, `torus`, `star_prism`, `octahedron`, `wedge` (a ramp).
 

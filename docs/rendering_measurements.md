@@ -4,6 +4,48 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Shadow recording redesign, 2026-11-11
+
+The reference is `6a1a5d61`, with both preceding shadow-preparation and culling
+redesigns active. Native stock shadow draws now keep the projection and addressing
+mode bound per map, carrying each direct/list offset in the draw's first-instance
+argument. The shaders, draw order, geometry, rasterization, cache ownership and
+memory budgets are unchanged. Surface shaders retain their original per-draw
+uniforms and instance IDs; GPU cluster-indirect arguments keep their layout.
+Sun recording also resolves its eight stock pipeline variants per call, and
+ordinary shadow materials bypass surface-shader resolution.
+
+Separate link-instrumented executables measure caller CPU from depth-only pass
+begin through end, including SDL/driver recording. Three alternating full Hard
+routes produce recording p50 pairs **0.928 → 0.626**, **0.948 → 0.588** and
+**0.934 → 0.683 ms**: **32.5% median paired reduction**, range **26.9–38.0%**.
+All retain 4,712 indexed draws/frame while vertex-uniform pushes fall
+**4,712 → 8**, or **99.83%**. The probe adds counter/timer overhead, particularly
+to the reference uniform calls; it is absent from normal timing binaries.
+
+Five uninstrumented alternating Hard pairs show **6.8% median paired caller-CPU
+reduction** and **6.0% process-CPU reduction**. Caller reductions are **−30.4%,
++8.7%, −3.4%, +6.9%, +6.8%**: only three pairs improve. Pooled caller p50/p95/p99
+are **6.649/8.213/8.870 → 6.402/7.899/8.556 ms**. Blender and other workloads stay
+running; clocks, thermals and host load are uncontrolled. Continuous GPU telemetry
+is retained. These are contended observations, with no stable frame-throughput
+claim. Easy/Medium have one guard pair each, not a scaling study.
+
+Ten focused NVIDIA GPU checks and two llvmpipe checks pass, including independent
+shadow-coverage unions across stock, masked, skinned, clustered, instanced and
+offset-surface casters in both source orders. All 10,080 normal paired route
+frames preserve work, uploads, resources and cache counters; nine separate
+decoded-RGBA pairs across all tiers and phases 1/541/961 are exact. Artifacts,
+raw per-run percentiles, probe sources and reproduction commands are in
+`out/runs/render3d-shadow-recording-redesign/`.
+
+The new fixture also exposed an existing local-shadow interning issue: stock
+and offset-surface casters sharing a mesh can merge because the depth-state key
+omits surface shader/parameter state. A shared-mesh probe fails identically on
+the reconstructed `6a1a5d61` reference and candidate. This recording change leaves
+that preparation issue separate; its surface-transition regression uses a
+distinct mesh to isolate recording behavior.
+
 ### Industrial Yard CPU investigation, 2026-11-03
 
 The newer cross-engine experiment lives in the sibling `kin-wt/yard-engines`
