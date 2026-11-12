@@ -2,6 +2,140 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Current branch versus main, 2026-11-12
+
+This is a fresh paired comparison of local `main` **`6aadd75e`** against renderer
+**`32f387ea`** on `perf/render3d-cpu-parity` (the comparison documentation starts
+at `b9606dec`). It reuses the frozen binaries whose hashes match their original
+build provenance: same Release/Ninja GCC configuration, renderer `-O2`, same
+no-AA application object and unchanged sample/public API sources. No rebuild,
+renderer edit, configuration change or temporary instrumentation was needed.
+Main predates the CPU preparation/culling/draw/shadow redesigns and map-wide
+shadow GPU batches. This measures their combined result, not individual gains.
+The main observed gain is caller CPU: Hard falls from 23.584 to 2.773 ms p50,
+with an 88.3% median paired reduction. Frame-time gains are substantially smaller.
+
+**Contended:** Blender and all other background workloads remained running.
+CPU/GPU clocks, temperatures and system load are uncontrolled. These fresh
+numbers must not be combined with the earlier Godot/Unreal campaign as if
+all engines ran under the same load.
+
+### Normal frame and CPU timings
+
+The existing Industrial Yard fixture uses independent objects, 1280×720 HDR,
+no AA/GI/AO/contact shadows, nominal classic 1,024 spot maps, four helpers,
+affinity 0–15, and 300 warm-up plus 1,440 measured route frames. Whole-map shadow
+image caching is off in both. Retention/gather/draw-command controls are enabled
+in both; their implementations and admission behavior differ. Both use the same
+hidden presentation and bounded frames-in-flight policy.
+
+Three alternating pairs per tier, with rotated tier order, produce **18 normal
+runs / 25,920 measured frames**. Each table cell is **p50 / p95 / p99 ms**,
+aggregated as the median of three per-run percentiles. The sample median is
+used for p50 and sorted index `floor((N-1)*p/100)` for p95/p99. Normal timings
+exclude screenshot readback and synchronous GPU timestamp queries.
+
+| Tier | Main frame interval | Current frame interval |
+| --- | --- | --- |
+| Easy | 3.863 / 6.961 / 7.486 | 2.704 / 6.835 / 7.322 |
+| Medium | 9.694 / 20.217 / 20.868 | 8.790 / 19.615 / 20.370 |
+| Hard | 28.054 / 64.634 / 78.937 | 26.436 / 51.740 / 53.785 |
+
+Caller CPU measures actual renderer caller-thread execution, excluding blocked
+waiting; process CPU includes helper execution during the renderer span.
+The two CPU channels overlap and must not be added. Application scene-build
+time is a separate exported scope.
+
+| Tier | Main caller CPU | Current caller CPU | Main process CPU | Current process CPU |
+| --- | --- | --- | --- | --- |
+| Easy | 0.925 / 1.202 / 1.333 | 0.361 / 0.464 / 0.498 | 1.218 / 1.537 / 1.669 | 0.474 / 0.575 / 0.617 |
+| Medium | 4.057 / 4.575 / 4.805 | 1.030 / 1.196 / 1.287 | 4.816 / 5.366 / 5.704 | 1.175 / 1.359 / 1.469 |
+| Hard | 23.584 / 29.212 / 32.796 | 2.773 / 3.227 / 3.440 | 30.511 / 37.134 / 41.230 | 3.447 / 3.999 / 4.238 |
+
+Changes below are the **median of three per-pair percentage changes**, current
+relative to main; negative means lower cost. They need not equal percentage
+changes calculated from the independently aggregated timing cells above.
+
+| Tier | Frame p50 change | Caller CPU p50 change | Process CPU p50 change |
+| --- | --- | --- | --- |
+| Easy | -16.3% | -61.0% | -61.1% |
+| Medium | +1.4% | -74.6% | -75.6% |
+| Hard | -16.0% | -88.3% | -88.9% |
+
+Hard caller-CPU p50 changes in the individual pairs are -87.7%, -88.3%, -92.9%.
+Repeat variation remains material:
+
+| Tier | Main frame p50 range | Current frame p50 range |
+| --- | --- | --- |
+| Easy | 2.677–4.714 | 2.514–3.947 |
+| Medium | 8.029–10.477 | 8.138–9.887 |
+| Hard | 26.941–46.024 | 22.620–30.998 |
+
+These are observations under contention, not isolated speedup guarantees.
+The raw per-run values and p95/p99 paired changes are retained in `summary.json`.
+The additional retained records/gather cache on Hard cost only a few MiB,
+a minor accounting change here; individual resource counters and process RSS
+remain in the raw data.
+
+### Work and sampled output parity
+
+Every paired measured frame has identical selected main triangles/instances,
+culled counts, light/map counts, shadow triangles/caster copies, skin matrices,
+visible skinned copies, recipe populations, moving-transform sums and camera
+route. The implementations legitimately differ in command counts, cached work,
+resident memory and uploads; those are measured rather than required to match.
+
+| Tier | Main / current main-pass draws | Main / current shadow draws | Unchanged shadow triangles |
+| --- | --- | --- | --- |
+| Easy | 44 / 44 | 166 / 42 | 1,113,312 |
+| Medium | 162 / 162 | 1,140 / 292 | 8,086,164 |
+| Hard | 8,710 / 317 | 4,712 / 1,096 | 40,941,344 |
+
+All **9/9 sampled image pairs are decoded-RGBA identical**, at route frames
+1, 541 and 961 across all three tiers.
+The [paired-image gallery](../out/runs/render3d-main-refresh-32f387ea-6aadd75e/quality-gallery.html)
+provides the full captures. This verifies sampled output, not every possible view
+or material combination.
+The branch also contains the per-surface shadow-state bug fix; these Yard samples
+do not exercise every affected surface combination. Frame-time tails do not
+establish flicker or general runtime stability.
+
+### Separate hardware GPU diagnostics
+
+One additional full-route GPU pair per tier uses the same Vulkan timestamp
+library and the same 13 nonnested bottom-of-pipe pass markers in both versions.
+These **synchronous diagnostics are separate from normal throughput**. Waiting
+for marked submissions changes pacing; spans can include external contention,
+preemption and dependency gaps. The span sum excludes unmarked uploads, 2D
+composition and presentation. CPU/GPU and independent pass percentiles must
+not be added. A single pair per tier cannot establish a repeatable GPU speedup.
+Cells are p50 / p95 / p99 ms.
+
+| Tier | Main 13-span sum | Current 13-span sum | Main shadow span | Current shadow span |
+| --- | --- | --- | --- | --- |
+| Easy | 2.019 / 4.232 / 4.456 | 1.903 / 4.011 / 4.448 | 0.245 / 0.302 / 0.308 | 0.239 / 0.260 / 0.267 |
+| Medium | 8.796 / 16.410 / 17.463 | 8.661 / 16.313 / 17.898 | 3.746 / 4.401 / 6.932 | 3.901 / 4.302 / 4.517 |
+| Hard | 20.354 / 46.422 / 49.911 | 24.763 / 41.423 / 55.835 | 11.986 / 20.792 / 20.834 | 13.919 / 27.937 / 29.475 |
+
+This single-pair check does not demonstrate a GPU speedup. Hard marked-span p50
+is higher on current (24.763 versus 20.354 ms), while Easy/Medium totals are
+close. These observations neither establish a GPU regression nor recover an
+isolated optimization effect under changing contention.
+
+Each of the six GPU runs has 1,741 contiguous complete 13-pass groups. CSV
+frames 301–1740 map to submissions 302–1741. Every exported non-timing work,
+cache, resource and upload column matches that version's fresh normal control
+at every measured frame. The main/current geometry checks also pass between
+the two GPU runs. Full main-shading and other pass distributions are retained.
+
+All **42 processes** completed: 18 normal, 18 capture and six GPU diagnostic
+runs. The existing RAM guards remain; the process deadline is 450 seconds.
+Commands, before/after telemetry, source/binary/harness/library/recipe hashes,
+raw timings, exact-image checks and final validation are under
+`out/runs/render3d-main-refresh-32f387ea-6aadd75e/` (`provenance.json`,
+`summary.json`, `capture-checks.json`, `route-checks.json`, `checks.json`).
+No engine code changed, so no C++ rebuild or engine test suite was required.
+
 ## Fresh cross-engine comparison, 2026-11-12
 
 Current Kin `32f387ea` on `perf/render3d-cpu-parity` is compared with installed
