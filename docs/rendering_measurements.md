@@ -2,6 +2,128 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Upload staging and packing experiments, 2026-11-12
+
+**No renderer change was retained.** This investigation split the upload hotspot, tested serial batching and
+worker packing, checked output parity, then rejected the implementation after the final design did not show
+a repeatable Hard CPU benefit. The renderer and tests were restored to `cb0d7744`; the rebuilt Yard benchmark
+is byte-identical to its starting binary. The branch remains `perf/render3d-cpu-parity`.
+
+### What the finer profile found
+
+**All measurements are CONTENDED.** Blender and every external workload stayed running. The same baseline
+binary's two full-route controls measured caller-CPU p50 **2.260 / 2.275 ms**, process-CPU p50 **2.851 / 2.832 ms**
+and frame p50 **4.315 / 4.756 ms**. Different runs and variants are kept separate below.
+
+The temporary CPU-only probe covers shared texture/storage staging, excluding the separate vertex/index
+upload ring. It measures space/allocation, mapping, fill callbacks, raw copies, unmapping and copy-command
+recording, tagged by upload source and byte count. It uses thread-CPU and wall clocks every sixteenth update:
+90 measured samples per 1,440-frame route after 300 configured warm-up frames. Four full-route profiles cover
+Easy, Medium and two Hard runs. Scoped parents and per-frame exclusive arithmetic are checked; helper-thread
+CPU is not separately attributed. The probe uses no synchronous GPU timestamp waits. Its three tier images
+and non-timing counters match the frozen binary at phase 541.
+
+Hard submits **127 retained-table writes per frame**, totaling **635,008 bytes** (4,961 128-byte records).
+The other explicit batch is streamed under the existing table limit. The following are diagnostic caller-CPU
+**means in ms** from the two Hard profiles, not normal-throughput percentiles:
+
+| Scope | Hard range |
+| --- | --- |
+| Retained-table fill callbacks | 0.112–0.112 |
+| Retained-table copy-command recording | 0.089–0.089 |
+| Streamed main-instance fill callback | 0.092–0.093 |
+| All raw staging copies | 0.029–0.029 |
+| All mapping scopes | 0.024–0.025 |
+| All unmapping scopes | 0.022–0.023 |
+| Entire staged-upload scopes | 0.623–0.639 |
+
+Rows overlap and must not be added. The entire staged-upload scopes include **0.199–0.209 ms outside their
+named child phases**, largely the inserted scope transitions, clocks and event bookkeeping. Tiny per-call
+scopes also include a clock-read floor. The inspected SDL Vulkan backend already holds transfer memory mapped;
+its unmap operation is a no-op, and an uncycled map returns the active pointer. Cycling the first write can
+still select another backing. Therefore the reported map/unmap scopes are not a 0.05-ms opportunity simply
+removable by eliminating real OS mappings.
+
+**Correction to the preceding recommendation:** the earlier 1.0–1.2-ms staging diagnostic is not a reliable
+estimate of normal upload cost. It included many nested per-call timers and was collected under different
+load. The finer profile shows smaller individual costs and material instrumentation overhead; those raw
+diagnostic totals must not be used as projected production gains.
+
+### Implementations tested
+
+1. **Serial batching:** queue whole retained-table updates, pack them through one staging fill, unmap, then
+   record each buffer copy in its original order. This amortizes staging setup and callback allocations while
+   keeping each target buffer, cycle bit and payload unchanged. It did not improve Hard CPU cost.
+2. **Parallel batching:** flatten pending records into a prefix-indexed stream and pack disjoint 1,024-record
+   slices on the attached workers. This lets many short tables collectively cross the parallel threshold.
+   Partial writes flush preceding whole writes; same-frame backing snapshots and failures retain their rules.
+   The first five Hard pairs suggested a gain, but Easy/Medium showed little benefit and mixed tails.
+3. **Restricted final design:** keep cold, small and unthreaded updates on the original immediate path.
+   Batch only with workers and a validated layout containing at least 4,096 explicit-batch source records.
+   A separate state-only diagnostic confirmed selection: Hard had batching enabled with 5,000 source records;
+   Medium (800) and Easy (40) used the fallback. The final timing set still did not establish a Hard gain.
+
+The retained buffer representation, float packing arithmetic, shaders, geometry selection and per-buffer
+copy order stayed unchanged in these prototypes. No timing from a diagnostic binary is treated as normal
+throughput. All experimental C++ and regression additions are archived in task output and removed from the
+working source after the decision.
+
+### Fresh uninstrumented results
+
+The baseline and candidates use the same frozen application object and recipes: original independent Yard
+submissions, 720p HDR, no AA/GI/AO/contact shadows, classic 1,024 spot maps, shadow caching enabled, four helpers,
+affinity 0–15, 300 configured warm-up plus 1,440 measured frames. Pair order alternates. There are 50 normal
+candidate runs in total: five serial pairs, eleven unrestricted-parallel pairs and nine final-design pairs.
+Every paired frame has identical exported non-timing counters.
+
+Changes below are **medians of paired percentage changes**, with negative values meaning lower cost. p50 is
+the sample median; p95/p99 use sorted index `floor((N-1)*p/100)`. Variants are not pooled.
+
+| Hard experiment | Pairs | Caller CPU change p50 / p95 / p99 | Process CPU p50 | Frame p50 |
+| --- | --- | --- | --- | --- |
+| Serial staging batch | 3 | +3.5% / +3.6% / +2.6% | +4.1% | -1.5% |
+| Parallel batch, unrestricted | 5 | -5.7% / -13.3% / -15.6% | -3.0% | +0.5% |
+| Final workload restriction | 3 | +0.4% / +5.7% / +10.9% | +3.3% | +0.9% |
+
+The restricted design's three Hard caller-CPU p50 changes were **-4.9%, +0.4%, +8.6%**. Its unchanged hot
+packing algorithm remained selected; the earlier favorable set cannot establish a repeatable improvement
+for the final design under this contention. This does not prove batching can never help another workload.
+It fails the acceptance criterion for adding this queue, bookkeeping and internal API here.
+
+| Final workload restriction | Pairs | Caller CPU change p50 / p95 / p99 | Frame p50 |
+| --- | --- | --- | --- |
+| Easy | 3 | +2.3% / -10.8% / -6.6% | -4.6% |
+| Medium | 3 | -1.9% / -2.5% / -1.9% | -0.2% |
+| Hard | 3 | +0.4% / +5.7% / +10.9% | +0.9% |
+
+### Correctness, restoration and evidence
+
+Both parallel prototypes passed 14 focused runs each: NVIDIA core renderer plus six 3D suites, the six 3D
+suites on software Vulkan, and the CPU suite. The 3D selections were direct cache, local graph, bounds,
+draw commands, geometry and surface stages. All thirteen GPU runs in each set observed Khronos core and
+synchronization validation, with no skips or validation errors. The mixed core-renderer suite chooses its
+SDL/GPU backend per test; GPU checks remain required. This is focused coverage, not the full platform matrix.
+
+The experimental regressions checked exact buffer bytes and overlapping copy order, cycling after an earlier
+recorded read, reentrancy rejection/recovery, 4,800 records across twelve short tables with and without
+workers, mixed full/partial/unchanged updates, exact pixels/picking against ordinary instance submissions,
+and earlier-view preservation after same-frame edits. Existing local-graph tests also checked depth bits.
+Each parallel prototype passed six exact-RGBA frozen-baseline capture pairs: Hard phases 1/541/961,
+Easy/Medium phase 541, and Hard phase 541 with shadow image caching disabled. Counters matched too.
+
+After rejecting the candidates, all five experimental C++/test files were restored exactly to the starting
+commit and affected targets were rebuilt. Relinking the same application produced a **byte-identical baseline
+benchmark**. The bounds, CPU, direct-cache, draw-command and local-graph test binaries are also byte-identical
+to their previously validated starting versions. No production code, API, shader or test change remains.
+The four unrelated dirty files were preserved.
+
+Raw data, source patches/snapshots, commands, validation logs and provenance remain in
+`out/runs/render3d-upload-packing/`: `experiment-summary.json`, the four `profile-*-profile.json` files,
+`batch-serial.patch`, `batch-parallel-all.patch`, `final-candidate.patch`, `rejected-src/`,
+`all-test-results.json`, `test-results.json`, `restoration.json` and `checks.json`. Generated artifacts are
+not committed. The next useful CPU targets remain live-shadow fingerprinting and draw-span emission,
+measured with whole-phase timers before introducing per-item scopes.
+
 ## CPU preparation profile and retained caster eligibility, 2026-11-12
 
 The next CPU investigation profiles preparation, pass recording, uploads, submission and presentation before
