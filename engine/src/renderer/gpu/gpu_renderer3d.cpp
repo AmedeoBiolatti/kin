@@ -1242,6 +1242,13 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
     }
     try {
+        _shadow_restore_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "shadow_restore.frag.spv", 1, 1);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: static shadow depth reuse unavailable",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    try {
         _visibility_shader =
             GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "visibility.frag.spv", 2, 0);
         _visibility_mask_shader =
@@ -7626,9 +7633,54 @@ GpuRenderer3D::LocalGatherCache* GpuRenderer3D::local_gather_plan(const FrameCtx
     return cell;
 }
 
+bool GpuRenderer3D::static_shadow_ref(const DrawRef& ref, const Scene3D& scene) const {
+    const Material3D& material = ref.draw->material;
+    return ref.scene == 0 && !scene.instances_exposed() && !ref.batch && !ref.skinned && !ref.mesh->dynamic &&
+           !ref.mesh->clusters && ref.mesh->levels.size() == 1 && material.blend == Blend3D::Opaque &&
+           !material.wireframe && !(material.surface.backend() && pass_surface(material));
+}
+
+void GpuRenderer3D::clear_local_static() {
+    _local_static_map = {};
+    _local_static_generation = _local_static_attempt = 0;
+    _local_static_idle = 0;
+    for (auto& cache : _local_static_cache)
+        cache = {};
+}
+
+bool GpuRenderer3D::ensure_local_static_map() {
+    constexpr u64 budget = 64ull * 1024 * 1024;
+    const u64 bytes = u64(_local_side) * _local_side * _local_layers * 4;
+    if (!_local_map || !bytes || bytes > budget || _shadow_format != SDL_GPU_TEXTUREFORMAT_D32_FLOAT ||
+        !_shadow_restore_shader)
+        return false;
+    if (_local_static_map && _local_static_generation == _local_generation)
+        return true;
+    if (_local_static_attempt == _local_generation)
+        return false; // Retry an allocation failure only after the atlas changes or caching is reset.
+    _local_static_attempt = _local_generation;
+    try {
+        _local_static_map =
+            _device->create_target_array(_local_side, _local_side, _local_layers, _shadow_format,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        _local_static_generation = _local_generation;
+        for (auto& cache : _local_static_cache)
+            cache.valid = false;
+        return bool(_local_static_map);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: static shadow atlas unavailable; drawing full maps",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        return false;
+    }
+}
+
 void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     const Lights3D& lights = ctx.scene.lights;
+    if (!ctx.public_local &&
+        (!lights.cache_shadows || !_local_map || (_local_static_map && _local_static_generation != _local_generation)))
+        clear_local_static();
+    _local_static_refs.clear();
     const u64 gather_budget = ctx.scene.debug.cache_local_shadow_gather
                                   ? std::min<u32>(ctx.scene.debug.local_shadow_gather_budget, 4 * 1024 * 1024)
                                   : 0;
@@ -7670,6 +7722,11 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         do {
             ++p;
         } while (p < _pieces.size() && _pieces[p].ref == r);
+    }
+    if (!ctx.public_local && lights.cache_shadows && _shadow_restore_shader) {
+        _local_static_refs.assign(_refs.size(), 0);
+        for (u32 r = 0; r < _refs.size(); ++r)
+            _local_static_refs[r] = caster[r] && static_shadow_ref(_refs[r], ctx.scene);
     }
     constexpr u32 view_limit = max_local_shadow_layers + max_shadow_cascades + 1;
     std::array<LocalGatherCache*, view_limit> plans{};
@@ -8511,6 +8568,66 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         view.drawn = true;
         ++drawing;
     }
+    // Admit stable mixed spot/point maps only after observing the same exact
+    // source/projection twice. Mutable batches, poses and surfaces stay live.
+    bool static_active = false, static_atlas = false;
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        LocalView& view = _local_views[v];
+        view.static_cached = view.static_build = false;
+        if (ctx.public_local || !cache_on || !view.drawn || view.moon || view.gi_sun ||
+            view.cache >= _local_static_cache.size() || !_shadow_restore_shader)
+            continue;
+        bool fixed = false, live = false;
+        for (const Found& f : found[v])
+            (_local_static_refs[f.ref] ? fixed : live) = true;
+        const auto* particles = particle_cast_view(view.view_projection);
+        live = live || (particles && !particles->ranges.empty());
+        if (!fixed || !live)
+            continue; // Whole-map caching already handles maps containing only unchanged geometry.
+        static_active = true;
+        auto& cache = _local_static_cache[view.cache];
+        std::vector<u8>& bytes = _local_payload;
+        bytes.clear();
+        CacheBytes key{bytes};
+        key.value(ctx.scene.draw_identity());
+        key.value(ctx.scene.draw_revision());
+        key.value(_local_generation);
+        key.value(ctx.scene.cull);
+        key.value(view.layer);
+        key.value(view.x);
+        key.value(view.y);
+        key.value(view.size);
+        key.value(view.kind);
+        key.value(view.bounded);
+        key.value(view.radius);
+        key.value(view.centre);
+        key.value(view.frustum.count);
+        key.append(view.frustum.planes.data(), view.frustum.count * sizeof(Vec4f));
+        key.append(view.view_projection.m, sizeof(view.view_projection.m));
+        const bool same = cache.observed && cache.payload == bytes;
+        if (!same) {
+            cache.payload.assign(bytes.begin(), bytes.end());
+            cache.observed = true;
+            cache.valid = false;
+            cache.layer = view.layer;
+            cache.x = view.x;
+            cache.y = view.y;
+            cache.size = view.size;
+        } else {
+            view.static_cached = cache.valid;
+            view.static_build = !cache.valid;
+            static_atlas = true;
+        }
+    }
+    if (!ctx.public_local) {
+        if (static_active)
+            _local_static_idle = 0;
+        else if (_local_static_map && ++_local_static_idle >= 120)
+            clear_local_static();
+        if (static_atlas && !ensure_local_static_map())
+            for (auto& view : _local_views)
+                view.static_cached = view.static_build = false;
+    }
     // The cuts of the clustered copies, for the maps to be drawn (a map kept has not had them made).
     std::size_t output_copies = 0;
     for (u32 v = 0; v < _local_views.size(); ++v) {
@@ -8663,6 +8780,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                            ref.retained,
                            cutout ? std::bit_cast<u32>(material.alpha_cutoff) : 0,
                            u32(material.double_sided) | (u32(ref.skinned) << 1) | (u32(cutout) << 2) |
+                               (u32(!_local_static_refs.empty() && _local_static_refs[r]) << 3) |
                                (cutout ? (u32(material.wrap_u) << 8) | (u32(material.wrap_v) << 16) : 0),
                            cutout ? sampler_identity(material.texture_samplers[0]) : 0};
         batch = batch_refs.try_emplace(key, r).first->second;
@@ -9067,11 +9185,19 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
 bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     SDL_GPUCommandBuffer* commands = ctx.commands;
+    const auto finish = [&](bool ok) {
+        if (!ctx.public_local) {
+            stats.local_shadow_static_bytes =
+                _local_static_map ? u64(_local_side) * _local_side * _local_layers * 4 : 0;
+            stats.local_shadow_bytes += stats.local_shadow_static_bytes;
+        }
+        return ok;
+    };
     // Cached or camera-culled maps need no caster buffers, even on first use.
     if (std::none_of(_local_views.begin(), _local_views.end(), [](const LocalView& view) { return view.drawn; }))
-        return true;
+        return finish(true);
     if (!_local_lists)
-        return false;
+        return finish(false);
     bool complete = true;
     SDL_GPUBuffer* instances = _local_instances ? _local_instances->handle() : nullptr;
     SDL_GPUBuffer* lists = _local_lists ? _local_lists->handle() : instances;
@@ -9106,57 +9232,25 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
         _local_record_refs.assign(_refs.size(), ~0u);
         _local_records.reserve(std::min(_refs.size(), _local_entries.size()));
     }
-    for (LocalView& view : _local_views) {
-        if (!view.drawn) {
-            continue;
-        }
-        // Not cycled, as the sun's: the frames before are done with it in queue order. A packed map shares its layer
-        // with others (some kept from the frames before): the layer is loaded, and its square alone cleared to the far
-        // plane (reverse Z: 0) by a triangle over it.
-        SDL_GPUDepthStencilTargetInfo depth =
-            depth_target(view.texture, SDL_GPU_STOREOP_STORE, /*cycle=*/false, view.layer);
-        SDL_GPUGraphicsPipeline* clear = nullptr;
-        if (view.packed) {
-            depth.load_op = SDL_GPU_LOADOP_LOAD;
-            clear = _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
-                                                          .fragment = _shadow_shader.handle(),
-                                                          .layout = GpuVertexLayout::None,
-                                                          .depth_stencil = _shadow_format,
-                                                          .depth = GpuDepthTest::Overwrite,
-                                                          .depth_only = true});
-            if (!clear) {
-                _local_cache[view.cache].valid = false;
-                complete = false;
-                continue;
-            }
-        }
-        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
-        if (!pass) {
-            if (!ctx.public_local)
-                _local_cache[view.cache].valid = false;
-            complete = false;
-            continue;
-        }
-        if (view.packed) {
-            const SDL_GPUViewport square{static_cast<f32>(view.x),
-                                         static_cast<f32>(view.y),
-                                         static_cast<f32>(view.size),
-                                         static_cast<f32>(view.size),
-                                         0.0f,
-                                         1.0f};
-            SDL_SetGPUViewport(pass, &square);
-            const SDL_Rect scissor{static_cast<int>(view.x), static_cast<int>(view.y), static_cast<int>(view.size),
-                                   static_cast<int>(view.size)};
-            SDL_SetGPUScissor(pass, &scissor);
-            SDL_BindGPUGraphicsPipeline(pass, clear);
-            SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
-        } else {
-            set_viewport(pass, view.size, view.size);
-        }
+    // 0: original complete map; 1: bake unchanged opaque geometry; 2: live remainder.
+    const auto record = [&](SDL_GPURenderPass* pass, const LocalView& view, u32 subset, bool saved) {
+        bool recorded = true;
         ShadowUniforms uniforms{commands, view.view_projection};
         DrawBinder binder{pass};
         for (u32 e = view.entry_first; e < view.entry_first + view.entry_count; ++e) {
             const LocalEntry& entry = _local_entries[e];
+            const bool fixed = subset != 0 && _local_static_refs[entry.ref];
+            if (subset == 1 && !fixed)
+                continue;
+            if (subset == 2 && fixed) {
+                if (saved) {
+                    ++stats.local_shadow_static_skipped_draws;
+                    stats.local_shadow_static_skipped_casters += entry.count;
+                    stats.local_shadow_static_skipped_triangles +=
+                        u64(_refs[entry.ref].mesh->levels.front().index_count / 3) * entry.count;
+                }
+                continue;
+            }
             if (shared && !entry.clustered && entry.level == 0) {
                 // The selection compiler already proves this group's mesh,
                 // instance table and stock depth state identical. Its source
@@ -9174,7 +9268,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                         SDL_GPUGraphicsPipeline* p = stock_pipeline(!material.double_sided, false, false, compact);
                         if (!p) {
                             // Preserve per-entry allocation retries and incomplete-map handling.
-                            complete = false;
+                            recorded = false;
                             continue;
                         }
                         const auto& level = ref.mesh->levels.front();
@@ -9199,7 +9293,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             const Material3D& caster = ref.draw->material;
             const bool cutout = caster.blend == Blend3D::Mask;
             if (ref.skinned && (!ctx.joints || !joint_offsets)) {
-                complete = false;
+                recorded = false;
                 continue;
             }
             // (A surface's own cut-out, or its vertices moved, is its pipeline, not one of the pass's few.)
@@ -9212,7 +9306,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             SDL_GPUGraphicsPipeline* p =
                 own ? surfaced : stock_pipeline(!caster.double_sided, cutout, ref.skinned, compact);
             if (!p) {
-                complete = false;
+                recorded = false;
                 continue;
             }
             SDL_GPUBuffer* const plain[2] = {ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : instances,
@@ -9222,7 +9316,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             // A clustered mesh's copies are drawn from the cut the light's map made of each (a run of the compacted
             // indices); else the mesh whole.
             if (entry.clustered && !_local_index_buffer) {
-                complete = false;
+                recorded = false;
                 continue;
             }
             binder.bind_mesh(ref.mesh, entry.clustered ? _local_index_buffer->handle() : nullptr, compact);
@@ -9253,6 +9347,85 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             stats.local_shadow_casters += entry.count;
             stats.local_shadow_triangles += static_cast<u64>(level.index_count / 3) * entry.count;
         }
+        return recorded;
+    };
+    SDL_GPUGraphicsPipeline* restore = nullptr;
+    if (_local_static_map && std::any_of(_local_views.begin(), _local_views.end(),
+                                         [](const LocalView& view) { return view.static_cached || view.static_build; }))
+        restore = _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                        .fragment = _shadow_restore_shader.handle(),
+                                                        .layout = GpuVertexLayout::None,
+                                                        .depth_stencil = _shadow_format,
+                                                        .depth = GpuDepthTest::Overwrite,
+                                                        .depth_only = true});
+    for (LocalView& view : _local_views) {
+        if (!view.drawn)
+            continue;
+        SDL_GPUGraphicsPipeline* clear = nullptr;
+        if (view.packed) {
+            clear = _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                          .fragment = _shadow_shader.handle(),
+                                                          .layout = GpuVertexLayout::None,
+                                                          .depth_stencil = _shadow_format,
+                                                          .depth = GpuDepthTest::Overwrite,
+                                                          .depth_only = true});
+            if (!clear) {
+                _local_cache[view.cache].valid = false;
+                complete = false;
+                continue;
+            }
+        }
+        const auto begin = [&](SDL_GPUTexture* texture, bool restored) {
+            auto depth = depth_target(texture, SDL_GPU_STOREOP_STORE, false, view.layer);
+            if (view.packed || restored)
+                depth.load_op = SDL_GPU_LOADOP_LOAD;
+            SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
+            if (!pass)
+                return pass;
+            const SDL_GPUViewport square{f32(view.x), f32(view.y), f32(view.size), f32(view.size), 0.0f, 1.0f};
+            const SDL_Rect scissor{int(view.x), int(view.y), int(view.size), int(view.size)};
+            SDL_SetGPUViewport(pass, &square);
+            SDL_SetGPUScissor(pass, &scissor);
+            if (view.packed && !restored) {
+                SDL_BindGPUGraphicsPipeline(pass, clear);
+                SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+            }
+            return pass;
+        };
+        bool static_ready = restore && view.static_cached && _local_static_cache[view.cache].valid;
+        if (restore && view.static_build) {
+            // Invalidate old owners of this region, including maps not wanted
+            // now: atlas repacking must never revive an overwritten image.
+            for (auto& cache : _local_static_cache)
+                if (cache.valid && cache.layer == view.layer && cache.x < view.x + view.size &&
+                    view.x < cache.x + cache.size && cache.y < view.y + view.size && view.y < cache.y + cache.size)
+                    cache.valid = false;
+            if (auto* pass = begin(_local_static_map.handle(), false)) {
+                static_ready = record(pass, view, 1, false);
+                SDL_EndGPURenderPass(pass);
+                _local_static_cache[view.cache].valid = static_ready;
+                if (static_ready)
+                    ++stats.local_shadow_static_builds;
+            }
+        }
+        SDL_GPURenderPass* pass = begin(view.texture, static_ready);
+        if (!pass) {
+            if (!ctx.public_local)
+                _local_cache[view.cache].valid = false;
+            complete = false;
+            continue;
+        }
+        if (static_ready) {
+            SDL_BindGPUGraphicsPipeline(pass, restore);
+            const SDL_GPUTextureSamplerBinding source{_local_static_map.handle(), _owner->_sampler_nearest};
+            SDL_BindGPUFragmentSamplers(pass, 0, &source, 1);
+            const std::array<i32, 4> layer{static_cast<i32>(view.layer), 0, 0, 0};
+            SDL_PushGPUFragmentUniformData(commands, 0, layer.data(), sizeof(layer));
+            SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+            if (view.static_cached)
+                ++stats.local_shadow_static_cached;
+        }
+        complete = record(pass, view, static_ready ? 2u : 0u, view.static_cached && static_ready) && complete;
         if (!ctx.public_local && !draw_particle_shadows(ctx, pass, view.view_projection, true)) {
             _local_cache[view.cache].valid = false;
             complete = false;
@@ -9261,7 +9434,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             _local_cache[view.cache].valid = false;
         SDL_EndGPURenderPass(pass);
     }
-    return complete;
+    return finish(complete);
 }
 
 // The light variants' block for scene `s`, into `slot`. The overlay's lights are carried into its space and have no

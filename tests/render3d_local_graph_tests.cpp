@@ -1,4 +1,5 @@
 #include "../engine/src/renderer/gpu/gpu_light_grid3d.hpp"
+#include "../engine/src/renderer/gpu/gpu_pipeline_cache.hpp"
 #include "../engine/src/renderer/gpu/gpu_renderer3d.hpp"
 #include "../engine/src/renderer/gpu/gpu_shadow_mesh.hpp"
 #include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"
@@ -22,6 +23,81 @@
 #include <kin/renderer/shader_compiler.hpp>
 #include <limits>
 #include <random>
+namespace kin::gpu {
+// Test-only inspection of stock maps. Public graph maps intentionally remain
+// uncached and are not a substitute for checking the stock atlas coordinates.
+struct LocalShadowDepthProbe {
+    static void invalidate_full(GpuRenderer3D& renderer) {
+        for (auto& cache : renderer._local_cache)
+            cache.valid = false;
+    }
+    static GpuShader full_redraw(GpuRenderer3D& renderer) {
+        invalidate_full(renderer);
+        return std::move(renderer._shadow_restore_shader);
+    }
+    static void restore(GpuRenderer3D& renderer, GpuShader shader) {
+        renderer._shadow_restore_shader = std::move(shader);
+    }
+    static bool packed_origin(const GpuRenderer3D& renderer) {
+        return std::any_of(renderer._local_views.begin(), renderer._local_views.end(),
+                           [](const auto& v) { return v.wanted && (v.x || v.y); });
+    }
+    static std::vector<u8> read(GpuRenderer3D& renderer) {
+        auto& device = *renderer._device;
+        const auto bytes = local_graph_shaders("shadow_cache_probe.frag.spv");
+        auto shader = GpuShader::from_bytes(device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                            {bytes.data(), bytes.size()}, 1, 1);
+        GpuPipelineCache pipelines;
+        pipelines.init(device.handle());
+        auto* pipeline = pipelines.get(GpuPipelineKey{.vertex = renderer._fullscreen_shader.handle(),
+                                                      .fragment = shader.handle(),
+                                                      .blend = GpuBlendMode::Replace,
+                                                      .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                                      .layout = GpuVertexLayout::None});
+        const SDL_GPUSamplerCreateInfo info{};
+        auto* sampler = SDL_CreateGPUSampler(device.handle(), &info);
+        assert(shader && pipeline && sampler);
+        std::vector<u8> result;
+        bool covered = false;
+        for (const auto& view : renderer._local_views) {
+            if (!view.wanted || view.moon || view.gi_sun)
+                continue;
+            const std::array<u32, 4> metadata{view.layer, view.x, view.y, view.size};
+            const auto* raw = reinterpret_cast<const u8*>(metadata.data());
+            result.insert(result.end(), raw, raw + sizeof(metadata));
+            auto colour = device.create_target(view.size, view.size, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                               SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            for (const i32 shift : {0, 24}) {
+                auto frame = device.begin_frame();
+                const SDL_GPUColorTargetInfo target{
+                    .texture = colour.handle(), .load_op = SDL_GPU_LOADOP_CLEAR, .store_op = SDL_GPU_STOREOP_STORE};
+                auto* pass = SDL_BeginGPURenderPass(frame.command_buffer(), &target, 1, nullptr);
+                assert(pass);
+                const SDL_GPUViewport viewport{0, 0, f32(view.size), f32(view.size), 0, 1};
+                const SDL_Rect scissor{0, 0, int(view.size), int(view.size)};
+                SDL_SetGPUViewport(pass, &viewport);
+                SDL_SetGPUScissor(pass, &scissor);
+                SDL_BindGPUGraphicsPipeline(pass, pipeline);
+                const SDL_GPUTextureSamplerBinding source{renderer._local_map.handle(), sampler};
+                SDL_BindGPUFragmentSamplers(pass, 0, &source, 1);
+                const std::array<i32, 4> region{int(view.x), int(view.y), int(view.layer), shift};
+                SDL_PushGPUFragmentUniformData(frame.command_buffer(), 0, region.data(), sizeof(region));
+                SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+                SDL_EndGPURenderPass(pass);
+                frame.submit();
+                std::vector<u8> pixels;
+                assert(device.read_texture_rgba(colour, pixels));
+                for (std::size_t i = 0; i < pixels.size(); i += 4)
+                    covered = covered || pixels[i] || pixels[i + 1] || pixels[i + 2];
+                result.insert(result.end(), pixels.begin(), pixels.end());
+            }
+        }
+        SDL_ReleaseGPUSampler(device.handle(), sampler);
+        assert(covered);
+        return result;
+    }
+};
+} // namespace kin::gpu
 using namespace kin;
 namespace {
 constexpr Vec2i size{160, 120};
@@ -526,6 +602,123 @@ void shadow_position_depth(Fixture& f) {
     std::cout << "shadow positions: all depth bits match original-stream cutouts across LODs, batches and seven maps\n";
 }
 
+void static_shadow_depth(Fixture& f) {
+    const auto lights = f.scene.lights;
+    f.scene.lights.cache_shadows = true;
+    f.scene.lights.spots.resize(3, f.scene.lights.spots.front());
+    for (u32 i = 0; i < 3; ++i) {
+        f.scene.lights.spots[i].position.x += .2f * i;
+        f.scene.lights.spots[i].shadow_resolution = 64;
+    }
+    f.objects();
+    std::array moving{MeshInstance3D{.transform = Mat4f::translation({-.8f, .6f, .7f})}};
+    auto batch = InstanceBatch3D::create(f.box, {moving.begin(), moving.end()}).value_or({});
+    auto skin = meshes::box({.6f, .6f, .6f});
+    skin.skin.assign(skin.vertices.size(), {});
+    const auto skinned = f.r3d.create_mesh(skin).value_or({});
+    std::array pose{Mat4f::translation({.8f, .7f, 0})};
+    assert(batch && skinned && f.scene.draw_instanced(batch) && f.scene.draw_skinned(skinned, pose, {}));
+    const std::array<u8, 8> rgba{255, 255, 255, 0, 255, 255, 255, 255};
+    const auto mask = f.r.create_texture_from_rgba(rgba.data(), {2, 1});
+    assert(mask && f.scene.draw(f.box, Mat4f::translation({1, .5f, 1}), {.blend = Blend3D::Mask, .texture = mask}));
+    gpu::GpuRenderer3D* owner = nullptr;
+    {
+        const auto prepared = f.r3d.prepare(f.scene).value_or({});
+        const auto* backend = dynamic_cast<const gpu::GpuPreparedScene3D*>(prepared.backend());
+        assert(backend);
+        owner = backend->owner;
+    }
+    u32 frame = 0, hits = 0;
+    const auto check = [&](bool require_hit) {
+        moving[0].transform = Mat4f::translation({-.8f + .02f * ++frame, .6f, .7f});
+        pose[0] = Mat4f::translation({.8f, .7f + .01f * frame, 0});
+        const auto revision = f.scene.draw_revision();
+        assert(batch.update(0, moving) && f.scene.update_joint_matrices(0, pose));
+        assert(f.scene.draw_revision() == revision);
+        gpu::LocalShadowDepthProbe::invalidate_full(*owner);
+        const auto optimized = f.stock();
+        const auto stats = f.r3d.debug_stats();
+        if (require_hit) {
+            assert(stats.local_shadow_static_cached > 0 && stats.local_shadow_static_skipped_triangles > 0);
+            assert(stats.local_shadow_static_bytes > 0 && stats.local_shadow_static_bytes <= 64ull * 1024 * 1024);
+            ++hits;
+        }
+        const auto depth = gpu::LocalShadowDepthProbe::read(*owner);
+        auto shader = gpu::LocalShadowDepthProbe::full_redraw(*owner);
+        const auto reference = f.stock();
+        const auto reference_stats = f.r3d.debug_stats();
+        const auto reference_depth = gpu::LocalShadowDepthProbe::read(*owner);
+        gpu::LocalShadowDepthProbe::restore(*owner, std::move(shader));
+        assert(optimized == reference && depth == reference_depth);
+        assert(reference_stats.local_shadow_static_cached == 0);
+        if (stats.local_shadow_triangles + stats.local_shadow_static_skipped_triangles !=
+            reference_stats.local_shadow_triangles)
+            std::cerr << "static depth frame " << frame << ": actual=" << stats.local_shadow_triangles
+                      << " skipped=" << stats.local_shadow_static_skipped_triangles
+                      << " reference=" << reference_stats.local_shadow_triangles
+                      << " whole=" << stats.local_shadow_cached << " builds=" << stats.local_shadow_static_builds
+                      << '\n';
+        assert(stats.local_shadow_triangles + stats.local_shadow_static_skipped_triangles ==
+               reference_stats.local_shadow_triangles);
+    };
+    check(false); // Observe the mixed maps.
+    check(false); // Bake static geometry at its original atlas coordinates.
+    check(true);
+    assert(gpu::LocalShadowDepthProbe::packed_origin(*owner));
+    check(true); // Batch/pose changes keep static geometry reusable.
+    // Changing a fixed caster invalidates the retained depth.
+    assert(f.scene.set_draw_material(1, {.double_sided = true}));
+    check(false);
+    check(false);
+    check(true);
+    // Projection changes and packed atlas reassignment must not revive stale tiles.
+    f.scene.lights.spots[0].position.x += .4f;
+    f.scene.lights.spots[1].shadow_resolution = 128;
+    check(false);
+    check(false);
+    check(true);
+    f.scene.lights.spots.erase(f.scene.lights.spots.begin());
+    check(false);
+    check(false);
+    check(true);
+    f.scene.cull = !f.scene.cull;
+    check(false);
+    check(false);
+    check(true);
+    f.scene.cull = !f.scene.cull;
+    f.clear_draws();
+    assert(f.scene.draw(f.ground, Mat4f::translation({0, -.1f, 0})));
+    assert(f.scene.draw_instanced(batch) && f.scene.draw_skinned(skinned, pose, {}));
+    check(false); // Removing a fixed caster must not leave its depth behind.
+    check(false);
+    check(true);
+    const auto warm = [&] {
+        moving[0].transform = Mat4f::translation({-.7f + .01f * ++frame, .6f, .7f});
+        assert(batch.update(0, moving));
+        f.r.clear(colors::black);
+        assert(f.r3d.render(f.view, f.scene));
+        f.r.present();
+        assert(f.r3d.debug_stats().local_shadow_static_cached > 0);
+    };
+    for (int i = 0; i < 3; ++i)
+        warm();
+    const auto before = f.r.backend_stats();
+    for (int i = 0; i < 8; ++i)
+        warm();
+    const auto after = f.r.backend_stats();
+    assert(after.gpu_memory.allocations - before.gpu_memory.allocations ==
+           after.upload_staging_allocations - before.upload_staging_allocations);
+    assert(after.upload_staging_bytes <= before.upload_staging_bytes);
+    f.scene.lights.cache_shadows = false;
+    check(false);
+    assert(f.r3d.debug_stats().local_shadow_static_bytes == 0);
+    assert(hits == 7);
+    f.scene.lights = lights;
+    f.objects();
+    std::cout << "static local shadows: exact RGBA/all depth bits, moving batches/poses, masks, invalidation, "
+                 "packed origins/reassignment and cache-off passed\n";
+}
+
 void recording_ranges(Fixture& f) {
     // Independent one-object maps establish the coverage union. The combined
     // map crosses nonzero list offsets, pipelines and direct cluster ranges;
@@ -1009,6 +1202,7 @@ int main() {
     parity(f);
     variants(f);
     shadow_position_depth(f);
+    static_shadow_depth(f);
     recording_ranges(f);
     cube_and_camera(f);
     grid_and_history(f);

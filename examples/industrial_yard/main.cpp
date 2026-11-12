@@ -27,7 +27,7 @@ struct Options {
     bool gpu_pass_markers = false, receives = true, validate = false, animation = true, motion = true, glass = true,
          structures = true, shadows = true, taa = false, ao = false, contact = false, profile = false, visible = false,
          preview = false, rebuild = false, batch_static_props = false, retain_scene_instances = true,
-         cache_local_shadow_gather = true, cache_draw_commands = true;
+         cache_local_shadow_gather = true, cache_draw_commands = true, cache_shadows = false;
 };
 double cpu(bool process) {
 #ifdef __linux__
@@ -54,7 +54,10 @@ public:
                 "local_gather_cached_tests,local_gather_cached_copies,local_gather_cache_bytes,local_sort_cache_hits,"
                 "local_sort_cache_misses,local_sort_cached_entries,draw_plan_hits,draw_plan_builds,draw_pipeline_hits,"
                 "draw_pipeline_misses,main_batched_draws,main_merged_draws,draw_plan_bytes,draw_material_gpu_bytes,"
-                "draw_material_upload_bytes,draw_index_gpu_bytes,draw_index_upload_bytes\n";
+                "draw_material_upload_bytes,draw_index_gpu_bytes,draw_index_upload_bytes,local_shadow_drawn,"
+                "local_shadow_cached,local_shadow_static_builds,local_shadow_static_cached,"
+                "local_shadow_static_skipped_draws,local_shadow_static_skipped_casters,"
+                "local_shadow_static_skipped_triangles,local_shadow_static_bytes\n";
     }
     std::string_view name() const override { return "Industrial yard"; }
     void update(SceneContext& ctx) override {
@@ -148,7 +151,11 @@ public:
                  << ',' << st.draw_plan_hits << ',' << st.draw_plan_builds << ',' << st.draw_pipeline_hits << ','
                  << st.draw_pipeline_misses << ',' << st.main_batched_draws << ',' << st.main_merged_draws << ','
                  << st.draw_plan_bytes << ',' << st.draw_material_gpu_bytes << ',' << st.draw_material_upload_bytes
-                 << ',' << st.draw_index_gpu_bytes << ',' << st.draw_index_upload_bytes << '\n';
+                 << ',' << st.draw_index_gpu_bytes << ',' << st.draw_index_upload_bytes << ',' << st.local_shadow_drawn
+                 << ',' << st.local_shadow_cached << ',' << st.local_shadow_static_builds << ','
+                 << st.local_shadow_static_cached << ',' << st.local_shadow_static_skipped_draws << ','
+                 << st.local_shadow_static_skipped_casters << ',' << st.local_shadow_static_skipped_triangles << ','
+                 << st.local_shadow_static_bytes << '\n';
         }
         if (!_o.capture.empty() && _frame >= _o.warmup + _o.capture_from &&
             _frame < _o.warmup + _o.capture_from + _o.capture_count) {
@@ -199,6 +206,7 @@ public:
             .field("retain_scene_instances", _o.retain_scene_instances)
             .field("cache_local_shadow_gather", _o.cache_local_shadow_gather)
             .field("cache_draw_commands", _o.cache_draw_commands)
+            .field("cache_shadows", _o.cache_shadows)
             .field("source_triangles", _data.source_triangles)
             .field("scene_triangles", _triangles)
             .field("source_mesh_bytes", _data.mesh_bytes)
@@ -240,7 +248,7 @@ private:
         l.local_shadow_resolution = 1024;
         l.max_shadowed_points = 0;
         l.max_shadowed_spots = _data.spot_count;
-        l.cache_shadows = false;
+        l.cache_shadows = _o.cache_shadows;
         u32 point = 0;
         for (u32 i = 0; i < _data.lights.size(); ++i) {
             const auto& d = _data.lights[i];
@@ -471,14 +479,15 @@ int main(int argc, char** argv) {
                 o.batch_static_props = true;
             else if (a == "--receive-shadows" || a == "--animation" || a == "--motion" || a == "--glass" ||
                      a == "--retain-scene-instances" || a == "--cache-local-shadow-gather" ||
-                     a == "--cache-draw-commands" || a == "--structures" || a == "--local-shadows" || a == "--taa" ||
-                     a == "--ao" || a == "--contact") {
+                     a == "--cache-draw-commands" || a == "--cache-shadows" || a == "--structures" ||
+                     a == "--local-shadows" || a == "--taa" || a == "--ao" || a == "--contact") {
                 auto v = value();
                 if (v != "0" && v != "1")
                     throw std::runtime_error("yard booleans require 0 or 1");
                 bool* p = a == "--retain-scene-instances"      ? &o.retain_scene_instances
                           : a == "--cache-local-shadow-gather" ? &o.cache_local_shadow_gather
                           : a == "--cache-draw-commands"       ? &o.cache_draw_commands
+                          : a == "--cache-shadows"             ? &o.cache_shadows
                           : a == "--receive-shadows"           ? &o.receives
                           : a == "--animation"                 ? &o.animation
                           : a == "--motion"                    ? &o.motion

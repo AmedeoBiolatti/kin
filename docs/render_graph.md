@@ -308,6 +308,18 @@ Prepared bounds and compatible instance/joint uploads are shared across these co
 
 ## Explicit local shadows
 
+Stock native D32F spot/point shadows with `Lights3D::cache_shadows` can retain an
+opaque rigid subset while redrawing moving casters. Two identical source/projection
+observations admit the subset into an auxiliary atlas capped at 64 MiB. Restoring
+depth uses the original atlas coordinates and unfiltered texel reads; light fitting,
+resolution, caster selection and filtering are unchanged. Mutable batches, exposed
+instance spans, skins, morphs, LOD/cluster meshes, cutouts and depth-affecting surfaces
+stay on the live path. Source edits, projection changes and overwritten atlas regions
+invalidate retained depth. Allocation/pipeline failure falls back to full recording.
+`RenderDebugStats3D::local_shadow_static_*` reports builds, reuse, omitted geometry
+and resident bytes; `local_shadow_bytes` includes this storage. Disabling caching
+releases it. Explicit producers below retain their redraw contract.
+
 `Renderer3D::render_local_shadows(depth_array, prepared, requests, receiver_size)` renders explicitly requested point/spot mesh shadows on native SDL_GPU. Check `capabilities().local_shadow_pass`. The target is a square sampled D32F array with at most `max_local_shadow_layers` (20) layers. At most eight spots and two points may be requested. Each request specifies a light's index in the prepared source scene, a first layer, and a viewport resolution (zero uses the full array side). A spot occupies one layer; a point occupies six consecutive layers in +x, −x, +y, −y, +z, −z order. Occupied ranges must not overlap, and each light can appear only once.
 
 ```cpp

@@ -157,6 +157,12 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 moon_cascades = 0;
     u64 local_shadow_triangles =
         0; // submitted to the local and moon maps this render (a clustered copy's: its cut's, from the light)
+    // Auxiliary static-depth cache, behind Lights3D::cache_shadows. Builds rasterize
+    // the unchanged opaque subset; cached maps restore it and skip these geometry
+    // draws/copies/triangles. Bytes are also included in local_shadow_bytes.
+    u32 local_shadow_static_builds = 0, local_shadow_static_cached = 0;
+    u32 local_shadow_static_skipped_draws = 0, local_shadow_static_skipped_casters = 0;
+    u64 local_shadow_static_skipped_triangles = 0, local_shadow_static_bytes = 0;
     bool lights_variant = false;
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
     // Reflection probes (Lights3D::reflection_probes): those this render read, the captures it filtered into its

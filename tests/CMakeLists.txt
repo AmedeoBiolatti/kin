@@ -639,7 +639,7 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     set_tests_properties(kin-render3d-material-inputs kin-render3d-material-inputs-foreign kin-render3d-material-inputs-lifetime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_local_graph_tests kin-render3d-local-graph SOURCES render3d_local_graph_tests.cpp)
     kin_compile_glsl(_local_graph_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/local_graph/shaders"
-        SOURCES shaders/custom_direct_light.frag.glsl shaders/shadow_probe.frag.glsl)
+        SOURCES shaders/custom_direct_light.frag.glsl shaders/shadow_probe.frag.glsl shaders/shadow_cache_probe.frag.glsl)
     kin_embed_files(kin_render3d_local_graph_tests NAME local_graph_shaders FILES ${_local_graph_spv})
     set_tests_properties(kin-render3d-local-graph PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_geometry_tests kin-render3d-geometry SOURCES render3d_geometry_tests.cpp)

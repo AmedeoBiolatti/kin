@@ -2,6 +2,79 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Static opaque local-shadow depth reuse, 2026-11-12
+
+The reference is frozen renderer **`3aece4f5`**, with the position-only shadow mesh already enabled. Both binaries share one no-AA application object and the same cache CLI/zero-initialized telemetry scaffolding; the reference retains the original full-map recording. The primary comparison explicitly enables `Lights3D::cache_shadows` in **both**. This is a fresh cache-enabled comparison, not a continuation of the earlier cache-off timings.
+
+Mixed native D32F spot/point maps can now retain opaque rigid depth separately, restore it at the original atlas coordinates with an unfiltered texel fetch, then rasterize live casters. Two identical source/projection observations admit a bake. Source edits, changed light projections/layouts, and overwritten atlas regions invalidate it. Mutable batches, exposed instance spans, skinning/morphs, multi-LOD/cluster meshes, cutouts and depth-affecting surfaces stay live. Fully unchanged maps retain the existing whole-map cache. Sun/moon and explicit graph local producers retain their existing paths.
+
+The auxiliary atlas is capped at **64 MiB**, falls back to full recording when unavailable, and releases when caching is disabled (or after idle retention). Resolution, light fitting, filtering and caster selection are unchanged. The Industrial Yard sample keeps its existing forced-redraw default; use **`--cache-shadows 1`** to exercise reuse. New `local_shadow_static_*` counters distinguish baked/reused maps, omitted geometry and resident bytes; `local_shadow_bytes` includes the auxiliary atlas.
+
+**All measurements are CONTENDED.** Blender and all background workloads were left untouched; clocks, thermals and system load were uncontrolled. Settings: 720p HDR, no AA/GI/AO/contact shadows, classic 1,024 spot maps, independent original Yard submissions, four helpers, affinity 0–15, configured 300 warm-up and 1,440 measured route frames. Existing Release/Ninja GCC, renderer `-O2`, and build directory were reused. Three alternating Hard pairs and one Easy/Medium guard pair were collected for each mode. Cells below are **p50 / p95 / p99 ms**; Hard cells are medians of three per-run percentiles. Changes are medians of paired percentage changes. p50 is the sample median; p95/p99 use sorted index `floor((N-1)*p/100)`.
+
+### GPU shadow attribution
+
+| Tier | Pairs | Before | After | Paired p50 change |
+| --- | --- | --- | --- | --- |
+| Easy | 1 | 0.180 / 0.180 / 0.181 | 0.070 / 0.070 / 0.070 | -61.3% |
+| Medium | 1 | 1.237 / 1.238 / 1.239 | 0.196 / 0.199 / 0.201 | -84.1% |
+| Hard | 3 | 6.235 / 6.237 / 6.238 | 1.632 / 1.634 / 1.708 | -73.8% |
+
+Individual Hard shadow-p50 changes: -76.0%, -73.8%, -73.8%.
+
+| Tier | Unchanged main GPU before | After | 3D span-sum before | After |
+| --- | --- | --- | --- | --- |
+| Easy | 0.929 / 1.164 / 1.385 | 0.930 / 1.167 / 1.382 | 1.133 / 1.370 / 1.590 | 1.025 / 1.261 / 1.478 |
+| Medium | 2.381 / 4.101 / 4.280 | 2.380 / 4.082 / 4.258 | 3.642 / 5.362 / 5.541 | 2.601 / 4.301 / 4.478 |
+| Hard | 5.124 / 9.794 / 9.959 | 5.142 / 9.804 / 9.984 | 11.384 / 16.052 / 16.219 | 6.800 / 11.463 / 11.641 |
+
+These are separate synchronous bottom-of-pipe spans at 13 nonnested pass markers, with a wait on each marked submission. The sum excludes unmarked uploads, 2D composition and presentation; preemption/dependency gaps can contribute. **This diagnostic is not normal throughput.** CPU/GPU and independent pass percentiles must not be added. The unchanged main pass is included as a contemporaneous load control. Easy/Medium are single guard pairs; this is not fixed-clock isolated evidence.
+
+### Normal frame intervals and CPU
+
+Normal runs use neither timestamp-query waits nor screenshot readback.
+
+| Tier | Frame before | After | Paired frame p50 change |
+| --- | --- | --- | --- |
+| Easy | 1.474 / 1.871 / 2.155 | 1.346 / 1.762 / 2.009 | -8.7% |
+| Medium | 4.396 / 6.818 / 7.156 | 3.691 / 6.175 / 6.524 | -16.0% |
+| Hard | 11.609 / 17.060 / 17.328 | 8.213 / 12.644 / 12.915 | -29.3% |
+
+| Tier | Caller CPU before | After | Renderer process CPU before | After |
+| --- | --- | --- | --- | --- |
+| Easy | 0.436 / 0.489 / 0.519 | 0.417 / 0.482 / 0.558 | 0.512 / 0.617 / 0.653 | 0.498 / 0.625 / 0.688 |
+| Medium | 1.869 / 2.031 / 2.208 | 2.234 / 2.634 / 2.956 | 2.009 / 2.185 / 2.358 | 2.392 / 2.814 / 3.131 |
+| Hard | 6.976 / 7.879 / 8.470 | 7.556 / 8.753 / 9.109 | 7.582 / 8.540 / 9.219 | 8.206 / 9.517 / 9.910 |
+
+CPU columns measure time inside `Renderer3D::render`, excluding scene updates and application/2D/presentation work. Process CPU includes helper work. Partial depth reuse still pays current caster gathering, instance/list preparation and whole-map fingerprinting; it primarily removes GPU geometry work.
+
+### Forced-redraw policy guard
+
+A separate **single contended Hard pair** compares the previous benchmark policy (`cache_shadows=0` on the frozen reference) with the candidate using `cache_shadows=1`. This includes the CPU cost of enabling the existing whole-map fingerprinting, so it must be read separately from the cache-enabled implementation comparison above.
+
+| Hard guard | Before, forced redraw | After, partial caching |
+| --- | --- | --- |
+| Frame interval | 11.557 / 18.635 / 19.087 | 8.728 / 12.764 / 13.017 |
+| Caller CPU | 2.193 / 2.433 / 2.532 | 7.990 / 8.627 / 8.878 |
+| Renderer process CPU | 2.739 / 3.046 / 3.212 | 8.718 / 9.429 / 9.645 |
+
+### Work, memory and output parity
+
+| Tier | Shadow triangles before, p50 | Actually rasterized after, p50 | Static triangles omitted, p50 | Extra atlas |
+| --- | --- | --- | --- | --- |
+| Easy | 1,113,312 | 28,056 | 1,085,256 | 8 MiB |
+| Medium | 8,086,164 | 848,712 | 7,237,452 | 16 MiB |
+| Hard | 40,941,344 | 10,277,396 | 30,663,948 | 32 MiB |
+
+- **15 focused suites passed**, no skips: eight NVIDIA GPU suites and five Lavapipe GPU suites with Khronos synchronization validation, plus two CPU suites. No validation errors. These are focused checks, not the full platform matrix.
+- The local-shadow regression compares **all 32 depth bits of every wanted stock spot/point texel**, and exact final RGBA, against the original full geometry route with partial reuse disabled. It covers nonzero packed origins, moving batches/poses, cutouts, fixed-caster changes/removal, light projection/resolution changes, repacking, culling policy and cache-off. Both native NVIDIA and software Vulkan passed. Warmed rendering has no extra non-staging GPU allocations or staging growth.
+- **Three 720p RGBA pairs at route frame 541 are byte-identical while partial reuse is active**, with the new reuse/skipped-geometry counters asserted in the captured frame. Three additional cache-off pairs match every exported non-timing column and exact RGBA, with zero auxiliary atlas bytes.
+- Nine further 720p RGBA pairs are byte-identical during the stationary warm-up phases **0 / 540 / 960** across all tiers. The harness default capture happens at configured warm-up frame 300; their CSV rows describe the following route phases 1 / 541 / 961. These stationary captures do not establish active partial-cache-hit parity; the explicit frame-541 captures and depth regression above do.
+- On every measured primary before/after route frame, source configuration, main geometry, lighting, skinning and motion match. **Actually drawn + statically omitted shadow triangles/casters equal the reference**, including the initial bake. GPU diagnostic and normal non-timing columns match within each version. All 13 pass groups and CSV-to-submission mapping were checked; all reported percentiles were recomputed.
+- The atlas descriptor bytes are not physical VRAM/RSS. Geometry/skin/list uploads are not eliminated by this change; the extra atlas is the principal retained GPU payload tradeoff. No loading/startup, isolated thermal, device-loss or exhaustive long-duration stability claim is made.
+
+Artifacts: `out/runs/render3d-shadow-static-depth/` contains frozen baseline/candidate executable and source hashes, shared application-object hash, recipes, compiler/link commands, GPU library hash, per-run logs/process records/telemetry, raw CSV/timestamps, 30 PNG captures, JUnit reports, exact-image/depth gates and `summary.json` / `checks.json`. The four unrelated dirty files recorded at task start were preserved byte-for-byte. Generated output is not committed.
+
 ## Position-only local-shadow geometry, 2026-11-12
 
 The reference is frozen renderer **`32f387ea`**, including map-wide shadow batches

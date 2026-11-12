@@ -54,6 +54,11 @@ renderer, window, jobs or GPU resources; it does not require `--metrics`.
 
 Native profiling controls (default rendering is unchanged):
 
+- `--cache-shadows 0|1` controls shadow-image reuse (default 0 preserves the
+  existing forced-redraw benchmark). Use 1 in both versions for a matched
+  cache-enabled comparison. Reports identify the policy; CSVs expose full-map
+  hits and static-depth builds/hits, skipped geometry and resident cache bytes.
+
 - `--retain-scene-instances 0|1` selects the streamed reference or automatic direct
   scene-record retention (default 1). This keeps independent draw order and scene
   content. CSVs include direct retention/cache/upload/bounds counters, total bounds

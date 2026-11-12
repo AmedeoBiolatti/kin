@@ -467,7 +467,9 @@ struct Lights3D {
     // the area and the resolution, the camera (what casts into view, and the cascades' fit, depend on it), every
     // caster's mesh, material and copies, and the levels of detail all as they were. Exact (the picture is the one
     // drawn again, to the byte), and a scene that moves pays only a comparison that stops at the first difference; it
-    // hits only when nothing in the shadow's reach moved: a paused game, a photo mode, a viewer at rest. A cut-out
+    // reuses a whole map only when nothing in its reach moved. Native D32F local spot/point maps can also retain
+    // stable opaque rigid depth and redraw the live remainder (up to 64 MiB of auxiliary atlas storage).
+    // `RenderDebugStats3D::local_shadow_static_*` reports this partial reuse. A cut-out
     // caster's texture that is drawn into or written to (a render target) is never cached. Off unless asked for, like
     // the other opt-ins (a benchmark that renders one scene many times and means to time the shadows leaves it off).
     // `RenderStats3D::shadow_cached` says when it hit.

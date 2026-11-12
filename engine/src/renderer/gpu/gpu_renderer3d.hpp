@@ -646,6 +646,7 @@ public:
 
 private:
     friend class GpuPreparedScene3D;
+    friend struct LocalShadowDepthProbe; // Focused regression access; no public shadow-map exposure.
     bool preparation_live(u64 frame) const;
     bool validate_material_inputs(const Scene3D&, std::span<const Texture> outputs = {},
                                   u64* signature = nullptr) const;
@@ -827,6 +828,9 @@ private:
     // grid_tile pixels by slices of view depth) those whose reach touches it, uploaded for the main pass.
     void build_light_grid(FrameCtx& ctx);
     void build_local_shadows(FrameCtx& ctx);
+    bool static_shadow_ref(const DrawRef& ref, const Scene3D& scene) const;
+    bool ensure_local_static_map();
+    void clear_local_static();
     void prepare_shadow_mesh(GpuMesh3D& mesh, const MeshData3D& source, const MeshLodChain3D* chain);
     bool local_shadow_pass(FrameCtx& ctx);
     void push_local_lights(const FrameCtx& ctx, u32 s, u32 slot);
@@ -1066,6 +1070,7 @@ private:
     GpuShader _unlit_vertex_shader, _unlit_textured_vertex_shader;
     GpuShader _unlit_shader, _unlit_textured_shader, _unlit_mask_shader, _unlit_textured_mask_shader;
     GpuShader _shadow_shader;        // shadow.frag
+    GpuShader _shadow_restore_shader; // shadow_restore.frag, optional static-depth reuse
     GpuShader _shadow_vertex_shader; // shadow.vert
     GpuShader _fullscreen_shader;    // fullscreen.vert
     GpuShader _bloom_shader;         // bloom.frag
@@ -1306,6 +1311,11 @@ private:
     // draws into a corner of it); the moon's cascades are an array of their own. `_*_generation` changes when one is
     // made again (nothing cached is in it).
     GpuTexture _local_map;
+    // Same dimensions/coordinates as the stock spot/point atlas. Opaque rigid
+    // depth is retained here; its restore always writes the complete live map.
+    GpuTexture _local_static_map;
+    u64 _local_static_generation = 0, _local_static_attempt = 0;
+    u32 _local_static_idle = 0;
     u32 _local_side = 0, _local_layers = 0; // the maps are packed into its layers (pack_local_maps)
     u64 _local_generation = 0;
     u32 _local_idle = 0;
@@ -1335,6 +1345,13 @@ private:
         bool valid = false;
     };
     std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades + 1> _local_cache; // (+1: the GI's sun map)
+    struct LocalStaticCache {
+        std::vector<u8> payload;
+        u32 layer = 0, x = 0, y = 0, size = 0;
+        bool observed = false, valid = false;
+    };
+    std::array<LocalStaticCache, max_local_shadow_layers> _local_static_cache;
+    std::vector<u8> _local_static_refs;
     // The local views' casters of this render: the union of their copies as GpuInstance3D, each view's lists of them
     // (u32), and the joint offsets of the posed ones.
     std::shared_ptr<GpuBuffer> _local_instances, _local_lists, _local_joint_offsets;
@@ -1380,6 +1397,7 @@ private:
         bool wanted = true; // a face of a cube no visible surface falls in is not drawn
         bool cached = false;
         bool drawn = false;
+        bool static_cached = false, static_build = false;
         u32 entry_first = 0, entry_count = 0;
     };
     struct LocalGatherKey {
