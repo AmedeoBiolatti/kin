@@ -450,6 +450,10 @@ or layout refresh invalidates the mask; disabling image reuse or using public lo
 An exposed mutable instance span always disables static membership. Batch contents, poses, visibility, shadow
 fingerprints and current GPU bindings still refresh through their existing paths.
 
+Local shadow image/history keys inspect the texture backend through RTTI only for masked materials, whose
+alpha, sampler and texture-content state affect depth. Other fields, including texture identities used by
+vertex-offset surfaces, retain their existing key rules.
+
 Retained selection/program vector payload is limited to 4 MiB per renderer across 64 source/light-slot
 probes, plus fixed metadata. Unstable projections are observed without allocating
 payload, and pressure falls back to fresh gathering/sorting.

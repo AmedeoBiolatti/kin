@@ -8561,7 +8561,9 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             for (const Found& f : found[v]) {
                 const DrawRef& ref = _refs[f.ref];
                 const Material3D& m = ref.draw->material;
-                const auto* texture = dynamic_cast<const GpuTextureBackend*>(m.texture.backend().get());
+                const auto* texture = m.blend == Blend3D::Mask
+                                          ? dynamic_cast<const GpuTextureBackend*>(m.texture.backend().get())
+                                          : nullptr;
                 if (m.blend == Blend3D::Mask && texture && texture->premultiplied()) {
                     cacheable = false; // a render target: drawn into without a trace
                     break;

@@ -2,6 +2,100 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Live local-shadow fingerprinting, 2026-11-12
+
+The retained change skips the texture-backend `dynamic_cast` while constructing local-shadow keys unless
+the material uses `Blend3D::Mask`. The result was previously computed and discarded for opaque materials.
+Cutout checks, surface-specific texture identities, serialized fields, matrices, joints, cache decisions,
+temporal hashes and GPU work keep their existing rules. This is one conditional in `build_local_shadows`,
+with no API, cache-format or shader change. The starting commit is `07e7c20e` (renderer `cb0d7744`) on
+`perf/render3d-cpu-parity`.
+
+**All measurements are CONTENDED.** Blender and all background workloads stayed running. The supported gain
+is approximately **4% less Hard key-generation CPU**, about **6–7 microseconds per measured frame** in the
+controlled diagnostic. The much larger whole-renderer CPU drops below cannot be attributed to this small
+change. No FPS gain is established.
+
+### Profile and controlled key comparison
+
+A temporary CPU-only probe times whole renderer phases every eighth update: 180 sampled frames per full
+1,440-frame route after 300 configured warm-up frames. The two Hard baseline profiles place fingerprinting
+at **0.179 / 0.196 ms**, shadow preparation at **0.686 / 0.746 ms**, and the renderer at **2.024 / 2.205 ms**
+(caller-CPU means). These overlapping scopes are diagnostic, not throughput. Fingerprinting accounts for
+roughly 9% of this renderer budget, so saving 4% of key construction alone suggests a sub-percent renderer
+gain under comparable conditions. The probe's phase-541 pixels and work counters match the frozen baseline
+on all three tiers. Generated GCC assembly confirms that the old code calls `__dynamic_cast` before testing
+the blend mode; the retained code guards the call with the mask test.
+
+The final byte oracle runs the legacy and optimized key builders on identical inputs, into separate scratch
+vectors written on every frame with matched reuse lifetimes. Call order rotates by frame and view. Both
+complete keys and cacheability must match the actual production key before normal cache decisions. Whole-key
+thread-CPU clocks are active every eighth frame; there are no per-field clocks. This triple-serialization
+binary supplies component timings and correctness evidence only, never throughput measurements.
+
+| Diagnostic run | Legacy mean key CPU | Optimized mean key CPU | Mean change | p50 change |
+| --- | --- | --- | --- | --- |
+| Easy | 2.789 us | 2.462 us | -11.7% | -10.1% |
+| Medium | 23.979 us | 22.093 us | -7.9% | -6.5% |
+| Hard, first | 162.640 us | 156.636 us | -3.7% | -3.7% |
+| Hard, repeat | 178.481 us | 171.087 us | -4.1% | -4.9% |
+
+Each row aggregates all wanted keys in a sampled frame. Changes are ratios of that run's means/percentiles,
+not medians of per-frame changes. All **38,302 complete keys** match byte-for-byte, including startup and
+warm-up; 3,960 key comparisons fall within the sampled measured frames. The oracle also checks cacheability.
+
+Two larger writer changes were rejected. Reusing a vector through an overwrite cursor gave an essentially
+flat Hard caller-CPU p50 (-0.5%, median of three pairs). Batching adjacent scalar fields gave +6.4% across
+three Hard pairs despite favorable exploratory kernel timings. The early writer oracle used different scratch
+reuse lifetimes and is not accepted performance evidence. Both implementations and their extra test code
+were removed; their patches and measurements remain in task output.
+
+### Fresh normal-throughput comparison
+
+Frozen baseline and candidate binaries use the same original Yard application object and recipes: independent
+submissions, 720p HDR, no AA/GI/AO/contact shadows, classic 1,024 spot maps, shadow caching enabled, four helpers,
+affinity 0–15, 300 configured warm-up plus 1,440 measured frames. Neither binary contains scoped probes or
+synchronous GPU-query waits. Three alternating pairs cover each tier, followed by three independent Hard
+pairs using the same binaries and opposite starting order: **24 fresh normal runs, 34,560 measured frames**.
+Every matched frame has identical exported non-timing counters.
+
+The table gives **medians of paired percentage changes**, negative meaning lower cost. p50 is the sample
+median; p95/p99 use sorted index `floor((N-1)*p/100)`. The two Hard blocks are kept separate.
+
+| Block | Pairs | Caller CPU change p50 / p95 / p99 | Process CPU p50 | Frame p50 |
+| --- | --- | --- | --- | --- |
+| Easy | 3 | +1.2% / -4.6% / -5.1% | -1.9% | +0.3% |
+| Medium | 3 | +1.4% / -1.0% / -12.1% | +0.5% | -0.4% |
+| Hard, initial | 3 | -15.7% / -17.7% / -24.6% | -15.5% | +0.2% |
+| Hard, independent repeat | 3 | -8.6% / -11.2% / -15.2% | -9.3% | +1.1% |
+
+Individual Hard caller-CPU p50 changes were **-5.3%, -15.7%, -19.7%** initially and
+**-11.9%, +7.6%, -8.6%** in replication. Background load and unchanged-binary timings drift substantially.
+These whole-renderer observations do not establish an 8–16% causal CPU gain from this conditional, and the
+frame results do not establish higher throughput. The small, repeatable matched-input key saving is the
+reason for retaining the change. This task adds no new Godot or Unreal comparison.
+
+### Parity, validation and evidence
+
+The final implementation passed **13 focused suite runs**: local graph, direct cache, draw commands,
+geometry and surface stages on both NVIDIA and software Vulkan; the CPU suite; and the existing particle-shadow
+suite on both Vulkan drivers. All twelve GPU runs observed Khronos core and synchronization validation,
+with no skips or validation errors. Affected targets were built first. The particle suite's CMake target is
+disabled by this build's runtime-scene option, so its unchanged existing source was compiled and linked
+against the same engine without reconfiguring the build. These are focused checks, not a full-suite pass.
+
+Six exact-RGBA capture pairs cover Hard phases 1/541/961, Easy/Medium phase 541 and Hard phase 541 with shadow
+image caching disabled. Work counters match too. Candidate captures are fresh; baseline correctness captures
+are reused from the verified identical frozen binary, application and recipes in the preceding task. Those
+reused captures supply no new performance timings. Existing local-graph tests also check exact depth bits;
+particle tests exercise temporal/cache behavior. The four unrelated dirty files are preserved.
+
+Evidence is under `out/runs/render3d-shadow-fingerprint/`: the `coarse-before-*-profile.json` files,
+`balanced-key-summary.json`, `balanced-oracle-provenance.json`, `texture-summary.json`,
+`replication-summary.json`, `texture-provenance.json`, `texture-capture-checks.json`,
+`reused-capture-provenance.json`, `test-results.json` and `checks.json`, with commands, generated diagnostic
+sources, raw CSVs, logs and rejected patches. Generated output is not committed.
+
 ## Upload staging and packing experiments, 2026-11-12
 
 **No renderer change was retained.** This investigation split the upload hotspot, tested serial batching and
