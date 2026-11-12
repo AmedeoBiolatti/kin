@@ -2,6 +2,61 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## CPU preparation for cached local shadows, 2026-11-12
+
+The reference is frozen **`82a380f8`**, with static opaque shadow-depth reuse enabled. Both executables use **`cache_shadows=1`**, the same existing no-AA application object and the same quality settings. This comparison measures CPU preparation changes on top of depth reuse; it is distinct from enabling caching versus forced redraw.
+
+Previously the shadow cache rebuilt a per-map byte stream containing static caster transforms, and enabling it disabled the existing deferred static-selection program. An admitted gather plan now records whether every saved direct row has immutable opaque depth inputs. Its source identity/revision, selected projection/frustum/reach and culling policy stand in for the repeated static records. Dynamic batches, poses and other live rows still contribute their detailed inputs. The existing compiled selection program stays source-relative and compact until command/list emission, avoiding expansion into per-frame `Found` rows and transform serialization. No additional cache layer, dependency, public option or application-object rebuild was added.
+
+If a saved direct selection contains a cutout, mutable mesh or other ineligible row, it retains the detailed path. Exposed instance spans, multi-LOD/cluster meshes and unsupported retention also keep existing behavior. Temporal shadow-content history retains its original full fingerprint bytes; compact and full payload formats are explicitly distinguished when switching paths. Source revision changes conservatively invalidate the compact key even if they leave depth unchanged. The gather key now also includes `Scene3D::cull`, so a culling-policy change cannot reuse the previous selection. Public graph producers, shaders, shadow resolution/filtering and the 64 MiB auxiliary-atlas cap are unchanged.
+
+**All results are CONTENDED.** Blender and all background workloads were left untouched; clocks, temperature and system load were uncontrolled. Existing Release/Ninja/GCC, renderer `-O2`, build directory and application object were reused. Settings: 720p HDR, no AA/GI/AO/contact shadows, classic 1,024 spot maps, original independent Yard submissions, four helpers and affinity 0–15. Configured warm-up is 300 frames, followed by the full 1,440-frame route. There are three alternating Hard normal pairs and one Easy/Medium guard pair; GPU attribution uses one separate synchronous pair per tier. All cells are **p50 / p95 / p99 ms**. Hard normal cells are medians of three per-run percentiles; percentage changes are medians of paired changes. p50 uses the sample median; p95/p99 use sorted index `floor((N-1)*p/100)`.
+
+### Normal CPU and frame intervals
+
+| Tier | Caller CPU before | After | Paired caller p50 change |
+| --- | --- | --- | --- |
+| Easy | 0.399 / 0.473 / 0.525 | 0.246 / 0.361 / 0.381 | -38.5% |
+| Medium | 1.940 / 2.120 / 2.255 | 0.974 / 1.115 / 1.361 | -49.8% |
+| Hard | 7.146 / 8.025 / 8.621 | 2.542 / 3.067 / 3.402 | -64.4% |
+
+| Tier | Frame interval before | After | Paired frame p50 change |
+| --- | --- | --- | --- |
+| Easy | 1.080 / 1.361 / 1.580 | 1.050 / 1.348 / 1.580 | -2.8% |
+| Medium | 2.690 / 4.402 / 4.608 | 2.692 / 4.396 / 4.598 | +0.1% |
+| Hard | 7.878 / 11.753 / 12.737 | 5.960 / 11.629 / 11.826 | -18.3% |
+
+Individual Hard caller-p50 changes: -57.1%, -64.4%, -64.8%. Individual Hard frame-p50 changes: -18.3%, -27.2%, -11.9%.
+
+| Tier | Renderer process CPU before | After | Peak process RSS before / after |
+| --- | --- | --- | --- |
+| Easy | 0.458 / 0.568 / 0.620 | 0.308 / 0.460 / 0.497 | 141.0 / 141.1 MiB |
+| Medium | 2.084 / 2.282 / 2.429 | 1.109 / 1.265 / 1.542 | 153.0 / 153.4 MiB |
+| Hard | 7.780 / 8.773 / 9.333 | 3.103 / 3.675 / 4.046 | 187.3 / 195.6 MiB |
+
+CPU columns cover `Renderer3D::render`, excluding scene updates and application/2D/presentation work; process CPU includes helper threads. Normal runs have neither timestamp-query waits nor screenshot readback. These are whole-render CPU timings, not isolated fingerprinting durations. CPU improvements need not translate proportionally to frame time: GPU shading, presentation and contention still contribute. Medium frame p50 is essentially flat despite lower CPU cost, consistent with a remaining GPU limit. Hard frame tails vary across pairs; this does not establish a uniform frame-tail improvement. The raw per-pair results remain in `summary.json`.
+
+### GPU preservation guard
+
+| Tier | Local-shadow GPU before | After | Unchanged main GPU before | After |
+| --- | --- | --- | --- | --- |
+| Easy | 0.069 / 0.070 / 0.070 | 0.068 / 0.070 / 0.070 | 0.926 / 1.166 / 1.382 | 0.898 / 1.158 / 1.391 |
+| Medium | 0.195 / 0.198 / 0.200 | 0.196 / 0.199 / 0.201 | 2.302 / 4.107 / 4.487 | 2.389 / 4.112 / 4.431 |
+| Hard | 1.400 / 1.629 / 1.633 | 1.576 / 1.630 / 1.632 | 4.278 / 9.292 / 9.890 | 4.993 / 9.767 / 9.949 |
+
+GPU values are single guard pairs using the existing synchronous Vulkan timestamp library: 13 nonnested bottom-of-pipe pass spans, with a wait on marked submissions. They are **not normal throughput** and can include preemption/dependency gaps; uploads/2D/presentation outside the markers are excluded. The unchanged main pass is a contemporaneous load control. CPU and GPU timings must not be added.
+
+### Correctness, residency and limits
+
+- **15 focused suites passed**, no skips: eight NVIDIA GPU suites and five Lavapipe GPU suites with Khronos synchronization validation, plus two CPU suites. No validation errors. This is not the full platform matrix.
+- The new regression exceeds direct-retention admission with 320 static copies plus moving batch/skinned casters. Hot fingerprint payload and expanded selection sizes are each **less than one quarter** of the detailed reference. It compares exact final RGBA and every wanted stock map texel’s **32 depth bits**, with full gather and partial reuse disabled for the reference. It exercises source edits/addition, light and camera changes, culling policy, cache re-entry and direct cutout fallback on both GPU backends, including a mask texture upload that leaves the scene revision unchanged. The earlier static-depth invalidation, packed-atlas, source-removal, cache-off and warmed-resource regressions also pass.
+- **Nine active-cache 720p RGBA pairs match exactly**, across all tiers at route phases 1 / 541 / 961. Captures explicitly occur at the third measured render, with both versions asserting active partial reuse in that frame. Three additional cache-off pairs at phase 541 match exact RGBA and every exported non-timing column, with zero auxiliary-atlas bytes.
+- Every measured primary before/after route frame preserves source configuration, main geometry, lighting, poses and motion, and conserves **actual + statically omitted shadow triangles/casters**. After the first two cold route frames, actual/omitted shadow geometry and atlas bytes also match exactly. All non-timing columns match between each version’s own normal and GPU diagnostic runs. Pass inventories, frame-to-submission mapping and all exported percentiles were independently recomputed.
+- Compact fingerprinting can cause a one-time full-map miss on a payload-format transition. During stationary warm-up, this can bake the auxiliary atlas earlier, which then expires under the existing idle policy; the moving route can therefore need two cold frames (observe, bake) instead of one. Full geometry is drawn whenever retained depth is unavailable, preserving output. Steady atlas storage remains **8 / 16 / 32 MiB** for Easy/Medium/Hard, within the existing cap. CPU selection-program payloads remain inside the existing 4 MiB gather budget; descriptor bytes and RSS are distinct measures.
+- A separate sampled-stack profile was attempted, but `perf record` was denied for both `cpu-clock:u` and `task-clock:u` by host permissions. `perf stat` counting works, but sampling did not; no system settings were changed. No sampled phase-percentage attribution is claimed. Phase isolation, loading/startup, device loss, fixed-clock isolation and exhaustive long-duration stability remain unmeasured.
+
+Artifacts: `out/runs/render3d-shadow-static-cpu/` contains frozen baseline/source hashes, candidate and shared application-object hashes, recipes/link command/GPU library hash, raw normal and timestamp CSVs, per-run process/load evidence, 24 PNG captures, JUnit reports, exact-depth/hot-key regression results, permission-denial evidence and `summary.json` / `checks.json`. Preliminary 120-frame smoke runs are retained separately from the full-route comparison. Generated output is not committed; the four unrelated dirty files recorded at task start were preserved byte-for-byte.
+
 ## Static opaque local-shadow depth reuse, 2026-11-12
 
 The reference is frozen renderer **`3aece4f5`**, with the position-only shadow mesh already enabled. Both binaries share one no-AA application object and the same cache CLI/zero-initialized telemetry scaffolding; the reference retains the original full-map recording. The primary comparison explicitly enables `Lights3D::cache_shadows` in **both**. This is a fresh cache-enabled comparison, not a continuation of the earlier cache-off timings.

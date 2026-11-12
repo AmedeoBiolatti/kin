@@ -1343,6 +1343,7 @@ private:
         u64 revision = 0;
         bool fingerprinted = false;
         bool valid = false;
+        bool compact = false; // payload describes immutable selections by their source/projection revisions
     };
     std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades + 1> _local_cache; // (+1: the GI's sun map)
     struct LocalStaticCache {
@@ -1408,6 +1409,7 @@ private:
         Vec3f centre{};
         f32 radius = 0;
         bool bounded = false;
+        bool culled = true;
     };
     struct LocalGatherCache {
         LocalGatherKey key;
@@ -1415,6 +1417,7 @@ private:
         u32 slot = ~0u;
         u64 frame = 0, tests = 0;
         bool observed = false, valid = false;
+        bool rigid = false; // every saved direct row has immutable opaque depth inputs
         struct Row {
             u32 ref, first, count;
         };

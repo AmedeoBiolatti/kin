@@ -7586,8 +7586,9 @@ void GpuRenderer3D::trim_local_gather(u64 budget) {
 
 bool GpuRenderer3D::same_local_gather_key(const LocalGatherKey& a, const LocalGatherKey& b) {
     return a.scene == b.scene && a.revision == b.revision && a.refs == b.refs && a.kind == b.kind &&
-           a.bounded == b.bounded && a.radius == b.radius && a.centre.x == b.centre.x && a.centre.y == b.centre.y &&
-           a.centre.z == b.centre.z && std::memcmp(a.projection.m, b.projection.m, sizeof(a.projection.m)) == 0 &&
+           a.culled == b.culled && a.bounded == b.bounded && a.radius == b.radius && a.centre.x == b.centre.x &&
+           a.centre.y == b.centre.y && a.centre.z == b.centre.z &&
+           std::memcmp(a.projection.m, b.projection.m, sizeof(a.projection.m)) == 0 &&
            a.frustum.count == b.frustum.count &&
            std::memcmp(a.frustum.planes.data(), b.frustum.planes.data(), a.frustum.count * sizeof(Vec4f)) == 0;
 }
@@ -7606,7 +7607,8 @@ GpuRenderer3D::LocalGatherCache* GpuRenderer3D::local_gather_plan(const FrameCtx
                              view.frustum,
                              view.centre,
                              view.radius,
-                             view.bounded};
+                             view.bounded,
+                             source.cull};
     LocalGatherCache* cell = nullptr;
     const u64 frame = _owner->_frame_serial;
     for (auto& cache : _local_gather_cache) {
@@ -7786,9 +7788,15 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             append(dynamic_pieces);
     }
     const bool cache_on = lights.cache_shadows;
-    std::array<u8, view_limit> deferred{};
-    for (u32 v = 0; v < _local_views.size(); ++v)
-        deferred[v] = hits[v] && !cache_on && !ctx.shadow_history && !ctx.public_local && !_local_views[v].gi_sun;
+    std::array<u8, view_limit> deferred{}, compact{};
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        // Immutable opaque selections are already validated by the gather key.
+        // Keep them in the source-relative program, rather than expanding them
+        // merely to serialize the same transforms for every map every frame.
+        compact[v] = hits[v] && plans[v]->rigid && cache_on && !ctx.shadow_history && !ctx.public_local;
+        deferred[v] =
+            hits[v] && (!cache_on || compact[v]) && !ctx.shadow_history && !ctx.public_local && !_local_views[v].gi_sun;
+    }
     const GpuFrustum& camera = ctx.frustums[0];
     const bool culled = ctx.scene.cull;
     const Bounds3D& area = lights.shadow_area;
@@ -8458,6 +8466,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 next += count;
             }
         plan.tests = static_tests[v];
+        plan.rigid = std::all_of(plan.rows.begin(), plan.rows.end(),
+                                 [&](const auto& row) { return static_shadow_ref(_refs[row.ref], ctx.scene); });
         plan.valid = true; // an empty selection is also reusable
         _local_gather_bytes += plan.bytes();
         ++stats.local_gather_cache_builds;
@@ -8494,6 +8504,19 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             payload.value(view.size);
             payload.value(particles ? particles->key : u64{0});
             payload.append(view.view_projection.m, sizeof(view.view_projection.m));
+            if (compact[v]) {
+                const auto& key = plans[v]->key;
+                payload.value(key.scene);
+                payload.value(key.revision);
+                payload.value(key.refs);
+                payload.value(key.kind);
+                payload.value(key.culled);
+                payload.value(key.bounded);
+                payload.value(key.radius);
+                payload.value(key.centre);
+                payload.value(key.frustum.count);
+                payload.append(key.frustum.planes.data(), key.frustum.count * sizeof(Vec4f));
+            }
             for (const Found& f : found[v]) {
                 const DrawRef& ref = _refs[f.ref];
                 const Material3D& m = ref.draw->material;
@@ -8540,7 +8563,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 }
             }
             if (cacheable) {
-                const bool same = cache.valid && cache.payload == bytes;
+                const bool same = cache.valid && cache.compact == bool(compact[v]) && cache.payload == bytes;
                 if (ctx.shadow_history && (!same || !cache.fingerprinted)) {
                     // Views share map slots, but each view's temporal identity
                     // follows its own content even after another view used it.
@@ -8557,6 +8580,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                     continue;
                 }
                 cache.payload.swap(bytes);
+                cache.compact = compact[v];
                 cache.valid = true;
             }
         }
@@ -8577,7 +8601,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         if (ctx.public_local || !cache_on || !view.drawn || view.moon || view.gi_sun ||
             view.cache >= _local_static_cache.size() || !_shadow_restore_shader)
             continue;
-        bool fixed = false, live = false;
+        bool fixed = compact[v] && !plans[v]->rows.empty(), live = false;
         for (const Found& f : found[v])
             (_local_static_refs[f.ref] ? fixed : live) = true;
         const auto* particles = particle_cast_view(view.view_projection);

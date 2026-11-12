@@ -320,6 +320,15 @@ invalidate retained depth. Allocation/pipeline failure falls back to full record
 and resident bytes; `local_shadow_bytes` includes this storage. Disabling caching
 releases it. Explicit producers below retain their redraw contract.
 
+When every saved direct row of a retained gather selection has immutable opaque
+depth inputs, stock CPU preparation validates that selection by source and
+projection revisions instead of expanding and serializing its static transforms
+again. Live rows retain their detailed inputs. Selections containing direct
+cutouts or other ineligible inputs use the detailed path; temporal shadow-content
+history keeps its original fingerprint format. The gather key includes the scene's
+culling policy. Source edits can conservatively invalidate reuse even when depth
+would be unchanged.
+
 `Renderer3D::render_local_shadows(depth_array, prepared, requests, receiver_size)` renders explicitly requested point/spot mesh shadows on native SDL_GPU. Check `capabilities().local_shadow_pass`. The target is a square sampled D32F array with at most `max_local_shadow_layers` (20) layers. At most eight spots and two points may be requested. Each request specifies a light's index in the prepared source scene, a first layer, and a viewport resolution (zero uses the full array side). A spot occupies one layer; a point occupies six consecutive layers in +x, −x, +y, −y, +z, −z order. Occupied ranges must not overlap, and each light can appear only once.
 
 ```cpp

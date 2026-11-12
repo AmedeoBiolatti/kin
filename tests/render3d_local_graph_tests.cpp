@@ -42,6 +42,13 @@ struct LocalShadowDepthProbe {
         return std::any_of(renderer._local_views.begin(), renderer._local_views.end(),
                            [](const auto& v) { return v.wanted && (v.x || v.y); });
     }
+    static std::pair<u64, u64> preparation_size(const GpuRenderer3D& renderer) {
+        u64 bytes = 0;
+        for (const auto& view : renderer._local_views)
+            if (view.wanted)
+                bytes += renderer._local_cache[view.cache].payload.size();
+        return {bytes, renderer._local_selection_list.size()};
+    }
     static std::vector<u8> read(GpuRenderer3D& renderer) {
         auto& device = *renderer._device;
         const auto bytes = local_graph_shaders("shadow_cache_probe.frag.spv");
@@ -719,6 +726,106 @@ void static_shadow_depth(Fixture& f) {
                  "packed origins/reassignment and cache-off passed\n";
 }
 
+void compact_shadow_preparation(Fixture& f) {
+    const auto lights = f.scene.lights;
+    const auto lod = f.scene.lod;
+    const auto debug = f.scene.debug;
+    f.scene.lights.cache_shadows = true;
+    f.scene.lod.enabled = false;
+    f.scene.debug.retain_scene_instances = true;
+    f.scene.debug.cache_local_shadow_gather = true;
+    f.clear_draws();
+    // Exceed direct scene-retention admission without relying on one-copy draws.
+    // All static selections remain opaque, while batches and poses stay live.
+    for (u32 r = 0; r < 40; ++r) {
+        std::array<MeshInstance3D, 8> copies;
+        for (u32 i = 0; i < copies.size(); ++i) {
+            const u32 k = r * 8 + i;
+            copies[i].transform = Mat4f::translation({-.9f + .1f * (k % 20), .05f + .1f * (k / 20), -.4f}) *
+                                  Mat4f::scaling({.08f, .08f, .08f});
+        }
+        assert(f.scene.draw_instanced(f.box, copies, {.color = Color::rgb(80 + r, 120, 160)}));
+    }
+    std::array moving{MeshInstance3D{.transform = Mat4f::translation({-.7f, .6f, .8f})}};
+    auto batch = InstanceBatch3D::create(f.box, {moving.begin(), moving.end()}).value_or({});
+    auto data = meshes::box({.5f, .5f, .5f});
+    data.skin.assign(data.vertices.size(), {});
+    const auto skinned = f.r3d.create_mesh(data).value_or({});
+    std::array pose{Mat4f::translation({.8f, .6f, .4f})};
+    assert(batch && skinned && f.scene.draw_instanced(batch) && f.scene.draw_skinned(skinned, pose, {}));
+    gpu::GpuRenderer3D* owner = nullptr;
+    {
+        const auto prepared = f.r3d.prepare(f.scene).value_or({});
+        const auto* backend = dynamic_cast<const gpu::GpuPreparedScene3D*>(prepared.backend());
+        assert(backend);
+        owner = backend->owner;
+    }
+    u32 frame = 0;
+    const auto advance = [&] {
+        moving[0].transform = Mat4f::translation({-.7f + .01f * ++frame, .6f, .8f});
+        pose[0] = Mat4f::translation({.8f, .6f + .01f * frame, .4f});
+        assert(batch.update(0, moving) && f.scene.update_joint_matrices(0, pose));
+    };
+    const auto check = [&](bool fast) {
+        for (u32 i = 0; i < 4; ++i) {
+            advance();
+            f.stock();
+        }
+        advance();
+        const auto actual = f.stock();
+        const auto stats = f.r3d.debug_stats();
+        if (fast)
+            assert(stats.direct_retained_instances >= 320 && stats.local_shadow_static_cached > 0);
+        const auto prepared = gpu::LocalShadowDepthProbe::preparation_size(*owner);
+        const auto depth = gpu::LocalShadowDepthProbe::read(*owner);
+        auto shader = gpu::LocalShadowDepthProbe::full_redraw(*owner);
+        f.scene.debug.cache_local_shadow_gather = false;
+        const auto reference = f.stock();
+        const auto full = gpu::LocalShadowDepthProbe::preparation_size(*owner);
+        const auto reference_stats = f.r3d.debug_stats();
+        const auto reference_depth = gpu::LocalShadowDepthProbe::read(*owner);
+        gpu::LocalShadowDepthProbe::restore(*owner, std::move(shader));
+        f.scene.debug.cache_local_shadow_gather = true;
+        assert(actual == reference && depth == reference_depth);
+        assert(stats.local_shadow_triangles + stats.local_shadow_static_skipped_triangles ==
+               reference_stats.local_shadow_triangles);
+        if (fast) {
+            assert(prepared.first * 4 < full.first);   // No per-map serialization of static transforms.
+            assert(prepared.second * 4 < full.second); // No hot expansion of the static copy selections.
+        }
+    };
+    check(true);
+    check(true); // Re-enter after the uncached reference emptied the gather cache.
+    assert(f.scene.set_draw_material(0, {.double_sided = true}));
+    check(true);
+    assert(f.scene.draw(f.box, Mat4f::translation({0, 1, .5f})));
+    check(true); // New source geometry changes both selection and retained depth.
+    f.scene.lights.spots[0].position.x += .4f;
+    check(true);
+    f.scene.camera = Camera3D::look_at({-3, 3, 6}, {0, .3f, 0}, 45);
+    check(true);
+    f.scene.cull = !f.scene.cull;
+    check(true);
+    f.scene.cull = !f.scene.cull;
+    std::array<u8, 4> texel{255, 255, 255, 255};
+    const auto mask = f.r.create_texture_from_rgba(texel.data(), {1, 1});
+    assert(mask && f.scene.set_draw_material(0, {.blend = Blend3D::Mask, .texture = mask}));
+    check(false); // Cutout inputs require the detailed fingerprint and selection path.
+    const auto revision = f.scene.draw_revision();
+    texel[3] = 0;
+    assert(f.r.update_texture(mask, {}, {1, 1}, texel.data()) && f.scene.draw_revision() == revision);
+    check(false); // A texture upload changes depth without a source edit.
+    assert(f.scene.set_draw_material(0, {}));
+    check(true);
+    f.scene.lights = lights;
+    f.scene.lod = lod;
+    f.scene.debug = debug;
+    f.scene.camera = Camera3D::look_at({3, 3, 6}, {0, .3f, 0}, 45);
+    f.objects();
+    std::cout << "compact shadow preparation: bounded hot keys/selections, exact depth/RGBA, live batches/poses, "
+                 "source/projection/camera/cull edits and mask fallback passed\n";
+}
+
 void recording_ranges(Fixture& f) {
     // Independent one-object maps establish the coverage union. The combined
     // map crosses nonzero list offsets, pipelines and direct cluster ranges;
@@ -1203,6 +1310,7 @@ int main() {
     variants(f);
     shadow_position_depth(f);
     static_shadow_depth(f);
+    compact_shadow_preparation(f);
     recording_ranges(f);
     cube_and_camera(f);
     grid_and_history(f);
