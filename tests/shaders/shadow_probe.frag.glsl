@@ -7,5 +7,10 @@ void main() {
     ivec2 size = textureSize(sDepth, 0).xy;
     ivec2 p = clamp(ivec2(In.UV * vec2(size)), ivec2(0), size - 1);
     float depth = texelFetch(sDepth, ivec3(p, int(options.x)), 0).r;
-    fColor = vec4(vec3(depth > 0.0), 1.0);
+    if (options.y != 0.0) {
+        uint bits = floatBitsToUint(depth) >> uint(options.z);
+        fColor = vec4(vec3(uvec3(bits, bits >> 8, bits >> 16) & 255u) / 255.0, 1.0);
+    } else {
+        fColor = vec4(vec3(depth > 0.0), 1.0);
+    }
 }

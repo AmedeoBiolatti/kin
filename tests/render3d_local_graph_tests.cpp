@@ -547,6 +547,50 @@ void recording_ranges(Fixture& f) {
         assert(f.scene.set_draw_material(surface_ref, higher));
         warm();
     }
+    // Ninety-six distinct cutout states repeat across locality windows. Compare
+    // every depth bit against a small independent map, including special paths
+    // as barriers. Repeated coincident copies cannot change the depth result.
+    f.scene.lod.enabled = false;
+    f.scene.debug.force_level = -1;
+    const auto depth = [&](u32 repeats, bool reverse) {
+        f.clear_draws();
+        for (u32 repeat = 0; repeat < repeats; ++repeat) {
+            for (u32 row = 0; row < 96; ++row) {
+                const u32 id = reverse ? 95 - row : row;
+                assert(f.scene.draw(f.box,
+                                    Mat4f::translation({f32(id % 12) * .25f - 1.4f, .2f + f32(id / 12) * .2f, -.4f}),
+                                    {.color = Color::rgba(255, 255, 255, id % 2 ? 128 : 255),
+                                     .double_sided = id % 3 == 0,
+                                     .blend = Blend3D::Mask,
+                                     .texture = mask,
+                                     .alpha_cutoff = .1f + f32(id) * .008f}));
+            }
+            if (repeat == repeats / 2)
+                for (const int object : objects)
+                    add(object);
+        }
+        f.r.clear(colors::black);
+        const auto prepared = f.r3d.prepare(f.scene).value_or({});
+        assert(prepared && f.r3d.render_local_shadows(f.array, prepared, requests, size));
+        assert(f.r3d.debug_stats().local_shadow_draws <= 192 + objects.size());
+        std::vector<u8> bits;
+        for (const f32 shift : {0.f, 24.f}) {
+            ShaderParams params;
+            params.uniforms[1] = 1;
+            params.uniforms[2] = shift;
+            f.r.draw_shader_surface(rect, f.probe, params, f.array);
+            std::vector<u8> pixels;
+            Vec2i actual;
+            assert(f.r.read_rgba(rect, pixels, actual) && actual == size);
+            bits.insert(bits.end(), pixels.begin(), pixels.end());
+        }
+        f.r.present();
+        return bits;
+    };
+    const auto independent = depth(1, false);
+    for (const bool reverse : {false, true})
+        assert(depth(11, reverse) == independent);
+    std::cout << "local graph: map-wide stock batches preserve all depth bits across windows and special barriers\n";
     f.scene.lod = lod;
     f.scene.debug = debug;
     f.objects();

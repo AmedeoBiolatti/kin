@@ -8509,7 +8509,10 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     stats.local_shadow_drawn = drawing;
     if (drawing == 0) {
         stats.local_copy_bytes =
-            (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity()) * sizeof(u32);
+            (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity() +
+             _local_batch_indices.capacity() + _local_batch_slots.capacity() + _local_batch_destinations.capacity()) *
+                sizeof(u32) +
+            _local_batch_entries.capacity() * sizeof(LocalEntry);
         stats.local_slot_bytes = _local_slot.capacity() * sizeof(u32);
         return;
     }
@@ -8776,9 +8779,81 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         append_cached(~0u);
         emit_window();
     }
+    // Window sorting keeps selection compilation compact. Stock depth-only
+    // commands can share their exact state across the whole map: the depth
+    // comparison is order independent, and source order within each group is
+    // preserved. Special per-draw shaders/cuts remain ordering barriers.
+    if (_local_entries.size() >= 128) {
+        _local_batch_slots.assign(_refs.size(), ~0u);
+        _local_batch_entries.clear();
+        _local_batch_entries.reserve(_local_entries.size());
+        _local_batch_indices.resize(_local_list.size());
+        _local_batch_destinations.resize(_local_entries.size());
+        std::size_t next = 0;
+        for (LocalView& view : _local_views) {
+            const u32 begin = view.entry_first, end = begin + view.entry_count;
+            view.entry_first = static_cast<u32>(_local_batch_entries.size());
+            const auto ordinary = [&](const LocalEntry& entry) {
+                const DrawRef& ref = _refs[entry.ref];
+                const Material3D& material = ref.draw->material;
+                return !entry.clustered && entry.level == 0 && ref.levels == 1 && !ref.skinned &&
+                       !(material.surface.backend() && pass_surface(material)) &&
+                       (material.blend != Blend3D::Mask || material.uv_identity());
+            };
+            for (u32 at = begin; at < end;) {
+                if (!ordinary(_local_entries[at])) {
+                    LocalEntry entry = _local_entries[at++];
+                    std::copy_n(_local_list.data() + entry.list_first, entry.count, _local_batch_indices.data() + next);
+                    entry.list_first = static_cast<u32>(next);
+                    next += entry.count;
+                    _local_batch_entries.push_back(entry);
+                    continue;
+                }
+                const u32 first = at, group_first = static_cast<u32>(_local_batch_entries.size());
+                for (; at < end && ordinary(_local_entries[at]); ++at) {
+                    const LocalEntry& entry = _local_entries[at];
+                    u32& group = _local_batch_slots[_local_batch_refs[entry.ref]];
+                    if (group == ~0u) {
+                        group = static_cast<u32>(_local_batch_entries.size());
+                        auto combined = entry;
+                        combined.count = 0;
+                        _local_batch_entries.push_back(combined);
+                    }
+                    _local_batch_destinations[at] = group;
+                    _local_batch_entries[group].count += entry.count;
+                }
+                for (u32 group = group_first; group < _local_batch_entries.size(); ++group) {
+                    LocalEntry& entry = _local_batch_entries[group];
+                    entry.list_first = static_cast<u32>(next);
+                    next += entry.count;
+                }
+                // list_first is a temporary append cursor; restore the start
+                // from the final cursor and count once all source spans land.
+                for (u32 source = first; source < at; ++source) {
+                    const LocalEntry& entry = _local_entries[source];
+                    LocalEntry& target = _local_batch_entries[_local_batch_destinations[source]];
+                    std::copy_n(_local_list.data() + entry.list_first, entry.count,
+                                _local_batch_indices.data() + target.list_first);
+                    target.list_first += entry.count;
+                }
+                for (u32 group = group_first; group < _local_batch_entries.size(); ++group) {
+                    LocalEntry& entry = _local_batch_entries[group];
+                    entry.list_first -= entry.count;
+                    _local_batch_slots[_local_batch_refs[entry.ref]] = ~0u;
+                }
+            }
+            view.entry_count = static_cast<u32>(_local_batch_entries.size()) - view.entry_first;
+        }
+        assert(next == written);
+        _local_entries.swap(_local_batch_entries);
+        _local_list.swap(_local_batch_indices);
+    }
     stats.local_gather_cache_bytes = _local_gather_bytes;
     stats.local_copy_bytes =
-        (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity()) * sizeof(u32);
+        (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity() +
+         _local_batch_indices.capacity() + _local_batch_slots.capacity() + _local_batch_destinations.capacity()) *
+            sizeof(u32) +
+        _local_batch_entries.capacity() * sizeof(LocalEntry);
     if (union_count > 0) {
         const u32 instance_bytes = union_count * static_cast<u32>(sizeof(GpuInstance3D));
         // No CPU mirror of the 128-byte GPU records: build each once in disjoint staging ranges.

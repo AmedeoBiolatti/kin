@@ -4,7 +4,91 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## GPU work
 
-### Current GPU pass attribution, 2026-11-12
+### Map-wide stock local-shadow GPU batches, 2026-11-12
+
+The reference renderer is `ce7cbb90` (the GPU refresh is documentation-only
+`650958fb`). Local-shadow preparation now joins compatible stock depth commands
+across locality windows within each map. It reuses existing exact depth-state
+IDs and preserves source/copy order inside each group. Depth-affecting surfaces,
+transformed-UV cutouts, skinning, clusters and other levels remain barriers.
+No shader math, selected geometry, resolution, filtering or image-cache policy
+changes. Hard median shadow draws fall **4,712 → 1,096 (76.7%)**; shadow triangles
+remain **40,941,344**, and caster copies **80,274**. Easy draws fall 166 → 42;
+Medium 1,140 → 292. GPU buffers and upload sizes are unchanged; reusable CPU
+command/index scratch and its memory accounting are added.
+
+**This improves the shadow GPU span at an observed CPU cost.** Blender and all
+external workloads stayed running throughout. Temperature, clocks and load are
+uncontrolled; every result is **contended**, and there is no isolated FPS claim.
+
+Ordinary alternating process pairs had very large timing swings. A temporary
+same-process probe therefore rotated the old stream, 256-entry grouping and
+map-wide grouping on successive renders. Three full routes use starting phases
+0/1/2: each mode has 480 measured frames per run, 1,440 across the three runs,
+and covers every route frame exactly once. Its old/global draw counts match the
+frozen controls at every corresponding frame; all other exported non-timing
+columns match. The temporary selector was removed from the final source.
+
+Hard map-wide shadow p50 falls **31.6%** by median paired within-run
+reduction, with per-run changes -31.6%, -34.6%, -21.5%.
+The unchanged main pass serves as a contemporaneous control; clocks remain
+uncontrolled. Bounded grouping is retained
+only as diagnostic evidence; the final implementation needs no new switch.
+
+| Hard interleaved mode | Shadow GPU p50/p95/p99, ms | Main GPU p50, ms | GPU 3D span-sum p50, ms |
+| --- | --- | ---: | ---: |
+| Original windows | 82.265 / 103.971 / 108.448 | 33.302 | 118.102 |
+| 256-entry groups | 56.343 / 66.047 / 67.940 | 33.143 | 90.430 |
+| Map-wide groups | 56.279 / 65.787 / 67.591 | 33.430 | 88.925 |
+
+These are medians of three per-run percentiles, each from 480 mode samples.
+The existing Vulkan forwarding library takes bottom-of-pipe hardware timestamps
+at all 13 nonnested pass markers and waits for marked submissions. The span sum
+excludes unmarked uploads, 2D composition and presentation. This diagnostic is
+not normal throughput, and CPU/GPU values must not be added. Settings remain
+720p HDR, no AA/GI/AO, independent Yard submissions, classic 1,024 spot maps,
+four helpers, affinity 0–15, and 300 warm-up plus 1,440 measured route frames.
+
+The separate-process campaign below shows the timing variation. Hard paired
+shadow-p50 changes were −44.8%, +20.5% and
++42.9%, motivating the interleaved probe. Easy and Medium are single guard pairs.
+
+| Tier | Separate-process shadow GPU before p50/p95/p99, ms | After, ms |
+| --- | --- | --- |
+| Easy | 0.280 / 0.312 / 0.327 | 0.377 / 0.447 / 0.513 |
+| Medium | 9.887 / 11.008 / 14.927 | 9.824 / 10.975 / 11.380 |
+| Hard | 13.219 / 25.174 / 35.988 | 14.388 / 34.523 / 37.820 |
+
+Normal runs have no timestamp-query library or image readback. Hard caller
+CPU p50 increases in all three pairs, with **8.4% median paired increase**
+(individual changes +2.8%, +35.5%, +8.4%). This is an observed contended cost,
+not an isolated attribution to compaction. Reduced recording work does not
+make the new CPU index regrouping free. Percentiles below are medians of
+per-run percentiles; dividing those medians gives a different percentage.
+
+| Tier | Normal pairs | Caller CPU before p50/p95/p99, ms | After, ms |
+| --- | ---: | --- | --- |
+| Easy | 1 | 0.635 / 0.904 / 1.035 | 0.522 / 0.755 / 0.828 |
+| Medium | 1 | 1.733 / 2.423 / 2.828 | 1.859 / 2.623 / 2.906 |
+| Hard | 3 | 3.871 / 5.427 / 6.085 | 4.471 / 5.687 / 6.123 |
+
+Every measured frame in the ten full-route before/after pairs (five hardware
+GPU pairs and five normal pairs) matches every exported non-timing column
+except the intended `local_shadow_draws` change. Nine decoded-RGBA image pairs
+match exactly at route phases 1, 541 and 961 across Easy/Medium/Hard. A focused
+regression compares all 32 depth bits at probed texels with a small independent
+map, across repeated stock states, reversed submissions and special barriers.
+Nine NVIDIA renderer suites passed; four relevant suites passed again after
+the regression/shader-probe rebuild. Four Lavapipe suites passed with no skips.
+These sampled parity and focused stability checks do not cover every scene.
+
+Evidence, frozen binary/source hashes, commands, telemetry, all raw timings,
+mode-mapping checks and exact-image hashes are in
+`out/runs/render3d-gpu-shadow-batches/`. The retained change preserves the
+existing compiler, gather-cache programs, shadow fingerprints and source-ordered
+union packing; only its final stock command/index stream is compacted.
+
+### GPU baseline pass attribution, 2026-11-12
 
 The reference is the frozen `ce7cbb90` binary on `perf/render3d-cpu-parity`.
 Three rotated runs per tier use the original independent Industrial Yard

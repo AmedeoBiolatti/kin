@@ -414,10 +414,10 @@ admission, fingerprints, source/copy order and the 4 MiB retained-plan cap keep
 their existing rules. `local_task_bytes` includes shared ranges, clipping opcodes
 and count/cursor payload; `local_bucket_bytes` reports the visibility masks.
 
-Shadow preparation compiles selected copy spans directly into final depth commands and the GPU index list.
+Shadow preparation compiles selected copy spans into depth commands and the GPU index list.
 Live selections have independent scratch storage; unchanged static rows can feed the compiler read-only from their
-saved plan when no image/history fingerprint is needed. There is no full-map intermediate command array or
-second index-list reorder copy. Streamed union slots and cluster runs are assigned in source order before emission,
+saved plan when no image/history fingerprint is needed. Selection compilation holds no full-map intermediate row array.
+Streamed union slots and cluster runs are assigned in source order before emission,
 preserving prepared-upload reuse and copy correspondence.
 
 The compiler holds one 128-row locality window on the stack. It orders row indices, then emits compatible depth
@@ -425,6 +425,14 @@ runs directly, including merges across adjacent windows. Exact current comparato
 a changed sequence uses the original stable tie order. Current records, textures and samplers are still bound each
 render. This cache reuses CPU preparation, including when `lights.cache_shadows` is false; it does not retain GPU
 shadow images. Fingerprints, cluster cuts, cache lifetimes and retention budgets keep their existing rules.
+
+When the compiled local pass has at least 128 commands, a final CPU compaction joins repeated stock level-zero,
+single-level, unskinned depth groups across each map. It reuses the exact current mesh/table/raster/cutout-state IDs;
+source and copy order within each group stay stable. Depth-affecting surfaces, transformed-UV cutouts, skinning,
+clusters and other levels remain ordering barriers. This changes depth draw count and command order, preserving the
+selected copies, triangles, per-instance records, shader math and shadow settings. Temporary command/index vectors
+reuse their capacity and are included in `local_copy_bytes`; the GPU index upload size is unchanged. This adds no
+GPU allocation or retained shadow-image cache.
 
 Full static windows before the first live row can also retain a compiled program: merged commands and source-table
 indices ready for emission. The program follows the selection plan's source/projection lifetime. Each render visits

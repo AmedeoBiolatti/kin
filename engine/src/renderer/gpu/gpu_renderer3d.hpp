@@ -1426,6 +1426,8 @@ private:
     LocalGatherCache* local_gather_plan(const FrameCtx& ctx, const LocalView& view, u32 refs, bool& ready);
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
+    std::vector<LocalEntry> _local_batch_entries;
+    std::vector<u32> _local_batch_indices, _local_batch_slots, _local_batch_destinations;
     struct LocalRecord {
         SDL_GPUGraphicsPipeline* pipeline;
         SDL_GPUBuffer* instances;
