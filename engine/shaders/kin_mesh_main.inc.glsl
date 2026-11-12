@@ -44,6 +44,7 @@ void main() {
 #else
     const vec4 color = kin_base_color();
     float alpha = color.a;
+#ifndef KIN_OPAQUE_DEPTH
     if (alpha < material.params.w) {
         discard;
     }
@@ -51,6 +52,7 @@ void main() {
     if (material.params.w > 0.0) {
         alpha = 1.0;
     }
+#endif
     vec3 c;
     if (material.params.y > 0.5) {
         // Keep the legacy no-map operation order identical to the minimal unlit shader.

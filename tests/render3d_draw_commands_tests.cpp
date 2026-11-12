@@ -260,6 +260,51 @@ void check(Renderer2D& renderer) {
     assert(scene.draw_decal({.transform = Mat4f::scaling({3, 3, 3}), .texture = texture}));
     const auto decal = compare(view, false);
     assert(decal.stats.decals_drawn > 0 && decal.stats.main_merged_draws > 20);
+    // The discard-free opaque path must preserve fractional/zero alpha and
+    // leave signed floating textures and varying vertex alpha on the general path.
+    auto alpha_data = meshes::box({.6f, .6f, .6f});
+    for (auto& vertex : alpha_data.vertices)
+        vertex.color.a = 128;
+    const auto constant_alpha = r.create_mesh(alpha_data).value_or({});
+    for (u32 i = 0; i < alpha_data.vertices.size(); ++i)
+        alpha_data.vertices[i].color.a = u8((i % 4) * 85);
+    const auto varying_alpha = r.create_mesh(alpha_data).value_or({});
+    const std::array<u16, 8> signed_texels{0x3c00, 0x3c00, 0x3c00, 0xbc00, 0x3c00, 0x3c00, 0x3c00, 0x3c00};
+    const auto floating = renderer.create_texture({2, 1}, TextureFormat::Rgba16Float, signed_texels.data());
+    assert(constant_alpha && varying_alpha && floating);
+    const auto alpha_case = [&](const Mesh3D& geometry, const Texture& base, bool variants = false) {
+        scene = Scene3D{};
+        scene.camera = Camera3D::look_at({0, 0, 13}, {});
+        scene.lights.ambient = {.4f, .4f, .4f};
+        for (u32 i = 0; i < 384; ++i)
+            assert(scene.draw(
+                geometry, Mat4f::translation({f32(i % 24) * .65f - 7.5f, f32(i / 24) * .65f - 5.f, .001f * (i % 7)}),
+                {.color = Color::rgba(u8(100 + i % 90), 160, 200, i % 5 ? 120 : 0), .texture = base}, colors::white,
+                i + 1));
+        assert(scene.draw(box, Mat4f::translation({0, 0, -1}) * Mat4f::scaling({20, 20, 1}),
+                          {.color = Color::rgb(0, 0, 255), .unlit = true}, colors::white, 900));
+        compare(view);
+        compare(second); // MSAA interpolation cannot assume varying vertex alpha stays nonnegative.
+        compare(hdr);
+        if (variants) {
+            scene.fog.enabled = true;
+            scene.fog.density = .025f;
+            compare(view);
+            scene.lights.spots.push_back({.position = {2, 4, 8},
+                                          .direction = normalize(Vec3f{-2, -4, -8}),
+                                          .radius = 30,
+                                          .shadow_enabled = true});
+            scene.lights.max_shadowed_spots = 1;
+            scene.lights.local_shadow_resolution = 128;
+            compare(view);
+            scene.fog.enabled = false;
+            compare(view);
+        }
+    };
+    alpha_case(box, texture, true);
+    alpha_case(constant_alpha, texture);
+    alpha_case(varying_alpha, texture);
+    alpha_case(box, floating); // Negative base alpha still discards before depth is written.
     // Instance retention can fit while the independent material budget cannot.
     // That source must still draw completely with per-draw uniforms.
     scene = Scene3D{};
@@ -326,7 +371,8 @@ void check(Renderer2D& renderer) {
     scene.debug.draw_command_budget = 4 * 1024 * 1024;
     compare(view);
     std::cout << "draw commands: exact pixels/picks/order, heterogeneous materials, sampling/texture edits, "
-                 "fog/lights/MSAA/AO, poses, overlays, source moves, raw spans, budgets and same-frame views passed\n";
+                 "fog/lights/MSAA/AO, constant/varying/signed alpha, poses, overlays, source moves, raw spans, budgets "
+                 "and same-frame views passed\n";
 }
 } // namespace
 

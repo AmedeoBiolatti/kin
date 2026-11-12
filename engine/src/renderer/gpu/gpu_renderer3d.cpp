@@ -1293,6 +1293,18 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         KIN_LOG_WARN_F("render", "3D: retained draw materials unavailable",
                        (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    try {
+        const std::array<const char*, 4> names{"mesh_material_opaque.frag.spv", "mesh_material_opaque_fog.frag.spv",
+                                               "mesh_material_opaque_light.frag.spv",
+                                               "mesh_material_opaque_light_fog.frag.spv"};
+        for (u32 i = 0; i < names.size(); ++i)
+            _opaque_material_fragments[i] =
+                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, names[i], 2 + u32(i & 1) + u32(i >= 2),
+                                         (i >= 2 ? 15 : 10) + u32(i & 1), i >= 2 ? 6 : 1);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: discard-free opaque materials unavailable; using general shaders",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
     {
         try {
             _unlit_vertex_shader =
@@ -2160,7 +2172,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
 }
 
 GpuRenderer3D::MaterialPipeline GpuRenderer3D::material_pipeline(const Material3D& material, bool skinned, bool taa,
-                                                                 bool velocity, bool fog) const {
+                                                                 bool velocity, bool fog, const GpuMesh3D* mesh) const {
     const auto* custom = dynamic_cast<const GpuMaterialShader3D*>(material.shader.backend().get());
     // A surface shader stands in for the stock shaders (never for a custom one), the unlit ones included.
     const auto* surface = custom ? nullptr : dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
@@ -2171,7 +2183,17 @@ GpuRenderer3D::MaterialPipeline GpuRenderer3D::material_pipeline(const Material3
                                 !surface && material.uv_identity() && !skinned && !taa && !velocity && !fog
                             ? (material.texture ? Unlit::Textured : Unlit::Colour)
                             : Unlit::Off;
-    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material), surface};
+    const auto* base = dynamic_cast<const GpuTextureBackend*>(material.texture.backend().get());
+    const bool normalized_alpha =
+        !material.texture || (base && (base->texture().format() == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ||
+                                       base->texture().format() == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB));
+    // Opaque cutoff is zero. Constant vertex alpha prevents negative extrapolation
+    // at MSAA pixel centers; normalized textures cannot introduce negative alpha.
+    // Mutable vertices, float textures and arbitrary surface code retain discard.
+    const bool opaque_depth = material.blend == Blend3D::Opaque && !custom && !surface && mesh && !mesh->dynamic &&
+                              mesh->constant_vertex_alpha && normalized_alpha;
+    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, opaque_depth, pass_of(material),
+            surface};
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& request) const {
@@ -2180,18 +2202,25 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& requ
         if (!_draw_materials_available || (m.surface && !m.surface->merges()))
             return nullptr;
         const u32 variant = u32(request.fog) + 2 * u32(request.lights);
-        return _owner->_pipelines.get(
-            GpuPipelineKey{.vertex = _draw_material_vertex.handle(),
-                           .fragment = (m.surface ? m.surface->variants[surface_required_variants3d + variant]
-                                                  : _draw_material_fragments[variant])
-                                           .handle(),
+        const auto ordinary =
+            (m.surface ? m.surface->variants[surface_required_variants3d + variant] : _draw_material_fragments[variant])
+                .handle();
+        const bool opaque = m.opaque_depth && !m.surface && _opaque_material_fragments[variant];
+        GpuPipelineKey key{.vertex = _draw_material_vertex.handle(),
+                           .fragment = opaque ? _opaque_material_fragments[variant].handle() : ordinary,
                            .blend = GpuBlendMode::Replace,
                            .format = request.format,
                            .layout = GpuVertexLayout::MeshVertices,
                            .depth_stencil = _depth_format,
                            .depth = GpuDepthTest::TestWrite,
                            .cull = m.cull ? GpuCull::Back : GpuCull::None,
-                           .samples = sample_count(request.samples)});
+                           .samples = sample_count(request.samples)};
+        auto* result = _owner->_pipelines.get(key);
+        if (!result && opaque) {
+            key.fragment = ordinary;
+            result = _owner->_pipelines.get(key);
+        }
+        return result;
     }
     return pipeline(request.format, request.samples, m.cull, m.pass, m.mask,
                     m.custom ? m.custom->shader.handle() : nullptr, request.velocity, request.skinned, request.fog,
@@ -2606,6 +2635,11 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
     try {
         auto mesh = std::make_shared<GpuMesh3D>(_device->shared());
         mesh->serial = _next_mesh_serial++;
+        const u8 alpha = vertex_count ? data.vertices.front().color.a : 0;
+        const auto same_alpha = [alpha](const MeshVertex3D& vertex) { return vertex.color.a == alpha; };
+        mesh->constant_vertex_alpha =
+            vertex_count && std::all_of(data.vertices.begin(), data.vertices.end(), same_alpha) &&
+            (!chain || std::all_of(chain->extra_vertices.begin(), chain->extra_vertices.end(), same_alpha));
         u32 index_first = 0, table_first = 0; // the mesh's ranges in its chunk, with the cut in compute
         if (gpu_table) {
             mesh->chunk = allocate_cluster_range(static_cast<u32>(index_count),
@@ -12323,6 +12357,13 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
             _draw_spans.push_back({i, 1, static_cast<u8>(ref.scene), pass_of(m), m.receives_decals, materials});
         }
         _draw_plan_keys = keys;
+        for (const auto& span : _draw_spans) {
+            const auto first = _draw_order.begin() + span.first, last = first + span.count;
+            const bool opaque =
+                std::all_of(first, last, [&](u32 r) { return _refs[r].draw->material.blend == Blend3D::Opaque; });
+            for (auto i = first; i != last; ++i)
+                _draw_commands[*i].opaque_span = opaque;
+        }
         _draw_plan_valid = true;
         ++ctx.stats.draw_plan_builds;
     }
@@ -12346,7 +12387,9 @@ GpuRenderer3D::DrawCommand* GpuRenderer3D::main_command(FrameCtx& ctx, u32 r, bo
                     (u64(materials) << 45);
     const u64 revision = _owner->_pipelines.revision();
     if (command.pipeline_key != key || command.pipeline_revision != revision) {
-        command.selection = material_pipeline(ref.draw->material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog);
+        command.selection =
+            material_pipeline(ref.draw->material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog, ref.mesh);
+        command.selection.opaque_depth = command.selection.opaque_depth && command.opaque_span;
         command.uniforms = material_uniforms(ref.draw->material, command.selection.unlit);
         command.pipeline = pipeline(MeshPipelineRequest{static_cast<SDL_GPUTextureFormat>(format), samples,
                                                         command.selection, ctx.main_velocity, ref.skinned, ctx.fog,
@@ -14809,9 +14852,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 fill_uniforms(draw_uniforms, current_scene);
             }
             const auto* command = main_command(ctx, item.ref, item.materials);
-            const auto selection = command
-                                       ? command->selection
-                                       : material_pipeline(material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog);
+            const auto selection =
+                command ? command->selection
+                        : material_pipeline(material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog, ref.mesh);
             const auto* custom = selection.custom;
             if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
                 continue;
@@ -16303,7 +16346,7 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
                 continue;
             }
             const Material3D& m = draw.material;
-            const auto selection = material_pipeline(m, draw.skinned, taa, main_velocity, fog_on);
+            const auto selection = material_pipeline(m, draw.skinned, taa, main_velocity, fog_on, mesh);
             const auto* custom = selection.custom;
             const MeshPipelineRequest request{format, samples, selection, main_velocity, draw.skinned};
             const auto warm_mesh = [&](const MeshPipelineRequest& candidate) {

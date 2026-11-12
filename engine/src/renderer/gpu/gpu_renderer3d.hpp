@@ -159,6 +159,7 @@ public:
     // A mesh with morph targets (MeshData3D::morph_targets): its own vertex buffer, rewritten by update_mesh_vertices,
     // and how many times it has been (the shadow caches' key for its shape).
     bool dynamic = false;
+    bool constant_vertex_alpha = false; // all uploaded LOD vertices share alpha; immutable meshes only use the proof
     u32 vertex_count = 0;
     u64 content = 0;
     std::shared_ptr<const GpuMorphSource> morph; // set where the GPU blends (else the CPU does, update_mesh_vertices)
@@ -688,7 +689,7 @@ private:
     struct MaterialPipeline {
         const GpuMaterialShader3D* custom;
         Unlit unlit;
-        bool cull, mask;
+        bool cull, mask, opaque_depth;
         Pass pass;
         // A surface shader's variants in place of the stock ones (never with `custom`, which takes its place).
         const GpuSurfaceShader3D* surface = nullptr;
@@ -711,8 +712,8 @@ private:
     };
     static_assert(sizeof(SurfaceMaterialUniforms) == 80 + 4 * surface_param_count3d);
     static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
-    MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
-                                       bool fog) const;
+    MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity, bool fog,
+                                       const GpuMesh3D* mesh) const;
     SDL_GPUGraphicsPipeline* pipeline(const MeshPipelineRequest& request) const;
     // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`:
     // the second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is
@@ -1062,6 +1063,7 @@ private:
     GpuShader _indexed_vertex, _indexed_unlit_vertex, _indexed_unlit_textured_vertex, _indexed_prepass_vertex;
     GpuShader _draw_material_vertex;
     std::array<GpuShader, 4> _draw_material_fragments; // base, fog, lights, lights+fog
+    std::array<GpuShader, 4> _opaque_material_fragments; // same shading, no unreachable alpha discard
     bool _draw_materials_available = false;
     GpuShader _vertex_shader;   // mesh.vert
     GpuShader _fragment_shader; // mesh.frag
@@ -1581,6 +1583,7 @@ private:
         SDL_GPUGraphicsPipeline* pipeline = nullptr;
         u64 pipeline_key = ~0ull, pipeline_revision = 0;
         u32 binding = ~0u;
+        bool opaque_span = false; // no row of the compiled material span can request a cutout
     };
     std::array<PreparedKey, 2> _draw_plan_keys{};
     std::vector<DrawCommand> _draw_commands;

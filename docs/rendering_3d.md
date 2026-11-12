@@ -500,6 +500,16 @@ scale/mip changes and global sampling settings are resolved when binding each
 current texture class. No new public shader ABI is required. `warm_up()` prepares
 the applicable indexed and material-table variants as well as ordinary draws.
 
+Eligible native material-table batches use a stock fragment variant without an
+alpha-discard branch. Every row in the compiled batch must be `Blend3D::Opaque`,
+the immutable mesh must have constant vertex alpha across its uploaded LODs, and
+the base texture must be absent or normalized RGBA8. Zero and fractional alpha
+remain unchanged; this path does not force alpha to one. Mixed cutout batches,
+varying or mutable vertex alpha, floating-point base textures, custom shaders and
+surfaces retain the general shader. The four optional base/fog/light variants
+preserve shading arithmetic and fall back when unavailable. No early-fragment-test
+mode is forced, and no new quality setting or render target is introduced.
+
 `debug.cache_draw_commands = false` selects ordinary main draw preparation and
 submission; `debug.draw_command_budget` reduces the CPU and GPU-material caps,
 each clamped to 4 MiB. The immutable batch-kind flag reused by culling is common

@@ -2,6 +2,83 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Discard-free opaque material shading, 2026-11-12
+
+The reference is frozen **`52722b4c`**, including static shadow depth reuse and compact CPU preparation. Both versions use the same no-AA application object, `cache_shadows=1`, unchanged render settings and source content. The production change selects a discard-free stock fragment variant for proven eligible retained-material batches. It adds no public setting, render target, geometry reduction, light reduction or shader-compiler optimization flag.
+
+### Main-pass diagnosis
+
+Before changing the renderer, a task-local copy of the existing shader-loader object was linked before the unchanged engine archive. It can replace only selected stock mesh fragment modules from a task directory. Its control modules match all twelve original SPIR-V binaries byte-for-byte; control pixels and every non-timing counter match the frozen executable. This loader and all substituted diagnostic shaders remain generated artifacts, outside production code.
+
+Each following exploratory case is one full Hard route using the synchronous GPU diagnostic. **These ablations alter output and are not quality-preserving speedups.** The two controls expose considerable contention drift; their independent percentiles cannot be subtracted into a precise phase-cost breakdown.
+
+| Diagnostic | Main GPU p50 / p95 / p99 ms | Unchanged local-shadow GPU p50 ms |
+| --- | --- | --- |
+| Full shader, initial control | 4.232 / 9.770 / 9.946 | 1.387 |
+| Base/emission without lighting or surface maps | 0.940 / 1.380 / 1.520 | 1.254 |
+| Base, normal and PBR maps; lighting removed | 1.331 / 4.476 / 4.599 | 1.492 |
+| Local-light evaluation removed | 1.758 / 3.940 / 5.044 | 1.629 |
+| Shadow reception off; map rendering retained | 2.909 / 5.180 / 5.491 | 1.630 |
+| Forced early tests, diagnostic only | 3.499 / 5.119 / 5.526 | 1.630 |
+| glslc -O, diagnostic only | 3.701 / 6.771 / 6.937 | 1.630 |
+| Full shader, final control | 5.868 / 11.051 / 11.329 | 1.631 |
+
+The flat/material controls indicate that shading, particularly local-light evaluation and shadow sampling, is a larger opportunity than geometry/raster work alone in this route. Further probes tried explicit PCF unrolling and optimized SPIR-V, and confirmed one sampled image for each against the frozen control. They were not shipped. Removing an unreachable opaque alpha-discard branch was selected to avoid its fragment-control dependency and permit earlier depth/write optimization while preserving all lighting/filter arithmetic. No fragment-invocation, occupancy or bandwidth counters were collected, so the exact hardware contribution is unmeasured.
+
+### Production behavior and safety
+
+Four optional native retained-material variants cover base, fog, local lights and lights+fog. They retain the same texture samples and floating-point shading expressions, omitting only the stock alpha-discard block and mask-only alpha assignment. The renderer proves that the **entire compiled batch** is `Blend3D::Opaque`, not just its representative. Existing mixed opaque/cutout batches retain the general shader and their batching/order. The mesh must be immutable and have constant vertex alpha across all uploaded base/LOD vertices; the base texture must be absent or normalized RGBA8/sRGB. Constant vertex alpha avoids negative extrapolation at MSAA pixel centers, while normalized texture sampling cannot introduce signed alpha.
+
+Zero and fractional alpha remain unchanged; opaque does not imply forcing alpha to one. Signed floating-point base textures, varying/mutable vertex alpha, masks, custom shaders and surface shaders keep the existing path. Ordinary non-material-table draws also keep their original shaders. New variants/pipelines fall back to the general shader when unavailable. The production path does **not** force early-fragment-test mode. The twelve old stock shader binaries remain byte-identical; binary inspection confirms zero discard instructions in each new module versus one in its general counterpart, with identical floating-arithmetic opcode counts. This count is supporting evidence, not a replacement for pixel comparisons.
+
+### Fresh matched measurements
+
+**All results are CONTENDED.** Blender and every external workload stayed running; clocks, thermals and load were uncontrolled. Primary timings use the NVIDIA GeForce RTX 4080 Laptop GPU; software Vulkan is used for validation. The existing Release/Ninja/GCC build, renderer `-O2`, GLSL compiler settings and shared application object were reused. Original independent Yard submissions use 720p HDR, no AA/GI/AO/contact shadows, classic 1,024 spot maps, four helpers, affinity 0–15, configured 300 warm-up and 1,440 measured route frames. Three alternating Hard pairs and one Easy/Medium guard pair were collected for both normal throughput and separate GPU attribution.
+
+Every timing cell is **p50 / p95 / p99 ms**; Hard cells are medians of three per-run percentiles. Percentage changes are medians of per-pair changes, which can differ from ratios of independently aggregated cells. p50 is the sample median; p95/p99 use sorted index `floor((N-1)*p/100)`.
+
+| Tier | Pairs | Main GPU before | After | Paired main p50 change |
+| --- | --- | --- | --- | --- |
+| Easy | 1 | 0.929 / 1.164 / 1.388 | 0.779 / 0.965 / 1.121 | -16.1% |
+| Medium | 1 | 2.378 / 4.077 / 4.263 | 1.887 / 2.680 / 2.912 | -20.6% |
+| Hard | 3 | 5.144 / 9.788 / 9.969 | 3.995 / 6.473 / 6.709 | -22.3% |
+
+Individual Hard main-GPU p50 changes: -22.0%, -22.8%, -22.3%.
+
+| Tier | Unchanged local-shadow GPU before | After | 3D span-sum before | After |
+| --- | --- | --- | --- | --- |
+| Easy | 0.070 / 0.071 / 0.071 | 0.070 / 0.070 / 0.071 | 1.025 / 1.260 / 1.486 | 0.874 / 1.061 / 1.217 |
+| Medium | 0.197 / 0.200 / 0.201 | 0.199 / 0.223 / 0.225 | 2.602 / 4.299 / 4.488 | 2.115 / 2.911 / 3.146 |
+| Hard | 1.630 / 1.635 / 1.636 | 1.632 / 1.773 / 1.905 | 6.799 / 11.455 / 11.628 | 5.719 / 8.142 / 8.416 |
+
+GPU measurements use the existing synchronous Vulkan timestamp library: 13 nonnested bottom-of-pipe pass spans and a wait on each marked submission. They can include contention/dependency gaps and exclude unmarked uploads, 2D composition and presentation. **These are not normal throughput.** CPU/GPU times and independent pass percentiles must not be added. Unchanged local shadows provide a contemporaneous load control.
+
+| Tier | Normal frame interval before | After | Paired frame p50 change |
+| --- | --- | --- | --- |
+| Easy | 2.126 / 2.800 / 3.334 | 1.969 / 2.697 / 3.226 | -7.4% |
+| Medium | 6.874 / 11.551 / 12.161 | 4.479 / 7.190 / 8.012 | -34.8% |
+| Hard | 11.104 / 27.284 / 28.828 | 10.127 / 14.553 / 15.190 | -8.8% |
+
+Individual Hard normal frame-p50 changes: -3.4%, -8.8%, -33.3%.
+
+| Tier | Caller CPU before | After | Renderer process CPU before | After |
+| --- | --- | --- | --- | --- |
+| Easy | 0.867 / 1.068 / 1.124 | 1.007 / 1.142 / 1.195 | 1.003 / 1.214 / 1.285 | 1.152 / 1.304 / 1.344 |
+| Medium | 3.291 / 3.660 / 3.810 | 3.316 / 3.780 / 4.002 | 3.607 / 4.023 / 4.202 | 3.658 / 4.148 / 4.368 |
+| Hard | 8.236 / 9.335 / 9.739 | 8.589 / 9.771 / 10.237 | 9.698 / 10.966 / 11.504 | 10.064 / 11.378 / 11.908 |
+
+Normal runs have no GPU-query waits or screenshot readback. CPU timings cover `Renderer3D::render`, excluding scene updates and application/2D/presentation work; process CPU includes helpers. CPU results are mixed. Absolute CPU/frame values differ substantially from earlier campaigns, so comparisons should use the fresh pairs within this campaign. Easy/Medium are single guards. Frame tails and load drift must be assessed independently; no fixed-clock or exhaustive stability conclusion follows.
+
+### Validation and limits
+
+- **16 focused suite runs passed**, no skips: eight NVIDIA GPU checks and six Lavapipe GPU checks with Khronos synchronization validation, plus two CPU suites. No validation errors. This is not the full platform matrix.
+- The extended draw-command suite compares retained/batched output against ordinary submission using the original shaders. It covers mixed opaque/cutout batches, zero/fractional tint and texture alpha, constant and varying vertex alpha, negative RGBA16F texture alpha, MSAA, HDR, all four fog/light variants, equal-depth order and picking, texture edits, poses, overlays, source moves and budget fallbacks.
+- **Nine active-cache RGBA pairs match exactly** across Easy/Medium/Hard at route phases 1 / 541 / 961. Three additional cache-off pairs at phase 541 match exact RGBA. Captures explicitly occur at the third measured render for active-cache checks; cache-off captures use the second. Every exported non-timing CSV column matches before/after on all measured primary frames, including geometry, lights, shadow work/cache activity, draw counts, instance/material uploads and logical resource bytes.
+- Per-version normal and GPU diagnostic non-timing metrics match; all 13 pass groups and CSV-to-submission mappings are checked. Percentiles, source/binary/recipe/application-object/library hashes and capture equality were independently recomputed.
+- Four optional shader modules and a one-time mesh-alpha scan are added. Batch eligibility is computed during existing plan construction and stays within the existing metadata budget. No new per-frame uploads, GPU buffers or render targets are introduced. Driver code memory, cold shader compilation/loading and isolated startup cost were not measured; logical resource bytes are not physical VRAM/RSS. No exact floating-point HDR attachment-bit comparison or hardware invocation-counter attribution is claimed.
+
+Artifacts: `out/runs/render3d-main-shading/` contains frozen baseline/candidate and source hashes, diagnostic loader/source/shader identities, exploratory ablation/probe CSVs, raw matched timings/timestamps, per-run process/telemetry records, 30 PNGs (24 final comparison captures plus six diagnostic controls/probes), JUnit reports, shader instruction checks and `summary.json` / `checks.json`. The diagnostic loader is absent from the production link. Generated output is not committed. The four unrelated dirty files recorded at task start were preserved byte-for-byte.
+
 ## CPU preparation for cached local shadows, 2026-11-12
 
 The reference is frozen **`82a380f8`**, with static opaque shadow-depth reuse enabled. Both executables use **`cache_shadows=1`**, the same existing no-AA application object and the same quality settings. This comparison measures CPU preparation changes on top of depth reuse; it is distinct from enabling caching versus forced redraw.
