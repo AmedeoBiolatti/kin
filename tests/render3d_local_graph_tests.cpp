@@ -645,6 +645,8 @@ void static_shadow_depth(Fixture& f) {
         gpu::LocalShadowDepthProbe::invalidate_full(*owner);
         const auto optimized = f.stock();
         const auto stats = f.r3d.debug_stats();
+        if (f.scene.instances_exposed())
+            assert(stats.local_shadow_static_cached == 0 && stats.local_shadow_static_builds == 0);
         if (require_hit) {
             assert(stats.local_shadow_static_cached > 0 && stats.local_shadow_static_skipped_triangles > 0);
             assert(stats.local_shadow_static_bytes > 0 && stats.local_shadow_static_bytes <= 64ull * 1024 * 1024);
@@ -678,6 +680,16 @@ void static_shadow_depth(Fixture& f) {
     check(false);
     check(false);
     check(true);
+    // A revision can change membership without changing the reusable ref layout.
+    assert(f.scene.set_draw_material(1, {.casts_shadow = false}));
+    check(false);
+    check(false);
+    assert(f.scene.set_draw_material(1, {.blend = Blend3D::Mask, .texture = mask}));
+    check(false);
+    check(false);
+    assert(f.scene.set_draw_material(1, {.double_sided = true}));
+    check(false);
+    check(false);
     // Projection changes and packed atlas reassignment must not revive stale tiles.
     f.scene.lights.spots[0].position.x += .4f;
     f.scene.lights.spots[1].shadow_resolution = 128;
@@ -716,6 +728,14 @@ void static_shadow_depth(Fixture& f) {
     assert(after.gpu_memory.allocations - before.gpu_memory.allocations ==
            after.upload_staging_allocations - before.upload_staging_allocations);
     assert(after.upload_staging_bytes <= before.upload_staging_bytes);
+    auto exposed = f.scene.add_instances(f.box, 1).value_or(std::span<MeshInstance3D>{});
+    assert(exposed.size() == 1 && f.scene.instances_exposed());
+    for (u32 i = 0; i < 3; ++i) {
+        exposed[0].transform = Mat4f::translation({.4f * i, 1, .5f});
+        const auto revision = f.scene.draw_revision();
+        check(false);
+        assert(f.scene.draw_revision() == revision);
+    }
     f.scene.lights.cache_shadows = false;
     check(false);
     assert(f.r3d.debug_stats().local_shadow_static_bytes == 0);

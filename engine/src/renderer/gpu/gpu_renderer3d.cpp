@@ -7716,7 +7716,11 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     if (!ctx.public_local &&
         (!lights.cache_shadows || !_local_map || (_local_static_map && _local_static_generation != _local_generation)))
         clear_local_static();
-    _local_static_refs.clear();
+    const bool static_refs = !ctx.public_local && lights.cache_shadows && _shadow_restore_shader;
+    if (!static_refs) {
+        _local_static_refs.clear();
+        _local_static_refs_valid = false;
+    }
     const u64 gather_budget = ctx.scene.debug.cache_local_shadow_gather
                                   ? std::min<u32>(ctx.scene.debug.local_shadow_gather_budget, 4 * 1024 * 1024)
                                   : 0;
@@ -7759,10 +7763,13 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             ++p;
         } while (p < _pieces.size() && _pieces[p].ref == r);
     }
-    if (!ctx.public_local && lights.cache_shadows && _shadow_restore_shader) {
+    if (static_refs &&
+        (!_local_static_refs_valid || _local_static_refs.size() != _refs.size() || ctx.scene.instances_exposed())) {
         _local_static_refs.assign(_refs.size(), 0);
-        for (u32 r = 0; r < _refs.size(); ++r)
-            _local_static_refs[r] = caster[r] && static_shadow_ref(_refs[r], ctx.scene);
+        if (!ctx.scene.instances_exposed())
+            for (u32 r = 0; r < _refs.size(); ++r)
+                _local_static_refs[r] = caster[r] && static_shadow_ref(_refs[r], ctx.scene);
+        _local_static_refs_valid = !ctx.scene.instances_exposed();
     }
     constexpr u32 view_limit = max_local_shadow_layers + max_shadow_cascades + 1;
     std::array<LocalGatherCache*, view_limit> plans{};
@@ -10058,6 +10065,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         cull_flags[s] = ctx.scenes[s] && ctx.scenes[s]->cull;
     const bool reuse_updates = reuse && _ref_update_valid && !ctx.prepared && keys == _ref_update_keys;
     if (!reuse_updates) {
+        // Static local-shadow membership depends on these same commands and ref
+        // layout. Batch contents and poses remain live, and are never members.
+        _local_static_refs_valid = false;
         _ref_update_valid = false;
         _direct_bound_slots.fill(~0u);
         _direct_bound_spheres.fill(nullptr);

@@ -1355,6 +1355,7 @@ private:
     };
     std::array<LocalStaticCache, max_local_shadow_layers> _local_static_cache;
     std::vector<u8> _local_static_refs;
+    bool _local_static_refs_valid = false; // follows the validated command/ref layout, not camera visibility
     // The local views' casters of this render: the union of their copies as GpuInstance3D, each view's lists of them
     // (u32), and the joint offsets of the posed ones.
     std::shared_ptr<GpuBuffer> _local_instances, _local_lists, _local_joint_offsets;

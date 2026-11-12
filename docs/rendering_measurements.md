@@ -2,6 +2,129 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## CPU preparation profile and retained caster eligibility, 2026-11-12
+
+The next CPU investigation profiles preparation, pass recording, uploads, submission and presentation before
+changing scheduling. The selected optimization retains the existing static-caster eligibility byte mask under
+the renderer's command/ref-layout validity checks. It removes a repeated mesh/material scan while keeping
+current visibility, poses, mutable batches, fingerprints, depth commands and shaders on their existing paths.
+There is no new public option, cache payload or GPU representation. The frozen baseline is `783f9c16` on
+`perf/render3d-cpu-parity`.
+
+### Controls and diagnostic scope
+
+**Every result is CONTENDED.** Blender and all background workloads stayed running. Three unchanged-binary
+Hard controls produced caller-CPU p50 **4.662, 6.112 and 7.099 ms**, with frame p50 **6.218, 7.262 and
+8.233 ms**. The same binary later measured lower CPU times during matched candidate runs. These different
+sessions cannot be used to claim extra optimization gains or a permanent CPU/GPU bottleneck.
+
+Temporary diagnostic translation-unit overrides use scoped wall and thread-CPU clocks, with nested scopes
+on every fourth frame and an update root on every frame. Full routes have 300 warm-up and 1,440 measured
+frames; 360 measured frames receive nested scopes. Preparation, recording, storage upload/map/copy/submit
+calls, and the subsequent 2D/present path are covered. A second probe splits shadow preparation and main
+draw-span emission. Each event records its parent; exclusive durations subtract direct children before
+aggregation. Helper-thread CPU is not attributed to these caller-thread stages. The application's existing
+process-CPU column remains available separately.
+
+Diagnostic scope overhead is material: sampled Hard frames used roughly **0.7–1.1 ms** more caller CPU than
+their preceding three route frames. This adjacent-frame estimate also contains route/load variation; it is
+not an exact overhead correction. Scoped timings are for locating work, not throughput claims. Probe images
+and all non-timing counters match the frozen binary at route phase 541 on all three tiers. Production
+comparison binaries contain neither scoped probes nor synchronous GPU timestamp waits.
+
+The following are **inclusive caller-CPU means in ms**, not p50. Hard shows the range of two full-route
+profiles. The five preparation/recording rows are disjoint; their remainder is other work in the renderer.
+
+| CPU scope | Easy | Medium | Hard range |
+| --- | --- | --- | --- |
+| Culling and instance uploads | 0.203 | 0.886 | 1.946–2.446 |
+| Local-shadow preparation | 0.115 | 0.700 | 2.162–2.520 |
+| Draw planning/composition | 0.085 | 0.425 | 0.967–1.203 |
+| Local-shadow recording | 0.042 | 0.175 | 0.436–0.567 |
+| Main-pass recording | 0.077 | 0.178 | 0.226–0.292 |
+| Other renderer work | 0.221 | 0.459 | 0.705–0.847 |
+| Total renderer caller CPU | 0.742 | 2.822 | 6.442–7.874 |
+
+In Hard, preparation dominates: culling/uploads and shadow preparation each consume roughly a third of
+profiled renderer CPU, followed by composition at about 15%. The nested upload-staging scopes are substantial;
+they include callback packing and copies and do not independently isolate memory-transfer bandwidth.
+Across the two Hard profiles, SDL submit calls total only **0.064–0.079 ms** caller CPU per sampled frame.
+Presentation, outside the renderer call, uses **0.140–0.166 ms** caller CPU and **0.166–0.322 ms** wall time.
+These API/present figures overlap other scopes or lie outside the renderer total and must not be added to it.
+The measured cost points to preparation rather than a large CPU submit call.
+
+Two deeper Hard profiles identify source/caster classification at **0.499–0.507 ms**, live depth fingerprinting
+at **0.405–0.441 ms**, live selection at **0.349–0.380 ms**, window compilation at **0.257–0.272 ms**, and
+final command coalescing at **0.252–0.284 ms**. Classification includes the repeated static eligibility proof;
+the probe does not isolate that scan alone. Main draw-span emission is another **0.427–0.554 ms**.
+
+### Implementation and output parity
+
+The existing mask now remains valid while the exact command revisions and validated ref layout remain
+current. `cull_and_upload` invalidates it whenever the existing ref-update proof cannot be reused. Disabling
+shadow image caching or entering a public local pass clears it. Exposed mutable instance spans always force
+zero static membership. Mutable batches and skinned poses remain live and cannot enter the static mask.
+No new owning handles, traversal cache or vector allocation is introduced.
+
+The local-shadow test now changes caster membership through casts-shadow, opaque/cutout material transitions
+and caller edits through an exposed span without another revision. It compares exact RGBA and every depth
+bit against full redraw, alongside existing moving batches/poses, projection/culling changes, packed-atlas
+reassignment and cache-off checks.
+
+### Fresh uninstrumented comparison
+
+Both binaries use the same frozen no-AA application object, recipes and flags: original independent Yard
+submissions, 720p HDR, classic 1,024 spot maps, no AA/GI/AO/contact shadows, four helpers, affinity 0–15,
+300 configured warm-up plus 1,440 measured frames, and shadow image caching enabled. There are three
+alternating Hard pairs, one Easy guard and three Medium pairs. Medium was extended after its first guard
+showed worse CPU tails. Every exported non-timing counter matches in every paired frame.
+
+Cells are **p50 / p95 / p99 ms**, aggregated as medians of per-run percentiles. Changes are medians of paired
+percentage changes; they need not equal ratios of the aggregate cells. p50 is the sample median and p95/p99
+use sorted index `floor((N-1)*p/100)`.
+
+| Tier | Pairs | Renderer caller CPU before | After | Paired change p50 / p95 / p99 |
+| --- | --- | --- | --- | --- |
+| Easy | 1 | 0.231 / 0.281 / 0.347 | 0.219 / 0.301 / 0.328 | -5.0% / +7.1% / -5.7% |
+| Medium | 3 | 0.951 / 1.041 / 1.083 | 0.818 / 0.914 / 1.051 | -10.9% / -8.1% / -10.1% |
+| Hard | 3 | 2.462 / 2.900 / 3.195 | 2.173 / 2.404 / 2.663 | -11.4% / -16.1% / -16.3% |
+
+Hard caller-CPU p50 changes were **-4.8%, -11.7%, -11.4%**. Its median paired process-CPU p50 change is
+**-9.2%**. Medium caller-CPU p50 improved in all three pairs, but its first pair's CPU p95/p99 regressed;
+the repeated pairs improved both. Easy has one guard with mixed tails. These are local contended results,
+not a guarantee about every scene or load.
+
+| Tier | Frame before | After | Paired frame change p50 / p95 / p99 |
+| --- | --- | --- | --- |
+| Easy | 0.930 / 1.130 / 1.312 | 0.931 / 1.146 / 1.315 | +0.0% / +1.4% / +0.3% |
+| Medium | 2.008 / 2.975 / 3.199 | 2.079 / 2.969 / 3.222 | +0.0% / -0.2% / -0.6% |
+| Hard | 5.183 / 8.058 / 8.312 | 4.729 / 7.279 / 7.539 | -0.4% / +0.1% / +0.1% |
+
+**Frame throughput is effectively flat by the median paired changes**, despite the CPU reduction. For Hard,
+individual frame-p50 changes are **-0.4%, -8.8%, +0.7%**. The lower aggregate frame cells do not establish a
+repeatable 8–9% speedup: paired changes are the relevant comparison under this drift. GPU attribution was
+not repeated for this CPU-only change, and no GPU improvement is claimed.
+
+### Verification and retained evidence
+
+- Built the affected existing targets. Four focused suites passed on NVIDIA and the same four passed on
+  software Vulkan: local graph, bounds, direct cache and draw commands. All eight GPU runs observed the
+  Khronos validation layer with synchronization validation; no skips or validation errors. The CPU suite
+  also passed. This is focused validation, not the full platform matrix.
+- Six exact-RGBA before/after capture pairs passed: Hard phases 1/541/961, Easy/Medium phase 541 and Hard
+  phase 541 with image caching disabled. All their non-timing counters match. The local-graph regression
+  suite separately checks exact depth bits and output across changing static/live membership.
+- Rebuilding after whitespace formatting produced byte-identical test binaries. All fourteen normal
+  throughput runs stayed below the existing 450-second/1-GiB process guard. The four unrelated dirty files
+  were preserved.
+
+Raw reports, CSVs, scoped events, commands and binary/source hashes remain in
+`out/runs/render3d-cpu-submission/`: `controls.json`, `cpu-profile-summary.json`, `candidate-summary.json`,
+`candidate-provenance.json`, `candidate-capture-checks.json`, `test-results.json` and `checks.json`.
+Generated artifacts are not committed. The remaining measured CPU opportunities are live shadow
+fingerprints/selection, culling and upload packing, and main draw-span emission; isolate each before
+changing its representation or scheduling.
+
 ## Discard-free opaque material shading, 2026-11-12
 
 The reference is frozen **`52722b4c`**, including static shadow depth reuse and compact CPU preparation. Both versions use the same no-AA application object, `cache_shadows=1`, unchanged render settings and source content. The production change selects a discard-free stock fragment variant for proven eligible retained-material batches. It adds no public setting, render target, geometry reduction, light reduction or shader-compiler optimization flag.

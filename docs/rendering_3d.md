@@ -444,6 +444,12 @@ Program payload shares the existing gather budget; admission checks vector capac
 Cold program admission replaces its temporary row spans with one span into the program's owned index list. Source
 spans live only through the current compilation; cache trimming precedes their construction.
 
+Static-caster eligibility for local shadow image reuse follows the validated command/ref layout. Unchanged
+command revisions retain the existing byte mask instead of revisiting every mesh/material each render. A command
+or layout refresh invalidates the mask; disabling image reuse or using public local-shadow passes clears it.
+An exposed mutable instance span always disables static membership. Batch contents, poses, visibility, shadow
+fingerprints and current GPU bindings still refresh through their existing paths.
+
 Retained selection/program vector payload is limited to 4 MiB per renderer across 64 source/light-slot
 probes, plus fixed metadata. Unstable projections are observed without allocating
 payload, and pressure falls back to fresh gathering/sorting.
