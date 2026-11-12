@@ -2,6 +2,140 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Cached Cycles quality and image stability, 2026-11-12
+
+**The measured output is preserved:** all 145 sampled still/static/moving frame pairs are byte-identical,
+with identical Cycles accuracy and static shimmer/stepping scores. The throughput table below reports
+separate native timing runs; it does not turn frame pacing into an image-stability claim.
+
+Fresh native Bistro builds compare **`210504f6`** (renderer `0b921435`) with local main **`6aadd75e`**.
+The game uses the same 29 source/header files and unchanged baked content in both. Matching Release/GCC 15.2
+configurations enable audio, fonts, scripting, physics3D and the scene3D runtime; renderer translation units use
+`-O2`. Both use the same local `-Wno-template-body` compatibility warning option. Dedicated `dev-3d` builds
+coexist with the earlier minimal Yard configuration. No engine, shader or game source was changed for this study.
+
+This evaluates **Bistro at 3408×2130**, quality 1, TAA, anisotropy 16 and GI enabled, with fog/bloom disabled.
+The effective GI volume is 3,145,728 voxels. Camera, time of day, ISO/exposure, original ACES/display mapping
+and saturation 1.17 are fixed by the existing reviewed evaluation suite. Performance and capture jobs are separate.
+
+### Static accuracy against retained Cycles
+
+All ten Cycles EXRs are reused from the immutable two-seed, **1024-sample** cache: Blender 5.2.2/OptiX,
+no denoising, adaptive sampling or clamping. The complete cache inventory and 398 physical inputs match;
+cameras, exporter, Blender and display identities are checked. The benchmark directories moved since the
+cache was made. The originals are read directly after an explicit content/path-relocation review; no new
+cache entry is published or reference rerendered. No exposure fitting is applied to either engine version.
+
+All **five frame 600 still captures are byte-identical** between main and current. Independently executing
+the existing FLIP/JOD/PSNR/SSIM scorer for both yields identical complete metric results, including reference
+noise floors. The existing scorer uses one seed as the reference and the other to measure seed disagreement.
+FLIP is lower-is-better; JOD, PSNR and SSIM are higher-is-better.
+
+| View | FLIP, main = current | JOD, main = current | PSNR dB, main = current | Cycles seed FLIP | Cycles seed PSNR dB |
+| --- | --- | --- | --- | --- | --- |
+| start | 0.190141 | 7.1080 | 22.896 | 0.021088 | 39.992 |
+| street | 0.188817 | 7.4254 | 22.797 | 0.019171 | 40.480 |
+| terrace | 0.132181 | 7.4375 | 23.276 | 0.016648 | 40.456 |
+| start_noon | 0.164270 | 7.2478 | 23.932 | 0.019419 | 40.510 |
+| start_dusk | 0.160560 | 7.4743 | 24.265 | 0.016930 | 41.173 |
+
+Current preserves main's sampled static output. The renderer-to-Cycles error remains substantially larger
+than independent seed disagreement; it is real approximation error under this mapping. Reference noise is
+reported separately and is not subtracted into an accuracy claim. JOD uses the existing assumed laptop
+display model. These measurements do not select quality defaults or establish equivalence to path tracing.
+
+Visual review of all five views confirms matching framing and large scene structure. Visible residuals
+highlight foliage, fine geometry/edges, shadow boundaries and lighting/reflection differences. Both Kin
+versions share these differences; this identifies areas for follow-up without isolating a rendering pass.
+
+### Image stability and moving regression
+
+Two fixed views capture **64 consecutive frames each at nominal 60 fps**, frames 600–663 after settling.
+Mean shimmer is the average per-pixel population standard deviation of displayed luma on the 0–255 scale.
+Stepping is the fraction of pixels that ever change by more than 8 luma levels between adjacent frames.
+Every clip contains 64 unique RGB frames: variation is present and measured rather than replaced with a still.
+
+| Fixed view | Mean shimmer, main = current | Pixels ever stepping >8 levels, main = current |
+| --- | --- | --- |
+| start | 0.168100 levels | 0.1551% |
+| street | 0.156440 levels | 0.1214% |
+
+The original scorer's display/luma definitions and streaming moments cover every original pixel. Streaming
+results are checked against the existing stacked metric on real image samples; the complete stage output
+is preserved. Standard-deviation maps (×16 for display) and stepping masks show localized changes.
+
+The matched **12-frame moving clip at 120 fps**, frames 661–672, also has exact main/current file hashes.
+Across five still pairs, 128 static-frame pairs and 12 moving-frame pairs, **145/145 captured RGB8 files match**.
+Matching frame IDs, cameras and display transforms plus exact frame identity prove zero image-regression and
+frame-difference error versus main. Final validation rehashes the actual files and completed job inventories;
+redundant decoding of identical image pairs is skipped after the streaming analysis.
+
+These are short temporal regression checks. **Absolute moving-image accuracy against Cycles is not scored:**
+the archived moving jobs failed after five seed 0 frames and never produced a complete independent second
+seed. Main is explicitly the moving regression reference. The data do not establish absence of inherited
+ghosting, camera-cut issues or longer-period artifacts, or general runtime stability.
+
+### Static throughput with matched temperature admission
+
+Initial runs reached 87–88°C and the GPU clock collapsed from about 1.3 GHz to 210 MHz. An external `harvest`
+process also appeared during an incomplete attempt with second-long stalls; it was left untouched
+and exited naturally. Only owned timing attempts were interrupted. The original ten completed view runs
+and interrupted attempts remain under `perf/` as contended diagnostics and are not pooled below.
+
+The final protocol waits for three consecutive observations at **≤80°C and <10% GPU utilization** before
+each renderer starts. It changes no clocks, fans or external processes. Three alternating pairs per view use
+300 warm-up plus 300 measured frames: **30 renderer processes / 9000 measured frames**. These short windows
+describe cooled starts, not sustained throughput at the thermal limit. Temperature and clocks remain sampled
+diagnostics, without per-frame GPU-clock attribution or locked-frequency isolation. Device-total
+process-lifetime temperature/clock ranges are retained in `summary.json`; they include admission/startup,
+so they are not measurements of the timed frames alone. Background applications remain running and
+these results should be treated as thermally sensitive, potentially contended observations.
+
+Cells are medians of three per-run percentiles. The evaluator uses linearly interpolated percentiles.
+Changes are medians of paired percentage changes; negative means lower current frame cost.
+
+| View | Main frame p50/p95/p99 ms | Current frame p50/p95/p99 ms | Median paired p50 change |
+| --- | --- | --- | --- |
+| start | 17.407 / 18.202 / 18.551 | 17.396 / 18.107 / 18.410 | +0.0% |
+| street | 17.189 / 17.601 / 17.860 | 17.087 / 17.787 / 18.136 | -0.1% |
+| terrace | 16.158 / 17.331 / 17.728 | 16.057 / 17.208 / 17.461 | -0.6% |
+| start_noon | 17.454 / 18.157 / 18.471 | 17.478 / 18.124 / 18.478 | +0.1% |
+| start_dusk | 17.264 / 17.966 / 18.287 | 17.234 / 18.147 / 18.310 | -0.1% |
+
+| View | Main frame p50 range, ms | Current frame p50 range, ms |
+| --- | --- | --- |
+| start | 15.289–17.433 | 17.365–17.407 |
+| street | 15.328–17.203 | 16.916–17.186 |
+| terrace | 14.315–16.302 | 15.881–16.185 |
+| start_noon | 16.350–17.471 | 17.413–17.491 |
+| start_dusk | 16.989–17.281 | 17.070–17.254 |
+
+The median paired p50 changes range from −0.62% to +0.14% across these five views: observed static
+frame costs are essentially unchanged. Accepted process-lifetime samples still reach 87–88°C. The admission
+rule reduces initial thermal imbalance but does not eliminate thermal influence; these small differences
+do not establish an isolated branch speed advantage.
+
+Frame interval includes game updates, renderer work and presentation waiting; these are not thread-CPU
+execution times. The exported GPU observations are fence-completion estimates without exact source-frame
+attribution. They do not supply hardware GPU frame-time percentiles. Settings and scene differ from the
+earlier 720p Yard fixture, so those absolute timings are a separate comparison.
+
+### Evidence and validation
+
+The final cohort completes **48 native renderer processes**: two small smoke checks, 16 capture processes
+producing 290 images, and 30 timing processes. Completed artifact inventories, dimensions, frame counts,
+cameras, effective settings, actual native binary hashes at every cooled launch, raw timing statistics,
+all 145 paired image hashes, source/content identities and metric math checks pass. All four unrelated dirty
+files are preserved. This validates the measurement pipeline and sampled outputs; no engine-suite or
+cross-platform pass is claimed for this measurement-only task.
+
+The [complete quality/stability report](../out/runs/render3d-cycles-quality-210504f6/report.html) includes
+reference/test/FLIP images, temporal maps, matched moving frames and timing distributions. Artifacts are in
+`out/runs/render3d-cycles-quality-210504f6/`: `summary.json`, `checks.json`, `cache-review.json`,
+`provenance.json`, `cooled-provenance.json`, `analysis-provenance.json`, `raw-image-parity.json`,
+the original attempts, commands and native evaluator reports. Raw captures and the expensive original
+Cycles cache remain outside Git. Generated binaries remain in their respective build trees.
+
 ## Fresh Kin main / current / Godot / Unreal comparison, 2026-11-12
 
 This campaign compares renderer **`0b921435`** on `perf/render3d-cpu-parity`, local main **`6aadd75e`**,
