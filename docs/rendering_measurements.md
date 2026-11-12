@@ -2,6 +2,157 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Fresh Kin main / current / Godot / Unreal comparison, 2026-11-12
+
+This campaign compares renderer **`0b921435`** on `perf/render3d-cpu-parity`, local main **`6aadd75e`**,
+Godot **4.7.2.stable.official.ed1daf0bf** (Forward+) and Unreal
+**5.8.4-58902052+++UE5+Release-5.8** (Shipping, Vulkan). Existing frozen binaries, recipes and cooked assets
+match their build provenance. No engine code or build configuration changed. Main predates the
+CPU/GPU redesigns; this compares their combined result, not the last texture-cast change in isolation.
+
+**CONTENDED / uncontrolled host load.** No external workload was paused or stopped. At startup the GPU
+reported 73°C and 0% utilization, with desktop/Steam clients and no listed Blender process. Background GPU
+load is much lighter than in earlier campaigns. Absolute differences from those campaigns must not be
+credited to renderer changes. CPU/GPU clocks and temperature remain uncontrolled; telemetry surrounds each run.
+
+### Normal frame times and policies
+
+Every timing cell is **p50 / p95 / p99 ms**, lower is better. Cells are medians of three per-run percentiles;
+each normal run measures the complete 1,440-frame route after 300 stationary warm-up frames. p50 uses the
+sample median, p95/p99 sorted index `floor((N-1)*p/100)`. Tier and variant order rotate. There are
+**45 fresh normal runs / 64,800 measured frames**, including the additional Kin cache-off control. Normal
+timings contain no screenshot readbacks or synchronous Kin GPU-query waits.
+
+| Tier | Kin current, cache on | Kin main, cache off | Godot 4.7.2 | Unreal 5.8.4 Shipping |
+| --- | --- | --- | --- | --- |
+| Easy | 1.072 / 1.345 / 1.541 | 1.291 / 1.673 / 1.914 | 1.776 / 1.964 / 2.036 | 2.017 / 2.285 / 2.588 |
+| Medium | 2.131 / 2.996 / 3.220 | 3.853 / 5.550 / 5.764 | 9.834 / 11.274 / 12.051 | 3.268 / 3.929 / 4.346 |
+| Hard | 5.573 / 8.279 / 8.471 | 19.042 / 22.566 / 23.636 | 40.642 / 43.961 / 45.138 | 6.707 / 8.552 / 9.288 |
+
+Current Kin has the lowest aggregate p50/p95/p99 cells in this campaign. The repetition ranges and matched-block
+ratios below matter: these independently aggregated cells do not establish a permanent ordering under all load.
+
+| Tier | Kin current p50 range | Kin main p50 range | Godot p50 range | Unreal p50 range |
+| --- | --- | --- | --- | --- |
+| Easy | 0.750–1.078 | 0.964–1.490 | 1.486–1.854 | 1.572–2.024 |
+| Medium | 2.039–2.567 | 3.733–4.149 | 8.630–9.923 | 2.748–3.305 |
+| Hard | 5.166–6.219 | 18.481–19.450 | 38.456–41.407 | 6.035–6.901 |
+
+The following are medians of three **matched-block percentile ratios**; above one means higher current-Kin
+frame time. They are not ratios of the independently aggregated table cells. For example, Hard's aggregate
+current p95 is below Unreal's, while its median matched-block p95 ratio is above one. There is no consistent
+Hard tail advantage in every pairing.
+
+| Tier | Current / main p50/p95/p99 | Current / Godot p50/p95/p99 | Current / Unreal p50/p95/p99 |
+| --- | --- | --- | --- |
+| Easy | 0.778 / 0.807 / 0.776 | 0.581 / 0.611 / 0.643 | 0.529 / 0.573 / 0.584 |
+| Medium | 0.553 / 0.540 / 0.559 | 0.236 / 0.296 / 0.300 | 0.742 / 0.873 / 0.850 |
+| Hard | 0.302 / 0.359 / 0.347 | 0.145 / 0.192 / 0.191 | 0.923 / 1.052 / 1.007 |
+
+All variants use the same hashed independent-object Yard recipes, camera route, 1280×720 HDR/ACES,
+no AA/GI/AO/contact shadows, nominal classic 1,024 spot maps, uncapped/vsync off and affinity 0–15. Kin and
+Godot use four workers; Unreal retains its native scheduling within that affinity. Easy/Medium/Hard contain
+2,000/8,000/20,000 props, 32/128/256 six-joint actors, 128/512/2,000 smoke instances, 16/64/128 materials,
+40/800/5,000 moving props and 2/4/8 shadowed spotlights. Source meshes total 4,378 unique triangles.
+Source populations and instantiated budgets do not imply identical visible/rasterized geometry across engines.
+
+**Cache policy is explicit:** the primary current-Kin column enables `cache_shadows=1`, including static-depth
+reuse. The frozen main application forces image caching off. Godot and Unreal retain their native caches,
+including Unreal `r.Shadow.CacheWholeSceneShadows=1`. The separate current-Kin cache-off control makes the
+Kin comparison match this opt-in setting:
+
+| Tier | Current cache-off frame | Paired frame p50 change vs main | Paired caller CPU p50 change vs main |
+| --- | --- | --- | --- |
+| Easy | 1.071 / 1.364 / 1.566 | -17.1% | -64.4% |
+| Medium | 3.177 / 4.026 / 4.279 | -19.3% | -75.1% |
+| Hard | 10.394 / 12.861 / 13.079 | -46.3% | -87.9% |
+
+The control shows a substantial Kin gain without image caching; the primary column additionally measures the
+new cache implementation. Kin's frozen applications share scene logic and renderer CPU timer boundaries,
+but their cache CLI/report fields and CSV columns differ. Main exports additional graph-timer columns;
+current exports shadow-cache counters. CSV formatting is outside the renderer CPU span and inside the frame
+interval. Each application was built against its matching engine headers; no shared application object is claimed.
+
+Unreal uses no Nanite assets or Lumen/SSR/occlusion queries, with zero pending PSOs throughout the measured
+frames. Its shadow resolution selection, filters, bias and shaders differ. Godot uses the verified corrected
+MULTIPLY-emission pack. Kin is hidden with bounded frames in flight; Godot/Unreal are windowed. Presentation,
+adapter code and GDScript versus native update costs remain part of this application comparison.
+
+### CPU and normal-run GPU channels
+
+Kin caller CPU measures actual renderer caller-thread execution, excluding blocked waits. Process CPU includes
+helpers in the same span; these overlap and must not be added. Application scene-build time is separate.
+
+| Tier | Main caller CPU | Current cache-off caller CPU | Current cache-on caller CPU | Current cache-on process CPU |
+| --- | --- | --- | --- | --- |
+| Easy | 0.696 / 0.805 / 0.905 | 0.248 / 0.342 / 0.412 | 0.268 / 0.355 / 0.409 | 0.346 / 0.467 / 0.524 |
+| Medium | 3.406 / 3.960 / 4.188 | 0.823 / 0.974 / 1.139 | 0.850 / 0.945 / 1.110 | 0.989 / 1.101 / 1.281 |
+| Hard | 18.410 / 21.848 / 22.958 | 2.161 / 2.561 / 2.887 | 2.334 / 2.732 / 3.023 | 2.879 / 3.322 / 3.600 |
+
+The following Godot/Unreal channels have **different scopes** from Kin and each other; they cannot supply a
+direct CPU speed ratio. Godot reports script scene-update wall time and its subviewport render CPU/GPU counters.
+Unreal reports adapter update wall time and latest-completed game/render/RHI/GPU timers, which can lag and
+overlap. RHI time includes waiting and is not pure CPU execution. All cells still use the same percentile rule.
+
+| Tier | Godot scene-update wall | Godot viewport CPU | Godot viewport GPU |
+| --- | --- | --- | --- |
+| Easy | 0.151 / 0.160 / 0.166 | 1.209 / 1.288 / 1.312 | 0.853 / 0.955 / 0.991 |
+| Medium | 1.665 / 1.900 / 2.044 | 6.716 / 7.789 / 8.372 | 3.548 / 3.989 / 4.194 |
+| Hard | 9.625 / 10.420 / 10.726 | 27.629 / 30.008 / 30.869 | 15.385 / 15.796 / 15.911 |
+
+| Tier | Unreal scene-update wall | Game thread | Render thread | RHI thread | RHI GPU frame |
+| --- | --- | --- | --- | --- | --- |
+| Easy | 0.030 / 0.041 / 0.047 | 0.551 / 0.639 / 0.691 | 1.500 / 1.779 / 2.019 | 1.059 / 1.344 / 1.434 | 1.716 / 1.889 / 1.940 |
+| Medium | 0.226 / 0.290 / 0.309 | 0.982 / 1.156 / 1.232 | 2.699 / 3.233 / 3.479 | 1.727 / 2.224 / 2.417 | 2.936 / 3.198 / 3.257 |
+| Hard | 1.060 / 1.256 / 1.326 | 2.079 / 2.453 / 2.599 | 4.866 / 5.992 / 6.607 | 2.803 / 4.380 / 4.761 | 6.196 / 6.664 / 6.735 |
+
+### Separate Kin hardware GPU diagnostics
+
+One additional full-route pair per tier uses the same Vulkan forwarding library and 13 nonnested bottom-of-pipe
+pass spans. Main has image caching off and current on, matching the primary comparison. These **six synchronous
+diagnostic runs are not normal throughput**; waits change pacing. Spans can include contention, preemption and
+dependencies; their sum excludes unmarked uploads, 2D composition and presentation. Do not add CPU/GPU or
+independent pass percentiles, or rank this sum directly against Godot/Unreal's different GPU counters.
+
+| Tier | Main 13-span sum | Current 13-span sum | Main local-shadow span | Current local-shadow span |
+| --- | --- | --- | --- | --- |
+| Easy | 1.150 / 1.385 / 1.607 | 0.871 / 1.055 / 1.211 | 0.197 / 0.197 / 0.198 | 0.070 / 0.070 / 0.070 |
+| Medium | 3.742 / 5.443 / 5.638 | 2.023 / 2.888 / 3.095 | 1.341 / 1.342 / 1.343 | 0.196 / 0.199 / 0.200 |
+| Hard | 15.377 / 18.525 / 18.858 | 4.128 / 6.613 / 7.501 | 8.847 / 9.748 / 9.914 | 1.212 / 1.354 / 1.492 |
+
+These single-pair diagnostics support lower local-shadow GPU cost on the current path in this campaign,
+without isolating individual changes or establishing an engine-wide GPU speed ratio. All six runs contain
+1,741 contiguous complete 13-pass groups; measured CSV frames 301–1740 map to submissions 302–1741.
+Every non-timing metric matches that version's own fresh normal control at every frame.
+
+### Output quality, stability and checks
+
+Every normal block passes shared source/configuration, camera-route and moving-transform checks. Godot and
+Unreal validate actual motion and skinning twice per run. Main and current cache-off additionally match
+selected main/shadow triangles, instances, skinning and motion at every measured frame. Cached shadow work,
+draw counts, uploads and resident memory legitimately differ and are reported rather than required to match.
+
+All **23 fresh captures** are valid 1280×720 images. They cover each tier at route frame 60 across five variants,
+plus Medium warehouse/elevated views at frames 540/1140 across the four primary variants. Kin passes
+**eight exact decoded-RGBA pairs** against main: five cache-on and three cache-off. The
+[fresh capture gallery](../out/runs/render3d-four-engine-refresh-0b921435/quality-gallery.html)
+shows the primary variants. Visual inspection finds corresponding framing, large structures and populated-yard
+silhouettes at all five views. Smoke brightness/opacity, specular/emissive highlights and shadow edges differ
+across engines; Unreal's sky is darker. No objective cross-engine quality winner is established.
+
+All **74 bounded processes** completed and passed fixture checks: 45 normal, 23 capture and six
+GPU diagnostics. Observed p95/p99 and repetition ranges describe frame pacing under this load. They do not
+establish intrinsic engine reliability or flicker stability; still captures do not test temporal artifacts.
+Unreal's large tails from earlier high-contention sessions are not reproduced here, so those historical
+tails cannot be treated as an intrinsic Unreal property.
+
+Commands, per-run telemetry, binary/source/application/cooked-content/recipe/harness hashes, raw CSVs,
+capture checks, GPU distributions and reproducibility checks are under
+`out/runs/render3d-four-engine-refresh-0b921435/`: `provenance.json`, `application-review.json`,
+`summary.json`, `route-checks.json`, `preflight-checks.json`, `quality-checks.json`, `checks.json`
+and `quality-gallery.html`. The existing engines required no rebuild or engine-suite run. Validation covers
+the measurement scripts, complete route data, assets and sampled output. All four unrelated dirty files are preserved.
+
 ## Live local-shadow fingerprinting, 2026-11-12
 
 The retained change skips the texture-backend `dynamic_cast` while constructing local-shadow keys unless
