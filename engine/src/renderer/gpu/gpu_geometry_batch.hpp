@@ -103,8 +103,19 @@ struct GpuMeshVertex {
 };
 
 // None: no vertex buffer (a fullscreen triangle made in the shader).
-// SkinnedMeshVertices: MeshVertices in buffer slot 0, and a second buffer (slot 1, GpuSkinVertex) with the joints and weights.
-enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances, MeshVertices, None, SkinnedMeshVertices };
+// SkinnedMeshVertices: MeshVertices in buffer slot 0, and a second buffer (slot 1, GpuSkinVertex) with the joints and
+// weights. ShadowPositions: tightly packed xyz for immutable opaque local-shadow geometry.
+enum class GpuVertexLayout : u8 {
+    Triangles,
+    SpriteInstances,
+    ShaderVertices,
+    ShapeVertices,
+    SdfInstances,
+    MeshVertices,
+    None,
+    SkinnedMeshVertices,
+    ShadowPositions
+};
 
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {

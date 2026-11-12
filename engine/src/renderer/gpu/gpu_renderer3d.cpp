@@ -5,6 +5,7 @@
 #include "gpu_memory.hpp"
 #include "gpu_renderer2d_backend.hpp"
 #include "gpu_shadow_cull.hpp"
+#include "gpu_shadow_mesh.hpp"
 #include "gpu_shadow_reach.hpp"
 #include "gpu_sphere_cull4.hpp"
 
@@ -1007,7 +1008,7 @@ public:
     // Keep the same binding state as the general recorder across mixed draws,
     // without constructing/comparing/copying variable-length buffer arrays.
     void bind_shadow(SDL_GPUGraphicsPipeline* pipeline, SDL_GPUBuffer* instances, SDL_GPUBuffer* lists,
-                     const GpuMesh3D* mesh) {
+                     const GpuMesh3D* mesh, bool compact) {
         const bool changed = pipeline != _pipeline;
         if (changed) {
             SDL_BindGPUGraphicsPipeline(_pass, pipeline);
@@ -1019,29 +1020,36 @@ public:
             _storage_count = 2;
             SDL_BindGPUVertexStorageBuffers(_pass, 0, _storage.data(), 2);
         }
-        bind_mesh(mesh);
+        bind_mesh(mesh, nullptr, compact);
     }
 
     // The mesh's vertices and, unless `indices` is given (a clustered mesh's compacted ones), its own indices.
-    void bind_mesh(const GpuMesh3D* mesh, SDL_GPUBuffer* indices = nullptr) {
+    void bind_mesh(const GpuMesh3D* mesh, SDL_GPUBuffer* indices = nullptr, bool compact = false) {
+        // Shadow topology shares the same pages where possible. Its vertex
+        // allocations are padded to whole GpuMeshVertex elements so later full
+        // meshes retain their original alignment; its own stride is Vec3f.
         // Pool allocations contain whole GpuMeshVertex/u32 elements. Keep the page bound at zero and
         // address a mesh with base_vertex/first_index, including its LOD index ranges. Skins and
         // clustered meshes have dedicated vertices (zero offset); compacted indices start at zero.
         const u32 vertex_offset = 0u;
-        const SDL_GPUBuffer* index_buffer = indices ? indices : mesh->indices;
+        SDL_GPUBuffer* vertex_buffer = compact ? mesh->shadow_vertex_buffer() : mesh->vertices;
+        SDL_GPUBuffer* index_buffer = compact ? mesh->shadow_index_buffer() : indices ? indices : mesh->indices;
         const u32 index_offset = 0u;
-        if (mesh->vertices != _vertices) {
-            const SDL_GPUBufferBinding vertices{mesh->vertices, vertex_offset};
+        if (vertex_buffer != _vertices) {
+            const SDL_GPUBufferBinding vertices{vertex_buffer, vertex_offset};
             SDL_BindGPUVertexBuffers(_pass, 0, &vertices, 1);
-            _vertices = mesh->vertices;
+            _vertices = vertex_buffer;
         }
         if (index_buffer != _indices) {
-            const SDL_GPUBufferBinding binding{indices ? indices : mesh->indices, index_offset};
+            const SDL_GPUBufferBinding binding{index_buffer, index_offset};
             SDL_BindGPUIndexBuffer(_pass, &binding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
             _indices = index_buffer;
         }
-        _first_index = !indices ? mesh->index_offset / sizeof(u32) : 0u;
-        _base_vertex = static_cast<i32>(mesh->vertex_offset / sizeof(GpuMeshVertex));
+        _first_index = compact    ? mesh->shadow_allocation.indices.offset / sizeof(u32)
+                       : !indices ? mesh->index_offset / sizeof(u32)
+                                  : 0u;
+        _base_vertex = compact ? static_cast<i32>(mesh->shadow_allocation.vertices.offset / sizeof(Vec3f))
+                               : static_cast<i32>(mesh->vertex_offset / sizeof(GpuMeshVertex));
     }
 
     void draw(u32 indices, u32 instances, u32 first_index, u32 first_instance = 0) const {
@@ -1132,8 +1140,11 @@ GpuClusterChunk::~GpuClusterChunk() {
 }
 
 GpuMesh3D::~GpuMesh3D() {
-    if (buffer_pool)
+    if (buffer_pool) {
         buffer_pool->retire(std::move(allocation));
+        if (shadow_allocation)
+            buffer_pool->retire(std::move(shadow_allocation));
+    }
     if (device && *device) {
         for (SDL_GPUBuffer* buffer :
              {buffer_pool ? nullptr : vertices, skin, chunk || buffer_pool ? nullptr : indices, previous}) {
@@ -2001,7 +2012,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat d
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass,
                                                  bool mask, SDL_GPUShader* custom, bool velocity, bool skinned,
                                                  bool fog, bool lights, Unlit unlit, bool indexed,
-                                                 const GpuSurfaceShader3D* surface) const {
+                                                 const GpuSurfaceShader3D* surface, bool compact_shadow) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
@@ -2041,7 +2052,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::ShadowMask)
                                                             : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
             .blend = GpuBlendMode::Replace,
-            .layout = layout,
+            .layout = compact_shadow && !mask && !skinned && !surface ? GpuVertexLayout::ShadowPositions : layout,
             .depth_stencil = _shadow_format,
             .depth = GpuDepthTest::TestWrite,
             .cull = cull ? GpuCull::Back : GpuCull::None,
@@ -2866,10 +2877,63 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                                     static_cast<u32>(chain->levels[l].indices.size()), chain->levels[l].error});
             level_start += chain->levels[l].indices.size();
         }
+        if (_capabilities.local_shadow_pass && !mesh->clusters && !source.skinned() && !mesh->dynamic)
+            prepare_shadow_mesh(*mesh, source, chain);
         return mesh;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = e.what()}}));
         return {};
+    }
+}
+
+void GpuRenderer3D::prepare_shadow_mesh(GpuMesh3D& mesh, const MeshData3D& source, const MeshLodChain3D* chain) {
+    static_assert(sizeof(Vec3f) == 3 * sizeof(f32));
+    try {
+        const auto geometry = build_shadow_mesh(source, chain);
+        if (geometry.positions.empty() || geometry.indices.empty())
+            return;
+        const u32 vertex_bytes = static_cast<u32>(geometry.positions.size() * sizeof(Vec3f));
+        const u32 index_bytes = static_cast<u32>(geometry.indices.size() * sizeof(u32));
+        const auto upload = [&](SDL_GPUBuffer* buffer, u32 base, const void* data, u32 bytes) {
+            constexpr u32 piece = 8u * 1024u * 1024u;
+            for (u32 first = 0; first < bytes;) {
+                const u32 count = std::min(piece, bytes - first);
+                _device->upload_storage_buffer(buffer, base + first, count, static_cast<const u8*>(data) + first,
+                                               false);
+                first += count;
+            }
+        };
+        if (mesh.buffer_pool) {
+            // The same pool serves both strides; every subsequent full-mesh
+            // allocation must still start at a whole 36-byte vertex.
+            const u32 padded = static_cast<u32>((vertex_bytes + sizeof(GpuMeshVertex) - 1) / sizeof(GpuMeshVertex) *
+                                                sizeof(GpuMeshVertex));
+            mesh.shadow_allocation = mesh.buffer_pool->allocate(padded, index_bytes);
+        }
+        if (mesh.shadow_allocation) {
+            upload(mesh.shadow_vertex_buffer(), mesh.shadow_allocation.vertices.offset, geometry.positions.data(),
+                   vertex_bytes);
+            upload(mesh.shadow_index_buffer(), mesh.shadow_allocation.indices.offset, geometry.indices.data(),
+                   index_bytes);
+        } else {
+            const SDL_GPUBufferCreateInfo vertex_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX, .size = vertex_bytes};
+            const SDL_GPUBufferCreateInfo index_info{.usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = index_bytes};
+            GpuBuffer vertices{_device->shared(), tracked_create_buffer(_device->handle(), &vertex_info), vertex_bytes};
+            GpuBuffer indices{_device->shared(), tracked_create_buffer(_device->handle(), &index_info), index_bytes};
+            if (!vertices || !indices)
+                return; // Optional representation: the original mesh remains usable.
+            upload(vertices.handle(), 0, geometry.positions.data(), vertex_bytes);
+            upload(indices.handle(), 0, geometry.indices.data(), index_bytes);
+            mesh.shadow_vertices = std::move(vertices);
+            mesh.shadow_indices = std::move(indices);
+        }
+    } catch (const std::exception& e) {
+        if (mesh.shadow_allocation) {
+            mesh.buffer_pool->retire(std::move(mesh.shadow_allocation));
+            mesh.shadow_allocation = {};
+        }
+        KIN_LOG_WARN_F("render", "3D: compact shadow mesh unavailable; using original mesh",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
     }
 }
 
@@ -9012,9 +9076,25 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
     SDL_GPUBuffer* instances = _local_instances ? _local_instances->handle() : nullptr;
     SDL_GPUBuffer* lists = _local_lists ? _local_lists->handle() : instances;
     SDL_GPUBuffer* joint_offsets = _local_joint_offsets ? _local_joint_offsets->handle() : nullptr;
-    // These eight variants are fixed for this call. Avoid rebuilding and
-    // searching the full pipeline key for every caster in every light map.
-    std::array<SDL_GPUGraphicsPipeline*, 8> pipelines{};
+    // Stock variants, including the optional position-only vertex stream. Avoid
+    // rebuilding/searching the full pipeline key for every caster in every map.
+    std::array<SDL_GPUGraphicsPipeline*, 16> pipelines{};
+    const auto stock_pipeline = [&](bool cull, bool cutout, bool skinned, bool& compact) {
+        const auto get = [&] {
+            const u32 variant = u32(cull) | (u32(cutout) << 1) | (u32(skinned) << 2) | (u32(compact) << 3);
+            SDL_GPUGraphicsPipeline*& p = pipelines[variant];
+            if (!p)
+                p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, cull, Pass::Shadow, cutout, nullptr, false, skinned,
+                             false, false, Unlit::Off, false, nullptr, compact);
+            return p;
+        };
+        SDL_GPUGraphicsPipeline* p = get();
+        if (!p && compact) {
+            compact = false;
+            p = get(); // Optional pipeline allocation can fall back to the original vertex stream.
+        }
+        return p;
+    };
     // Resolve ordinary depth-state groups once for all drawn maps of this call.
     // Keep small/single-map passes on the existing loop: they cannot amortize
     // this source table. No pointer survives the next recording call.
@@ -9090,10 +9170,8 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                         (material.surface.backend() && pass_surface(material))) {
                         record = ~1u;
                     } else {
-                        SDL_GPUGraphicsPipeline*& p = pipelines[u32(!material.double_sided)];
-                        if (!p)
-                            p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !material.double_sided, Pass::Shadow, false,
-                                         nullptr, false, false);
+                        bool compact = ref.mesh->has_shadow_mesh();
+                        SDL_GPUGraphicsPipeline* p = stock_pipeline(!material.double_sided, false, false, compact);
                         if (!p) {
                             // Preserve per-entry allocation retries and incomplete-map handling.
                             complete = false;
@@ -9103,12 +9181,12 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                         record = static_cast<u32>(_local_records.size());
                         _local_records.push_back(
                             {p, ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : instances, ref.mesh,
-                             level.index_count, level.first_index});
+                             level.index_count, level.first_index, compact});
                     }
                 }
                 if (record != ~1u) {
                     const LocalRecord& source = _local_records[record];
-                    binder.bind_shadow(source.pipeline, source.instances, lists, source.mesh);
+                    binder.bind_shadow(source.pipeline, source.instances, lists, source.mesh, source.compact);
                     const u32 first = uniforms.bind(0, entry.list_first + 1, false);
                     binder.draw(source.index_count, entry.count, source.first_index, first);
                     ++stats.local_shadow_draws;
@@ -9124,18 +9202,15 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                 complete = false;
                 continue;
             }
-            const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
             // (A surface's own cut-out, or its vertices moved, is its pipeline, not one of the pass's few.)
             const GpuSurfaceShader3D* own = caster.surface.backend() ? pass_surface(caster) : nullptr;
             SDL_GPUGraphicsPipeline* surfaced =
                 own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
                                false, ref.skinned, false, false, Unlit::Off, false, own)
                     : nullptr;
-            SDL_GPUGraphicsPipeline*& cached = pipelines[variant];
-            if (!own && !cached)
-                cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
-                                  false, ref.skinned);
-            SDL_GPUGraphicsPipeline* p = own ? surfaced : cached;
+            bool compact = !own && !cutout && !ref.skinned && !entry.clustered && ref.mesh->has_shadow_mesh();
+            SDL_GPUGraphicsPipeline* p =
+                own ? surfaced : stock_pipeline(!caster.double_sided, cutout, ref.skinned, compact);
             if (!p) {
                 complete = false;
                 continue;
@@ -9150,7 +9225,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                 complete = false;
                 continue;
             }
-            binder.bind_mesh(ref.mesh, entry.clustered ? _local_index_buffer->handle() : nullptr);
+            binder.bind_mesh(ref.mesh, entry.clustered ? _local_index_buffer->handle() : nullptr, compact);
             if (ref.skinned) {
                 binder.bind_skin(ref.mesh);
             }
@@ -16026,7 +16101,8 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
             continue;
         }
         for (const Scene3D::Draw& draw : scenes[index]->draws()) {
-            if (draw.count == 0 || !dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get())) {
+            const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+            if (draw.count == 0 || !mesh) {
                 continue;
             }
             const Material3D& m = draw.material;
@@ -16096,6 +16172,10 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
                 m.casts_shadow) {
                 pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided, Pass::Shadow, cutout, nullptr, false,
                          draw.skinned);
+                if (lights_on && (spot_shadows || point_shadows || moon_shadow) && !draw.skinned && !cutout &&
+                    mesh->has_shadow_mesh() && (!m.surface.backend() || !pass_surface(m)))
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided, Pass::Shadow, false, nullptr, false,
+                             false, false, false, Unlit::Off, false, nullptr, true);
             }
             if (index == 0 && view->_pick && (opaque || m.blend == Blend3D::Alpha)) {
                 pipeline(pick_format, 1, !m.double_sided, Pass::Pick, cutout, nullptr, false, draw.skinned);

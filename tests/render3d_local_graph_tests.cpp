@@ -1,9 +1,12 @@
 #include "../engine/src/renderer/gpu/gpu_light_grid3d.hpp"
+#include "../engine/src/renderer/gpu/gpu_renderer3d.hpp"
+#include "../engine/src/renderer/gpu/gpu_shadow_mesh.hpp"
 #include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"
 #include "local_graph_shaders.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -165,6 +168,60 @@ void shadow_packets() {
         }
     std::cout
         << "shadow packets: pointer/packet/scalar parity, partial planes, radius proofs, boundaries and NaNs passed\n";
+}
+
+void shadow_mesh_topology() {
+    const auto bits = [](Vec3f p) {
+        return std::array{std::bit_cast<u32>(p.x), std::bit_cast<u32>(p.y), std::bit_cast<u32>(p.z)};
+    };
+    const auto check = [&](const MeshData3D& source, const MeshLodChain3D* chain = nullptr) {
+        const auto shadow = gpu::build_shadow_mesh(source, chain);
+        std::vector<Vec3f> expected;
+        if (source.indices.empty()) {
+            for (const auto& vertex : source.vertices)
+                expected.push_back(vertex.position);
+        } else {
+            for (const u32 index : source.indices)
+                expected.push_back(source.vertices[index].position);
+        }
+        for (std::size_t l = 1; chain && l < chain->levels.size(); ++l)
+            for (const u32 index : chain->levels[l].indices)
+                expected.push_back(index < source.vertices.size()
+                                       ? source.vertices[index].position
+                                       : chain->extra_vertices[index - source.vertices.size()].position);
+        assert(shadow.indices.size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            assert(shadow.indices[i] < shadow.positions.size());
+            assert(bits(shadow.positions[shadow.indices[i]]) == bits(expected[i]));
+        }
+        return shadow;
+    };
+    auto box = meshes::box({1, 1, 1});
+    assert(box.vertices.size() == 24 && box.indices.size() == 36);
+    assert(check(box).positions.size() == 8); // Normal/UV seams do not affect opaque shadow vertices.
+    MeshData3D unindexed;
+    for (const u32 index : box.indices)
+        unindexed.vertices.push_back(box.vertices[index]);
+    assert(check(unindexed).positions.size() == 8);
+    box.indices.insert(box.indices.end(), {0, 0, 1}); // Keep degenerates and repeated triangles in their source order.
+    assert(check(box).indices.size() == 39);
+    MeshLodChain3D chain;
+    chain.extra_vertices = {box.vertices[0], {{2, 2, 2}}};
+    chain.levels.resize(3);
+    chain.levels[1].indices = {0, 1, 24, 24, 1, 25};
+    chain.levels[2].indices = {25, 24, 0};
+    assert(check(box, &chain).positions.size() == 9);
+    MeshData3D close;
+    for (const Vec3f position : std::array{Vec3f{0, 0, 0}, Vec3f{-0.f, 0, 0}, Vec3f{1, 0, 0},
+                                           Vec3f{std::nextafter(1.f, 2.f), 0, 0}, Vec3f{1, 0, 0}})
+        close.vertices.push_back({position});
+    close.indices = {0, 1, 2, 3, 4, 0};
+    assert(check(close).positions.size() == 4); // Signed zero and adjacent floats must not be merged.
+    chain.levels[1].indices[0] = 26;
+    assert(gpu::build_shadow_mesh(box, &chain).indices.empty());
+    box.indices[0] = static_cast<u32>(box.vertices.size());
+    assert(gpu::build_shadow_mesh(box).indices.empty());
+    std::cout << "shadow topology: exact ordered positions across seams, implicit indices, LODs and float boundaries\n";
 }
 
 struct Fixture {
@@ -378,6 +435,95 @@ void variants(Fixture& f) {
     assert(after.upload_staging_bytes <= before.upload_staging_bytes);
     std::cout << "local graph: LOD/CPU-GPU cuts, skinning/retained/mask/transparency/overlay, particle exclusion and "
                  "stable resources\n";
+}
+
+void shadow_position_depth(Fixture& f) {
+    // Opaque white cutouts use the original full vertex/index stream. Compare
+    // its depth bits with the same geometry through the welded position stream;
+    // stock/public comparisons alone would run the new recorder on both sides.
+    const std::array<u8, 4> rgba{255, 255, 255, 255};
+    const auto white = f.r.create_texture_from_rgba(rgba.data(), {1, 1});
+    auto raw = meshes::box({.6f, .8f, .7f});
+    MeshData3D unindexed;
+    for (const u32 index : raw.indices)
+        unindexed.vertices.push_back(raw.vertices[index]);
+    const auto flat = f.r3d.create_mesh(unindexed).value_or({});
+    const auto levels = f.r3d.create_mesh(meshes::sphere(.4f, 24, 12), {.levels = 3}).value_or({});
+    // This index payload exceeds the small-mesh pool's admission limit.
+    const auto dedicated = f.r3d.create_mesh(meshes::plane({.7f, .7f}, 80)).value_or({});
+    const auto batch =
+        InstanceBatch3D::create(f.box, std::vector<MeshInstance3D>{{.transform = Mat4f::translation({-.8f, .6f, .7f})},
+                                                                   {.transform = Mat4f::translation({.8f, .6f, .7f})}})
+            .value_or({});
+    assert(white && flat && levels && dedicated && batch);
+    const auto* pooled_backend = dynamic_cast<const gpu::GpuMesh3D*>(flat.backend().get());
+    const auto* dedicated_backend = dynamic_cast<const gpu::GpuMesh3D*>(dedicated.backend().get());
+    assert(pooled_backend && pooled_backend->has_shadow_mesh() && pooled_backend->shadow_allocation);
+    assert(pooled_backend->shadow_allocation.vertices.offset > 0);
+    assert(pooled_backend->shadow_allocation.vertices.bytes < unindexed.vertices.size() * 3 * sizeof(f32));
+    assert(dedicated_backend && dedicated_backend->has_shadow_mesh() && !dedicated_backend->shadow_allocation);
+    const auto lod = f.scene.lod;
+    const auto debug = f.scene.debug;
+    const std::array requests{LocalShadowRequest3D{.kind = LocalShadowKind3D::Spot},
+                              LocalShadowRequest3D{.kind = LocalShadowKind3D::Point, .first_layer = 1}};
+    const auto capture = [&](bool original, bool reverse, i32 level) {
+        f.clear_draws();
+        f.scene.lod.enabled = true;
+        f.scene.debug.force_level = level;
+        Material3D material{.double_sided = true};
+        if (original) {
+            material.blend = Blend3D::Mask;
+            material.texture = white;
+        }
+        for (u32 i = 0; i < 5; ++i) {
+            const u32 object = reverse ? 4 - i : i;
+            if (object == 0)
+                assert(f.scene.draw(flat, Mat4f::translation({-1, .6f, -.5f}), material));
+            else if (object == 1)
+                assert(f.scene.draw(levels, Mat4f::translation({1, .6f, -.5f}) * Mat4f::scaling({-.8f, 1.1f, .7f}),
+                                    material));
+            else if (object == 2)
+                assert(f.scene.draw_instanced(batch, material));
+            else if (object == 3)
+                assert(f.scene.draw(dedicated, Mat4f::translation({0, .4f, 0}), material));
+            else
+                assert(f.scene.draw(f.box, Mat4f::translation({0, 1.2f, -.8f}),
+                                    {.blend = Blend3D::Mask, .texture = white})); // Switch back to the full stream.
+        }
+        f.r.clear(colors::black);
+        const auto prepared = f.r3d.prepare(f.scene).value_or({});
+        assert(prepared && f.r3d.render_local_shadows(f.array, prepared, requests, size));
+        std::vector<u8> result;
+        bool covered = false;
+        for (u32 layer = 0; layer < 7; ++layer)
+            for (const f32 shift : {0.f, 24.f}) {
+                ShaderParams params;
+                params.uniforms[0] = static_cast<f32>(layer);
+                params.uniforms[1] = 1;
+                params.uniforms[2] = shift;
+                f.r.draw_shader_surface(rect, f.probe, params, f.array);
+                std::vector<u8> pixels;
+                Vec2i actual;
+                assert(f.r.read_rgba(rect, pixels, actual) && actual == size);
+                for (std::size_t i = 0; i < pixels.size(); i += 4)
+                    covered = covered || pixels[i] || pixels[i + 1] || pixels[i + 2];
+                result.insert(result.end(), pixels.begin(), pixels.end());
+            }
+        f.r.present();
+        assert(covered);
+        return result;
+    };
+    for (const i32 level : {0, 1, 2}) {
+        const auto reference = capture(true, false, level);
+        for (const bool reverse : {false, true}) {
+            assert(capture(false, reverse, level) == reference);
+            assert(capture(true, reverse, level) == reference);
+        }
+    }
+    f.scene.lod = lod;
+    f.scene.debug = debug;
+    f.objects();
+    std::cout << "shadow positions: all depth bits match original-stream cutouts across LODs, batches and seven maps\n";
 }
 
 void recording_ranges(Fixture& f) {
@@ -851,6 +997,7 @@ void validation(Fixture& f) {
 int main() {
     grid_lists();
     shadow_packets();
+    shadow_mesh_topology();
     App app;
     auto& window = app.create_window({.title = "local graph", .width = 160, .height = 120, .hidden = true});
     Renderer2D r{make_render_backend(window, false, true)};
@@ -861,6 +1008,7 @@ int main() {
     stock_without_shadow_work(f);
     parity(f);
     variants(f);
+    shadow_position_depth(f);
     recording_ranges(f);
     cube_and_camera(f);
     grid_and_history(f);

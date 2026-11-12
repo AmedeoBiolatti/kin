@@ -119,6 +119,17 @@ public:
 
     SharedDevice device;
     SDL_GPUBuffer* vertices = nullptr;
+    // Optional immutable position-only topology for stock opaque local shadows.
+    // The original stream remains authoritative for every other mesh consumer.
+    GpuBuffer shadow_vertices, shadow_indices;
+    GpuMeshBufferAllocation shadow_allocation;
+    bool has_shadow_mesh() const { return shadow_allocation || (shadow_vertices && shadow_indices); }
+    SDL_GPUBuffer* shadow_vertex_buffer() const {
+        return shadow_allocation ? shadow_allocation.vertices.page->buffer : shadow_vertices.handle();
+    }
+    SDL_GPUBuffer* shadow_index_buffer() const {
+        return shadow_allocation ? shadow_allocation.indices.page->buffer : shadow_indices.handle();
+    }
     u32 vertex_offset = 0, index_offset = 0; // byte offsets for small static meshes in shared pages
     std::shared_ptr<GpuMeshBufferPool> buffer_pool;
     GpuMeshBufferAllocation allocation;
@@ -670,7 +681,8 @@ private:
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                       SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false,
                                       bool fog = false, bool lights = false, Unlit unlit = Unlit::Off,
-                                      bool indexed = false, const GpuSurfaceShader3D* surface = nullptr) const;
+                                      bool indexed = false, const GpuSurfaceShader3D* surface = nullptr,
+                                      bool compact_shadow = false) const;
     // Pure requests shared by actual draws and conservative warm-up variants.
     struct MaterialPipeline {
         const GpuMaterialShader3D* custom;
@@ -815,6 +827,7 @@ private:
     // grid_tile pixels by slices of view depth) those whose reach touches it, uploaded for the main pass.
     void build_light_grid(FrameCtx& ctx);
     void build_local_shadows(FrameCtx& ctx);
+    void prepare_shadow_mesh(GpuMesh3D& mesh, const MeshData3D& source, const MeshLodChain3D* chain);
     bool local_shadow_pass(FrameCtx& ctx);
     void push_local_lights(const FrameCtx& ctx, u32 s, u32 slot);
     // The local array made or kept (`side` x `side`, `layers` of them, which pack_local_maps fills: only ever more,
@@ -1438,6 +1451,7 @@ private:
         SDL_GPUBuffer* instances;
         const GpuMesh3D* mesh;
         u32 index_count, first_index;
+        bool compact;
     };
     std::vector<u32> _local_record_refs;
     std::vector<LocalRecord> _local_records;       // refreshed per recording call; no persistent source/pipeline cache

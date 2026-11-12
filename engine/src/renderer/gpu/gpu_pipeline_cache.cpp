@@ -149,6 +149,10 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSdfInstance, radius));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSdfInstance, fill_r));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSdfInstance, stroke_r));
+    } else if (layout == GpuVertexLayout::ShadowPositions) {
+        vb.pitch = 3 * sizeof(f32);
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0);
     } else if (layout == GpuVertexLayout::MeshVertices || layout == GpuVertexLayout::SkinnedMeshVertices) {
         vb.pitch = sizeof(GpuMeshVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;

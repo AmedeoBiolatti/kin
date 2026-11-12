@@ -2,6 +2,130 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## Position-only local-shadow geometry, 2026-11-12
+
+The reference is frozen renderer **`32f387ea`**, including map-wide shadow batches
+and direct index scatter. Immutable rigid meshes now prepare an additional
+position-only stream and shadow indices once at creation. Bit-identical positions
+are welded across normal/UV seams; nearby floats and signed zero stay distinct.
+Every triangle retains its ordered position values, winding and LOD range,
+including degenerates. The stock shadow shader and transform math are unchanged.
+Vertex input stride is **36 → 12 bytes**; the topology check verifies a box has
+**24 → 8 vertices**, with the same 12 triangles. Hardware vertex-invocation or
+bandwidth counters were not collected.
+
+Opaque local maps use this representation in both ordinary and shared-group
+recording. Cutouts, skins, morphs, depth-affecting surfaces and cluster cuts keep
+the original streams; other passes, including sun shadows, are unchanged.
+Small meshes reuse the existing fenced buffer pool, padding allocations to retain
+both vertex strides' alignment. Large meshes use tracked dedicated buffers.
+Optional buffer/pipeline failures fall back to the original stream. Uploads use
+existing staging at creation; no per-frame topology compilation/uploads are added.
+Extra mesh-creation work and resident geometry remain tradeoffs; this campaign
+measures warmed rendering, not a controlled loading/startup comparison.
+
+**All results are contended.** Blender and every external workload stayed running;
+CPU/GPU clocks, thermals and load remain uncontrolled. Original independent Yard
+submissions use 720p HDR, no AA/GI/AO/contact shadows, classic 1,024 spot maps,
+four helpers, affinity 0–15, 300 warm-up and 1,440 measured route frames.
+Whole-map shadow-image caching stays off in both. Release/Ninja GCC and renderer
+`-O2` settings are unchanged; the existing build and no-AA application object
+were reused. Frozen reference executables remain intact.
+
+### GPU pass attribution
+
+Three alternating Hard pairs and one Easy/Medium guard pair use the existing
+synchronous Vulkan timestamp library. Every cell is **p50 / p95 / p99 ms**;
+Hard cells are medians of three per-run percentiles. p50 uses the sample median;
+p95/p99 use sorted index `floor((N-1)*p/100)`. Percentage changes are medians of
+per-pair changes, rather than ratios of independently aggregated table cells.
+
+| Tier | Pairs | Shadow GPU before | After | Paired shadow p50 change |
+| --- | --- | --- | --- | --- |
+| Easy | 1 | 0.241 / 0.279 / 0.285 | 0.255 / 0.281 / 0.287 | +5.9% |
+| Medium | 1 | 1.984 / 3.510 / 4.356 | 2.321 / 4.418 / 4.611 | +17.0% |
+| Hard | 3 | 8.322 / 13.121 / 15.829 | 7.474 / 9.234 / 12.031 | -14.3% |
+
+The individual Hard shadow-p50 changes are -10.2%, -14.6%, -14.3%.
+The unchanged main shading pass is retained as a contemporaneous load control:
+
+| Tier | Main GPU before | After | 3D span-sum before | After |
+| --- | --- | --- | --- | --- |
+| Easy | 1.264 / 2.622 / 3.012 | 1.634 / 3.058 / 3.338 | 1.549 / 2.909 / 3.384 | 1.931 / 3.377 / 3.666 |
+| Medium | 4.229 / 8.931 / 10.572 | 5.490 / 10.849 / 11.721 | 6.542 / 12.093 / 14.565 | 7.928 / 13.989 / 15.500 |
+| Hard | 6.335 / 18.890 / 20.271 | 6.202 / 12.826 / 18.707 | 14.926 / 31.538 / 33.906 | 13.682 / 21.783 / 31.087 |
+
+These are bottom-of-pipe spans at 13 nonnested pass markers, with a wait for each
+marked submission. Their sum excludes unmarked uploads, 2D composition and
+presentation; contention, preemption and dependency gaps can contribute.
+**This diagnostic is not normal throughput.** CPU/GPU and independent pass
+percentiles must not be added. Easy/Medium are single guard pairs. These
+observations do not establish an isolated gain under fixed clocks/load. The
+Easy/Medium shadow guards are slower, while their unchanged main passes also
+slow by about 29–30%; those single pairs are inconclusive about the optimization.
+
+### Normal CPU and frame intervals
+
+Normal pairs use neither timestamp-query waits nor screenshot readback. There
+are ten full-route normal runs, separate from the ten GPU runs above.
+Caller CPU measures renderer thread execution, excluding blocked waits;
+frame interval includes runtime/presentation and scheduling. Cells again show
+p50 / p95 / p99 ms, aggregated as above.
+
+| Tier | Caller CPU before | After | Frame interval before | After |
+| --- | --- | --- | --- | --- |
+| Easy | 0.351 / 0.514 / 0.585 | 0.334 / 0.432 / 0.476 | 2.660 / 4.091 / 4.665 | 2.576 / 3.219 / 3.749 |
+| Medium | 0.997 / 1.244 / 1.447 | 0.965 / 1.138 / 1.238 | 6.003 / 8.963 / 9.378 | 6.076 / 9.504 / 10.024 |
+| Hard | 4.070 / 4.862 / 5.467 | 4.063 / 4.912 / 5.612 | 34.343 / 52.790 / 55.319 | 33.960 / 54.104 / 56.110 |
+
+| Tier | Paired caller CPU p50 change | Paired frame p50 change |
+| --- | --- | --- |
+| Easy | -4.8% | -3.2% |
+| Medium | -3.2% | +1.2% |
+| Hard | -0.2% | -5.8% |
+
+Individual Hard frame-p50 changes are -6.1%, -5.8%, -0.9%. Independently aggregated
+frame medians are 34.343 → 33.960 ms (-1.1%),
+which differs from the median paired change because the median comes from
+different repeats in each version. Hard frame p95/p99 medians are higher after;
+this campaign does not demonstrate better frame-time tails.
+
+Raw repeats, process CPU, all paired p95/p99 changes and telemetry remain in
+`summary.json` and per-run artifacts. Normal frame gains need not track the
+shadow span proportionally, and differences from earlier campaigns cannot be
+attributed to this optimization by comparing their absolute times.
+
+### Correctness and stability checks
+
+All **15 focused suites pass without skips**: eight GPU suites on RTX 4080
+Laptop Vulkan, five on Lavapipe, and two CPU suites. All thirteen GPU-suite
+executions have loader evidence of Khronos validation with synchronization and
+shader-access analysis, with zero validation-error markers. The CPU-only
+`kin-rendering` suite is counted as a functional pass, not Vulkan validation.
+The local-graph suite independently checks exact ordered positions for indexed
+and implicit topology, LOD extras, seams, degenerates and float boundaries.
+Its GPU regression requires active compact geometry, tests nonzero pooled offsets
+and dedicated buffers, and compares all 32 depth bits at sampled texels against
+opaque-white cutouts forcing the original full-vertex path. It covers three LODs,
+instancing, reversals, mixed streams and all seven maps of a spot plus a point.
+
+All **nine decoded-RGBA Yard capture pairs match exactly**, at route frames
+1, 541 and 961 across the three tiers. Every measured normal/GPU before/after
+pair matches every exported non-timing work/cache/resource/upload CSV column,
+including selected geometry, draw counts, skinning, motion and shadow work.
+Those CSV columns do not account for the added mesh buffers or creation uploads;
+extra resident geometry is still a cost of this representation.
+Hard remains **1,096 shadow draws / 40,941,344 shadow triangles**. Hardware GPU
+runs also match each version's own normal control at every corresponding frame.
+Every GPU run has 1,741 complete contiguous 13-pass groups, with measured CSV
+frames 301–1740 mapping to submissions 302–1741.
+
+The 38 bounded benchmark/capture processes all complete. These checks cover
+sampled output and focused runtime/resource behavior, not every scene, temporal
+artifact or platform. Evidence, binaries/source/library/recipe hashes, commands,
+JUnit/layer logs, raw timings and final checks are under
+`out/runs/render3d-shadow-positions/`. No full engine/platform matrix is claimed.
+
 ## Current branch versus main, 2026-11-12
 
 This is a fresh paired comparison of local `main` **`6aadd75e`** against renderer
