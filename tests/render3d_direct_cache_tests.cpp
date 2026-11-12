@@ -662,6 +662,21 @@ void check(Renderer2D& renderer) {
     scene.debug.local_shadow_gather_budget = 0;
     const auto no_program = shoot(true);
     assert(no_program.stats.local_gather_cache_bytes == 0 && no_program.pixels == shoot(false).pixels);
+    // Rebuilding/evicting static programs changes the backing of source spans.
+    // Mixed live rows and cube-face holes must survive those transitions with
+    // the same command counts, geometry and image as fresh streamed selection.
+    for (const u32 budget : {64u, 4096u, 4u * 1024 * 1024, 0u, 4u * 1024 * 1024}) {
+        scene.debug.local_shadow_gather_budget = budget;
+        const auto reference = shoot(false);
+        for (u32 warmup = 0; warmup < 3; ++warmup)
+            shoot(true);
+        const auto actual = shoot(true);
+        assert(actual.pixels == reference.pixels && actual.pick_id == reference.pick_id &&
+               actual.stats.local_shadow_draws == reference.stats.local_shadow_draws &&
+               actual.stats.local_shadow_triangles == reference.stats.local_shadow_triangles &&
+               actual.stats.local_shadow_casters == reference.stats.local_shadow_casters &&
+               actual.stats.local_gather_cache_bytes <= budget && actual.stats.device_waits == 0);
+    }
 
     // Adjacent independent draws cross task boundaries and leave short tails.
     // Camera-edge decisions and interruptions by other submission types must

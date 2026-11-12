@@ -156,6 +156,107 @@ and profiling library; it requires no engine rebuild or shader/renderer edits.
 
 ## CPU work
 
+### Direct shadow-index scatter, 2026-11-12
+
+The reference is `6b2e3872`, with map-wide stock local-shadow batching enabled.
+Window compilation now emits command counts and read-only source spans.
+Grouping determines final offsets, then the original source stream scatters
+directly into the GPU index list. Every active index is written once; the
+second temporary CPU index list and its reorder copy are removed. The common
+scatter path keeps a source pointer, remaining count and base in local variables;
+commands fitting inside that span avoid the boundary loop and metadata reload.
+
+Cached static programs retain their existing representation and budget. Cold
+admission replaces temporary row spans with one span into the owned program.
+Current-call spans read immutable cached data or independent live selections.
+Source-ordered union slots, joints, cluster runs, compatibility IDs, specialized
+barriers, small-pass order, shadow fingerprints and image-cache policy retain
+their rules. GPU shaders, commands, resources and upload sizes are unchanged.
+
+The final source reuses the existing Release/Ninja build and renderer `-O2`
+settings. All Blender/background jobs stayed running. CPU frequency, GPU clocks,
+thermals and system load remain uncontrolled: **all results are contended**.
+
+Normal comparisons use independent Yard submissions, 720p HDR, no AA/GI/AO,
+classic 1,024 spot maps, four helpers, affinity 0–15, 300 warm-up frames and
+the full 1,440-frame measured route. Three alternating Hard pairs and one
+Easy/Medium guard pair use frozen binaries, without diagnostic logging,
+timestamp-query waits or image readback during timing.
+
+One reference attempt reached the original 300-second process limit after
+1,299 measured frames. Its incomplete data is preserved and excluded; the
+remaining runs use a 450-second limit with the same memory bound and scene
+settings. This was a bounded-process termination, not an engine crash.
+
+Hard caller CPU p50 changes by **-1.09%** using the median
+paired change; 2 of three pairs improve. Individual changes are +11.86%, -7.50%, -1.09%.
+This does not establish recovery of the earlier contended 8.4% increase.
+Percentiles below are medians of per-run percentiles; dividing those medians
+gives a different percentage from the paired calculation.
+
+| Tier | Normal pairs | Caller CPU before p50/p95/p99, ms | After, ms |
+| --- | ---: | --- | --- |
+| Easy | 1 | 0.486 / 0.560 / 0.614 | 0.474 / 0.565 / 0.649 |
+| Medium | 1 | 1.472 / 1.678 / 1.775 | 1.457 / 1.670 / 1.737 |
+| Hard | 3 | 3.757 / 4.571 / 5.887 | 3.717 / 4.114 / 6.628 |
+
+A temporary same-process diagnostic alternates the unmodified reference
+compiler and fused compiler on successive renders. Two full Hard routes flip
+the starting phase: 720 measured samples per mode per run, 1,440 per mode in
+total, with every route frame exercised once by each. `CLOCK_THREAD_CPUTIME_ID`
+times batch-key setup, window/program compilation, grouping and scatter. It
+excludes selection, packing, recording, fingerprint work and logging. This is a
+compiler slice of caller CPU; it must not be added to the caller CPU table.
+
+Hard compiler p50 falls **2.5%** by median paired within-run
+change (-3.0%, -1.9%). The first source-span prototype had essentially
+flat compiler time; caching the active cursor removes its per-command overhead.
+Its earlier results remain under `out/runs/render3d-shadow-direct-scatter/`.
+
+| Hard compiler | CPU p50/p95/p99, ms |
+| --- | --- |
+| Reference | 0.480 / 1.196 / 1.559 |
+| Fused cursor | 0.468 / 1.163 / 1.546 |
+
+Compiler percentiles are medians of two per-run percentiles. Easy and Medium
+diagnostics use only 120 measured route-prefix frames per run (60 per mode),
+after the same warm-up; they are correctness/overhead guards, not full-route
+performance repeats. Their median paired compiler-p50 changes are +1.0% for
+Easy and -0.4% for Medium.
+
+The diagnostic also reports `local_copy_bytes`, the capacity-based index/span
+scratch metric, independently of the retained gather-program payload. The table
+uses median mode values across the two runs. It describes that diagnostic’s
+shared allocation history; it is not total process memory or GPU memory. Small
+passes can retain more span metadata, while Hard removes a large index mirror.
+
+| Tier | Reference reported scratch, KiB | Fused reported scratch, KiB |
+| --- | ---: | ---: |
+| Easy | 49.2 | 104.0 |
+| Medium | 416.8 | 306.0 |
+| Hard | 1858.0 | 1294.8 |
+
+Two independent 64-bit fingerprints cover projections/view ranges, depth
+commands, the active caster list, union-copy mapping, joint indices and cluster
+runs. They match across all **2,583 corresponding render pairs**, including cold
+and warmed states: 1,741 Hard and 421 each Easy/Medium. Each paired render
+exercises opposite compiler modes. This preserves the command/index stream of
+the prior GPU optimization, including **1,096 Hard shadow draws**. It does not
+re-estimate the earlier GPU timing gain.
+
+Every exported non-timing column matches in all five normal full-route pairs,
+with no exceptions. Nine decoded-RGBA pairs match exactly at route phases 1,
+541 and 961 across all tiers. Nine focused NVIDIA suites and four Lavapipe
+suites pass with no skips. The direct-cache regression now exercises repeated
+small/full/zero gather-budget transitions with mixed live rows and point-face
+holes, checking pixels, picks, geometry, draw counts and budget limits. Existing
+local-graph tests cover all 32 depth bits at probed texels and specialized paths.
+
+Temporary compiler selection, clocks and fingerprint logging are removed from
+the final source. Frozen source/binary hashes, raw measurements, telemetry,
+commands, stream checks and exact-image checks are under
+`out/runs/render3d-shadow-direct-scatter-fast/`.
+
 ### Dense per-view outputs and stable index compaction, 2026-11-12
 
 The reference is `39c30d0a`. Draw references no longer duplicate per-view

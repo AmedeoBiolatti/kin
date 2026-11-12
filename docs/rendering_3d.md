@@ -414,10 +414,10 @@ admission, fingerprints, source/copy order and the 4 MiB retained-plan cap keep
 their existing rules. `local_task_bytes` includes shared ranges, clipping opcodes
 and count/cursor payload; `local_bucket_bytes` reports the visibility masks.
 
-Shadow preparation compiles selected copy spans into depth commands and the GPU index list.
+Shadow preparation compiles selected copy spans into depth-command metadata and read-only source spans first.
 Live selections have independent scratch storage; unchanged static rows can feed the compiler read-only from their
-saved plan when no image/history fingerprint is needed. Selection compilation holds no full-map intermediate row array.
-Streamed union slots and cluster runs are assigned in source order before emission,
+saved plan when no image/history fingerprint is needed. Cached programs supply contiguous index sources; live rows
+supply source-relative spans. Streamed union slots and cluster runs are assigned in source order before emission,
 preserving prepared-upload reuse and copy correspondence.
 
 The compiler holds one 128-row locality window on the stack. It orders row indices, then emits compatible depth
@@ -426,21 +426,25 @@ a changed sequence uses the original stable tie order. Current records, textures
 render. This cache reuses CPU preparation, including when `lights.cache_shadows` is false; it does not retain GPU
 shadow images. Fingerprints, cluster cuts, cache lifetimes and retention budgets keep their existing rules.
 
-When the compiled local pass has at least 128 commands, a final CPU compaction joins repeated stock level-zero,
+When the compiled local pass has at least 128 commands, grouping joins repeated stock level-zero,
 single-level, unskinned depth groups across each map. It reuses the exact current mesh/table/raster/cutout-state IDs;
 source and copy order within each group stay stable. Depth-affecting surfaces, transformed-UV cutouts, skinning,
-clusters and other levels remain ordering barriers. This changes depth draw count and command order, preserving the
-selected copies, triangles, per-instance records, shader math and shadow settings. Temporary command/index vectors
-reuse their capacity and are included in `local_copy_bytes`; the GPU index upload size is unchanged. This adds no
-GPU allocation or retained shadow-image cache.
+clusters and other levels remain ordering barriers. Counts determine each group's offsets, then the existing source
+spans scatter directly into the final GPU index list. Each active index is written once; no second temporary CPU
+index list or reorder copy is needed. Small passes copy the source stream in its original command order. Final
+command/index order, selected copies, triangles, per-instance records, shader math and shadow settings retain their rules.
+Command and source-span scratch reuse capacity and are included in `local_copy_bytes`. An oversized span vector is
+released when its capacity exceeds both 4,096 spans and twice its last use. GPU buffers and upload sizes are unchanged.
 
 Full static windows before the first live row can also retain a compiled program: merged commands and source-table
 indices ready for emission. The program follows the selection plan's source/projection lifetime. Each render visits
 its depth-state group leaders in source order and checks their exact current batch representatives; a changed
 representative or static/live boundary recompiles through the window stream. Current table bindings remain live.
 Program payload shares the existing gather budget; admission checks vector capacities, and pressure uses streaming.
+Cold program admission replaces its temporary row spans with one span into the program's owned index list. Source
+spans live only through the current compilation; cache trimming precedes their construction.
 
-CPU vector payload is limited to 4 MiB per renderer across 64 source/light-slot
+Retained selection/program vector payload is limited to 4 MiB per renderer across 64 source/light-slot
 probes, plus fixed metadata. Unstable projections are observed without allocating
 payload, and pressure falls back to fresh gathering/sorting.
 `debug.cache_local_shadow_gather = false` selects that reference path;

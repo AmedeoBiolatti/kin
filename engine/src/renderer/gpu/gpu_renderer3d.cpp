@@ -8510,9 +8510,9 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     if (drawing == 0) {
         stats.local_copy_bytes =
             (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity() +
-             _local_batch_indices.capacity() + _local_batch_slots.capacity() + _local_batch_destinations.capacity()) *
+             _local_batch_slots.capacity() + _local_batch_destinations.capacity()) *
                 sizeof(u32) +
-            _local_batch_entries.capacity() * sizeof(LocalEntry);
+            _local_batch_entries.capacity() * sizeof(LocalEntry) + _local_spans.capacity() * sizeof(LocalSpan);
         stats.local_slot_bytes = _local_slot.capacity() * sizeof(u32);
         return;
     }
@@ -8531,6 +8531,18 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     _local_copies.clear();
     _local_joint_list.clear();
     _local_list.resize(output_copies);
+    if (_local_spans.capacity() > std::max<std::size_t>(4096, _local_spans.size() * 2))
+        std::vector<LocalSpan>().swap(_local_spans);
+    _local_spans.clear();
+    const auto copy_span = [](u32* out, const u32* copies, u32 count, u32 base) {
+        if (count == 1)
+            *out = base + *copies;
+        else if (!base)
+            std::copy_n(copies, count, out);
+        else
+            for (u32 i = 0; i < count; ++i)
+                out[i] = base + copies[i];
+    };
     u32 union_count = 0;
     bool skinned_in_use = false;
     std::size_t written = 0;
@@ -8592,8 +8604,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         batch = batch_refs.try_emplace(key, r).first->second;
         return batch;
     };
-    // Compile selections directly into the final GPU list and merged depth
-    // commands. Only one locality window is materialized, never a whole map.
+    // Compile command counts and source spans first. Once group offsets are
+    // known, the sources scatter directly into the final GPU list.
     constexpr u32 batch_window = 128;
     struct Selected {
         const u32* copies;
@@ -8646,6 +8658,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         Program compiled;
         std::unordered_map<u32, u32> program_groups;
         const u32 prefix_first = static_cast<u32>(written);
+        const std::size_t prefix_span_first = _local_spans.size();
         bool compile_prefix = false;
         if (prefix_rows && !replay) {
             const auto& last = sort_plan->rows[prefix_rows - 1];
@@ -8685,15 +8698,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             for (u32 i = 0; i < count; ++i) {
                 const Selected& row = selected[permutation[i]];
                 const u32 first = static_cast<u32>(written);
-                if (row.count == 1) {
-                    _local_list[written++] = row.first + *row.copies;
-                } else if (!row.first) {
-                    std::copy_n(row.copies, row.count, _local_list.data() + written);
-                    written += row.count;
-                } else {
-                    for (u32 c = 0; c < row.count; ++c)
-                        _local_list[written++] = row.first + row.copies[c];
-                }
+                _local_spans.push_back({row.copies, row.count, row.first});
+                written += row.count;
                 // Cluster runs keep their original per-copy correspondence.
                 // Compatible ordinary rows can also merge across windows.
                 if (view.entry_count && !row.clustered && !_local_entries.back().clustered &&
@@ -8710,7 +8716,14 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             count = 0;
             if (compile_prefix && offset == prefix_rows) {
                 compiled.rows = prefix_rows;
-                compiled.copies.assign(_local_list.begin() + prefix_first, _local_list.begin() + written);
+                compiled.copies.resize(written - prefix_first);
+                u32 first = 0;
+                for (std::size_t i = prefix_span_first; i < _local_spans.size(); ++i) {
+                    const LocalSpan& span = _local_spans[i];
+                    copy_span(compiled.copies.data() + first, span.copies, span.count, span.base);
+                    first += span.count;
+                }
+                assert(first == compiled.copies.size());
                 compiled.entries.resize(view.entry_count);
                 for (u32 i = 0; i < view.entry_count; ++i) {
                     const auto& entry = _local_entries[view.entry_first + i];
@@ -8720,6 +8733,11 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 if (compiled.bytes() <= gather_budget - _local_gather_bytes) {
                     _local_gather_bytes += compiled.bytes();
                     sort_plan->program = std::move(compiled);
+                    // Cold compilation can leave many one-copy spans. The
+                    // admitted program now owns their contiguous source list.
+                    _local_spans.resize(prefix_span_first);
+                    _local_spans.push_back(
+                        {sort_plan->program.copies.data(), static_cast<u32>(sort_plan->program.copies.size()), 0});
                 }
                 compile_prefix = false;
             }
@@ -8727,7 +8745,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         u32 cached_row = 0;
         if (replay) {
             const auto& program = sort_plan->program;
-            std::copy(program.copies.begin(), program.copies.end(), _local_list.begin() + written);
+            _local_spans.push_back({program.copies.data(), static_cast<u32>(program.copies.size()), 0});
             for (const auto& entry : program.entries) {
                 _local_batch_refs[entry.ref] = program.groups[entry.group].batch;
                 _local_entries.push_back(
@@ -8779,6 +8797,33 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         append_cached(~0u);
         emit_window();
     }
+    // Entries and spans cover the same contiguous logical list. Consume source
+    // ranges in that order while scattering to each group's final offset.
+    std::size_t span_index = 0;
+    const u32* source = nullptr;
+    u32 available = 0, source_base = 0;
+    const auto scatter = [&](u32 out, u32 count) {
+        if (count <= available) {
+            copy_span(_local_list.data() + out, source, count, source_base);
+            source += count;
+            available -= count;
+            return;
+        }
+        while (count) {
+            if (!available) {
+                const LocalSpan& span = _local_spans[span_index++];
+                source = span.copies;
+                available = span.count;
+                source_base = span.base;
+            }
+            const u32 take = std::min(count, available);
+            copy_span(_local_list.data() + out, source, take, source_base);
+            source += take;
+            available -= take;
+            out += take;
+            count -= take;
+        }
+    };
     // Window sorting keeps selection compilation compact. Stock depth-only
     // commands can share their exact state across the whole map: the depth
     // comparison is order independent, and source order within each group is
@@ -8787,7 +8832,6 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         _local_batch_slots.assign(_refs.size(), ~0u);
         _local_batch_entries.clear();
         _local_batch_entries.reserve(_local_entries.size());
-        _local_batch_indices.resize(_local_list.size());
         _local_batch_destinations.resize(_local_entries.size());
         std::size_t next = 0;
         for (LocalView& view : _local_views) {
@@ -8803,7 +8847,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             for (u32 at = begin; at < end;) {
                 if (!ordinary(_local_entries[at])) {
                     LocalEntry entry = _local_entries[at++];
-                    std::copy_n(_local_list.data() + entry.list_first, entry.count, _local_batch_indices.data() + next);
+                    scatter(static_cast<u32>(next), entry.count);
                     entry.list_first = static_cast<u32>(next);
                     next += entry.count;
                     _local_batch_entries.push_back(entry);
@@ -8827,13 +8871,12 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                     entry.list_first = static_cast<u32>(next);
                     next += entry.count;
                 }
-                // list_first is a temporary append cursor; restore the start
-                // from the final cursor and count once all source spans land.
+                // list_first is a temporary append cursor, restored once each
+                // source span lands directly in its final GPU-list position.
                 for (u32 source = first; source < at; ++source) {
                     const LocalEntry& entry = _local_entries[source];
                     LocalEntry& target = _local_batch_entries[_local_batch_destinations[source]];
-                    std::copy_n(_local_list.data() + entry.list_first, entry.count,
-                                _local_batch_indices.data() + target.list_first);
+                    scatter(target.list_first, entry.count);
                     target.list_first += entry.count;
                 }
                 for (u32 group = group_first; group < _local_batch_entries.size(); ++group) {
@@ -8846,14 +8889,16 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         }
         assert(next == written);
         _local_entries.swap(_local_batch_entries);
-        _local_list.swap(_local_batch_indices);
+    } else if (written) {
+        scatter(0, static_cast<u32>(written));
     }
+    assert(span_index == _local_spans.size() && available == 0);
     stats.local_gather_cache_bytes = _local_gather_bytes;
-    stats.local_copy_bytes =
-        (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity() +
-         _local_batch_indices.capacity() + _local_batch_slots.capacity() + _local_batch_destinations.capacity()) *
-            sizeof(u32) +
-        _local_batch_entries.capacity() * sizeof(LocalEntry);
+    stats.local_copy_bytes = (_local_selection_list.capacity() + _local_list.capacity() + _local_batch_refs.capacity() +
+                              _local_batch_slots.capacity() + _local_batch_destinations.capacity()) *
+                                 sizeof(u32) +
+                             _local_batch_entries.capacity() * sizeof(LocalEntry) +
+                             _local_spans.capacity() * sizeof(LocalSpan);
     if (union_count > 0) {
         const u32 instance_bytes = union_count * static_cast<u32>(sizeof(GpuInstance3D));
         // No CPU mirror of the 128-byte GPU records: build each once in disjoint staging ranges.

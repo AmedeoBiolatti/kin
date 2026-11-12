@@ -1427,7 +1427,12 @@ private:
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
     std::vector<LocalEntry> _local_batch_entries;
-    std::vector<u32> _local_batch_indices, _local_batch_slots, _local_batch_destinations;
+    struct LocalSpan {
+        const u32* copies;
+        u32 count, base;
+    };
+    std::vector<LocalSpan> _local_spans;
+    std::vector<u32> _local_batch_slots, _local_batch_destinations;
     struct LocalRecord {
         SDL_GPUGraphicsPipeline* pipeline;
         SDL_GPUBuffer* instances;
