@@ -180,6 +180,27 @@ void check(Renderer2D& renderer) {
     scene.camera.z_far = 60;
     const auto hidden = compare();
     assert(hidden.stats.instances == 0 && hidden.pick_id == 0);
+    // Repeated empty output rows can retain unused offsets, but count/shape
+    // changes must initialize them before any later view makes them visible.
+    const f32 sun_strength = scene.lights.sun_shadow_strength;
+    for (u32 cascades : {0u, 0u, 1u, 4u, 0u, 0u}) {
+        scene.lights.sun_shadow_strength = cascades ? sun_strength : 0.f;
+        scene.lights.shadow_cascades = std::max(cascades, 1u);
+        scene.lights.shadow_resolution = 128;
+        scene.camera = Camera3D::look_at({0, 0, 13}, {0, 0, 14});
+        const auto empty = shoot(true);
+        const auto still_empty = shoot(true);
+        assert(empty.stats.instances == 0 && still_empty.stats.instances == 0 && empty.pixels == still_empty.pixels &&
+               still_empty.pick_id == 0);
+        scene.camera = original_camera;
+        const auto exposed_again = compare();
+        assert(exposed_again.stats.instances > 0 && exposed_again.pick_id > 0);
+        scene.cull = false;
+        assert(compare().stats.culled == 0);
+        scene.cull = true;
+    }
+    scene.lights.sun_shadow_strength = sun_strength;
+    scene.lights.shadow_cascades = 1;
     scene.camera = original_camera;
     compare();
     const auto original_spot = scene.lights.spots.front();

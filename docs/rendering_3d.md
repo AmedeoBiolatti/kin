@@ -313,6 +313,14 @@ retained bounds and frustums. Structural reuse after command edits recompiles th
 for every consumer using the original scalar/SIMD arithmetic; no camera result or posed bound is retained here.
 
 For a single-level view without sun shadows, prefix construction also emits retained indices in source/copy order.
+Per-view draw first/count/extra values live in the existing dense result buffer.
+Single-level draws reuse their three level-output words; multi-level draws keep
+three aggregate words before the per-level arrays. Resident prefix runs write
+contiguous result triples without updating each large draw reference. Their
+index compaction writes the next reserved slot and advances only on acceptance,
+preserving the original active index stream. Current visibility and all counts
+still refresh each render; there is no camera-result cache. Result views rebind
+after shape/backing changes under the existing layout-budget rules.
 Other views keep the general LOD/cascade prefix and scatter. Upload scheduling contains only selected streamed
 pieces and transparent refs, skipping whole resident runs. It reuses its workspace and parallelizes actual opaque
 packing work. Transparent sorting, skin/history offsets, prepared-upload mappings and GPU buffer lifetimes stay

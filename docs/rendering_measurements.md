@@ -4,6 +4,104 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Dense per-view outputs and stable index compaction, 2026-11-12
+
+The reference is `39c30d0a`. Draw references no longer duplicate per-view
+first/count/extra values. Single-level draws reuse the existing three dense
+level-output words; multi-level draws reserve three separate aggregate words
+before their per-level arrays. Main ordering, packing and sun recording read
+that current output view. General multi-level reduction retains the original
+sums; single-level reduction uses its already-complete counts.
+
+Resident camera-only prefix runs now write contiguous result triples without
+mutating every large draw reference. Stable index compaction writes the next
+reserved slot and advances only for accepted copies; later accepted copies
+overwrite rejected candidates, producing the exact original active index stream.
+The input's complete retained-copy count proves the reserved-space bound. Counts,
+offsets and visibility refresh every render. Existing key/shape/backing rebinds,
+16 MiB layout admission, worker boundaries, source order, arithmetic, selected
+geometry, GPU commands, resources and uploads retain their rules. This introduces
+no visibility-result cache or new switch.
+
+Two temporary full-route probes separated inclusive caller CPU into source
+refresh/retention, work layout, bounds setup, classification, prefixes/statistics,
+retained-index/history work, packing schedule and packing/uploads. Prefix p50
+was **0.209–0.228 ms**, versus **0.082–0.103 ms** for classification; work-layout
+setup was about **0.001 ms**. Source refresh/retention was **0.367–0.473 ms**;
+a finer probe found direct scene-table claims about **0.0013 ms**, key/GC work
+**0.0105 ms**, and live batch retention/bounds **0.459 ms**. These are diagnostic
+phase medians from different contended runs, inclusive of nested calls; they
+are not additive or directly comparable to exclusive sampled phase shares.
+All temporary timers/logging were removed before freezing the normal candidate.
+
+Five alternating Hard pairs show **7.2% median paired caller-CPU p50 reduction**,
+improving in four of five; individual changes are **−30.1%, −32.6%, −2.6%, +30.2%
+and −7.2%**. Process CPU falls **5.4%** by the same calculation. Conditions are
+original independent Yard submissions, 720p HDR, no AA/GI/AO, classic 1,024 spot
+maps, four helpers, affinity 0–15, and 300 warm-up plus 1,440 measured route
+frames. Blender/background jobs stay untouched; clocks, thermals and load are
+uncontrolled: results are **contended**. PMU collection and image readback run
+separately from normal timing.
+
+| Tier | Pairs | Caller CPU before p50/p95/p99, ms | After, ms | Paired p50 reduction |
+| --- | ---: | --- | --- | ---: |
+| Easy | 1 | 0.343 / 0.475 / 0.532 | 0.285 / 0.387 / 0.454 | 16.8% |
+| Medium | 1 | 1.360 / 1.777 / 2.002 | 1.125 / 1.356 / 1.597 | 17.3% |
+| Hard | 5 | 3.574 / 4.657 / 5.130 | 2.729 / 4.257 / 5.103 | 7.2% |
+
+Percentiles are medians of per-run percentiles; paired reductions compare
+adjacent run medians. Dividing the independently aggregated Hard p50 values
+gives a different percentage. Easy and Medium are single guard pairs. The wide
+Hard range prevents a stable isolated-speedup claim. Hard frame p50 has a median
+paired reduction of 2.9%, with changes spanning −84.8% to +265.8%; normal Hard
+processes took roughly 32–165 seconds as GPU load changed. These observations
+do not establish isolated throughput or a new cross-engine ranking. CPU gains
+do not compound with earlier campaigns.
+
+Every exported non-timing per-frame work/cache/resource/upload column matches,
+with no exceptions. The CPU `prepared_layout_bytes` metric reflects the changed
+private layout, but the frozen Yard application exports no layout-byte column
+in CSV or its run-report state. Hard peak process RSS, including startup and
+driver memory, is 196.2 → 242.0 MiB; no total-process memory reduction is claimed.
+
+Two separate forward/reverse inherited P-core controls, after both binaries
+completed the normal campaign, show **+0.118% and +0.146% retired user
+instructions**, essentially flat. User-cycle counts fall **10.06% and 3.49%**.
+Event running coverage is 99%. Each includes startup, 300 warm-up plus **720
+measured frames (half the route)**, helpers, driver threads, scene assembly and
+presentation. These are whole-process counts; cycles are not clock-normalized,
+and no isolated reduction in executed instructions is claimed. There is no
+full-route extrapolation. Every exported work column matches in these controls.
+
+Fresh before/after `cpu-clock:u` profiles each cover one full 1,440-frame Hard
+route at 499 Hz with 16 KiB DWARF user stacks. Actual render-call windows exclude
+assembly, warm-up and presentation; caller, Kin workers and other threads are
+separate. **Camera/instance preparation falls from 22.93% to 18.36% of caller
+samples**. These are normalized shares, not phase medians or an independent
+speedup estimate. Remaining caller shares are local-shadow preparation 21.03%,
+draw planning/lookup 20.47%, shadow recording 11.88% and input validation 10.05%.
+
+Caller samples number 2,887/2,130, with 1.35%/0.75% unresolved phase attribution.
+Every exported profile work column matches its normal control. Normal timing
+above uses the adjacent unsampled controls.
+
+Nine focused NVIDIA suites and four llvmpipe suites pass. The direct-cache suite
+adds repeated fully hidden/visible views and culling changes while switching sun
+shadows through zero, one and four cascades. Exact pixels, picking and work match
+the streamed reference. Existing suites cover three-level LOD, CPU/GPU clusters,
+transparent packing, skins/history, explicit prepared views, source mutation,
+budget fallback and preparation lifetime. All **10,080 paired route frames**
+preserve every exported non-timing work column. Nine decoded-RGBA pairs across
+three tiers at route phases 1/541/961 are pixel-identical.
+
+The rejected conditional-empty-write prototype completed Hard caller-p50 changes
+of +5.1%, +9.8% and −2.5%. All raw results and its frozen binary remain under
+`out/runs/render3d-cull-work-redesign/`, alongside the diagnostic phase probes;
+they are not pooled with the retained candidate. Its proposed load-dependency
+mechanism was an inference. Frozen hashes, commands, raw controls, exact captures,
+instruction counts and fresh profiles for the dense-output version are under
+`out/runs/render3d-cull-dense-outputs/`.
+
 ### Reuse exact depth-state groups during shadow recording, 2026-11-12
 
 The reference is `54e0a2aa`. Large multi-map local-shadow recording now reuses

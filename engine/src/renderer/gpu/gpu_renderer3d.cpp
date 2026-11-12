@@ -9775,7 +9775,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                      !ctx.scenes[s]->cull              ? nullptr
                      : draw.clip == DrawClip3D::camera ? &_ref_frustums[s]
                                                        : &_ref_whole_frustums[s],
-                     caster, b.center(), b.radius(), 0, 0, 0});
+                     caster, b.center(), b.radius()});
                 _refs.back().batch = bool(draw.batch);
                 if (draw.skinned) {
                     DrawRef& ref = _refs.back();
@@ -9952,10 +9952,12 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         _piece_results.resize(words);
         std::size_t ref_words = 0;
         for (const DrawRef& ref : _refs)
-            ref_words += 3 * ref.levels + 2 * ctx.cascades * (1 + ref.levels);
+            ref_words += 3 * ref.levels + (ref.levels > 1 ? 3 : 0) + 2 * ctx.cascades * (1 + ref.levels);
         _ref_results.resize(ref_words);
         u32* at = _ref_results.data();
         for (DrawRef& ref : _refs) {
+            if (ref.levels > 1)
+                at += 3; // aggregate first/seen/extra; single-level outputs already occupy these words
             ref.level_first = at;
             at += ref.levels;
             ref.level_seen = at;
@@ -10387,13 +10389,15 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 const u32 start = retained_written;
                 stats.camera_instance_tests += first.frustum ? n : 0u;
                 for (u32 i = 0; i < n; ++i) {
-                    DrawRef& ref = _refs[r + i];
                     const u32 seen = (visible[i] & camera_bit) != 0;
-                    ref.out_first = counts[3 * i] = retained_written;
-                    ref.out_count = counts[3 * i + 1] = seen;
-                    ref.out_extra = counts[3 * i + 2] = 0;
-                    if (seen)
-                        _retained_visible[retained_written++] = source_first + i;
+                    counts[3 * i] = retained_written;
+                    counts[3 * i + 1] = seen;
+                    counts[3 * i + 2] = 0;
+                    // Space is reserved for every retained input. A rejected
+                    // row writes the next unused slot; only accepted rows
+                    // advance it, preserving the exact stable index stream.
+                    _retained_visible[retained_written] = source_first + i;
+                    retained_written += seen;
                 }
                 const u32 seen = retained_written - start;
                 visible_total += seen;
@@ -10412,14 +10416,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             }
             DrawRef& ref = _refs[r];
             u32& cursor = ref.retained != ~0u ? retained_written : written;
-            ref.out_first = ref.level_first[0] = cursor;
-            ref.out_count = ref.level_seen[0] = seen;
-            ref.out_extra = ref.level_extra[0] = 0;
+            ref.out_first() = ref.level_first[0] = cursor;
+            ref.out_count() = ref.level_seen[0] = seen;
+            ref.out_extra() = ref.level_extra[0] = 0;
             cursor += seen;
             stats.lod_copies_by_level[0] += seen;
             visible_total += seen;
             stats.skinned_copies += ref.skinned ? seen : 0u;
-            u32 at = ref.out_first;
+            u32 at = ref.out_first();
             for (u32 q = first; q < p; ++q) {
                 Piece& piece = _pieces[q];
                 const PieceResult result = piece_result(piece);
@@ -10442,7 +10446,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         }
     } else {
         for (DrawRef& ref : _refs) {
-            ref.out_count = ref.out_extra = 0;
+            ref.out_count() = ref.out_extra() = 0;
             clear_counts(std::span{ref.cascade_count, ctx.cascades}, ctx.cascades);
             clear_counts(std::span{ref.level_seen, ref.levels}, ref.levels);
             clear_counts(std::span{ref.level_extra, ref.levels}, ref.levels);
@@ -10463,12 +10467,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         }
         for (DrawRef& ref : _refs) {
             u32& cursor = ref.retained != ~0u ? retained_written : written;
-            ref.out_first = cursor;
+            ref.out_first() = cursor;
             for (u32 l = 0; l < ref.levels; ++l) {
                 ref.level_first[l] = cursor;
                 cursor += ref.level_seen[l] + ref.level_extra[l];
-                ref.out_count += ref.level_seen[l];
-                ref.out_extra += ref.level_extra[l];
+                if (ref.levels > 1) {
+                    ref.out_count() += ref.level_seen[l];
+                    ref.out_extra() += ref.level_extra[l];
+                }
                 ctx.stats.lod_copies_by_level[l] += ref.level_seen[l];
             }
             for (u32 k = 0; k < ctx.cascades && ctx.cascades > 1; ++k) {
@@ -10507,8 +10513,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             }
         }
         for (const DrawRef& ref : _refs) {
-            visible_total += ref.out_count;
-            stats.skinned_copies += ref.skinned ? ref.out_count : 0u;
+            visible_total += ref.out_count();
+            stats.skinned_copies += ref.skinned ? ref.out_count() : 0u;
         }
     }
     stats.culled = total - visible_total;
@@ -10588,7 +10594,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 continue;
             }
             const u32 index = p++;
-            if (ref.retained != ~0u || ref.out_count + ref.out_extra == 0)
+            if (ref.retained != ~0u || ref.out_count() + ref.out_extra() == 0)
                 continue;
             if (ref.draw->material.blend == Blend3D::Alpha || ref.draw->material.blend == Blend3D::Additive) {
                 if (piece.begin == 0)
@@ -10708,7 +10714,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 }
                 std::stable_sort(_sorted.begin(), _sorted.end(),
                                  [](const auto& a, const auto& b) { return a.first > b.first; });
-                u32 at = ref.out_first;
+                u32 at = ref.out_first();
                 for (const auto& [d, i] : _sorted) {
                     if (ctx.surface_stage != SurfaceStage3D::Opaque)
                         _main_order.push_back({first.ref, at, 1, ref.scene, d, false, true});
@@ -12138,7 +12144,7 @@ void GpuRenderer3D::emit_draw_span(FrameCtx& ctx, const DrawSpan& span, bool mat
     for (u32 i = span.first; i < span.first + span.count; ++i) {
         const u32 r = _draw_order[i];
         const auto& ref = _refs[r];
-        if (!ref.out_count)
+        if (!ref.out_count())
             continue;
         if (!(materials && span.materials && ref.direct && ref.levels == 1 && !ref.clustered &&
               _draw_material_slots[ref.scene] != ~0u)) {
@@ -12216,11 +12222,11 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
     _order.clear();
     if (_draw_plan_valid) {
         for (u32 r : _draw_order)
-            if (_refs[r].out_count)
+            if (_refs[r].out_count())
                 _order.push_back(r);
     } else {
         for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
-            if (_refs[r].out_count > 0) {
+            if (_refs[r].out_count() > 0) {
                 _order.push_back(r);
             }
         }
@@ -13088,7 +13094,7 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
             ShadowUniforms uniforms{commands, ctx.cascades > 1 ? ctx.plan.cascade[k].view_projection : ctx.light_vp};
             DrawBinder binder{pass};
             for (const DrawRef& ref : _refs) {
-                const u32 total = ctx.cascades > 1 ? ref.cascade_count[k] : ref.out_count + ref.out_extra;
+                const u32 total = ctx.cascades > 1 ? ref.cascade_count[k] : ref.out_count() + ref.out_extra();
                 if (!ref.caster || total == 0) {
                     continue;
                 }

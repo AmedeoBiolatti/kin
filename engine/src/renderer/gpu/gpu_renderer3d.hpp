@@ -1471,15 +1471,19 @@ private:
         bool caster = false;                 // drawn into the shadow map
         Vec3f center{};                      // the mesh's bounding sphere
         f32 radius = 0.0f;
-        u32 out_first = 0;                                    // where its copies go in the instance buffer:
-        u32 out_count = 0;                                    // those the camera sees,
-        u32 out_extra = 0;                                    // then those only the sun sees (casting into view)
         u32* cascade_first = nullptr;                         // active per-cascade outputs in _ref_results
         u32* cascade_count = nullptr;
         // With levels of detail (Scene3D::lod, a mesh with levels): the copies are grouped by the level each is
         // drawn at, and within a level the seen ones come first, then the sun's. `levels` is 1 without, and then
         // all of this is the run above (level_first[0] == out_first, level_seen[0] == out_count, ...).
         u32 levels = 1;
+        // Per-view outputs live together in the dense result words. A single
+        // level already has aggregate first/seen/extra; only multiple levels
+        // need three separate aggregate words before their per-level arrays.
+        u32* output_words() const { return level_first - (levels > 1 ? 3 : 0); }
+        u32& out_first() const { return output_words()[0]; }
+        u32& out_count() const { return output_words()[1]; }
+        u32& out_extra() const { return output_words()[2]; }
         u32* level_first = nullptr;
         u32* level_seen = nullptr;
         u32* level_extra = nullptr;
