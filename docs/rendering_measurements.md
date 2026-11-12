@@ -2,6 +2,74 @@
 
 The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CPU tracking, memory accounting, public graphs and stock-phase scheduling are delivered in separate commits through `e1226c2`. Main's planning edits and the lighting worktree's uncommitted GI subvoxel changes were preserved. The [progress log](rendering_progress.md) distinguishes this delivery from the full [pipeline plan](rendering_pipeline_plan.md).
 
+## GPU work
+
+### Current GPU pass attribution, 2026-11-12
+
+The reference is the frozen `ce7cbb90` binary on `perf/render3d-cpu-parity`.
+Three rotated runs per tier use the original independent Industrial Yard
+submissions: 1280×720 HDR, **no AA/GI/AO**, classic 1,024 spot maps, four helpers,
+CPU affinity 0–15, 300 warm-up frames and the full 1,440-frame route. Blender
+and all background jobs remain running; clocks, temperature and load are
+uncontrolled: these results are **contended**. Before/after telemetry is stored
+for each run, rather than assumed constant throughout it.
+
+The existing diagnostic Vulkan forwarding library records bottom-of-pipe hardware
+timestamps at the 13 existing, nonnested `kin3d` pass markers. It waits for each
+marked submission to complete. These are **synchronous pass-span attribution
+runs, not normal throughput measurements**. GPU contention/preemption and
+pipeline dependencies can contribute to a span. The total below sums those
+3D spans; it excludes uploads, 2D composition and presentation outside markers.
+CPU marker durations and fence timings are not substituted for GPU timestamps,
+and CPU/GPU columns must not be added.
+
+| Tier | GPU 3D span-sum p50/p95/p99, ms | Main shading, mean share | Local shadow maps, mean share |
+| --- | --- | ---: | ---: |
+| Easy | 1.220 / 2.203 / 2.522 | 81.4% | 16.6% |
+| Medium | 3.755 / 6.670 / 7.034 | 65.3% | 34.0% |
+| Hard | 12.561 / 23.318 / 32.747 | 45.6% | 54.2% |
+
+| Tier | Main shading p50/p95/p99, ms | Local shadow maps p50/p95/p99, ms |
+| --- | --- | --- |
+| Easy | 0.989 / 1.907 / 2.174 | 0.198 / 0.202 / 0.204 |
+| Medium | 2.384 / 5.193 / 5.485 | 1.342 / 1.823 / 1.885 |
+| Hard | 5.618 / 9.931 / 12.099 | 6.703 / 9.966 / 15.061 |
+
+Percentiles are medians of three per-run percentiles. Shares are medians of
+per-run mean-pass/mean-total ratios; independently aggregated shares need not
+sum to exactly 100%. Pass percentiles are not additive. The full thirteen-pass
+breakdown and per-frame values remain in the task artifacts.
+
+Across the three runs, total-span p50 ranges are **1.155–1.393 ms** for Easy,
+**3.743–4.456 ms** for Medium and **11.883–13.280 ms** for Hard. The earlier
+v0.3.0 GPU profile used 4× MSAA and an older renderer/submission path. These
+fresh no-AA results establish a new baseline; they do not establish an isolated
+old-to-new GPU speedup or a cross-engine ranking.
+
+**Hard now warrants local-shadow GPU investigation first:** shadow-map rendering
+accounts for about 54% of its measured spans, versus 46% for main shading.
+Its median workload submits **4,712 shadow draws / 40,941,344 shadow triangles**
+and **317 main draws / 5,868,509 main triangles** per measured frame. Main shading
+is the larger target on Easy and Medium, at about 81% and 65%. These timestamps
+do not distinguish vertex processing, raster/depth work, bandwidth or texture
+sampling within a pass. No authored quality settings or renderer implementation
+were changed.
+
+Every one of the **12,960 measured frame/pass sets** contains all 13 pass names
+in the expected order with finite, nonnegative hardware durations. Each full
+run has 1,741 contiguous marked submissions: 301 unmeasured renders and 1,440
+measured renders. Yard starts at frame zero, so measured CSV frames 301–1740
+map explicitly to submissions 302–1741. The complete exported non-timing
+work/cache/resource/upload columns match the current uninstrumented controls.
+Three decoded-RGBA captures, one per tier at route frame one, match the existing
+normal captures exactly. Timestamp logs identify the RTX 4080 Laptop GPU with
+1 ns timestamp period and 64 valid bits.
+
+Commands, current binary/library/recipe hashes, telemetry, mapping checks, raw
+pass timings, p50/p95/p99 tables and exact-image checks are under
+`out/runs/render3d-gpu-refresh-ce7cbb90/`. This refresh reuses the existing binary
+and profiling library; it requires no engine rebuild or shader/renderer edits.
+
 ## CPU work
 
 ### Dense per-view outputs and stable index compaction, 2026-11-12
