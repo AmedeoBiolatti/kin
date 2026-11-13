@@ -1262,7 +1262,12 @@ the plan's G5b results.
   blend follows the camera continuously, inset by half a voxel block so storage snapping cannot jump the ramp.
   Small windows shorten the ramp to retain an interior. Untraced probes contribute missing support rather than
   making the first ready neighbour supply full GI. Sleeping/inside probes are still deliberately excluded.
-  Keep important surfaces inside the outer fade band; include the floors and roofs in the requested GI area.
+  Keep important surfaces inside the fully covered part of the outer window; include the floors and roofs in
+  the requested GI area.
+  Outside that coverage, the ambient/environment replacement is unoccluded. An enclosed surface can therefore
+  brighten as the camera retreats and its scrolling GI coverage recedes. Choose enough `levels`, `side` or `cell`
+  to keep visible enclosures and their fade margin covered; increasing `levels` extends the range while retaining
+  the finest detail, with additional storage and a share of the probe-update budget for each extra level.
   They are read once a texel at half the view's size, after the depth and normal
   pre-pass (which global illumination brings with it), on the surface each texel stands for (the nearest of its 2 x
   2 pixels): the light facing its normal, and how its brightness changes with the way faced (a linear fit from three
