@@ -1163,9 +1163,11 @@ the plan's G5b results.
 - **How it is built:** in compute, before the passes that draw. Every voxel a triangle touches (Schwarz and Seidel's
   conservative surface voxelization), so a wall of no thickness has no gap a ray can pass. A voxel's owner, which
   writes its colour, normal and emission, is the touching triangle drawn first, an emissive one before any other (a
-  lamp's panel a millimetre under a ceiling keeps its light). A jump flood (Rong and Tan) gives the distances. Made
-  again only where something changed, by blocks of 8 x 8 x 8 voxels: those a copy that came, went, moved or changed (a
-  pose, a mesh, a material's colour, textures, or whether it emits, a tint) covers or covered, a voxel more each way,
+  lamp's panel a millimetre under a ceiling keeps its light). A jump flood (Rong and Tan) gives the distances:
+  exactly zero in surface voxels and at least one in empty voxels. The ray marcher uses this same distance read
+  for occupancy and step length. Made again only where something changed, by blocks of 8 x 8 x 8 voxels: those a
+  copy that came, went, moved or changed (a pose, a mesh, a material's colour, textures, or whether it emits, a tint)
+  covers or covered, a voxel more each way,
   and the slabs a window gains when it moves (all of a window that jumps past where it was; all of every level when the
   settings change). A block made again is emptied, voxelized from the copies that reach into it, and its distances
   flooded again with a margin; the rest keep theirs. A voxel holds the same whether it was made with the rest or

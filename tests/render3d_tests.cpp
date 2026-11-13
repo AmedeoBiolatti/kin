@@ -3279,6 +3279,16 @@ struct GiVoxels {
     int normal(std::size_t i, int c) const { return static_cast<int>((s.normal[i] >> (8 * c)) & 255u); }
 };
 
+// The ray marcher uses the distance field for occupancy too. This must hold for every voxel, including retained
+// voxels after a partial rebuild or a toroidal window move, not just the samples near the test geometry.
+void expect_gi_occupancy(const kin::GiScene3D& scene) {
+    assert(scene.distance.size() == scene.albedo.size());
+    for (std::size_t i = 0; i < scene.distance.size(); ++i) {
+        const bool full = (scene.albedo[i] >> 24) != 0;
+        assert(full ? scene.distance[i] == 0.0f : scene.distance[i] >= 1.0f);
+    }
+}
+
 // What the GI scene holds: one layer for a floor and the layers above counted off by the distances; a ball's distances
 // its surface's to within a voxel; two walls of no thickness, one turned, with every point of them in a full voxel (so
 // no ray gets through); a skinned box where its pose puts it, not at rest; a cut-out's clear half empty; the floor's
@@ -3302,6 +3312,7 @@ void test_gpu_gi_scene() {
         GiVoxels g;
         assert(r3d.read_gi_scene(view, g.s).value_or(false));
         assert((g.s.size == std::array<kin::u32, 3>{80, 48, 80}));
+        expect_gi_occupancy(g.s);
         assert(std::abs(g.s.cell - 0.1f) < 1e-6f);
         assert(kin::length(g.s.origin - Vec3f{-4.0f, -0.8f, -4.0f}) < 1e-4f);
 
@@ -3514,6 +3525,7 @@ void test_gpu_gi_scene_builds() {
         const auto voxels = [&](kin::View3D& v) {
             kin::GiScene3D s;
             assert(r3d.read_gi_scene(v, s).value_or(false));
+            expect_gi_occupancy(s);
             return s;
         };
         const auto blocks = [&] { return r3d.debug_stats().gi_blocks; };
@@ -3845,6 +3857,8 @@ void test_gpu_gi_scene_scrolls() {
             kin::View3D other = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             assert(step(other, x).gi_built);
             assert(r3d.read_gi_scene(other, afresh).value_or(false));
+            expect_gi_occupancy(kept);
+            expect_gi_occupancy(afresh);
             assert(kin::length(kept.origin - afresh.origin) < 1e-4f && kept.size == afresh.size);
             assert(kept.distance == afresh.distance && kept.albedo == afresh.albedo && kept.normal == afresh.normal &&
                    kept.emission == afresh.emission);

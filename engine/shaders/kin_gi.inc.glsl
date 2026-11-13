@@ -1,5 +1,5 @@
 // kin's global illumination (docs/3d_plan.md, G5): what its shaders share. The GI scene's walk (with KIN_GI_SCENE:
-// the including shader declares uGiDistance and uGiAlbedo, the scene's 3D textures) and the probes' light (with
+// the including shader declares uGiDistance, the scene's 3D distance texture) and the probes' light (with
 // KIN_GI_PROBES: uGiIrradiance, uGiMoments and uGiProbes, the probes' 3D atlases).
 //
 // The GI scene is in levels (G5c), each a window of the same number of voxels, each level's voxels twice the last's,
@@ -93,13 +93,15 @@ bool kin_gi_march(KinGiScene g, vec3 o, vec3 way, float far, int max_steps, out 
             const vec3 q = lo + way * tv;
             const ivec3 voxel = clamp(ivec3(floor(q)), ivec3(0), last);
             const ivec3 at = kin_gi_stored(g, k, voxel);
-            if (texelFetch(uGiAlbedo, at, 0).a > 0.0) {
+            // A surface keeps its own seed throughout the flood: its distance is exactly zero. Every empty
+            // voxel is at least one voxel from a seed, so this also gives occupancy without reading albedo.
+            const float d = texelFetch(uGiDistance, at, 0).r;
+            if (d == 0.0) {
                 hit = at;
                 level = k;
                 t = tv * cell;
                 return true;
             }
-            const float d = texelFetch(uGiDistance, at, 0).r;
             if (d >= 3.0) {
                 tv += d - 1.74;
             } else {
