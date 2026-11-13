@@ -109,10 +109,13 @@ void main() {
                 const float weight = clamp(dist * falloff_mul + falloff_add, 0.0, 1.0);
                 float h = dot(delta, v) / max(dist, 1e-5);
                 h = mix(side == 0 ? low0 : low1, h, weight);
+                // A continuing raised surface (a recess's frame/wall) still blocks the horizon. Relax only
+                // after returning to the receiver plane; the tolerance excludes coplanar depth/normal noise.
+                const float relaxation = dot(delta, n) > max(0.005, radius * 0.01) ? 0.0 : THICKNESS;
                 if (side == 0) {
-                    horizon0 = h > horizon0 ? h : mix(horizon0, h, THICKNESS);
+                    horizon0 = h > horizon0 ? h : mix(horizon0, h, relaxation);
                 } else {
-                    horizon1 = h > horizon1 ? h : mix(horizon1, h, THICKNESS);
+                    horizon1 = h > horizon1 ? h : mix(horizon1, h, relaxation);
                 }
             }
         }

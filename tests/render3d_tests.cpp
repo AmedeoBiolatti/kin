@@ -4398,6 +4398,72 @@ void test_gpu_gi_bleeding() {
     });
 }
 
+// A sub-voxel window recess: coarse probes can sample outside the frame, but local depth visibility must still
+// shade a pale receiver inside it. The continuing wall must not be discarded as a thin occluder. Check both depth
+// paths/projections, and keep an exposed pale card unchanged (no extra ambient occlusion or self-shadow there).
+void test_gpu_gi_recess_visibility() {
+    with_gpu("test_gpu_gi_recess_visibility", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination && r3d.capabilities().ambient_occlusion,
+                  "GI and ambient occlusion"))
+            return;
+        const GiRooms room{r3d};
+        for (const auto size : {kin::Vec2i{161, 121}, kin::Vec2i{1601, 1001}}) {
+            for (const bool ortho : {false, true}) {
+                auto view = r3d.create_view(size, {.samples = 1}).value_or(kin::View3D{});
+                auto scene = GiRooms::dark(kin::Camera3D::look_at({0, 0, 5}, {0, 0, 0}, 65));
+                if (ortho) {
+                    scene.camera.projection = kin::Projection3D::Orthographic;
+                    scene.camera.height = 6;
+                }
+                scene.lights.ambient = {0.5f, 0.5f, 0.5f};
+                scene.lights.ground_ambient = {.enabled = true, .color = {0.5f, 0.5f, 0.5f}};
+                scene.global_illumination = GiRooms::settings({{-5, -4, -2}, {5, 4, 6}}, 0.6f);
+                scene.global_illumination.probes.hysteresis = 0;
+                const kin::Material3D pale{.color = kin::colors::white, .roughness = 1};
+                const kin::Material3D dark{.color = Color::rgb(40, 40, 40), .roughness = 1};
+                room.quad(scene, {0, 0, 0}, 'z', 4, 4, pale);
+                room.quad(scene, {-1.125f, 0, 0.3f}, 'z', 1.75f, 4, dark);
+                room.quad(scene, {1.125f, 0, 0.3f}, 'z', 1.75f, 4, dark);
+                room.quad(scene, {0, -1.125f, 0.3f}, 'z', 0.5f, 1.75f, dark);
+                room.quad(scene, {0, 1.125f, 0.3f}, 'z', 0.5f, 1.75f, dark);
+                room.quad(scene, {2.8f, 0, 0.3f}, 'z', 0.6f, 2, pale);
+                const auto shoot = [&]() {
+                    auto p = shoot_large(renderer, r3d, view, scene);
+                    renderer.present();
+                    return p;
+                };
+                for (int frame = 0; frame < 24; ++frame) {
+                    render_ok(r3d, view, scene);
+                    renderer.present();
+                }
+                const auto off = shoot();
+                const auto value = [&](const Pixels& p, Vec3f at) {
+                    const auto pixel =
+                        scene.camera.project(at, {0, 0, static_cast<float>(size.x), static_cast<float>(size.y)});
+                    assert(pixel);
+                    float total = 0;
+                    for (int y = -2; y <= 2; ++y)
+                        for (int x = -2; x <= 2; ++x)
+                            total += brightness(
+                                p.at(static_cast<int>(pixel->pos.x) + x, static_cast<int>(pixel->pos.y) + y));
+                    return total / 25;
+                };
+                scene.ambient_occlusion = {.enabled = true, .radius = 1.2f, .intensity = 1.5f};
+                const auto on = shoot();
+                const auto before = value(off, {0, 0, 0}), after = value(on, {0, 0, 0});
+                std::cerr << "GI recess " << size.x << " ortho=" << ortho << ": " << before << " -> " << after
+                          << ", exposed " << value(off, {2.8f, 0, 0.3f}) << " -> " << value(on, {2.8f, 0, 0.3f})
+                          << '\n';
+                assert(before > 20 && after > 2 && after < before * 0.8f);
+                assert(std::abs(value(on, {2.8f, 0, 0.3f}) - value(off, {2.8f, 0, 0.3f})) < 4);
+                assert(r3d.debug_stats().ao_chain_built == kin::u32(size.x * size.y >= 1500000));
+                assert(delta(on, shoot()).worst <= 2);
+            }
+        }
+    });
+}
+
 // The texture mip bias (Scene3D::texture_lod_bias): a texture of 32 x 32 texels whose levels are olive, teal and
 // red (from 8 x 8 on) over 16 pixels reads its teal level 1; a bias of -1 reads olive, +1 red, -0.5 between olive and
 // teal. Without it the picture is as before.
@@ -24049,6 +24115,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_gi_area_lights());
     RUN(test_gpu_gi_tunnel());
     RUN(test_gpu_gi_bleeding());
+    RUN(test_gpu_gi_recess_visibility());
     RUN(test_gpu_gi_probes_scroll());
     RUN(test_gpu_gi_coverage_edge());
     RUN(test_gpu_environment());

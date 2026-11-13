@@ -1338,6 +1338,7 @@ vec3 kin_lit_surface(KinSurface surface) {
     }
 #endif
 #ifdef KIN_GI
+    float gi_share = 0.0;
     vec3 area_light = vec3(0.0); // the area lights' (frame.gi.y), a direct light's: not occluded, not the probes'
     // With global illumination's probes the diffuse is theirs: the sky's light where they see it, the light of every
     // surface they see, kept out by walls. The reflections too, in so far as a rough surface's are its surroundings'
@@ -1350,6 +1351,7 @@ vec3 kin_lit_surface(KinSurface surface) {
         vec3 probed, traced;
         float coverage;
         if (kin_gi_resolved(n, r, depth, depth_slope, probed, traced, coverage, area_light)) {
+            gi_share = coverage;
             around = mix(around, probed, coverage);
             behind = mix(behind, probed, coverage); // (the probes' for the front: none from the sky through a roof)
             const vec3 open = frame.environment.w > 0.5
@@ -1431,7 +1433,13 @@ vec3 kin_lit_surface(KinSurface surface) {
         const vec3 a = 2.0404 * base - vec3(0.3324);
         const vec3 b = -4.7951 * base + vec3(0.6417);
         const vec3 c = 2.7552 * base + vec3(0.6903);
-        const vec3 diffuse_light = s.diffuse * (vec3(1.0) - dielectric) * around * max(vec3(ao), ((ao * a + b) * ao + c) * ao);
+        vec3 diffuse_visibility = max(vec3(ao), ((ao * a + b) * ao + c) * ao);
+#ifdef KIN_GI
+        // GI already estimates bounced light. A pale receiver alone is not evidence of pale neighbours: use the
+        // depth visibility for that share rather than inventing additional local bounce light from its albedo.
+        diffuse_visibility = mix(diffuse_visibility, vec3(ao), gi_share);
+#endif
+        const vec3 diffuse_light = s.diffuse * (vec3(1.0) - dielectric) * around * diffuse_visibility;
         const vec3 specular_light = reflectance * above * clamp(pow(s.n_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
         return light + kin_coated(diffuse_light + specular_light, coat, coat_ab, s.n_v, coat_above) * occlusion +
                backlight * behind * (ao * occlusion);

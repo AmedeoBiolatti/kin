@@ -908,7 +908,10 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   sample, whatever the view's MSAA; where the main pass has one sample too, as
   with temporal anti-aliasing, it starts from a copy of the pre-pass's depth,
   below); GTAO (2 slices, 8 steps a side, a thickness heuristic)
-  runs in compute from it, then a depth-aware blur (R8 result). `mesh.frag`
+  runs in compute from it, then a depth-aware blur (R8 result). A horizon stays raised while samples remain
+  above the receiver plane (by more than 1% of the radius, at least 5 mm); the thin-occluder heuristic can lower it
+  again when samples return to that plane. A continuing window frame or wall therefore keeps shading a recess.
+  `mesh.frag`
   multiplies the ambient light and the environment's diffuse by it (Jimenez et
   al.'s multi-bounce fit, from the surface's colour) and the environment's
   reflections by a specular occlusion term; the sun, fill and point lights are
@@ -1292,6 +1295,10 @@ the plan's G5b results.
   that, a smooth one the environment dimmed by the share of the sky's light that is. (Read by each fragment instead,
   the probes cost the Bistro 13 ms at 2844 x 1600, the overdraw's fragments too; read so, about 1.4.) GTAO and the
   occlusion maps still multiply both (keep GTAO's radius under the probes' spacing, or creases are darkened twice).
+  For diffuse shading, the GI coverage blends GTAO's albedo-based multi-bounce compensation toward its raw
+  visibility: the probe field already carries bounced light, and a pale receiver alone does not establish pale
+  surroundings. This uses the existing visibility pass and targets; it does not refine the voxel field or constrain
+  the lookup bias. Like GTAO itself, the correction only knows geometry in the current depth buffer.
   Only the stock shaders' light variants read them: with them on, those draw (`debug_stats().lights_variant`); a
   custom material shader keeps the sky's light, and the overlay its own.
 - **Where:** compute that writes 3D textures of half floats, 8-bit and four-half-float texels and reads and writes
