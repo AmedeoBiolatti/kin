@@ -532,6 +532,8 @@ struct SceneAppSession::Impl {
     bool want_report = false;
     std::string report_snapshot;
     i32 frames_run = 0;
+    // Updates the scenes ran (SceneContext::step): frames held by a paused inspector are not counted.
+    u64 updates_run = 0;
     detail::EvalTelemetry eval_telemetry;
     i64 eval_frame = 0;
     std::chrono::steady_clock::time_point eval_previous{};
@@ -1076,6 +1078,7 @@ struct SceneAppSession::Impl {
                 .renderer3d = scene_renderer3d,
                 .services = services,
                 .development = config.headless.development,
+                .step = updates_run,
             };
         };
         // The system's app events (phones: background, foreground, low memory)
@@ -1131,6 +1134,7 @@ struct SceneAppSession::Impl {
                     services_pumped = true;
                     services->update();
                 }
+                scene_ctx.step = updates_run++; // this update's index
                 const auto update_start = std::chrono::steady_clock::now();
                 scenes.update(scene_ctx);
                 follow_text_input(ctx.window);

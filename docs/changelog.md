@@ -7,6 +7,67 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- Determinism for replayed and networked games ([determinism](determinism.md)):
+  - `kin::dmath` (sin, cos, sincos, tan, asin, acos, atan, atan2 in f32) gives
+    the same bits with every compiler and CPU, checked by a golden hash on x64.
+  - `SceneContext::step` numbers the updates (a paused inspector holds it) and
+    `fold_in()` gives each update its own RNG key.
+  - Lua is built with a fixed string-hash seed, so `pairs` over string and
+    number keys walks in one order everywhere; `kin::set_lua_hash_seed()` sets a
+    session's. Scene scripts' `math.random` follows `--seed`, in 3D scenes too
+    (`SceneScriptOptions3D::rng`).
+  - The ECS scheduler's state (rate and interval counters, enabled systems) can
+    be saved and restored beside the world, in the same bytes whatever the
+    systems' registration order.
+  - kin's code that must give the same bits is compiled without fused
+    multiply-adds on clang-cl and AppleClang too; test assertions stay on in
+    AppleClang Release builds.
+- Add experimental networking (`KIN_ENABLE_NET`, `kin::net`): a shared layer of
+  transports (loopback with a link simulator, UDP), handshakes that refuse
+  another game, build, model or setting, round trips and timeouts, under a first
+  sync model, deterministic input sync, with lockstep and rollback, clock sync
+  between peers, desync detection by state hashes and a rollback sync test.
+  See [networking](networking.md).
+
+## [0.3.0] — 2026-11-10
+
+A release for 3D, for apps and for whole 2D games. The experimental 3D renderer gains physically based materials
+with node-based material graphs (and an importer for Unreal, Unity and Godot materials), global illumination with
+area lights, mirrors, portals, water, reflection probes and screen-space reflections, volumetric fog lit by local
+lights, the sun and the moon, auto exposure, decals and morph targets, with Jolt physics, characters and ragdolls
+(see [3D rendering](rendering_3d.md)). 2D games get skeletal animation, normal-mapped sprites, light shadows, physics
+characters and one-way platforms, parallax, scenes and saves as data, tweens and timers, and browser builds. ui2 runs
+whole applications, on desktops and Android phones: touch, keyboards, accessibility, charts and composition. Lua
+scripting gains typed API definitions, debugging and scenario tests, and Python scripting arrives (experimental).
+Development builds are faster and build what is asked for. The larger showcase games moved to the
+[kin gallery](https://github.com/AmedeoBiolatti/kin-gallery).
+
+### Upgrading from 0.2.6
+
+- Development presets (`dev`, `dev-3d`, ...) build tools, samples and tests only when asked
+  (`KIN_BUILD_ON_DEMAND`) into `out/build/<preset>/`: request targets with `cmake --build --preset dev --target ...`.
+- Experimental 3D is off by default: use the `dev-3d`/`3d` presets or `-DKIN_EXPERIMENTAL_3D=ON`. Its public types
+  carry 3D suffixes (`Mesh3D`, `Model3D`, `ViewOptions3D`, `RenderStats3D`, ...) and fallible operations return
+  `Result3D<T>`; see the [3D API guide](3d_api_migration.md).
+- `LuaScriptOptions::instruction_limit` is `LuaScriptOptions::limits.instruction_limit`.
+- ui2: editor widgets are declared in `kin/ui2/editor.hpp` and game screen widgets in `kin/ui2/hud.hpp` (both still
+  included by `widgets.hpp`); keys go only to the focused widget; `NumberInput` commits on Enter or on leaving;
+  `SvgOptions::oversample` defaults to the renderer's content scale.
+- Summit, Blockfield, the planar-views atrium and the material gallery are in the
+  [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery); the 3D starters' content is in
+  `examples/camp_walk/content` (was `examples/summit/content`).
+
+- The larger showcase games moved to the [kin gallery](https://github.com/AmedeoBiolatti/kin-gallery), which builds them
+  against kin as a subproject: Summit (with its browser export and checks), Blockfield, the planar-views atrium
+  (`planar_atrium`, now `atrium`) and the material gallery. kin keeps the small samples, Signal Siege, Signal Breach and
+  the renderer viewers. The 3D starting points' CC0 content moved from `examples/summit/content` to
+  `examples/camp_walk/content`; the `summit-webgl2` preset, `KIN_BUILD_WEB_SUMMIT`, `tests/webgl2_benchmark.mjs`,
+  `tools/analyze_webgl_pacing.py` and the smoke check's `summit` and `simulation` modes went with Summit. The
+  `requests/` folder (game requests, all done) is removed.
+- Fixed: `kin_compile_surface_shader` (and so `kin_planar_surfaces`) compiled nothing for a game that adds kin as a
+  subproject: its surface variants were variables of kin's own directory scope.
 - Material graphs: a `local_position` built-in input, the point in the copy's own space (posed when skinned), from the
   mesh's vertex shader (at a vertex, through the inverse model matrix). A pattern on it moves and turns with the copy,
   where `position`'s stays in the world (noise on a rolling ball slid over it).
@@ -3010,7 +3071,8 @@ First public release.
 - Demos (`games/`), the Signal Siege and Run Observatory examples, `kin_bench`,
   and the engine test suite.
 
-[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.3...v0.2.4

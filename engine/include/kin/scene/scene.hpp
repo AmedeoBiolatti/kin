@@ -57,6 +57,10 @@ struct SceneContext {
     // SceneAppConfig::services; null where the host started none.
     PlatformServices* services = nullptr;
     bool development = false;
+    // Fixed updates the run has made before this one (update contexts: this
+    // update's index from 0), or in all (render contexts). fold_in(rng, step)
+    // gives each update its own key, the same in every run with the same seed.
+    u64 step = 0;
 };
 
 class Scene {

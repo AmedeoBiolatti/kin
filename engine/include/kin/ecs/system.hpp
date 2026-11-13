@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <source_location>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -668,6 +669,15 @@ public:
 
     std::vector<SystemSnapshot> snapshots() const;
     SystemSnapshot snapshot(std::string_view id) const;
+
+    // The scheduler's own state: per system, whether it is enabled, how many times it was due (for `rate`) and its
+    // interval clock (for `interval_seconds`). It lives here, not in the ECS world, so a rollback, a replay or a late
+    // join saves and restores it beside the world; otherwise systems run on other ticks afterwards, or stay disabled.
+    // The bytes are the same for the same systems in any registration order. Systems are matched by id: restore_schedule_state() returns false, and changes nothing, unless the
+    // bytes name exactly the systems this registry has.
+    void save_schedule_state(std::vector<u8>& out) const;
+    bool restore_schedule_state(std::span<const u8> bytes);
+    u64 schedule_state_hash() const;
 
     const std::string& last_error() const { return _last_error; }
     const SystemExecutionTuning& execution_tuning() const { return _execution_tuning; }

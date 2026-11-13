@@ -274,7 +274,8 @@ then assert on the exit code and the JSON state.
 ## Determinism check
 
 `--check-determinism` checks the promise above: that the same seed and frame
-count always play out the same way. Instead of playing, the game runs itself
+count always play out the same way ([determinism](determinism.md) lists what
+kin does for it, and what is left to a game). Instead of playing, the game runs itself
 three times as headless child processes, in lockstep:
 
 - **baseline**;

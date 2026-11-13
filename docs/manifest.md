@@ -55,7 +55,7 @@ supported configuration.
 Kin earns its features. Each system is added when a real game needs it, not speculatively. A turn-based strategy game and a card game should run before a particle system exists.
 
 ### Deterministic execution
-All randomness uses the scene's seeded `RngKey` and the provided utilities.
+All randomness uses the scene's seeded `RngKey` and the provided utilities. `fold_in(ctx.rng, ctx.step)` gives every update its own key, so a run that is replayed, rolled back or joined draws the same numbers again.
 
 ---
 

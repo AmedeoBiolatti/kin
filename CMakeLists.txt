@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(kin VERSION 0.2.6 LANGUAGES C CXX)
+project(kin VERSION 0.3.0 LANGUAGES C CXX)
 
 # On Windows, the Python on PATH (the one `python -m pip install` installs
 # Pillow into) before the newest one in the registry.
@@ -84,7 +84,6 @@ option(KIN_ENABLE_PHYSICS3D "Build the experimental Jolt physics and ECS adapter
 option(KIN_PHYSICS_BOX2D_V3 "Experimental: 2D physics on Box2D v3" OFF)
 option(KIN_ENABLE_SCENE3D_RUNTIME "Build the experimental scripted 3D scene runtime" ON)
 option(KIN_BUILD_WEBGL2_FIXTURE "Build the standalone browser 2D/3D rendering fixture" OFF)
-option(KIN_BUILD_WEB_SUMMIT "Build Summit's experimental browser export" OFF)
 option(KIN_WEB_PERSISTENCE "Restore browser user storage before starting the game" OFF)
 option(KIN_ENABLE_AGENT_SERVER "Let games run as an agent server (--server)" ${_kin_developer_default})
 option(KIN_PACK_CONTENT "Pack each game's content into a .kinpak when it is installed" ON)
@@ -192,7 +191,7 @@ include(kin_embed)
 include(kin_game)
 
 add_subdirectory(engine)
-if(KIN_BUILD_WEBGL2_FIXTURE OR KIN_BUILD_WEB_SUMMIT)
+if(KIN_BUILD_WEBGL2_FIXTURE)
     if(NOT (KIN_EXPERIMENTAL_3D AND KIN_HAS_WEBGL2_RENDERER))
         message(FATAL_ERROR "The browser 3D examples require the WebGL2 3D renderer")
     endif()

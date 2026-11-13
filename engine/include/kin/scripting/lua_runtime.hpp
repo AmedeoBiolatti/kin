@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/rng.hpp>
 #include <kin/core/types.hpp>
 
 #include <chrono>
@@ -15,6 +16,12 @@ struct lua_State;
 struct lua_Debug;
 
 namespace kin {
+
+// The seed of Lua's string hashes, for the Lua states made from now on. Lua makes one from the clock and addresses;
+// kin's is fixed instead, so `pairs` over string and number keys walks in the same order in every run and process.
+// A networked game sets it from its session key before its scripts start (every peer has the same key, outsiders do
+// not, so nobody can send strings made to collide). RngKey{} restores kin's fixed seed.
+void set_lua_hash_seed(RngKey key);
 
 struct LuaRuntimeLimits {
     u64 instruction_limit = 50'000'000;        // per entry into Lua; 0 disables

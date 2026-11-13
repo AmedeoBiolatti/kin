@@ -1429,6 +1429,7 @@ void ServerContext::step() {
     const auto render_start = clock::now();
     auto present_start = render_start;
     if (_render || ui_action) {
+        scene_ctx.step = static_cast<u64>(_frame) + 1; // a render sees every update so far, as in run_scene_app
         _scenes.render(scene_ctx);
         present_start = clock::now();
         _renderer.present();
@@ -1505,6 +1506,7 @@ SceneContext ServerContext::make_context() {
         .report = &_report,
         .renderer3d = _renderer3d,
         .development = _development,
+        .step = static_cast<u64>(_frame),
     };
 }
 

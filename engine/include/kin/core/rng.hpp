@@ -55,6 +55,12 @@ inline std::pair<RngKey, RngKey> split(RngKey key) {
     };
 }
 
+// A key for `data` under `key`, as JAX's fold_in: fold_in(key, tick) gives every tick its own key from one root, so a
+// simulation that is taken back to a tick (a rollback) or joined at it draws the same numbers again.
+inline RngKey fold_in(RngKey key, u64 data) {
+    return rng_detail::from_u64(rng_detail::mix(rng_detail::to_u64(key) ^ rng_detail::mix(data + 0x632be59bd9b4e019ULL)));
+}
+
 inline u32 rng_u32(RngKey key) {
     return static_cast<u32>(
         rng_detail::mix(rng_detail::to_u64(key) ^ 0xdeadbeefcafe0000ULL) >> 32

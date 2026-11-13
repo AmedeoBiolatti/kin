@@ -24,8 +24,8 @@ const { values } = parseArgs({
 assert(values.root, "--root must name the extracted browser bundle");
 assert(!values["gl-calls"] || values.profile, "--gl-calls requires --profile");
 assert(
-  ["hex", "3d", "summit", "simulation"].includes(values.mode),
-  "--mode must be hex, 3d, summit or simulation",
+  ["hex", "3d"].includes(values.mode),
+  "--mode must be hex or 3d",
 );
 const root = resolve(values.root),
   output = resolve(values.output);
@@ -50,9 +50,8 @@ const server = createServer(async (req, res) => {
   }
   if (req.url === "/embed.html") {
     res.setHeader("Content-Type", "text/html");
-    const summit = values.mode === "summit";
     res.end(
-      `<!doctype html><style>body{margin:0}iframe{border:0;width:${summit ? 640 : 960}px;height:${summit ? 360 : 600}px}</style><iframe src="/index.html" allow="autoplay; fullscreen" allowfullscreen></iframe>`,
+      `<!doctype html><style>body{margin:0}iframe{border:0;width:960px;height:600px}</style><iframe src="/index.html" allow="autoplay; fullscreen" allowfullscreen></iframe>`,
     );
     return;
   }
@@ -157,7 +156,6 @@ try {
         .map((arg) => arg.value || arg.description)
         .join(" ");
       consoleLines.push(line);
-      if (values.mode === "simulation") console.log(line);
     }
     if (
       message.method === "Log.entryAdded" &&
@@ -184,7 +182,7 @@ try {
           pending.delete(next);
           reject(new Error("CDP timeout: " + method));
         },
-        values.mode === "simulation" ? 120000 : 15000,
+        15000,
       );
       pending.set(next, {
         resolve: (result) => {
@@ -289,28 +287,7 @@ try {
   await call("Page.navigate", {
     url: `http://127.0.0.1:${server.address().port}/embed.html`,
   });
-  if (values.mode === "simulation") {
-    const simulation = await until(
-      async () => {
-        const result = await evaluate(
-          `document.querySelector('iframe')?.contentWindow.Module?.kinSimulation`,
-        );
-        if (result && !result.passed)
-          throw new Error(
-            "Summit simulation suite failed: " + JSON.stringify(result),
-          );
-        return result?.completed === 2 && result;
-      },
-      "Summit simulation and expedition suites",
-      120000,
-    );
-    assert.deepEqual(errors, []);
-    await writeFile(
-      join(output, "result.json"),
-      JSON.stringify({ mode: values.mode, ...simulation, errors }, null, 2),
-    );
-    console.log(JSON.stringify({ mode: values.mode, ...simulation, output }));
-  } else {
+  {
     await until(
       () =>
         evaluate(`(() => {
@@ -464,246 +441,6 @@ try {
         "Right click must move the unit",
       );
     }
-    if (values.mode === "summit") {
-      const game = `document.querySelector('iframe').contentWindow.Module.kinSummit`;
-      fixture = await until(() => evaluate(game), "Summit first frame", 60000);
-      assert(
-        fixture.hudPrepared || values.profile,
-        "Summit must prepare its HUD font caches before game readiness",
-      );
-      assert(
-        fixture.assets &&
-          fixture.font &&
-          fixture.instances > 0 &&
-          fixture.triangles > 0 &&
-          fixture.skinned > 0 &&
-          fixture.shadows === 2,
-        JSON.stringify(fixture),
-      );
-      assert(
-        await evaluate(
-          `document.querySelector('iframe').contentWindow.Module.kinStorage.ready`,
-        ),
-        "Storage must restore before game construction",
-      );
-      const beforeLook = fixture.look;
-      await key("F2", "F2", 113);
-      await until(
-        async () => (await evaluate(game)).look !== beforeLook,
-        "look setting change",
-      );
-      const savedLook = (await evaluate(game)).look;
-      if (values["deny-storage"]) {
-        const storage = await evaluate(
-          `(() => { const s=document.querySelector('iframe').contentWindow.Module.kinStorage; return {ready:s.ready,available:s.available,error:s.error}; })()`,
-        );
-        assert(
-          storage.ready && !storage.available && storage.error,
-          "Blocked IndexedDB must fall back to in-memory settings: " +
-            JSON.stringify(storage),
-        );
-      } else {
-        await until(
-          () =>
-            evaluate(
-              `(() => { const s=document.querySelector('iframe').contentWindow.Module.kinStorage; return s.available && !s.pending && s.flushes>0; })()`,
-            ),
-          "settings flush",
-        );
-      }
-      await until(
-        () =>
-          evaluate(
-            `document.querySelector('iframe').contentWindow.Module.SDL3?.audioContext?.state === 'running'`,
-          ),
-        "audio activation after a key gesture",
-      );
-      await screenshot("summit-settings");
-      await evaluate(`new Promise(resolve => {
-      const frame=document.querySelector('iframe');
-      frame.addEventListener('load',() => resolve(true),{once:true});
-      frame.contentWindow.location.reload();
-    })`);
-      await until(
-        async () =>
-          (await evaluate(game))?.look ===
-          (values["deny-storage"] ? beforeLook : savedLook),
-        values["deny-storage"]
-          ? "default settings after storage denial and reload"
-          : "persistent settings reload",
-        60000,
-      );
-      await focusWindow();
-      await call("Input.dispatchMouseEvent", {
-        type: "mousePressed",
-        x: 320,
-        y: 180,
-        button: "left",
-        clickCount: 1,
-      });
-      await call("Input.dispatchMouseEvent", {
-        type: "mouseReleased",
-        x: 320,
-        y: 180,
-        button: "left",
-        clickCount: 1,
-      });
-      await delay(200);
-      // R is Summit's default interaction binding and starts the expedition briefing.
-      await call("Input.dispatchKeyEvent", {
-        type: "keyDown",
-        key: "r",
-        code: "KeyR",
-        windowsVirtualKeyCode: 82,
-      });
-      try {
-        await until(
-          async () => (await evaluate(game)).phase !== 0,
-          "begin expedition",
-        );
-      } finally {
-        await call("Input.dispatchKeyEvent", {
-          type: "keyUp",
-          key: "r",
-          code: "KeyR",
-          windowsVirtualKeyCode: 82,
-        });
-      }
-      const click = async () => {
-        await call("Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: 320,
-          y: 180,
-        });
-        await call("Input.dispatchMouseEvent", {
-          type: "mousePressed",
-          x: 320,
-          y: 180,
-          button: "left",
-          clickCount: 1,
-        });
-        await call("Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          x: 320,
-          y: 180,
-          button: "left",
-          clickCount: 1,
-        });
-        await delay(150);
-      };
-      await click();
-      await click();
-      await until(
-        () =>
-          evaluate(
-            `!!document.querySelector('iframe').contentDocument.pointerLockElement`,
-          ),
-        "pointer lock",
-      );
-      const beforeMove = await evaluate(game);
-      if (values["cpu-profile"]) {
-        await call("Profiler.enable");
-        await call("Profiler.setSamplingInterval", { interval: 250 });
-        await call("Profiler.start");
-      }
-      await call("Input.dispatchKeyEvent", {
-        type: "keyDown",
-        key: "w",
-        code: "KeyW",
-        windowsVirtualKeyCode: 87,
-      });
-      await delay(values.profile ? 5000 : 1200);
-      await call("Input.dispatchKeyEvent", {
-        type: "keyUp",
-        key: "w",
-        code: "KeyW",
-        windowsVirtualKeyCode: 87,
-      });
-      if (values["cpu-profile"]) {
-        const { profile: cpu } = await call("Profiler.stop");
-        await writeFile(
-          join(output, "gameplay.cpuprofile"),
-          JSON.stringify(cpu),
-        );
-        await call("Profiler.disable");
-      }
-      fixture = await evaluate(game);
-      if (values.profile) {
-        const samples = await evaluate(
-          `document.querySelector('iframe').contentWindow.kinFrameSamples`,
-        );
-        const playing = samples.filter((sample) => sample.phase === 1);
-        assert(playing.length > 5, "Profile needs several gameplay frames");
-        const percentile = (rows, field, p) => {
-          const sorted = rows
-            .map((row) => row[field])
-            .filter(Number.isFinite)
-            .sort((a, b) => a - b);
-          return sorted.length
-            ? sorted[Math.floor((sorted.length - 1) * p)]
-            : null;
-        };
-        profile = {
-          samples: playing.length,
-          firstGameplayFrameMs: playing[0].ms,
-          gameplayP50Ms: percentile(playing, "ms", 0.5),
-          gameplayP95Ms: percentile(playing, "ms", 0.95),
-          gameplayMaxMs: percentile(playing, "ms", 1),
-          fillP50Ms: percentile(playing, "fillMs", 0.5),
-          uiP95Ms: percentile(playing, "uiMs", 0.95),
-          uiWarmupMs: fixture.uiWarmupMs ?? null,
-        };
-        if (values["gl-calls"]) {
-          profile.glCallsPerFrame = Object.fromEntries(
-            Object.keys(playing.at(-1).glCalls).map((name) => [
-              name,
-              percentile(
-                playing.map((row) => ({ n: row.glCalls[name] || 0 })),
-                "n",
-                0.5,
-              ),
-            ]),
-          );
-        }
-        await writeFile(
-          join(output, "frame-samples.json"),
-          JSON.stringify(samples),
-        );
-      }
-      assert(
-        Math.hypot(
-          fixture.x - beforeMove.x,
-          fixture.y - beforeMove.y,
-          fixture.z - beforeMove.z,
-        ) > 0.1,
-        "Movement must advance the actual physics world",
-      );
-      await screenshot("summit-walk");
-      await evaluate(
-        `document.querySelector('iframe').contentDocument.exitPointerLock()`,
-      );
-      await until(
-        () =>
-          evaluate(
-            `!document.querySelector('iframe').contentDocument.pointerLockElement`,
-          ),
-        "pointer unlock",
-      );
-      await key("Escape", "Escape", 27);
-      await screenshot("summit-menu");
-      await key("Escape", "Escape", 27);
-      await click();
-      await until(
-        () =>
-          evaluate(
-            `!!document.querySelector('iframe').contentDocument.pointerLockElement`,
-          ),
-        "pointer lock reacquire",
-      );
-      await evaluate(
-        `document.querySelector('iframe').contentDocument.exitPointerLock()`,
-      );
-    }
     const fullscreenButton = await evaluate(`(() => {
     const frame = document.querySelector('iframe'), a = frame.getBoundingClientRect();
     const b = frame.contentDocument.getElementById('fullscreen').getBoundingClientRect();
@@ -789,9 +526,6 @@ try {
           keyboard: true,
           picking: values.mode === "hex",
           movement: values.mode !== "3d",
-          audio: values.mode === "summit",
-          pointerLock: values.mode === "summit",
-          persistence: values.mode === "summit" && !values["deny-storage"],
           storageFallback: values["deny-storage"],
           fullscreen: true,
           resize: true,

@@ -5,6 +5,8 @@
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <kin/scene/scene_asset.hpp>
+#include <kin/core/json.hpp>
+#include <kin/scripting/script_engine.hpp>
 #include <kin/scripting/script_scene.hpp>
 #include <kin/scripting/script_engine.hpp>
 #include <sol/sol.hpp>
@@ -14,6 +16,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #ifdef _MSC_VER
 #include <crtdbg.h>
@@ -106,6 +109,72 @@ void test_scene_userdata_registry_keys_stay_short() {
 }
 
 // The editor entry point lives in the optional scene integration library.
+// Two script states agree on what `pairs` walks first and on math.random, as two peers' would: the string-hash seed
+// is fixed (not made from the clock and the state's address) and math.random is seeded from the run's key.
+void test_lua_is_deterministic_across_states(Fixture& fixture) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-scripting-tests-determinism";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path script = dir / "determinism.lua";
+    write_text(script, R"lua(
+local order = {}
+local t = {}
+for i = 1, 64 do t["key" .. i] = i end
+for k in pairs(t) do order[#order + 1] = k end
+local load_draws = {}
+for i = 1, 4 do load_draws[#load_draws + 1] = tostring(math.random(1, 1000000)) end
+draws = {}
+function on_enter(ctx)
+    for i = 1, 4 do draws[#draws + 1] = tostring(math.random(1, 1000000)) end
+end
+function write_report()
+    return {order = table.concat(order, ","), load_draws = table.concat(load_draws, ","),
+            draws = table.concat(draws, ",")}
+end
+)lua");
+    const auto run = [&](kin::u64 seed) {
+        kin::ScriptEngine engine;
+        assert(engine.load_file(script));
+        kin::SceneContext ctx = fixture.ctx;
+        ctx.rng = kin::make_key(seed);
+        assert(engine.call_on_enter(ctx));
+        std::ostringstream out;
+        kin::JsonWriter json(out, false);
+        json.begin_object();
+        assert(engine.call_write_report(json));
+        json.end_object();
+        return out.str();
+    };
+    const auto field = [](const std::string& json, std::string_view name) {
+        const std::string key = "\"" + std::string(name) + "\":\"";
+        const std::size_t start = json.find(key);
+        assert(start != std::string::npos);
+        const std::size_t begin = start + key.size();
+        return json.substr(begin, json.find('"', begin) - begin);
+    };
+    const std::string first = run(7);
+    // Other states are at other addresses: before the fixed seed, their orders differed in one process.
+    for (int i = 0; i < 3; ++i) {
+        const std::string again = run(7);
+        assert(field(again, "order") == field(first, "order"));
+        assert(field(again, "draws") == field(first, "draws"));
+        // Before on_enter gives it the run's seed, math.random starts from a fixed one.
+        assert(field(again, "load_draws") == field(first, "load_draws"));
+    }
+    // The pairs order does not depend on the run's seed; math.random does.
+    const std::string other = run(8);
+    assert(field(other, "order") == field(first, "order"));
+    assert(field(other, "draws") != field(first, "draws"));
+
+    // A session's hash seed (a networked game's): its states agree with each other, on another order than kin's
+    // fixed seed gives; RngKey{} brings the fixed seed back.
+    kin::set_lua_hash_seed(kin::make_key(0x5e55));
+    const std::string session = run(7);
+    assert(field(run(7), "order") == field(session, "order"));
+    assert(field(session, "order") != field(first, "order"));
+    kin::set_lua_hash_seed({});
+    assert(field(run(7), "order") == field(first, "order"));
+}
+
 void test_editor_reload_coordinator() {
     const auto dir = std::filesystem::temp_directory_path() / "kin-scripting-tests-coordinator";
     const auto script = dir / "scene.lua";
@@ -894,6 +963,7 @@ int main() {
     test_scene_userdata_registry_keys_stay_short();
     Fixture fixture;
     test_editor_reload_coordinator();
+    test_lua_is_deterministic_across_states(fixture);
     test_load_update_actions_and_spawn(fixture);
     test_input_query_can_quit_app(fixture);
     test_lua_can_query_and_mutate_existing_ecs_entities();

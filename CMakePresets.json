@@ -464,23 +464,6 @@
         "KIN_ENABLE_SCENE3D_RUNTIME": "OFF",
         "KIN_BUILD_WEBGL2_FIXTURE": "ON"
       }
-    },
-    {
-      "name": "summit-webgl2",
-      "displayName": "Summit browser export (core WebGL2)",
-      "inherits": "webgl2",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "KIN_EXPERIMENTAL_3D": "ON",
-        "KIN_ENABLE_PHYSICS3D": "ON",
-        "KIN_ENABLE_SCENE3D_RUNTIME": "OFF",
-        "KIN_ENABLE_IMAGE_IO": "ON",
-        "KIN_ENABLE_TTF": "ON",
-        "KIN_ENABLE_AUDIO": "ON",
-        "KIN_ENABLE_RUNTIME_ASSETS": "ON",
-        "KIN_BUILD_WEB_SUMMIT": "ON",
-        "KIN_WEB_PERSISTENCE": "ON"
-      }
     }
   ],
   "buildPresets": [
