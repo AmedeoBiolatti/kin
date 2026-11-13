@@ -160,7 +160,22 @@ struct PlanarViews3D::Data {
         ViewOptions3D options;
         u64 frame = 0;
     };
-    std::unordered_map<EcsId, Entry> entries;
+    // A surface has a different picture for each viewer. Keep the identities separate: folding two entity IDs into
+    // one could alias another surface's views. `level` distinguishes a portal's cameras along its chain.
+    struct ViewKey {
+        EcsId surface, viewer = 0;
+        u32 level = 0;
+        bool operator==(const ViewKey&) const = default;
+    };
+    struct ViewHash {
+        std::size_t operator()(ViewKey key) const {
+            const auto mix = [](std::size_t a, std::size_t b) {
+                return a ^ (b + std::size_t{0x9e3779b9} + (a << 6) + (a >> 2));
+            };
+            return mix(mix(std::hash<EcsId>{}(key.surface), std::hash<EcsId>{}(key.viewer)), key.level);
+        }
+    };
+    std::unordered_map<ViewKey, Entry, ViewHash> entries;
     // Where things went through each portal lately (Portal3D::effect answers them): the point on its surface (its own
     // x, y, metres from its middle), when (Scene3D::time) and how strongly (their size); the four latest.
     struct Disturbance {
@@ -192,7 +207,7 @@ struct PlanarViews3D::Data {
 
     // Keeps an entity's views for another frame (it is still there, if off screen).
     void keep(EcsId id) {
-        if (auto it = entries.find(id); it != entries.end())
+        if (auto it = entries.find({id}); it != entries.end())
             it->second.frame = frame;
     }
     // The entity's `k`th view for a picture `size` (at most `limit`), with `options`, to render `scene` (made again
@@ -202,7 +217,7 @@ struct PlanarViews3D::Data {
     // grow, to the largest picture it has shown (an eighth or 64 pixels more; smaller only after ten seconds of all its
     // pictures under half of it), and each render fills its picture's own size (View3D::set_render_size; the surface
     // reads that part: part_of). Where it cannot (temporal anti-aliasing, GI, ...), the view is the picture's size.
-    View3D* view(EcsId id, u32 k, Vec2i size, Vec2i limit, const ViewOptions3D& options, const Scene3D& scene) {
+    View3D* view(ViewKey id, u32 k, Vec2i size, Vec2i limit, const ViewOptions3D& options, const Scene3D& scene) {
         Entry& e = entries[id];
         e.frame = frame;
         if (e.options.hdr != options.hdr || e.options.samples != options.samples ||
@@ -334,6 +349,8 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
             Material3D level;
         };
         std::vector<Through> through;
+        const Mirror3D* settings = nullptr;
+        Material3D base;
     };
     struct Portal {
         EcsId id;
@@ -347,9 +364,12 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         Vec2i frame{}; // its pictures' frame (Portal3D::resolution)
         Portal3D::Effect effect = Portal3D::Effect::None;
         f32 effect_strength = 1.0f;
+        std::vector<Camera3D> cameras;            // each level's whole frame, before cropping
+        std::vector<std::vector<Mirror>> mirrors; // reflections seen by each of its cameras
     };
     std::vector<Mirror> mirrors;
     std::vector<Portal> portals;
+    scene.gi_portals.clear();
     std::size_t index = 0; // the surfaces' order, for their stand-ins' tags
     // The frame in a picture's pixels: the view's times the surface's resolution.
     const auto frame_size = [&](f32 resolution) {
@@ -498,6 +518,54 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 errors.emplace_back("planar views: an image through a portal was refused");
     }
 
+    // A mirror's reflection and refraction belong to the camera that sees it, including a portal's camera. The
+    // uncropped frame and visible window let both pictures keep the same perspective as the parent view.
+    const auto mirror_picture = [&](Mirror& m, const Camera3D& from, Rectf within, Data::ViewKey key) {
+        const Mirror3D& c = *m.settings;
+        m.view = m.below_view = nullptr;
+        m.through.clear();
+        m.real = m.base;
+        const auto bounds = planar_on_screen(from, aspect, m.at.position, m.at.rotation, m.size);
+        const auto shown = bounds ? intersect(*bounds, within) : std::nullopt;
+        if (shown && d.surfaces.reflection) {
+            // Only where the mirror shows (its ripples read a little round it: the margin), as sharp as the view.
+            const PlanarPicture3D picture = planar_picture(*shown, frame_size(c.resolution));
+            m.view = d.view(key, 0, picture.size, frame_size(c.resolution), options, scene);
+            if (m.view) {
+                m.seen = mirror_view(from, plane_through(m.at.position, m.at.rotation.rotate({0, 0, 1})), aspect);
+                m.frame_camera = m.seen.camera;
+                crop_planar_view(m.seen, picture.window, f32(picture.size.x) / f32(picture.size.y), true);
+                m.real.surface = d.surfaces.reflection;
+                // (Water the GI sees through: the light comes down into the pool, not off a dark lid.)
+                if (c.refraction > 0.0f && c.metallic < 1.0f)
+                    m.real.surface = SurfaceShader3D{d.surfaces.reflection.backend(), {.gi = SurfaceGi3D::None}};
+                m.real.emissive_texture = m.view->texture();
+                planar_view_params(m.real.shader_params, m.seen.projector, c.distortion,
+                                   std::clamp(c.strength, 0.0f, 1.0f), Data::part_of(*m.view), true);
+                // Water you see into: what is below the surface, in a picture of the same place, in its base colour
+                // map. Its murk is a height fog thickening fast under the surface (level water: its base height the
+                // surface's), about two thirds gone looking straight down `murk_depth` deep.
+                if (c.refraction > 0.0f && c.metallic < 1.0f)
+                    m.below_view = d.view(key, 1, picture.size, frame_size(c.resolution), options, scene);
+                if (m.below_view) {
+                    m.below =
+                        refraction_view(from, plane_through(m.at.position, m.at.rotation.rotate({0, 0, 1})), aspect);
+                    crop_planar_view(m.below, picture.window, f32(picture.size.x) / f32(picture.size.y), false);
+                    m.real.texture = m.below_view->texture();
+                    planar_refraction_params(m.real.shader_params, m.below.projector, c.refraction_distortion,
+                                             std::clamp(c.refraction, 0.0f, 1.0f), Data::part_of(*m.below_view), true);
+                    const f32 k = 3.0f / std::max(c.murk_depth, 0.01f);
+                    m.murk = Fog3D{.enabled = true,
+                                   .height_density = k / (std::exp(3.0f) - 1.0f),
+                                   .height_falloff = k,
+                                   .base_height = m.at.position.y,
+                                   .colour = to_linear_rgb(c.murk)};
+                }
+            }
+        } else
+            ++d.skipped;
+    };
+
     // The surfaces, drawn as their stand-ins (the pictures come first); which pictures this frame needs, from where.
     world.each([&](flecs::entity entity, const Mirror3D& c) {
         const auto at = c.enabled ? placed(EcsEntity{entity}) : std::nullopt;
@@ -525,43 +593,9 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
             m.stand_in.color.a = u8(std::lround(255.0f * (1.0f - 0.3f * std::clamp(c.refraction, 0.0f, 1.0f))));
             m.stand_in.blend = Blend3D::Alpha;
         }
-        const auto bounds = planar_on_screen(eye, aspect, at->position, at->rotation, m.size);
-        if (bounds && d.surfaces.reflection) {
-            // Only where the mirror shows (its ripples read a little round it: the margin), as sharp as the view.
-            const PlanarPicture3D picture = planar_picture(*bounds, frame_size(c.resolution));
-            m.view = d.view(m.id, 0, picture.size, frame_size(c.resolution), options, scene);
-            if (m.view) {
-                m.seen = mirror_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
-                m.frame_camera = m.seen.camera;
-                crop_planar_view(m.seen, picture.window, f32(picture.size.x) / f32(picture.size.y), true);
-                m.real.surface = d.surfaces.reflection;
-                // (Water the GI sees through: the light comes down into the pool, not off a dark lid.)
-                if (c.refraction > 0.0f && c.metallic < 1.0f)
-                    m.real.surface = SurfaceShader3D{d.surfaces.reflection.backend(), {.gi = SurfaceGi3D::None}};
-                m.real.emissive_texture = m.view->texture();
-                planar_view_params(m.real.shader_params, m.seen.projector, c.distortion,
-                                   std::clamp(c.strength, 0.0f, 1.0f), Data::part_of(*m.view), true);
-                // Water you see into: what is below the surface, in a picture of the same place, in its base colour
-                // map. Its murk is a height fog thickening fast under the surface (level water: its base height the
-                // surface's), about two thirds gone looking straight down `murk_depth` deep.
-                if (c.refraction > 0.0f && c.metallic < 1.0f)
-                    m.below_view = d.view(m.id, 1, picture.size, frame_size(c.resolution), options, scene);
-                if (m.below_view) {
-                    m.below = refraction_view(eye, plane_through(at->position, at->rotation.rotate({0, 0, 1})), aspect);
-                    crop_planar_view(m.below, picture.window, f32(picture.size.x) / f32(picture.size.y), false);
-                    m.real.texture = m.below_view->texture();
-                    planar_refraction_params(m.real.shader_params, m.below.projector, c.refraction_distortion,
-                                             std::clamp(c.refraction, 0.0f, 1.0f), Data::part_of(*m.below_view), true);
-                    const f32 k = 3.0f / std::max(c.murk_depth, 0.01f);
-                    m.murk = Fog3D{.enabled = true,
-                                   .height_density = k / (std::exp(3.0f) - 1.0f),
-                                   .height_falloff = k,
-                                   .base_height = at->position.y,
-                                   .colour = to_linear_rgb(c.murk)};
-                }
-            }
-        } else
-            ++d.skipped;
+        m.settings = &c;
+        m.base = base;
+        mirror_picture(m, eye, {0, 0, 1, 1}, {m.id});
         // (A square faces +Y: turned to face the entity's +Z.)
         m.draw = draw(
             d.quad, Mat4f::trs(at->position, at->rotation * Quatf::axis_angle({1, 0, 0}, 90), {m.size.x, 1, m.size.y}),
@@ -573,6 +607,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         if (!poses)
             return;
         Portal p{entity.id(), poses->first, poses->second, 0, {}, {}, {}, {}, 0};
+        scene.gi_portals.push_back({p.pose, p.exit});
         p.effect = c.effect;
         p.effect_strength = c.effect_strength;
         d.keep(p.id);
@@ -596,11 +631,12 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                 if (!seen)
                     break;
                 const PlanarPicture3D picture = planar_picture(*seen, frame);
-                View3D* view = d.view(p.id, p.shown, picture.size, frame, options, scene);
+                View3D* view = d.view({p.id}, p.shown, picture.size, frame, options, scene);
                 if (!view)
                     break;
                 PlanarView3D& level = p.chain[p.shown];
                 from = level.camera;
+                p.cameras.push_back(from);
                 crop_planar_view(level, picture.window, f32(picture.size.x) / f32(picture.size.y), false, through);
                 p.views.push_back(view);
                 within = *seen;
@@ -626,6 +662,22 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     if (!errors.empty())
         return status3d(false, std::move(errors));
 
+    // Mirrors and water through each portal level, even when the surface is off screen to the main camera. Their
+    // pictures are distinct from the main camera's and from the other portal levels'; other planar surfaces remain
+    // stand-ins inside these reflections, bounding the extra work to one reflection/refraction per visible surface.
+    for (Portal& p : portals) {
+        p.mirrors.resize(p.shown);
+        if (d.surfaces.reflection) {
+            for (u32 k = 0; k < p.shown; ++k)
+                for (const Mirror& source : mirrors) {
+                    Mirror reflected = source;
+                    mirror_picture(reflected, p.cameras[k], p.chain[k].camera.window, {source.id, p.id, k});
+                    if (reflected.view)
+                        p.mirrors[k].push_back(std::move(reflected));
+                }
+        }
+    }
+
     // Portals in mirrors: where a portal shows in a mirror's picture, a picture of what is beyond it as the mirror's
     // camera sees it (one level: the portals in that are stand-ins), for the mirror's picture to show.
     if (d.surfaces.window)
@@ -644,7 +696,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
                     continue;
                 const PlanarPicture3D picture = planar_picture(*seen, p.frame);
                 // (Its views are the portal's own entry's, keyed by the mirror too.)
-                View3D* view = d.view(p.id ^ (m.id * 0x9e3779b97f4a7c15ull), 0, picture.size, p.frame, options, scene);
+                View3D* view = d.view({p.id, m.id}, 0, picture.size, p.frame, options, scene);
                 if (!view)
                     continue;
                 PlanarView3D level = portal_view(m.frame_camera, p.pose, p.exit, aspect);
@@ -701,8 +753,24 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     }
     for (Portal& p : portals) {
         for (u32 k = p.shown; k-- > 0 && errors.empty();) {
+            (void)scene.set_draw_material(p.draw, p.stand_in);
+            for (const Mirror& m : p.mirrors[k]) {
+                if (!picture(*m.view, m.seen.camera))
+                    break;
+                if (m.below_view) {
+                    const Fog3D fog = scene.fog;
+                    scene.fog = m.murk;
+                    (void)picture(*m.below_view, m.below.camera);
+                    scene.fog = fog;
+                }
+            }
+            for (const Mirror& m : p.mirrors[k])
+                (void)scene.set_draw_material(m.draw, m.real);
             (void)scene.set_draw_material(p.draw, k + 1 < p.shown ? p.levels[k + 1] : p.stand_in);
-            if (!picture(*p.views[k], p.chain[k].camera))
+            const bool ok = errors.empty() && picture(*p.views[k], p.chain[k].camera);
+            for (const Mirror& m : p.mirrors[k])
+                (void)scene.set_draw_material(m.draw, m.stand_in);
+            if (!ok)
                 break;
         }
         (void)scene.set_draw_material(p.draw, p.stand_in);

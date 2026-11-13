@@ -63,11 +63,13 @@ public:
     // Draws the surfaces of `world`'s enabled Mirror3D and Portal3D entities (placed by their RenderTransform3D when
     // enabled, else WorldTransform3D) into `scene`, after the rest of it is collected and with its camera the view's,
     // and renders the pictures they need: a mirror's when it is on screen, a portal's level by level while the level
-    // before sees it (Portal3D::depth), deepest first, each with the other planar surfaces as stand-ins. `scene` is
-    // then ready for the view: render it. `view_size` is the view's, `like` its options (the pictures keep its
-    // background; one sample, no bloom, no picking, and not HDR: linear light clamped at white, which an HDR view
-    // tonemaps once with the rest of its picture). Views are kept from one call to the next,
-    // one a mirror and one a portal's level, made again when the size changes, and dropped with their entities.
+    // before sees it (Portal3D::depth), deepest first. Mirrors and refracting water seen through a portal get pictures
+    // of their own from that portal level's camera; other planar surfaces inside those pictures are stand-ins.
+    // Registers every enabled portal in scene.gi_portals for GI light transport, including off-screen ones. `scene`
+    // is then ready for the view: render it. `view_size` is the view's, `like` its options (the pictures keep its
+    // background and samples, without bloom, picking or HDR tonemapping; compressed linear light is read back by
+    // their surfaces). Views are kept from one call to the next, keyed by surface and viewer, resized as needed,
+    // and dropped when no longer used.
     // `lit_by`: the view the scene is then rendered into, whose global illumination lights the pictures too (as it
     // stands: Renderer3D::render(view, scene, lit_by)); without it, a scene with GI has its pictures make their own.
     Status3D render(EcsWorld& world, Scene3D& scene, Vec2i view_size, const ViewOptions3D& like = {},

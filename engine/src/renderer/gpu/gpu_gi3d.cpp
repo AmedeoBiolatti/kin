@@ -133,7 +133,13 @@ struct GiTraceUniforms {
     f32 environment_matrix[16];
     f32 ambient[4];
     f32 ground[4];
+    struct Portal {
+        f32 to_entry[16], through[16];
+        f32 opening[4]; // half width, half height
+    } portals[8];
+    u32 portal_count[4];
 };
+static_assert(sizeof(GiTraceUniforms::Portal) == 144); // std140's array stride (two mat4s and a vec4)
 
 // gi_probe_update.comp's Params.
 struct GiUpdateUniforms {
@@ -457,7 +463,7 @@ void GpuRenderer3D::make_gi() {
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 1, 1, 1, 1);
         _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 8, 8, 3, 0);
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
-        _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 1, 0, 1);
+        _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 8, 3, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
         _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 8, 0, 3, 0, 8, 8);
         _gi_surface = make_gi_compute(handle, "gi_surface.comp.spv", 5, 0, 3, 0, 8, 8);
@@ -2685,12 +2691,36 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
         const LinearRgb up = lights.ambient, down = lights.ground_ambient.enabled ? lights.ground_ambient.color : up;
         put4(u.ambient, up.r, up.g, up.b, 0.0f);
         put4(u.ground, down.r, down.g, down.b, 0.0f);
+        for (const GiPortal3D& portal : scene.gi_portals) {
+            if (u.portal_count[0] == std::size(u.portals))
+                break;
+            const f32 width = std::min(portal.entry.size.x, portal.exit.size.x);
+            const f32 height = std::min(portal.entry.size.y, portal.exit.size.y);
+            const auto finite = [](Vec3f p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); };
+            const Mat4f to_entry =
+                Mat4f::rotation(portal.entry.rotation.conjugate()) * Mat4f::translation(-portal.entry.position);
+            const Mat4f through = Mat4f::translation(portal.exit.position) *
+                                  Mat4f::rotation(portal_rotation(portal.entry, portal.exit)) *
+                                  Mat4f::translation(-portal.entry.position);
+            if (!(width > 0 && height > 0 && std::isfinite(width + height)) || !finite(portal.entry.position) ||
+                !finite(portal.exit.position) ||
+                !std::all_of(std::begin(to_entry.m), std::end(to_entry.m), [](f32 n) { return std::isfinite(n); }) ||
+                !std::all_of(std::begin(through.m), std::end(through.m), [](f32 n) { return std::isfinite(n); }))
+                continue;
+            auto& link = u.portals[u.portal_count[0]++];
+            std::memcpy(link.to_entry, to_entry.m, sizeof(link.to_entry));
+            std::memcpy(link.through, through.m, sizeof(link.through));
+            put4(link.opening, width * 0.5f, height * 0.5f, 0, 0);
+        }
         const SDL_GPUStorageBufferReadWriteBinding out{.buffer = g.rays->handle(), .cycle = true};
         SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &out, 1);
         if (!pass) {
             return false;
         }
-        const std::array<SDL_GPUTextureSamplerBinding, 7> samplers{
+        const bool area =
+            scene.global_illumination.emitters == GiEmitters3D::Exact && g.area_built && g.area_emitter_count > 0;
+        u.portal_count[1] = area ? g.area_explicit_count : 0;
+        const std::array<SDL_GPUTextureSamplerBinding, 8> samplers{
             SDL_GPUTextureSamplerBinding{g.distance.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.albedo.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.normal.handle(), _gi_sampler},
@@ -2698,11 +2728,14 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             SDL_GPUTextureSamplerBinding{g.probe_data.handle(), _gi_sampler},
             environment ? SDL_GPUTextureSamplerBinding{environment->specular.handle(), _environment_sampler}
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
-            SDL_GPUTextureSamplerBinding{g.radiance_back.handle(), _gi_sampler}};
-        SDL_GPUBuffer* list_buffer = g.batch_list->handle();
+            SDL_GPUTextureSamplerBinding{g.radiance_back.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.emission.handle(), _gi_sampler}};
+        const std::array<SDL_GPUBuffer*, 3> buffers{
+            g.batch_list->handle(), _gi_emitters ? _gi_emitters->handle() : _gi_empty->handle(),
+            area && g.area_explicit ? g.area_explicit->handle() : _gi_empty->handle()};
         SDL_BindGPUComputePipeline(pass, _gi_trace);
         SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
-        SDL_BindGPUComputeStorageBuffers(pass, 0, &list_buffer, 1);
+        SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), static_cast<u32>(buffers.size()));
         SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
         const std::array<u32, 2> groups = gi_groups(static_cast<u64>(batch.size()) * rays);
         SDL_DispatchGPUCompute(pass, groups[0], groups[1], 1);

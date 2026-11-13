@@ -3031,8 +3031,11 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   largest picture it has shown, so that a moving eye does not resize views, all their targets made again, every few
   frames; otherwise the view is the picture's size); a portal's levels while the level before sees it, each of
   where it shows within the level before, deepest first; a portal seen in a mirror, a picture of what is beyond it as the
-  mirror's camera sees through it (one level), drawn on the portal in the mirror's picture; each with the other planar
-  surfaces as stand-ins (a mirror as kin's own metal, water as its murk, a little see-through) and without the scene's
+  mirror's camera sees through it (one level), drawn on the portal in the mirror's picture. Each portal level also
+  renders the mirrors and refracting water it sees from its own camera, including surfaces off screen to the main
+  camera. Their reflection and refraction pictures have their own projectors and persistent views; those pictures
+  use other planar surfaces as stand-ins, bounding the nesting. The remaining stand-ins are a mirror as kin's own
+  metal, water as its murk, a little see-through. All pictures render without the scene's
   overlay
   (`Scene3D::show_overlay`: a first-person scene's hands are not in its mirrors). A scene with global illumination
   lights them by the view's (`PlanarViews3D::render`'s `lit_by`; `SceneSession3D` passes its view): what is seen
@@ -3045,6 +3048,18 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   The atrium's survivor (Kenney's, CC0) walks through its portals: yours to play from behind in the gallery's `atrium` (a
   physics capsule: WASD walk in the camera's frame, the mouse turns the camera, Space jumps, Shift runs; the camera
   follows it through a portal, seeing it through the other one), or walking its round by itself (`--camera 5`).
+- **Light through the opening.** With global illumination enabled, `PlanarViews3D` registers every enabled portal,
+  including ones off screen, in `Scene3D::gi_portals`. Probe rays entering the front of an opening continue from its
+  linked exit, with position and direction transformed as the portal camera's are. They carry sky light, emission
+  and the light leaving the source world's surfaces; geometry before and after the crossing still blocks them.
+  Exact area emitters restore their glow on this path alone, since their ordinary world-space direct integral does
+  not light through a portal. Both openings must have positive size; the smaller one limits the aperture. The first
+  eight valid links are traced, with at most four crossings sharing each ray's usual step budget. A cycle that uses
+  up that budget, or an exit outside the voxel field, contributes no light. Keep both ends and their surroundings
+  covered by the GI windows, and leave the opening clear in the voxelized geometry. Games collecting their own
+  planar views can fill `gi_portals` with `GiPortal3D` pairs;
+  `Scene3D::clear()` drops them. This carries GI light; analytic sun, point and spot terms and their shadow maps still
+  use ordinary world geometry, so sharp direct beams and specular virtual lights require separate transport.
 - **Going through.** `portal_step(world, from, to)` (Lua `scene3d.portal_step(from, to)`) tests a step against every
   enabled portal: where it ends, out of the exit, and the turn to give its facing and velocity (`turn`, a quaternion),
   or nothing (nil). `portal_poses(entity)` gives an entity's portal and its exit as the camera3d.hpp helpers take them.

@@ -6,12 +6,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <kin/ecs/render3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
+#include <kin/scene/planar_views3d.hpp>
 #include <string_view>
 #include <vector>
 
@@ -255,6 +258,15 @@ struct Gpu {
         const auto p = camera.project(world, rect);
         assert(p);
         return at(p->pos);
+    }
+    void capture(std::string_view name) const {
+        if (const char* folder = std::getenv("KIN_PLANAR_CAPTURE_DIR")) {
+            std::filesystem::create_directories(folder);
+            std::ofstream file(std::filesystem::path(folder) / (std::string(name) + ".ppm"), std::ios::binary);
+            file << "P6\n" << extent.x << ' ' << extent.y << "\n255\n";
+            for (std::size_t i = 0; i < pixels.size(); i += 4)
+                file.write(reinterpret_cast<const char*>(pixels.data() + i), 3);
+        }
     }
 };
 
@@ -500,6 +512,121 @@ void test_portal(Gpu& g, const SurfaceShader3D& window) {
     std::cout << "planar: portal\n";
 }
 
+// The mirror is outside the main camera's view, but visible through the portal. Its picture must be made for the
+// portal's camera: the green box's reflected image is below the floor, apart from the box seen directly above it.
+void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
+    for (const bool water : {false, true}) {
+        kin::EcsWorld world;
+        auto exit = world.raw().entity();
+        exit.set<WorldTransform3D>({Mat4f::translation({20, 1, 0})});
+        auto entry = world.raw().entity();
+        entry.set<WorldTransform3D>({Mat4f::translation({0, 1, 0})});
+        entry.set<Portal3D>({.size = {4, 4}, .exit = {exit.id()}});
+        auto floor = world.raw().entity();
+        floor.set<WorldTransform3D>({Mat4f::trs({20, 0, 3}, Quatf::axis_angle({1, 0, 0}, -90), {1, 1, 1})});
+        Mirror3D surface{.size = {8, 8}, .color = colors::white};
+        surface.metallic = water ? 0.0f : 1.0f;
+        surface.refraction = water ? 1.0f : 0.0f;
+        surface.refraction_distortion = 0;
+        surface.murk_depth = 100;
+        floor.set<Mirror3D>(surface);
+        PlanarViews3D planar{g.r3d, surfaces};
+        Scene3D scene;
+        scene.lights.sun.color = scene.lights.ambient = {0, 0, 0};
+        const auto compose = [&](float x) {
+            scene.clear();
+            assert(scene.gi_portals.empty());
+            scene.camera = Camera3D::look_at({x, 2, 6}, {0, 0, 0});
+            assert(scene.draw(g.box, at({20, water ? -1.0f : 1.0f, 4}), unlit(Color::rgb(20, 230, 20))));
+        };
+        compose(-0.4f);
+        PlanarViews3D stand_ins{g.r3d, {.window = surfaces.window}};
+        assert(stand_ins.render(world, scene, extent, {.samples = 1, .background = colors::black}));
+        g.frame(scene);
+        assert(g.at(scene.camera, {0, -1, -4}).g < 175);
+        g.capture(water ? "water-stand-in" : "mirror-stand-in");
+        // Move the eye too: a picture made for the main camera or the previous portal camera gives the wrong image.
+        for (const float x : {-0.4f, 0.4f}) {
+            compose(x);
+            assert(planar.render(world, scene, extent, {.samples = 1, .background = colors::black}));
+            assert(scene.gi_portals.size() == 1);
+            g.frame(scene);
+            const Rgb reflected = g.at(scene.camera, {0, -1, -4});
+            std::cerr << (water ? "water" : "mirror") << " through portal x=" << x << ": " << reflected.r << ','
+                      << reflected.g << ',' << reflected.b << '\n';
+            assert(reflected.g > 175 && reflected.g > reflected.r + 80 && reflected.g > reflected.b + 80);
+            assert(planar.views_rendered() == (water ? 3u : 2u));
+            if (x < 0)
+                g.capture(water ? "water-through-portal" : "mirror-through-portal");
+        }
+    }
+    std::cout << "planar: mirror and water through portal\n";
+}
+
+// A black partition separates two places. Only the linked aperture connects a white receiver to the green emitter
+// in the other place. A blocker on either segment must stop that light; reducing the opening must reduce it too.
+void test_portal_gi(Gpu& g) {
+    const auto run = [&](std::string_view name, bool linked, int blocker, f32 opening, bool front = true,
+                         GiEmitters3D emitters = GiEmitters3D::Exact) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0, 1.5f, 1}, {0, 1.5f, 3});
+        scene.lights.sun.color = scene.lights.ambient = {0, 0, 0};
+        scene.global_illumination = {
+            .enabled = true, .area = {{-4, -1, -4}, {12, 5, 5}}, .cell = 0.25f, .levels = 1, .side = 64, .height = 32};
+        scene.global_illumination.probes.per_render = 2048;
+        scene.global_illumination.probes.rays = 128;
+        scene.global_illumination.emitters = emitters;
+        const Material3D black{.color = colors::black};
+        const Material3D green{.color = Color::rgb(10, 255, 10), .emissive = 2};
+        assert(scene.draw(g.box, Mat4f::trs({4, 1.5f, 0}, {}, {0.5f, 8, 14}), black));
+        assert(scene.draw(g.box, Mat4f::trs({0, 1.5f, 3}, {}, {3, 3, 0.25f}), {.color = colors::white}));
+        assert(scene.draw(g.box, Mat4f::trs({8, 1.5f, 3}, {}, {4, 4, 0.25f}), green));
+        if (blocker)
+            assert(scene.draw(g.box, Mat4f::trs({blocker == 1 ? 0.0f : 8.0f, 1.5f, 0.75f}, {}, {5, 5, 0.25f}), black));
+        kin::EcsWorld world;
+        auto exit = world.raw().entity();
+        exit.set<WorldTransform3D>({Mat4f::translation({8, 1.5f, 0})});
+        exit.set<Portal3D>({.enabled = false, .size = {opening, opening}});
+        auto entry = world.raw().entity();
+        entry.set<WorldTransform3D>(
+            {Mat4f::trs({0, 1.5f, 0}, front ? Quatf{} : Quatf::axis_angle({0, 1, 0}, 180), {1, 1, 1})});
+        entry.set<Portal3D>({.enabled = linked, .size = {3, 3}, .exit = {exit.id()}});
+        PlanarViews3D planar{g.r3d};
+        assert(planar.render(world, scene, extent));
+        assert(scene.gi_portals.size() == (linked ? 1u : 0u));
+        assert(planar.views_rendered() == 0); // lighting crosses an off-screen portal without needing its picture
+        auto view = g.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+        assert(view);
+        for (int frame = 0; frame < 128; ++frame) {
+            g.r.clear(colors::black);
+            assert(g.r3d.render(view, scene));
+            if (frame == 127) {
+                g.r.draw_texture(view.texture(), rect);
+                Vec2i size;
+                assert(g.r.read_rgba(rect, g.pixels, size) && size == extent);
+            }
+            g.r.present();
+        }
+        const Rgb value = g.at({80, 60});
+        g.capture(name);
+        std::cerr << "portal GI " << name << ": " << value.r << ',' << value.g << ',' << value.b << '\n';
+        return value;
+    };
+    const Rgb closed = run("gi-unlinked", false, 0, 3);
+    const Rgb open = run("gi-linked", true, 0, 3);
+    const Rgb entry = run("gi-entry-blocked", true, 1, 3);
+    const Rgb exit = run("gi-exit-blocked", true, 2, 3);
+    const Rgb narrow = run("gi-narrow", true, 0, 0.25f);
+    const Rgb back = run("gi-back-facing", true, 0, 3, false);
+    const Rgb probes = run("gi-probes", true, 0, 3, true, GiEmitters3D::Probes);
+    assert(open.g > closed.g + 25 && open.g > open.r + 20);
+    assert(entry.g < open.g / 3 && exit.g < open.g / 3);
+    assert(narrow.g < open.g / 2);
+    assert(back.g < open.g / 3);
+    assert(std::abs(probes.g - open.g) <= 4); // the portal's emitter path is counted once with either strategy
+    std::cout << "planar: GI through portals\n";
+}
+
 } // namespace
 
 int main() {
@@ -535,4 +662,6 @@ int main() {
     test_render_part(g);
     test_mirror(g, reflection);
     test_portal(g, portal);
+    test_mirror_through_portal(g, {reflection, portal});
+    test_portal_gi(g);
 }
