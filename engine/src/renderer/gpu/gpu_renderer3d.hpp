@@ -1062,7 +1062,7 @@ private:
     RendererCapabilities3D _capabilities;
     GpuShader _indexed_vertex, _indexed_unlit_vertex, _indexed_unlit_textured_vertex, _indexed_prepass_vertex;
     GpuShader _draw_material_vertex;
-    std::array<GpuShader, 4> _draw_material_fragments; // base, fog, lights, lights+fog
+    std::array<GpuShader, 4> _draw_material_fragments;   // base, fog, lights, lights+fog
     std::array<GpuShader, 4> _opaque_material_fragments; // same shading, no unreachable alpha discard
     bool _draw_materials_available = false;
     GpuShader _vertex_shader;   // mesh.vert
@@ -1071,13 +1071,13 @@ private:
     bool _unlit_available = false;
     GpuShader _unlit_vertex_shader, _unlit_textured_vertex_shader;
     GpuShader _unlit_shader, _unlit_textured_shader, _unlit_mask_shader, _unlit_textured_mask_shader;
-    GpuShader _shadow_shader;        // shadow.frag
+    GpuShader _shadow_shader;         // shadow.frag
     GpuShader _shadow_restore_shader; // shadow_restore.frag, optional static-depth reuse
-    GpuShader _shadow_vertex_shader; // shadow.vert
-    GpuShader _fullscreen_shader;    // fullscreen.vert
-    GpuShader _bloom_shader;         // bloom.frag
-    GpuShader _output_shader;        // view_output.frag
-    GpuShader _pick_shader;          // pick.frag
+    GpuShader _shadow_vertex_shader;  // shadow.vert
+    GpuShader _fullscreen_shader;     // fullscreen.vert
+    GpuShader _bloom_shader;          // bloom.frag
+    GpuShader _output_shader;         // view_output.frag
+    GpuShader _pick_shader;           // pick.frag
     GpuShader _visibility_shader, _visibility_mask_shader;
     GpuShader _shadow_mask_shader;             // shadow_mask.frag
     GpuShader _shadow_mask_vertex_shader;      // shadow_mask.vert
@@ -1516,7 +1516,7 @@ private:
         bool caster = false;                 // drawn into the shadow map
         Vec3f center{};                      // the mesh's bounding sphere
         f32 radius = 0.0f;
-        u32* cascade_first = nullptr;                         // active per-cascade outputs in _ref_results
+        u32* cascade_first = nullptr; // active per-cascade outputs in _ref_results
         u32* cascade_count = nullptr;
         // With levels of detail (Scene3D::lod, a mesh with levels): the copies are grouped by the level each is
         // drawn at, and within a level the seen ones come first, then the sun's. `levels` is 1 without, and then
