@@ -48,7 +48,9 @@ void main() {
     if (any(greaterThanEqual(xy, ivec2(params.sizes.xy)))) return;
     vec4 light = texelFetch(uLight, xy, 0), slope = texelFetch(uSlope, xy, 0);
     const vec2 shares = texelFetch(uCoverage, xy, 0).rg;
-    float coverage = shares.r;
+    // Low visibility is evidence of occlusion, not missing sky coverage. Even when no safe donor exists, keep the
+    // conservative probe estimate rather than admitting unoccluded environment light. Only domain/readiness fades.
+    const float coverage = shares.g;
     const float confidence = shares.g > 0.001 ? clamp(shares.r / shares.g, 0.0, 1.0) : 1.0;
     vec3 p, n;
     if (light.a > 0.0 && confidence < 0.98 && receiver(xy, p, n)) {
@@ -79,7 +81,6 @@ void main() {
                 const float amount = 1.0 - smoothstep(0.85, 0.98, confidence);
                 light.rgb = mix(light.rgb, sum / total, amount);
                 slope = mix(slope, sum_slope / total, amount);
-                coverage = mix(coverage, shares.g, amount);
                 break;
             }
         }

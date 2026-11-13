@@ -280,9 +280,10 @@ void resolve_contracts(Window& window) {
 void surface_reconstruction_contracts(Window& window) {
     gpu::GpuDevice device(window);
     gpu_ready = true;
-    for (const std::string name : {"plane_hole", "wide_hole", "perspective", "dark_neighbours", "window_fade",
-                                   "outside_window", "untraced", "normal_boundary", "depth_boundary", "disconnected",
-                                   "world_bound", "legitimate_dark", "no_donor", "odd_edge"}) {
+    for (const std::string name :
+         {"plane_hole", "wide_hole", "perspective", "dark_neighbours", "window_fade", "outside_window", "untraced",
+          "normal_boundary", "depth_boundary", "disconnected", "world_bound", "legitimate_dark", "no_donor",
+          "partial_confidence", "weak_visibility", "odd_edge"}) {
         Fixture f(device, 65, 49);
         const int cx = name == "odd_edge" ? f.hw - 1 : f.hw / 2;
         const int cy = name == "odd_edge" ? f.hh - 1 : f.hh / 2;
@@ -323,6 +324,10 @@ void surface_reconstruction_contracts(Window& window) {
                     shares[i * 2] = shares[i * 2 + 1] = 0;
                 if (missing && name == "legitimate_dark")
                     shares[i * 2] = 1;
+                if (missing && name == "partial_confidence")
+                    shares[i * 2] = .92f;
+                if (missing && name == "weak_visibility")
+                    shares[i * 2] = .99f;
                 for (int dy = 0; dy < 2; ++dy) {
                     for (int dx = 0; dx < 2; ++dx) {
                         const int px = std::min(x * 2 + dx, f.width - 1), py = std::min(y * 2 + dy, f.height - 1);
@@ -391,9 +396,14 @@ void surface_reconstruction_contracts(Window& window) {
                               name == "dark_neighbours" || name == "window_fade" || name == "odd_edge";
         for (int c = 0; c < 3; ++c) {
             const float expected = repaired && name != "dark_neighbours" ? .04f * (c + 1) : 0;
-            need(std::abs(result[c] - expected) < .001f, name + ": borrowed incorrect surface lighting");
+            if (name == "partial_confidence")
+                need(result[c] > .005f && result[c] < .04f * (c + 1), name + ": missing partial donor contribution");
+            else
+                need(std::abs(result[c] - expected) < .001f, name + ": borrowed incorrect surface lighting");
         }
-        const float expected_coverage = repaired ? (name == "window_fade" ? .4f : 1.f) : shares[(cy * f.hw + cx) * 2];
+        // Neither a failed neighbour search nor a partial repair may reintroduce the unoccluded sky. Only the
+        // receiver's domain/readiness share controls replacement, including when its conservative light is zero.
+        const float expected_coverage = shares[(cy * f.hw + cx) * 2 + 1];
         need(std::abs(coverage_at(f, cx, cy) - expected_coverage) < .001f,
              name + ": changed window/readiness coverage");
         need(std::abs(result[3] - 1) < .001f, name + ": changed receiver depth");

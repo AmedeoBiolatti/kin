@@ -200,10 +200,9 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
     // Forced visibility-floor weights retain at most .0045 after crushing: every probe round the point is hidden from
     // it (a tight spot the probes are too far apart for: under a ball on a plinth, a crease). Normalizing those tiny
     // weights must not restore the probes' full light there (filtered with a neighbour's, it would leak in): it goes
-    // with the confidence. Nor is the answer no light (pitch black where a path tracer finds the sky's light coming in
-    // from the side): the probes say little, and seven tenths of their share goes with it, the caller's ambient or
-    // environment taking that (a tight spot dimmed as a crease is, not lit as the open floor). Bounce feedback retains
-    // its original estimator.
+    // with the confidence. Keep that loss separate from domain/readiness support: gi_surface uses it to reconstruct
+    // the receiver from nearby reliable lighting. The display's ambient replacement uses support alone; a failed or
+    // partial repair must not admit unoccluded sky. Bounce feedback retains its original estimator.
     const float retained = total / max(unoccluded_total, 1e-30);
     const float confidence = smoothstep(0.0045, 0.05, retained);
     for (int j = 0; j < 4; ++j) {

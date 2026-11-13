@@ -1279,9 +1279,11 @@ the plan's G5b results.
   texels and two finest probe spacings in world space; intermediate depth/normal checks reject shortcuts across
   silhouettes, gaps and corners. Its plane tolerance is 2% of a finest spacing, at least 5 mm. This is a geometric
   receiver match, not an object/material ID. Borrowed light restores only the receiver's own domain/readiness share:
-  it cannot extend the GI window or make untraced probes ready. Reliable dark lighting stays dark. Without a valid
-  neighbour, the existing dimmed ambient fallback remains. Raw light/slope histories stay raw; the repaired outputs
-  are separate, so parallel invocations never read a neighbour they are writing. Extra half-size storage is 20 bytes
+  it cannot extend the GI window or make untraced probes ready. Reliable dark lighting stays dark. Visibility loss
+  never admits unoccluded sky: when no valid neighbour exists, the receiver keeps its conservative probe estimate.
+  This also applies to partial repairs; only the domain/readiness share permits ambient replacement. Raw light/slope
+  histories stay raw; the repaired outputs are separate, so parallel invocations never read a neighbour they are
+  writing. Extra half-size storage is 20 bytes
   a texel (raw coverage plus repaired light/slope): about 4.4 MiB at 1280 x 720, 17.6 MiB at 2560 x 1440. A
   room the size of the atrium does best in one window (`side` x `height` x `side` cells over the whole area: it stays,
   and walking or a portal that carries the camera across does not start the probes over). It turns that light to the
