@@ -131,7 +131,7 @@ vec3 kin_gi_atlas(ivec3 stored, vec3 n, float tile, vec3 counts, float levels) {
 // (`count` of them, up to 4) into `light`, the look-up moved to `biased` (world); false where none of the eight has
 // light to give (asleep, in a wall, not yet traced).
 bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 grid, vec3 ways[4], int count,
-                        out vec3 light[4], out float coverage) {
+                        out vec3 light[4], out float coverage, out float support) {
     const ivec3 counts = ivec3(g.counts.xyz);
     const ivec3 base = clamp(ivec3(floor(grid)), ivec3(0), max(counts - 2, ivec3(0)));
     const vec3 alpha = clamp(grid - vec3(base), 0.0, 1.0);
@@ -194,7 +194,8 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
     for (int j = 0; j < 4; ++j) {
         light[j] = total > 0.0 ? sum[j] / total : vec3(0.0);
     }
-    coverage = possible > 0.0 ? clamp(ready / possible, 0.0, 1.0) : 0.0;
+    support = possible > 0.0 ? clamp(ready / possible, 0.0, 1.0) : 0.0;
+    coverage = support;
 #ifdef KIN_GI_RESOLVE_VISIBILITY
     // Forced visibility-floor weights retain at most .0045 after crushing: every probe round the point is hidden from
     // it (a tight spot the probes are too far apart for: under a ball on a plinth, a crease). Normalizing those tiny
@@ -223,9 +224,10 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
 // level's probes have anything for `p`. `coverage` is their share of the lighting: the rest must come from the
 // caller's ambient/environment fallback, including at the outermost window. `light` is not premultiplied by it.
 bool kin_gi_blended_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, bool fade_outer,
-                          out vec3 light[4], out float coverage) {
+                          out vec3 light[4], out float coverage, out float support) {
     light = vec3[4](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
     coverage = 0.0;
+    support = 0.0;
     const int levels = int(g.bias.w);
     const vec3 last = g.counts.xyz - 1.0;
     for (int k = 0; k < levels; ++k) {
@@ -236,8 +238,8 @@ bool kin_gi_blended_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[
             continue;
         }
         vec3 here[4];
-        float ready;
-        if (!kin_gi_level_light(g, k, p, biased, n, grid, ways, count, here, ready)) {
+        float ready, available;
+        if (!kin_gi_level_light(g, k, p, biased, n, grid, ways, count, here, ready, available)) {
             continue;
         }
         // Storage scrolls a whole voxel block at a time. The fade follows the camera continuously, inset by half
@@ -252,6 +254,7 @@ bool kin_gi_blended_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[
         // ambient. Feedback likewise keeps its outer light (the output fallback is not lost bounce energy).
         const float inside = stationary || (!fade_outer && k == levels - 1)
                                  ? 1.0 : smoothstep(0.0, width, min(min(edge.x, edge.y), edge.z));
+        support += (1.0 - support) * inside * available;
         const float share = (1.0 - coverage) * inside * ready;
         for (int j = 0; j < count; ++j) {
             light[j] += share * here[j];
@@ -271,14 +274,22 @@ bool kin_gi_blended_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[
 
 bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, out vec3 light[4],
                   out float coverage) {
-    return kin_gi_blended_light(g, p, n, to_eye, ways, count, true, light, coverage);
+    float support;
+    return kin_gi_blended_light(g, p, n, to_eye, ways, count, true, light, coverage, support);
+}
+
+// Display reconstruction needs domain/readiness separately from visibility confidence: a visibility hole must not
+// acquire the unoccluded sky lighting used outside a probe window.
+bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, out vec3 light[4],
+                  out float coverage, out float support) {
+    return kin_gi_blended_light(g, p, n, to_eye, ways, count, true, light, coverage, support);
 }
 
 // Feedback lighting has no ambient replacement here (the voxel shader already adds the sky's direct light).
 // Keep the original helpers for shader users, returning the probes' weighted contribution.
 bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, out vec3 light[4]) {
-    float coverage;
-    const bool have = kin_gi_blended_light(g, p, n, to_eye, ways, count, false, light, coverage);
+    float coverage, support;
+    const bool have = kin_gi_blended_light(g, p, n, to_eye, ways, count, false, light, coverage, support);
     for (int j = 0; j < count; ++j) {
         light[j] *= coverage;
     }

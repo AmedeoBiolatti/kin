@@ -4446,6 +4446,8 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     bytes += gi.light ? static_cast<u64>(gi.light.width()) * gi.light.height() * 16 : 0u;
     bytes += gi.last_light ? static_cast<u64>(gi.last_light.width()) * gi.last_light.height() * 16 : 0u;
     bytes += gi.coverage ? static_cast<u64>(gi.coverage.width()) * gi.coverage.height() * 2 : 0u;
+    bytes += gi.raw_coverage ? static_cast<u64>(gi.raw_coverage.width()) * gi.raw_coverage.height() * 4 : 0u;
+    bytes += gi.surface_light ? static_cast<u64>(gi.surface_light.width()) * gi.surface_light.height() * 16 : 0u;
     for (const std::shared_ptr<GpuBuffer>& b :
          {gi.owners, gi.seeds, gi.rays, gi.place_list, gi.batch_list, gi.light_list}) {
         bytes += b ? b->size() : 0u;

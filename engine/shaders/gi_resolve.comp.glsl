@@ -22,7 +22,7 @@ layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uLight; // rgb: 
                                                                          // light there; 0: nothing drawn)
 layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D uSlope; // xyz: g, the brightness's change with the
                                                                          // way faced, over the brightness (world); w: k
-layout(set = 1, binding = 2, r16f) uniform writeonly image2D uCoverage; // probe share; the main pass supplies the rest
+layout(set = 1, binding = 2, rg16f) uniform writeonly image2D uCoverage; // r: visible probe share; g: domain/readiness before visibility
 
 layout(set = 0, binding = 7) uniform sampler2D uPastNormals;
 
@@ -93,8 +93,8 @@ void main() {
     const vec3 ways[4] = vec3[4](n, c * n + s * t, c * n + s * (-0.5 * t + 0.8660254 * b),
                                  c * n + s * (-0.5 * t - 0.8660254 * b));
     vec3 light[4];
-    float coverage;
-    if (!kin_gi_light(params.probes, p, n, to_eye, ways, 4, light, coverage)) {
+    float coverage, support;
+    if (!kin_gi_light(params.probes, p, n, to_eye, ways, 4, light, coverage, support)) {
         imageStore(uLight, xy, vec4(0.0, 0.0, 0.0, min(seen.z, -1e-4))); // the main pass keeps the sky's light
         imageStore(uSlope, xy, vec4(0.0, 0.0, 0.0, 1.0));
         imageStore(uCoverage, xy, vec4(0.0));
@@ -154,5 +154,5 @@ void main() {
     imageStore(uLight, xy, vec4(now, max(-seen.z, 1e-4)));
     imageStore(uSlope, xy, slope);
     // Coverage follows the current window, not temporal history: old support must not linger outside it.
-    imageStore(uCoverage, xy, vec4(coverage));
+    imageStore(uCoverage, xy, vec4(coverage, support, 0.0, 0.0));
 }

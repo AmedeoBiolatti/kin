@@ -1272,10 +1272,17 @@ the plan's G5b results.
   current window immediately; old lighting history cannot keep GI alive outside it. The light and slope are
   filtered: those on its own surface (their depth on the fragment's depth plane: a rim's side, as deep as its top at
   their edge, is not its top's), else the nearest to it (a thin thing between texels); for what the pre-pass did not
-  draw (glass, in front of what it shows) all four. Where every probe round a point was hidden from it (a tight spot
-  the probes are too far apart for: under a ball on a plinth, a crease) the texel's coverage is low, and the pixel
-  takes its own surface's light from round it (texels on two rings, two and four out, on its plane, with more
-  coverage); failing that, seven tenths of the probes' share goes to the ambient light: dimmed, never pitch black. A
+  draw (glass, in front of what it shows) all four. Visibility holes are reconstructed once at half resolution,
+  before beauty shading: the raw resolve keeps domain/readiness coverage separately from visibility coverage in an
+  RG16F target. A surface with poor visibility takes reliable light from the nearest ring of receivers on its plane
+  and facing the same way (normal dot product above 0.98). The eight-direction search reaches at most 64 half-size
+  texels and two finest probe spacings in world space; intermediate depth/normal checks reject shortcuts across
+  silhouettes, gaps and corners. Its plane tolerance is 2% of a finest spacing, at least 5 mm. This is a geometric
+  receiver match, not an object/material ID. Borrowed light restores only the receiver's own domain/readiness share:
+  it cannot extend the GI window or make untraced probes ready. Reliable dark lighting stays dark. Without a valid
+  neighbour, the existing dimmed ambient fallback remains. Raw light/slope histories stay raw; the repaired outputs
+  are separate, so parallel invocations never read a neighbour they are writing. Extra half-size storage is 20 bytes
+  a texel (raw coverage plus repaired light/slope): about 4.4 MiB at 1280 x 720, 17.6 MiB at 2560 x 1440. A
   room the size of the atrium does best in one window (`side` x `height` x `side` cells over the whole area: it stays,
   and walking or a portal that carries the camera across does not start the probes over). It turns that light to the
   normal map's

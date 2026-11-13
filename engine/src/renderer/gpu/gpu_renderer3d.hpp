@@ -506,6 +506,8 @@ private:
         // The probes' light on the view (gi_resolve.comp's; RGBA16F, half its size), and the render before's, which it
         // keeps from (the pairs take turns), with that render's view.
         GpuTexture light, slope, last_light, last_slope;
+        GpuTexture raw_coverage;                 // RG16F: visible share and domain/readiness before visibility
+        GpuTexture surface_light, surface_slope; // reconstructed receivers; raw light/slope retain temporal history
         GpuTexture coverage; // R16F, half size; current window/probe support, without temporal history
         // Area lights (GlobalIllumination3D::area_lights; gpu_area_lights3d.hpp): the copies' triangles in a hierarchy
         // and the emitters as the shaders read them (made again when the copies change), the GI emitters they light
@@ -967,6 +969,7 @@ private:
     SDL_GPUComputePipeline* _gi_trace = nullptr;      // gi_probe_trace.comp
     SDL_GPUComputePipeline* _gi_update = nullptr;     // gi_probe_update.comp
     SDL_GPUComputePipeline* _gi_resolve = nullptr;    // gi_resolve.comp
+    SDL_GPUComputePipeline* _gi_surface = nullptr;    // gi_surface.comp
     SDL_GPUComputePipeline* _gi_area = nullptr;       // gi_area.comp
     SDL_GPUComputePipeline* _gi_area_fill = nullptr;  // gi_area_fill.comp
     SDL_GPUSampler* _gi_linear = nullptr;             // filtered, clamped on all three axes

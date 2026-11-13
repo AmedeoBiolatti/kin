@@ -49,7 +49,7 @@ float half(u16 v) {
 struct Fixture {
     gpu::GpuDevice& device;
     SDL_GPUDevice* d;
-    int width, height, hw, hh;
+    int width, height, hw, hh, coverage_channels = 2;
     std::vector<gpu::GpuTexture> inputs;
     gpu::GpuTexture light, slope, coverage;
     SDL_GPUSampler* sampler = nullptr;
@@ -69,7 +69,7 @@ struct Fixture {
         inputs.push_back(dev.create_target(w, h, SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT, use));
         light = dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, use);
         slope = dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, use);
-        coverage = dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, use);
+        coverage = dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, use);
         SDL_GPUSamplerCreateInfo sample{};
         sample.min_filter = sample.mag_filter = SDL_GPU_FILTER_LINEAR;
         sample.address_mode_u = sample.address_mode_v = sample.address_mode_w =
@@ -192,10 +192,13 @@ struct Fixture {
         SDL_DispatchGPUCompute(pass, (hw + 7) / 8, (hh + 7) / 8, 1);
         SDL_EndGPUComputePass(pass);
         complete(d, cmd);
+        return read(x, y);
+    }
+    std::array<float, 4> read(int x, int y) {
         SDL_GPUTransferBufferCreateInfo info{.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, .size = u32(hw * hh * 8)};
         auto* transfer = SDL_CreateGPUTransferBuffer(d, &info);
         need(transfer, "download buffer unavailable");
-        cmd = SDL_AcquireGPUCommandBuffer(d);
+        auto* cmd = SDL_AcquireGPUCommandBuffer(d);
         auto* copy = SDL_BeginGPUCopyPass(cmd);
         need(copy, "download pass failed");
         SDL_GPUTextureRegion source{.texture = light.handle(), .w = u32(hw), .h = u32(hh), .d = 1};
@@ -219,8 +222,9 @@ struct Fixture {
 } // namespace
 
 namespace {
-float coverage_at(Fixture& f) {
-    SDL_GPUTransferBufferCreateInfo info{.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, .size = u32(f.hw * f.hh * 2)};
+float coverage_at(Fixture& f, int x = 1, int y = 1, int channel = 0) {
+    SDL_GPUTransferBufferCreateInfo info{.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+                                         .size = u32(f.hw * f.hh * f.coverage_channels * 2)};
     auto* transfer = SDL_CreateGPUTransferBuffer(f.d, &info);
     need(transfer, "coverage buffer unavailable");
     auto* cmd = SDL_AcquireGPUCommandBuffer(f.d);
@@ -234,7 +238,7 @@ float coverage_at(Fixture& f) {
     complete(f.d, cmd);
     auto* bytes = static_cast<const u16*>(SDL_MapGPUTransferBuffer(f.d, transfer, false));
     need(bytes, "coverage map unavailable");
-    const float result = half(bytes[f.hw + 1]);
+    const float result = half(bytes[(y * f.hw + x) * f.coverage_channels + channel]);
     SDL_UnmapGPUTransferBuffer(f.d, transfer);
     SDL_ReleaseGPUTransferBuffer(f.d, transfer);
     return result;
@@ -246,7 +250,7 @@ void resolve_contracts(Window& window) {
     for (const std::string name : {"visible", "blocked", "dark", "missing", "background"}) {
         Fixture f(device, 8, 8);
         f.params.previous_eye[3] = 0;
-        float expected = 1, coverage = 1;
+        float expected = 1, coverage = 1, support = 1;
         if (name == "blocked") {
             // Bright probes whose moment field completely occludes the receiver must not normalize to full light, and
             // give up seven tenths of their share (the caller's ambient takes that: dim, not black).
@@ -259,16 +263,142 @@ void resolve_contracts(Window& window) {
         } else if (name == "missing") {
             for (size_t i = 3; i < f.probe_data.size(); i += 4)
                 f.probe_data[i] = 0;
-            expected = coverage = 0;
+            expected = coverage = support = 0;
         } else if (name == "background") {
             std::fill(f.depth.begin(), f.depth.end(), 0);
-            expected = coverage = 0;
+            expected = coverage = support = 0;
         }
         const auto light = f.run();
         for (int c = 0; c < 3; ++c)
             need(std::abs(light[c] - expected) < .001f, name + ": wrong raw GI");
         need(std::abs(coverage_at(f) - coverage) < .001f, name + ": wrong coverage");
+        need(std::abs(coverage_at(f, 1, 1, 1) - support) < .001f, name + ": wrong domain/readiness");
         std::cout << "GI resolve " << name << ": light " << light[0] << ", coverage " << coverage << '\n';
+    }
+}
+
+void surface_reconstruction_contracts(Window& window) {
+    gpu::GpuDevice device(window);
+    gpu_ready = true;
+    for (const std::string name : {"plane_hole", "wide_hole", "perspective", "dark_neighbours", "window_fade",
+                                   "outside_window", "untraced", "normal_boundary", "depth_boundary", "disconnected",
+                                   "world_bound", "legitimate_dark", "no_donor", "odd_edge"}) {
+        Fixture f(device, 65, 49);
+        const int cx = name == "odd_edge" ? f.hw - 1 : f.hw / 2;
+        const int cy = name == "odd_edge" ? f.hh - 1 : f.hh / 2;
+        const int hole_radius = name == "wide_hole" ? 6 : 2;
+        const auto hole = [&](int x, int y) {
+            return std::abs(x - cx) <= hole_radius && std::abs(y - cy) <= hole_radius;
+        };
+        if (name == "perspective") {
+            auto camera = Camera3D::look_at({}, {0, 0, -1}, 90);
+            camera.z_near = .1f;
+            camera.z_far = 10;
+            const auto projection = camera.projection_matrix(float(f.width) / f.height), inverse = projection.inverse();
+            f.params.unproject_xy[0] = inverse.at(0, 0);
+            f.params.unproject_xy[1] = inverse.at(1, 1);
+            f.params.unproject_xy[2] = inverse.at(0, 3);
+            f.params.unproject_xy[3] = inverse.at(1, 3);
+            f.params.unproject_zw[0] = inverse.at(2, 2);
+            f.params.unproject_zw[1] = inverse.at(2, 3);
+            f.params.unproject_zw[2] = inverse.at(3, 2);
+            f.params.unproject_zw[3] = inverse.at(3, 3);
+            std::fill(f.depth.begin(), f.depth.end(), projection.apply_projective({0, 0, -1}).z);
+        }
+        std::vector<float> raw(f.hw * f.hh * 4), slope(raw.size(), 0), shares(f.hw * f.hh * 2, 1);
+        for (int y = 0; y < f.hh; ++y) {
+            for (int x = 0; x < f.hw; ++x) {
+                const int i = y * f.hw + x;
+                const bool missing = hole(x, y);
+                raw[i * 4 + 3] = slope[i * 4 + 3] = 1;
+                for (int c = 0; c < 3; ++c)
+                    raw[i * 4 + c] = missing || name == "dark_neighbours" ? 0 : .04f * (c + 1);
+                if (missing || name == "no_donor")
+                    shares[i * 2] = .3f;
+                if (missing && name == "window_fade") {
+                    shares[i * 2] = .12f;
+                    shares[i * 2 + 1] = .4f;
+                }
+                if (missing && (name == "outside_window" || name == "untraced"))
+                    shares[i * 2] = shares[i * 2 + 1] = 0;
+                if (missing && name == "legitimate_dark")
+                    shares[i * 2] = 1;
+                for (int dy = 0; dy < 2; ++dy) {
+                    for (int dx = 0; dx < 2; ++dx) {
+                        const int px = std::min(x * 2 + dx, f.width - 1), py = std::min(y * 2 + dy, f.height - 1);
+                        const int pixel = py * f.width + px;
+                        if (!missing && name == "normal_boundary")
+                            f.normals[pixel * 2] = 1;
+                        if (!missing && name == "depth_boundary")
+                            f.depth[pixel] = (f.params.unproject_zw[1] + 2 * f.params.unproject_zw[3]) /
+                                             (-2 * f.params.unproject_zw[2] - f.params.unproject_zw[0]);
+                        const int distance = std::max(std::abs(x - cx), std::abs(y - cy));
+                        if (name == "disconnected" && distance >= 3 && distance <= 5)
+                            f.depth[pixel] = 0;
+                    }
+                }
+            }
+        }
+        constexpr auto usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+        f.inputs.push_back(device.create_target(f.hw, f.hh, SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT, usage));
+        f.upload(0, f.width, f.height, 1, f.depth);
+        f.upload(1, f.width, f.height, 1, f.normals);
+        f.upload(5, f.hw, f.hh, 1, raw);
+        f.upload(6, f.hw, f.hh, 1, slope);
+        f.upload(8, f.hw, f.hh, 1, shares);
+        f.coverage = device.create_target(f.hw, f.hh, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, usage);
+        f.coverage_channels = 1;
+        SDL_ReleaseGPUComputePipeline(f.d, f.pipeline);
+        f.pipeline = nullptr;
+        const auto code = gi_test_shaders("gi_surface.comp.spv");
+        SDL_GPUComputePipelineCreateInfo info{};
+        info.code = code.data();
+        info.code_size = code.size();
+        info.entrypoint = "main";
+        info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+        info.num_samplers = 5;
+        info.num_readwrite_storage_textures = 3;
+        info.num_uniform_buffers = 1;
+        info.threadcount_x = info.threadcount_y = 8;
+        info.threadcount_z = 1;
+        f.pipeline = SDL_CreateGPUComputePipeline(f.d, &info);
+        need(f.pipeline, "surface reconstruction pipeline unavailable");
+        struct SurfaceParams {
+            float to_world[16], xy[4], zw[4], sizes[4], repair[4];
+        } params{};
+        static_assert(sizeof(params) == 128);
+        std::memcpy(&params, &f.params, 112);
+        params.repair[0] = name == "world_bound" ? .01f : 2;
+        params.repair[1] = .005f;
+        auto* cmd = SDL_AcquireGPUCommandBuffer(f.d);
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> targets{
+            {{.texture = f.light.handle()}, {.texture = f.slope.handle()}, {.texture = f.coverage.handle()}}};
+        auto* pass = SDL_BeginGPUComputePass(cmd, targets.data(), 3, nullptr, 0);
+        need(pass, "surface reconstruction pass unavailable");
+        const std::array<SDL_GPUTextureSamplerBinding, 5> samplers{{{f.inputs[0].handle(), f.sampler},
+                                                                    {f.inputs[1].handle(), f.sampler},
+                                                                    {f.inputs[5].handle(), f.sampler},
+                                                                    {f.inputs[6].handle(), f.sampler},
+                                                                    {f.inputs[8].handle(), f.sampler}}};
+        SDL_BindGPUComputePipeline(pass, f.pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), 5);
+        SDL_PushGPUComputeUniformData(cmd, 0, &params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, (f.hw + 7) / 8, (f.hh + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+        complete(f.d, cmd);
+        const auto result = f.read(cx, cy);
+        const bool repaired = name == "plane_hole" || name == "wide_hole" || name == "perspective" ||
+                              name == "dark_neighbours" || name == "window_fade" || name == "odd_edge";
+        for (int c = 0; c < 3; ++c) {
+            const float expected = repaired && name != "dark_neighbours" ? .04f * (c + 1) : 0;
+            need(std::abs(result[c] - expected) < .001f, name + ": borrowed incorrect surface lighting");
+        }
+        const float expected_coverage = repaired ? (name == "window_fade" ? .4f : 1.f) : shares[(cy * f.hw + cx) * 2];
+        need(std::abs(coverage_at(f, cx, cy) - expected_coverage) < .001f,
+             name + ": changed window/readiness coverage");
+        need(std::abs(result[3] - 1) < .001f, name + ": changed receiver depth");
+        std::cout << "GI surface reconstruction " << name << ": light " << result[0] << ", coverage "
+                  << coverage_at(f, cx, cy) << '\n';
     }
 }
 
@@ -546,6 +676,8 @@ int main(int argc, char** argv) {
         auto& window = app.create_window({.title = "GI regression checks", .width = 96, .height = 72, .hidden = true});
         if (argc == 1)
             resolve_contracts(window);
+        else if (std::string(argv[1]) == "surface-reconstruction")
+            surface_reconstruction_contracts(window);
         else if (std::string(argv[1]) == "surface-history")
             surface_history_contracts(window);
 #ifdef KIN_TEST_GI_HISTORY_WRAP
