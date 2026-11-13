@@ -10951,8 +10951,11 @@ void test_gpu_skinned_pose_updates() {
                     assert(st.draws == ref.draws && st.triangles == ref.triangles && st.culled == ref.culled);
                     assert(st.skinned_copies == ref.skinned_copies && st.skin_matrices == ref.skin_matrices);
                     assert(st.shadow_casters == ref.shadow_casters && st.cascade_casters == ref.cascade_casters);
-                    assert(st.local_shadow_casters == ref.local_shadow_casters &&
-                           st.local_shadow_triangles == ref.local_shadow_triangles);
+                    // Retained static depth can skip raster work. Compare all selected geometry, redrawn or reused.
+                    assert(kin::u64(st.local_shadow_casters) + st.local_shadow_static_skipped_casters ==
+                           kin::u64(ref.local_shadow_casters) + ref.local_shadow_static_skipped_casters);
+                    assert(st.local_shadow_triangles + st.local_shadow_static_skipped_triangles ==
+                           ref.local_shadow_triangles + ref.local_shadow_static_skipped_triangles);
                     assert(st.retained_upload_bytes == ref.retained_upload_bytes);
                 }
                 const bool expected = mode >= 1 && frame != 0 && frame != 8 && frame != 10 && frame != 12;
