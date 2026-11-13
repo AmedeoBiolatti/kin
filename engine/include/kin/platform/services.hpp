@@ -3,7 +3,8 @@
 // What a store or platform offers a game, the same whichever one runs it
 // (docs/platform_services.md): the player, their language, achievements and
 // stats, leaderboards, rich presence, the overlay, the on-screen keyboard, DLC
-// ownership and invitations to join a friend.
+// ownership, invitations to join a friend, lobbies, and messages between
+// players (which kin::net's ServicesTransport plays a match over).
 //
 //     kin::ServicesConfig config{.game_id = "lantern_vale", .steam_app_id = 480};
 //     kin::ServicesStart start = kin::ServicesStart::Ready;
@@ -23,6 +24,7 @@
 // run_scene_app starts them from SceneAppConfig::services, calls update() once
 // a frame and passes them to scenes (SceneContext::services) and scripts.
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <kin/core/types.hpp>
@@ -31,6 +33,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace kin {
@@ -88,6 +91,63 @@ struct LeaderboardEntry {
 
 enum class KeyboardMode : u8 { SingleLine, MultipleLines, Email, Numeric };
 
+// Who finds a lobby. The values are Steam's ELobbyType.
+enum class LobbyVisibility : u8 {
+    Private,     // joined only by invitation
+    FriendsOnly, // shown to friends, and joined by invitation
+    Public,      // shown to friends and found by find_lobbies
+    Invisible,   // found by find_lobbies, not shown to friends
+};
+
+struct LobbyOptions {
+    u32 max_members = 4;
+    LobbyVisibility visibility = LobbyVisibility::FriendsOnly;
+    // Lobby data set as soon as it is made (what find_lobbies filters on).
+    std::vector<std::pair<std::string, std::string>> data{};
+};
+
+// How a filter compares a lobby's value with its own. The values are Steam's ELobbyComparison.
+enum class LobbyCompare : i8 { AtMost = -2, Less = -1, Equal = 0, Greater = 1, AtLeast = 2, NotEqual = 3 };
+// How far away lobbies may be. The values are Steam's ELobbyDistanceFilter.
+enum class LobbyDistance : u8 { Close, Default, Far, Worldwide };
+
+struct LobbyFilter {
+    struct Rule {
+        std::string key{};
+        std::string value{};
+        LobbyCompare compare = LobbyCompare::Equal;
+        bool numeric = false; // compare the values as whole numbers
+    };
+    std::vector<Rule> rules{};
+    u32 open_slots = 0; // at least this many free places (0: any)
+    LobbyDistance distance = LobbyDistance::Default;
+    u32 max_results = 50;
+};
+
+// A lobby find_lobbies found.
+struct LobbyInfo {
+    std::string id{};
+    u32 members = 0;
+    u32 max_members = 0;
+    std::vector<std::pair<std::string, std::string>> data{};
+};
+
+struct LobbyMember {
+    std::string id{}; // as ServicePlayer::id
+    std::string name{};
+};
+
+// How a message to a player travels.
+enum class MessageDelivery : u8 {
+    Unreliable, // may be lost or come out of order: at most max_message() bytes
+    Reliable,   // arrives, in order with the player's other reliable messages on the channel
+};
+
+struct PlayerMessage {
+    std::string from{}; // the sender's player id
+    std::vector<u8> bytes{};
+};
+
 // Where the overlay opens.
 enum class OverlayPage : u8 { Friends, Community, Players, Settings, Achievements, Stats };
 
@@ -108,6 +168,16 @@ enum class ServiceEventKind : u8 {
     DlcInstalled,        // id: the DLC
     Disconnected,        // the platform went away (Steam shut down, the player went offline)
     Reconnected,
+    LobbyEntered,      // id: the lobby; request: create_lobby's or join_lobby's (0: joined some other way)
+    LobbyFailed,       // request: which create_lobby or join_lobby failed; text: why
+    LobbyList,         // request: find_lobbies'; lobbies
+    LobbyMemberJoined, // id: the player; text: their name ("" if the platform does not have it yet)
+    LobbyMemberNamed,  // id: a member; text: their name, which arrived after LobbyMemberJoined
+    LobbyMemberLeft,   // id: the player (who left, lost their connection, or was removed)
+    LobbyDataChanged,  // id: the member whose data changed, or "" for the lobby's own
+    LobbyMessage,      // id: the sender; text: the message
+    LobbyLeft,         // id: the lobby, left without asking (removed, or the connection to it was lost)
+    MessagesFailed,    // id: the player messages to whom stopped getting through; text: why
 };
 
 struct ServiceEvent {
@@ -119,6 +189,7 @@ struct ServiceEvent {
     bool changed = false;
     i32 rank = 0;
     std::vector<LeaderboardEntry> entries{};
+    std::vector<LobbyInfo> lobbies{};
 };
 
 class PlatformServices {
@@ -205,6 +276,46 @@ public:
     virtual bool owns(std::string_view dlc) const = 0;
     // What the game was started to join ("lobby:<id>" or a connect string), or "".
     virtual std::string join_on_launch() const = 0;
+
+    // Lobbies: a place players meet before (and during) a match, with data
+    // the owner sets and each member's own. A player is in one lobby at a
+    // time. Each call that asks the platform returns a request number (0: not
+    // sent, as everywhere without a platform) that its event names. Lobby ids
+    // are "lobby:<id>", what JoinRequested and join_on_launch give and
+    // invite_friends takes.
+    virtual u32 create_lobby(const LobbyOptions& options) = 0;
+    virtual u32 join_lobby(std::string_view lobby) = 0;
+    virtual void leave_lobby() = 0;
+    virtual u32 find_lobbies(const LobbyFilter& filter) = 0;
+    // The lobby the player is in, or "".
+    virtual std::string lobby() const = 0;
+    // Its members, in the order they joined, the player too.
+    virtual std::vector<LobbyMember> lobby_members() const = 0;
+    virtual std::string lobby_owner() const = 0;
+    // The lobby's data: only its owner sets it; every member reads it.
+    virtual bool set_lobby_data(std::string_view key, std::string_view value) = 0;
+    virtual std::string lobby_data(std::string_view key) const = 0;
+    // The player's own data in the lobby (ready, character, team).
+    virtual bool set_member_data(std::string_view key, std::string_view value) = 0;
+    virtual std::string member_data(std::string_view member, std::string_view key) const = 0;
+    // Whether others may still join (the owner only): off once a match starts.
+    virtual bool set_lobby_joinable(bool joinable) = 0;
+    // A chat line to every member, as a LobbyMessage event (the sender's too).
+    virtual bool send_lobby_message(std::string_view text) = 0;
+
+    // Messages to other players, through the platform: it finds the way
+    // (across NATs, through relays where it has them) and hides addresses.
+    // Messages are taken from the members of the player's lobby and from
+    // players the game sent to first. Channels keep messages apart (a match on
+    // one, voice on another). false: not sent (too large, nowhere to send).
+    virtual bool send_message(std::string_view player, std::span<const u8> bytes,
+                              MessageDelivery delivery = MessageDelivery::Unreliable, u32 channel = 0) = 0;
+    // Appends the messages that arrived on `channel` since the last call.
+    virtual void receive_messages(u32 channel, std::vector<PlayerMessage>& out) = 0;
+    // Stops talking to a player (their next message starts over).
+    virtual void close_messages(std::string_view player) = 0;
+    // The largest unreliable message (0: none can be sent).
+    virtual std::size_t max_message() const = 0;
 };
 
 // Starts the services `config` allows: Steam when an app id is set and Steam
@@ -220,9 +331,59 @@ void set_active_services(PlatformServices* services);
 // Steam's language names ("french", "brazilian", "schinese") as BCP 47 tags.
 std::string language_from_steam(std::string_view steam_language);
 
+class FakeServices;
+
+// Lobbies and messages shared by the FakeServices that join it, in one
+// process: tests play a whole lobby and match without a platform. Messages
+// arrive at the receiver's next receive_messages(); lobby events at its next
+// update().
+class FakeNetwork {
+public:
+    FakeNetwork() = default;
+    FakeNetwork(const FakeNetwork&) = delete;
+    FakeNetwork& operator=(const FakeNetwork&) = delete;
+    ~FakeNetwork();
+
+    // Drops every n-th unreliable message (0: none), to test what a game does about loss.
+    u32 drop_every = 0;
+    // Unreliable messages sent, and those dropped.
+    u64 sent = 0, dropped = 0;
+
+    // The lobbies there are, as find_lobbies sees them.
+    std::vector<LobbyInfo> lobbies() const;
+
+private:
+    friend class FakeServices;
+    struct Lobby {
+        std::string id;
+        std::string owner;
+        std::vector<FakeServices*> members;
+        u32 max_members = 4;
+        LobbyVisibility visibility = LobbyVisibility::FriendsOnly;
+        bool joinable = true;
+        std::vector<std::pair<std::string, std::string>> data;
+        std::vector<std::pair<std::string, std::pair<std::string, std::string>>> member_data; // member, key, value
+    };
+    Lobby* find(std::string_view id);
+    const Lobby* find(std::string_view id) const;
+    FakeServices* player(std::string_view id) const;
+    void leave(FakeServices& who, bool asked);
+
+    std::vector<FakeServices*> _players;
+    std::vector<Lobby> _lobbies;
+    u64 _next_lobby = 1;
+};
+
 // Services for tests: does what it is told and records what the game asked.
 class FakeServices final : public PlatformServices {
 public:
+    FakeServices() = default;
+    // Joins `network` as player_.id (set it first, unique per network).
+    explicit FakeServices(FakeNetwork& network, ServicePlayer player);
+    ~FakeServices() override;
+    FakeServices(const FakeServices&) = delete;
+    FakeServices& operator=(const FakeServices&) = delete;
+
     struct Call {
         std::string what; // "unlock", "set_stat", "presence", "upload_score", "open_store", ...
         std::string id{};
@@ -263,6 +424,26 @@ public:
     bool owns(std::string_view dlc) const override;
     std::string join_on_launch() const override { return join_on_launch_; }
 
+    // Lobbies and messages work only on a FakeNetwork.
+    u32 create_lobby(const LobbyOptions& options) override;
+    u32 join_lobby(std::string_view lobby) override;
+    void leave_lobby() override;
+    u32 find_lobbies(const LobbyFilter& filter) override;
+    std::string lobby() const override { return _lobby; }
+    std::vector<LobbyMember> lobby_members() const override;
+    std::string lobby_owner() const override;
+    bool set_lobby_data(std::string_view key, std::string_view value) override;
+    std::string lobby_data(std::string_view key) const override;
+    bool set_member_data(std::string_view key, std::string_view value) override;
+    std::string member_data(std::string_view member, std::string_view key) const override;
+    bool set_lobby_joinable(bool joinable) override;
+    bool send_lobby_message(std::string_view text) override;
+    bool send_message(std::string_view player, std::span<const u8> bytes,
+                      MessageDelivery delivery = MessageDelivery::Unreliable, u32 channel = 0) override;
+    void receive_messages(u32 channel, std::vector<PlayerMessage>& out) override;
+    void close_messages(std::string_view player) override;
+    std::size_t max_message() const override { return _network ? 1200 : 0; }
+
     // What the test sets up.
     bool online_ = true;
     ServicePlayer player_{.id = "fake:1", .name = "Player"};
@@ -292,6 +473,12 @@ private:
     std::vector<ServiceEvent> _pending;
     u32 _next_request = 1;
     bool overlay_ = false;
+
+    friend class FakeNetwork;
+    FakeNetwork* _network = nullptr;
+    std::string _lobby;
+    std::vector<std::pair<u32, PlayerMessage>> _inbox; // channel, message
+    std::vector<std::string> _contacted;               // players the game sent to (their messages are taken)
 };
 
 } // namespace kin

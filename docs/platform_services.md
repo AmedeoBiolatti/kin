@@ -3,16 +3,17 @@
 `kin/platform/services.hpp` gives a game what a store or platform offers, through
 one interface whichever runs it. The game asks for the player and their language,
 achievements and stats, leaderboards, rich presence, the overlay, the on-screen
-keyboard, DLC, and invitations to join a friend. Steam is the first platform. A
-game written against `kin::PlatformServices` does not change for another.
+keyboard, DLC, invitations to join a friend, lobbies, and messages between
+players. Steam is the first platform. A game written against
+`kin::PlatformServices` does not change for another.
 
 Where no platform answers, the **offline** backend does. That happens with no
 Steam app id, Steam not running, no Steam library beside the game, a headless or
 server run, or a browser build. The offline backend:
 
 - keeps achievements, stats and the player's best scores in their save folder;
-- returns `false` from what only a platform can do (the overlay, friends,
-  presence).
+- returns `false` (or request `0`) from what only a platform can do (the
+  overlay, friends, presence, lobbies, messages).
 
 A game never needs to ask which backend it has.
 
@@ -95,6 +96,34 @@ for (const kin::ServiceEvent& event : services->events()) { /* ... */ }
 | `join_on_launch()` | What the game was started to join: `lobby:<id>` from `+connect_lobby`, or a connect string. |
 | `flush()` | Keep stats and achievements now. `update()` keeps them anyway, at most every two seconds. |
 
+## Lobbies and messages
+
+A lobby is where players meet before a match: its owner sets its data (the mode,
+the map, the match itself), every member sets their own (ready, character), and
+members chat. Messages go from player to player through the platform, which
+finds a way between them (on Steam: across NATs, through Valve's relays) without
+either seeing the other's address. [kin::net](networking.md#from-a-lobby-to-a-match)
+plays a match over them.
+
+| | |
+|---|---|
+| `create_lobby({max_members, visibility, data})` | `Private` (by invitation), `FriendsOnly`, `Public` (found by search), `Invisible` (found, not shown to friends). Answered by `LobbyEntered` or `LobbyFailed`. |
+| `find_lobbies({rules, open_slots, distance, max_results})` | Rules compare a lobby's data, as text or numbers. Answered by `LobbyList` (`event.lobbies`: id, members, max members, data). One search at a time: a newer one ends the last, whose `LobbyList` fails. |
+| `join_lobby(id)`, `leave_lobby()`, `lobby()` | One lobby at a time. Ids look like `lobby:<id>`, as `JoinRequested`, `join_on_launch()` and `invite_friends()` use them. A new `create_lobby` or `join_lobby`, or `leave_lobby()`, cancels one still on its way: it is answered by `LobbyFailed` ("cancelled"), and its lobby is left. |
+| `lobby_members()`, `lobby_owner()` | Members in the order they joined, the player too. When the owner leaves, the platform picks another. |
+| `set_lobby_data`, `lobby_data` | Only the owner sets it. |
+| `set_member_data`, `member_data` | Each member's own. |
+| `set_lobby_joinable(false)` | Closes the lobby to newcomers once a match starts. |
+| `send_lobby_message(text)` | Chat, as `LobbyMessage` to every member. |
+| `send_message(player, bytes, delivery, channel)` | `Unreliable` (at most `max_message()`, 1200 bytes) or `Reliable`, on a channel. |
+| `receive_messages(channel, out)` | What arrived on the channel. |
+| `close_messages(player)` | Stops talking to a player. |
+
+Messages are taken from the members of the player's lobby, and from players the
+game sent to first. Anyone else's are dropped, so a stranger cannot send one to a
+player. A joiner's first message may come before the platform says they joined:
+Steam's backend waits a few seconds for that before dropping it.
+
 Each `update()` replaces `events()` with what happened since the one before:
 
 - `OverlayShown` / `OverlayHidden`: pause the game while the overlay is up;
@@ -105,7 +134,13 @@ Each `update()` replaces `events()` with what happened since the one before:
 - `TextEntered` / `TextCancelled`;
 - `KeyboardClosed`;
 - `DlcInstalled`;
-- `Disconnected` / `Reconnected`.
+- `Disconnected` / `Reconnected`;
+- `LobbyEntered` / `LobbyFailed` / `LobbyList`;
+- `LobbyMemberJoined` / `LobbyMemberLeft`, `LobbyMemberNamed` (the name of a member who joined before the
+  platform had it; until then `lobby_members()` gives `""`), `LobbyDataChanged` (`id`: the member, or `""` for the lobby's own
+  data), `LobbyMessage`, `LobbyLeft` (removed from the lobby, or dropped from it while the connection was lost: on
+  Steam this shows when it comes back);
+- `MessagesFailed`: messages to a player stopped getting through.
 
 `run_scene_app` calls `update()` on a frame's first fixed step, so every step of
 the frame and its drawing see the same events.
@@ -117,9 +152,27 @@ services.unlock("FIRST_WIN")
 services.add_stat("lanterns_lit", 1)
 services.presence("status", "Exploring the vale")
 for _, e in ipairs(services.events()) do
-    if e.kind == "join_requested" then join(e.text) end
+    if e.kind == "join_requested" then services.join_lobby(e.text) end
 end
+
+services.create_lobby({max_members = 4, visibility = "public", data = {mode = "coop"}})
+services.find_lobbies({data = {mode = "coop"}, open_slots = 1, worldwide = true})
+-- lobby_list events carry e.lobbies: {id, members, max_members, data}
 ```
+
+Scripts also get `join_lobby`, `leave_lobby`, `lobby`, `lobby_owner`,
+`lobby_members`, `set_lobby_data`, `lobby_data`, `set_member_data`,
+`member_data`, `set_lobby_joinable` and `lobby_message`, and messages between
+players as strings of bytes:
+
+```lua
+services.send_message(player, bytes, {reliable = true, channel = 2})
+for _, m in ipairs(services.receive_messages(2)) do handle(m.from, m.bytes) end
+```
+
+with `close_messages(player)` and `max_message()`. A script game plays over
+these with its own protocol; `kin::net`'s input sync and lobby matches are C++
+(kin::net is a library of its own, which scripts do not reach).
 
 Without services, every call returns `false` or `nil`. What the platform says
 (the overlay, events) is not part of a game's deterministic state. Keep it out of
@@ -267,11 +320,21 @@ dispatch. A library exports only its own SDK's interface versions. kin looks for
 - SteamUtils v011–v010;
 - SteamApps v009–v008;
 - SteamUserStats v013–v012;
-- SteamRemoteStorage v016.
+- SteamRemoteStorage v016;
+- SteamMatchmaking v009, SteamNetworkingMessages v002 and SteamNetworkingUtils
+  v004, for lobbies and messages.
 
 Older versions are kept on a best-effort basis. On Steam Deck and similar
 handhelds, `handheld()` asks `GetSteamHardwareDefaultConfig`. A library missing
-a function kin needs is reported in the log, and the game plays offline.
+a function kin needs is reported in the log, and the game plays offline. One
+missing only lobby or message functions keeps the rest, without lobbies.
+
+**Lobbies and messages on Steam.** Lobbies are Steam's matchmaking lobbies, and
+messages are `ISteamNetworkingMessages`. These go peer to peer where they can and
+through Valve's relays where they can't, so they work behind any NAT. Unreliable
+messages still open a session first, and a broken session starts again by itself.
+The relays are found on first use. A player can be in one lobby at a time, and a
+lobby holds 250 members at most.
 
 ## Testing
 
@@ -283,7 +346,12 @@ a function kin needs is reported in the log, and the game plays offline.
 - **The Steam backend itself.** `tests/fake_steam_api.cpp` builds a stand-in
   library with the same file name and functions. `kin-platform-services` loads it
   the way it loads Steam's, then drives callbacks, call results, leaderboards,
-  the floating keyboard, relaunch and a Steam that is not running.
+  the floating keyboard, lobbies, messages, relaunch and a Steam that is not
+  running.
+- **Lobbies and messages without a platform.** `kin::FakeNetwork` joins
+  several `FakeServices` in one process. Their lobbies and messages work as a
+  platform's do, and `drop_every` loses unreliable messages. `kin-net-services`
+  plays a whole match this way.
 - **Against Valve's SDK.** Configure with
   `-DKIN_STEAMWORKS_SDK_DIR=<sdk>` (the folder holding `public/steam`), then
   build `kin_steam_abi_check`. It fails to compile wherever kin's declarations
@@ -301,8 +369,8 @@ a function kin needs is reported in the log, and the game plays offline.
 
 ## Not yet
 
-- **Multiplayer over Steam.** A `kin::net` transport on Steam's networking
-  sockets, and lobbies. That waits for `kin::net`.
+- **Lobbies and messages on Steam between two players.** Checked only through
+  the stand-in library and Valve's exports, not yet between two accounts.
 - **Steam Input action sets.** Controllers work through SDL.
 - **Workshop and the Cloud file API.** Auto-Cloud covers saves.
 - **Inventory, Timeline, screenshots.**

@@ -238,6 +238,36 @@ public:
     bool owns(std::string_view dlc) const override { return _inner.owns(dlc); }
     std::string join_on_launch() const override { return _inner.join_on_launch(); }
 
+    // Lobbies and messages have no catalog ids: straight through.
+    u32 create_lobby(const LobbyOptions& options) override { return _inner.create_lobby(options); }
+    u32 join_lobby(std::string_view lobby) override { return _inner.join_lobby(lobby); }
+    void leave_lobby() override { _inner.leave_lobby(); }
+    u32 find_lobbies(const LobbyFilter& filter) override { return _inner.find_lobbies(filter); }
+    std::string lobby() const override { return _inner.lobby(); }
+    std::vector<LobbyMember> lobby_members() const override { return _inner.lobby_members(); }
+    std::string lobby_owner() const override { return _inner.lobby_owner(); }
+    bool set_lobby_data(std::string_view key, std::string_view value) override {
+        return _inner.set_lobby_data(key, value);
+    }
+    std::string lobby_data(std::string_view key) const override { return _inner.lobby_data(key); }
+    bool set_member_data(std::string_view key, std::string_view value) override {
+        return _inner.set_member_data(key, value);
+    }
+    std::string member_data(std::string_view member, std::string_view key) const override {
+        return _inner.member_data(member, key);
+    }
+    bool set_lobby_joinable(bool joinable) override { return _inner.set_lobby_joinable(joinable); }
+    bool send_lobby_message(std::string_view text) override { return _inner.send_lobby_message(text); }
+    bool send_message(std::string_view player, std::span<const u8> bytes, MessageDelivery delivery,
+                      u32 channel) override {
+        return _inner.send_message(player, bytes, delivery, channel);
+    }
+    void receive_messages(u32 channel, std::vector<PlayerMessage>& out) override {
+        _inner.receive_messages(channel, out);
+    }
+    void close_messages(std::string_view player) override { _inner.close_messages(player); }
+    std::size_t max_message() const override { return _inner.max_message(); }
+
 private:
     // The store's id for the game's `id`: none when the catalog lists that kind and not it.
     template <class Entry>

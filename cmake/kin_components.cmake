@@ -160,4 +160,4 @@ kin_declare_component(DETERMINISM_CHECK DEFAULT ${_kin_developer_default} LEGACY
 kin_declare_component(PYTHON DEFAULT OFF DESCRIPTION "Build the experimental Python scripting (PocketPy)"
     EXTERNAL_DEPENDENCIES PocketPy TESTS kin-python-scripts)
 kin_declare_component(NET DEFAULT OFF DESCRIPTION "Build the experimental networking: transports and sync models (kin/net)"
-    TESTS kin-net)
+    TESTS kin-net kin-net-services)

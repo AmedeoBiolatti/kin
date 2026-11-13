@@ -46,7 +46,7 @@ flowchart TB
     RS["Replication (planned)"]
   end
   Links["Links: handshake, round trips, timeouts"]
-  T["Transport: loopback with a link simulator, UDP (later Steam, WebRTC)"]
+  T["Transport: loopback with a link simulator, UDP, the platform's messages (Steam); later WebRTC"]
   Game --> Models --> Links --> T
 ```
 
@@ -55,6 +55,8 @@ flowchart TB
 | `kin/net/transport.hpp` | `Transport`: unreliable datagrams of at most `max_datagram()` (1200) bytes to numbered peers |
 | `kin/net/loopback.hpp` | `LoopbackNetwork`: in-process endpoints with latency, jitter, loss and duplication per link, on a clock the owner sets |
 | `kin/net/udp.hpp` | `UdpTransport`: IPv4, or IPv6 with IPv4 mapped in; non-blocking; not in web builds |
+| `kin/net/services_transport.hpp` | `ServicesTransport`: the platform's messages between players (Steam's, across NATs and through relays); peers are players |
+| `kin/net/lobby_match.hpp` | From a lobby to a match: `start_lobby_match()`, `read_lobby_match()`, `configure_input_sync()` |
 | `kin/net/link.hpp` | `Links`: the handshake every model shares, round trips, timeouts, goodbye; `compatibility_hash()` |
 | `kin/net/session.hpp` | `Session`: what every model's session offers the app loop, a lobby and the debug overlay |
 | `kin/net/sim.hpp` | The capabilities a simulation provides (`Simulation`, `DeterministicSim`, `RollbackSim`), `CommandCodec`, `StepInfo` |
@@ -186,10 +188,56 @@ whatever time the owner sets, so a test plays a minute of a laggy four-player ma
 **`UdpTransport`** binds a non-blocking socket (`port = 0` picks a free one). `add_peer()` resolves an address.
 Datagrams from other addresses are ignored, unless `accept_unknown` is on: then one that starts like kin's messages
 gets a new peer id (up to `max_peers`, never reused), which is how a host learns its players. It does not cross NATs:
-that comes with the Steam and WebRTC transports.
+use `ServicesTransport` for that.
+
+**`ServicesTransport`** sends through the platform's messages between players
+([platform services](platform_services.md#lobbies-and-messages)). On Steam those messages go peer to peer where
+they can and through Valve's relays where they can't, so two players behind any NAT reach each other, and neither
+sees the other's address. Peers are players: `add_peer("steam:7656...")`. A message from a player it does not know
+gets a new peer id (unless `accept_unknown` is off). The platform takes messages only from members of the player's lobby and from
+players the game sent to first. `channel` (1 unless set) keeps a match apart from the game's other messages, which
+`send_message` puts on channel 0 unless told otherwise. `remove_peer(player)` forgets a player gone for good (on
+`LobbyMemberLeft`): it frees their place among `max_peers`, and their peer id is never given to anyone else. The
+transport needs
+the services' `update()` each frame (`run_scene_app` calls it). Offline, nothing is sent. Tests use `FakeServices`
+on a `kin::FakeNetwork`, which can drop messages (`drop_every`).
 
 A transport delivers datagrams or loses them; the layers above repeat what matters. Input sync sends every command a
 peer has not acknowledged in each datagram, so a lost datagram costs nothing.
+
+## From a lobby to a match
+
+Players meet in a lobby (`create_lobby`, `find_lobbies`, `join_lobby`, invitations). When everyone is ready, the
+owner starts the match, and every member reads it from the lobby's data (`kin.match`). Slots go in the order the
+owner gives (the order members joined, by default). The session number keeps this match apart from the lobby's
+earlier ones. The lobby closes to newcomers until `end_lobby_match()`. A `kin.match` that lists a player twice, or
+none, is not a match: `read_lobby_match` returns nothing.
+
+```cpp
+#include <kin/net/lobby_match.hpp>
+
+kin::net::ServicesTransport transport(*services);
+
+// The owner, when everyone is ready:
+kin::net::start_lobby_match(*services);
+
+// Every member (the owner too), on a LobbyDataChanged event:
+if (const auto match = kin::net::read_lobby_match(*services)) {
+    kin::net::InputSyncConfig config{.input_delay = 2, .max_prediction = 8,
+                                     .game = kin::net::compatibility_hash("my_game", "1.2")};
+    kin::net::configure_input_sync(*match, transport, config); // players, local_player, peers, session
+    game = std::make_unique<Game>(match->session);             // the session doubles as a shared seed
+    kin::set_lua_hash_seed(kin::make_key(match->session));     // before the game's scripts start
+    session = std::make_unique<kin::net::InputSync<Game, Command>>(*game, transport, config);
+}
+```
+
+The Lua hash seed keeps `pairs` in one order on every peer. Lobby data can be read by anyone who can find the lobby,
+so in a public lobby the session is not a secret: the seed then orders tables, but does not keep outsiders from
+crafting colliding strings.
+
+`kin-net-services` plays three players this way, on a network that loses one message in seven. They find the
+lobby, join it, start the match and play it under rollback, and every state hash agrees.
 
 ## Joining a game in progress
 
@@ -233,6 +281,17 @@ can join at once. A joiner fails alone, and the game goes on, if:
 
 A joiner that never comes, or leaves before it plays, leaves the slot empty, and nobody waits for it. A slot can then
 go to someone else. Once it plays, a joiner is a player like the others: losing it ends the session.
+
+**Through a lobby.** `start_lobby_match(services, {}, 0, free_slots)` keeps `free_slots` open. The lobby stays
+joinable while one is free. The owner seats newcomers with `seat_lobby_joiners()` (on `LobbyMemberJoined`), and frees
+the seat of one who leaves before playing with `free_lobby_slot()`. Every member, on `LobbyDataChanged`, reads the
+match:
+
+- a seated latecomer's `configure_input_sync` sets `joining`;
+- the players in the game call `allow_lobby_joiners(match, transport, session)`.
+
+`kin-net-services` plays it: two players start a four-slot match, Cyd joins, Dan is seated and leaves before playing,
+Eve takes the slot, the lobby closes when full, and every peer's states agree tick by tick from each one's first.
 
 ## Testing a networked game
 
@@ -284,8 +343,9 @@ handshake only if no matching hello follows before the connect timeout.
 
 - A lost player ends the session: nobody leaves a game that goes on. A joiner watches before it plays, but there is
   no spectator that only watches.
-- No NAT traversal, encryption or authentication: a peer's address and token are its identity, so anyone who sees
-  the traffic can forge it.
+- Over UDP: no NAT traversal, encryption or authentication (a peer's address and token are its identity, so anyone
+  who sees the traffic can forge it). Over Steam, `ServicesTransport` has all three: Steam's relays, its encrypted
+  sessions and its accounts.
 - Commands are copied in the machine's byte order: little-endian peers only (every desktop and console today).
 - No engine integration yet: a game calls `update()` itself and draws its own simulation.
 
@@ -296,5 +356,7 @@ handshake only if no matching hello follows before the connect timeout.
    saved, deterministic trigonometry (done).
 3. Summit co-op over input sync, with rollback cost measured (`step` and `save` with four climbers).
 4. A small replication model on loopback, kept as a test, so that the shared layers fit a second model.
-5. A Steam transport (NAT traversal and relays) and lobbies; late join from a saved state.
+5. A Steam transport (NAT traversal and relays) and lobbies (done: `ServicesTransport`, `lobby_match.hpp`, on
+   any platform's lobbies and messages); late join from a saved state (done: `joinable`, `allow_join`, free slots in
+   lobby matches).
 6. The replication model for real: delta compression, interest management, lag compensation, a dedicated server.

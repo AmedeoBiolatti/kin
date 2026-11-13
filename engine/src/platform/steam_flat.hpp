@@ -36,6 +36,7 @@ using SteamErrMsg = char[1024];
     X(user_steam_id, SteamAPI_ISteamUser_GetSteamID, u64, (void*))                                               \
     X(friends_persona_name, SteamAPI_ISteamFriends_GetPersonaName, const char*, (void*))                         \
     X(friends_friend_name, SteamAPI_ISteamFriends_GetFriendPersonaName, const char*, (void*, u64))               \
+    X(friends_request_info, SteamAPI_ISteamFriends_RequestUserInformation, bool, (void*, u64, bool))             \
     X(friends_set_rich_presence, SteamAPI_ISteamFriends_SetRichPresence, bool, (void*, const char*, const char*)) \
     X(friends_clear_rich_presence, SteamAPI_ISteamFriends_ClearRichPresence, void, (void*))                      \
     X(friends_overlay, SteamAPI_ISteamFriends_ActivateGameOverlay, void, (void*, const char*))                   \
@@ -81,6 +82,48 @@ using SteamErrMsg = char[1024];
     X(storage_cloud_account, SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount, bool, (void*))               \
     X(storage_cloud_app, SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp, bool, (void*))
 
+// Lobbies (ISteamMatchmaking) and messages between players (ISteamNetworkingMessages): all of them, or the
+// backend has neither.
+#define KIN_STEAM_NETWORK_FUNCTIONS(X)                                                                           \
+    X(mm_request_list, SteamAPI_ISteamMatchmaking_RequestLobbyList, SteamAPICall, (void*))                       \
+    X(mm_filter_string, SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter, void,                        \
+      (void*, const char*, const char*, i32))                                                                    \
+    X(mm_filter_number, SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter, void,                     \
+      (void*, const char*, int, i32))                                                                            \
+    X(mm_filter_slots, SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable, void, (void*, int))   \
+    X(mm_filter_distance, SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter, void, (void*, i32))      \
+    X(mm_filter_count, SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter, void, (void*, int))      \
+    X(mm_lobby_by_index, SteamAPI_ISteamMatchmaking_GetLobbyByIndex, u64, (void*, int))                          \
+    X(mm_create, SteamAPI_ISteamMatchmaking_CreateLobby, SteamAPICall, (void*, i32, int))                        \
+    X(mm_join, SteamAPI_ISteamMatchmaking_JoinLobby, SteamAPICall, (void*, u64))                                 \
+    X(mm_leave, SteamAPI_ISteamMatchmaking_LeaveLobby, void, (void*, u64))                                       \
+    X(mm_member_count, SteamAPI_ISteamMatchmaking_GetNumLobbyMembers, int, (void*, u64))                         \
+    X(mm_member_by_index, SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex, u64, (void*, u64, int))              \
+    X(mm_get_data, SteamAPI_ISteamMatchmaking_GetLobbyData, const char*, (void*, u64, const char*))              \
+    X(mm_set_data, SteamAPI_ISteamMatchmaking_SetLobbyData, bool, (void*, u64, const char*, const char*))        \
+    X(mm_data_count, SteamAPI_ISteamMatchmaking_GetLobbyDataCount, int, (void*, u64))                            \
+    X(mm_data_by_index, SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex, bool,                                    \
+      (void*, u64, int, char*, int, char*, int))                                                                 \
+    X(mm_get_member_data, SteamAPI_ISteamMatchmaking_GetLobbyMemberData, const char*,                            \
+      (void*, u64, u64, const char*))                                                                            \
+    X(mm_set_member_data, SteamAPI_ISteamMatchmaking_SetLobbyMemberData, void,                                   \
+      (void*, u64, const char*, const char*))                                                                    \
+    X(mm_send_chat, SteamAPI_ISteamMatchmaking_SendLobbyChatMsg, bool, (void*, u64, const void*, int))           \
+    X(mm_chat_entry, SteamAPI_ISteamMatchmaking_GetLobbyChatEntry, int,                                          \
+      (void*, u64, int, SteamId*, void*, int, i32*))                                                             \
+    X(mm_member_limit, SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit, int, (void*, u64))                        \
+    X(mm_set_joinable, SteamAPI_ISteamMatchmaking_SetLobbyJoinable, bool, (void*, u64, bool))                    \
+    X(mm_owner, SteamAPI_ISteamMatchmaking_GetLobbyOwner, u64, (void*, u64))                                     \
+    X(msg_send, SteamAPI_ISteamNetworkingMessages_SendMessageToUser, i32,                                        \
+      (void*, const NetworkingIdentity&, const void*, u32, int, int))                                            \
+    X(msg_receive, SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel, int,                              \
+      (void*, int, NetworkingMessage**, int))                                                                    \
+    X(msg_accept, SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser, bool,                                 \
+      (void*, const NetworkingIdentity&))                                                                        \
+    X(msg_close, SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser, bool, (void*, const NetworkingIdentity&)) \
+    X(msg_release, SteamAPI_SteamNetworkingMessage_t_Release, void, (NetworkingMessage*))                        \
+    X(net_init_relay, SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess, void, (void*))
+
 // Only in libraries from before SDK 1.65, or not declared by its headers (so not checked).
 #define KIN_STEAM_LEGACY_FUNCTIONS(X)                                                                            \
     X(init_legacy, SteamAPI_InitSafe, bool, ())                                                                  \
@@ -98,6 +141,10 @@ inline constexpr const char* utils_versions[] = {"v011", "v010"};
 inline constexpr const char* apps_versions[] = {"v009", "v008"};
 inline constexpr const char* stats_versions[] = {"v013", "v012"};
 inline constexpr const char* storage_versions[] = {"v016"};
+inline constexpr const char* matchmaking_versions[] = {"v009"};
+// SteamAPI_SteamNetworkingMessages_SteamAPI_v002, SteamAPI_SteamNetworkingUtils_SteamAPI_v004.
+inline constexpr const char* messages_versions[] = {"v002"};
+inline constexpr const char* networking_utils_versions[] = {"v004"};
 
 // ESteamAPIInitResult
 inline constexpr i32 init_ok = 0;
@@ -119,15 +166,38 @@ inline constexpr i32 upload_force_update = 2;
 inline constexpr i32 request_global = 0;
 inline constexpr i32 request_around_user = 1;
 inline constexpr i32 request_friends = 2;
+// ELobbyType is LobbyVisibility's values, ELobbyComparison LobbyCompare's, ELobbyDistanceFilter LobbyDistance's.
+// EChatRoomEnterResponse, EChatMemberStateChange, EChatEntryType
+inline constexpr u32 enter_success = 1;
+inline constexpr u32 member_entered = 0x1;
+inline constexpr u32 member_gone = 0x2 | 0x4 | 0x8 | 0x10; // left, disconnected, kicked, banned
+inline constexpr i32 chat_message = 1;
+// EPersonaChange: the name changed, or arrived for the first time.
+inline constexpr int persona_change_name = 0x0001 | 0x0400;
+// ESteamNetworkingIdentityType
+inline constexpr i32 identity_steam_id = 16;
+// k_nSteamNetworkingSend_*
+inline constexpr int send_unreliable = 0;
+inline constexpr int send_no_nagle = 1;
+inline constexpr int send_reliable = 8;
+inline constexpr int send_auto_restart = 32;
 // EFloatingGamepadTextInputMode: SingleLine, MultipleLines, Email, Numeric (0-3).
 // EGamepadTextInputMode Normal 0, Password 1; EGamepadTextInputLineMode SingleLine 0.
 
 // Callback ids (k_iCallback).
 inline constexpr int cb_servers_connected = 101;
 inline constexpr int cb_servers_disconnected = 103;
+inline constexpr int cb_persona_state_change = 304;
 inline constexpr int cb_overlay_activated = 331;
 inline constexpr int cb_lobby_join_requested = 333;
 inline constexpr int cb_rich_presence_join_requested = 337;
+inline constexpr int cb_lobby_enter = 504;
+inline constexpr int cb_lobby_data_update = 505;
+inline constexpr int cb_lobby_chat_update = 506;
+inline constexpr int cb_lobby_chat_msg = 507;
+inline constexpr int cb_lobby_match_list = 510;
+inline constexpr int cb_lobby_kicked = 512;
+inline constexpr int cb_lobby_created = 513;
 inline constexpr int cb_call_completed = 703;
 inline constexpr int cb_steam_shutdown = 704;
 inline constexpr int cb_text_input_dismissed = 714;
@@ -139,6 +209,42 @@ inline constexpr int cb_achievement_stored = 1103;
 inline constexpr int cb_leaderboard_find_result = 1104;
 inline constexpr int cb_leaderboard_scores_downloaded = 1105;
 inline constexpr int cb_leaderboard_score_uploaded = 1106;
+inline constexpr int cb_messages_session_request = 1251;
+inline constexpr int cb_messages_session_failed = 1252;
+
+// SteamNetworkingIdentity: packed to 1 byte everywhere.
+#pragma pack(push, 1)
+struct NetworkingIdentity {
+    i32 type;
+    i32 size;
+    union {
+        u64 steam_id;
+        u8 raw[128];
+    };
+};
+#pragma pack(pop)
+
+// CSteamID, as GetLobbyChatEntry writes it.
+struct SteamId {
+    u64 id;
+};
+
+// SteamNetworkingMessage_t: the platform's own alignment, not the callbacks' packing.
+struct NetworkingMessage {
+    void* data;
+    int size;
+    u32 connection;
+    NetworkingIdentity peer;
+    i64 connection_user_data;
+    i64 time_received;
+    i64 message_number;
+    void (*free_data)(NetworkingMessage*);
+    void (*release)(NetworkingMessage*);
+    int channel;
+    int flags;
+    i64 user_data;
+    u16 lane;
+};
 
 // Steam packs its callback structs to 4 bytes on Linux and macOS, 8 elsewhere.
 #if defined(__linux__) || defined(__APPLE__)
@@ -162,6 +268,11 @@ struct SteamAPICallCompleted {
 
 struct GameOverlayActivated {
     u8 active;
+};
+
+struct PersonaStateChange {
+    u64 steam_id;
+    int change_flags;
 };
 
 struct GameLobbyJoinRequested {
@@ -222,6 +333,65 @@ struct LeaderboardScoreUploaded {
     int global_rank_previous;
 };
 
+struct LobbyEnter {
+    u64 lobby;
+    u32 permissions;
+    bool locked;
+    u32 response;
+};
+
+struct LobbyDataUpdate {
+    u64 lobby;
+    u64 member;
+    u8 success;
+};
+
+struct LobbyChatUpdate {
+    u64 lobby;
+    u64 changed;
+    u64 making_change;
+    u32 state_change;
+};
+
+struct LobbyChatMsg {
+    u64 lobby;
+    u64 user;
+    u8 type;
+    u32 chat_id;
+};
+
+struct LobbyMatchList {
+    u32 count;
+};
+
+struct LobbyKicked {
+    u64 lobby;
+    u64 admin;
+    u8 due_to_disconnect;
+};
+
+struct LobbyCreated {
+    i32 result;
+    u64 lobby;
+};
+
+struct MessagesSessionRequest {
+    NetworkingIdentity remote;
+};
+
+// SteamNetConnectionInfo_t starts with the remote identity; kin reads only that and the end reason.
+struct MessagesSessionFailed {
+    NetworkingIdentity remote;
+    i64 user_data;
+    u32 listen_socket;
+    u8 address[18];
+    u16 pad;
+    u32 pop_remote;
+    u32 pop_relay;
+    i32 state;
+    i32 end_reason;
+};
+
 struct LeaderboardEntry {
     u64 user;
     i32 global_rank;
@@ -236,6 +406,7 @@ struct LeaderboardEntry {
 #define KIN_STEAM_TYPE(field, symbol, ret, params) using field##_fn = ret(*) params;
 KIN_STEAM_FUNCTIONS(KIN_STEAM_TYPE)
 KIN_STEAM_OPTIONAL_FUNCTIONS(KIN_STEAM_TYPE)
+KIN_STEAM_NETWORK_FUNCTIONS(KIN_STEAM_TYPE)
 KIN_STEAM_LEGACY_FUNCTIONS(KIN_STEAM_TYPE)
 #undef KIN_STEAM_TYPE
 

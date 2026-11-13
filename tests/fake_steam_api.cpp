@@ -8,8 +8,10 @@
 #include "steam_flat.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -54,7 +56,37 @@ struct State {
     u32 last_store_app = 0;
     std::string text = "typed on the deck";
     std::vector<i32> uploaded;
+    // Lobbies and messages.
+    struct Lobby {
+        u64 id = 0;
+        u64 owner = 0;
+        std::vector<u64> members;
+        int limit = 4;
+        bool joinable = true;
+        std::map<std::string, std::string> data;
+        std::map<std::pair<u64, std::string>, std::string> member_data;
+    };
+    std::map<u64, Lobby> lobbies;
+    u64 next_lobby = 109775240000000001ull;
+    std::vector<u64> listed; // the last RequestLobbyList's answer
+    std::string filters;     // what the last request was filtered by
+    std::vector<std::string> chat;
+    struct Sent {
+        u64 to = 0;
+        std::vector<u8> bytes;
+        int flags = 0;
+        int channel = 0;
+    };
+    std::vector<Sent> sent;
+    std::deque<std::pair<int, sf::NetworkingMessage*>> inbox; // channel, message
+    std::set<u64> accepted, closed;
+    std::map<u64, std::string> names; // players whose names are not "First" (or "Second")
+    std::set<u64> requested;          // RequestUserInformation was called
+    int released = 0;
+    int relays = 0;
 } g;
+
+constexpr u64 self_id = 76561197960287930ull;
 
 int g_object = 0; // what the interface accessors return
 void* object() {
@@ -143,6 +175,15 @@ FAKE_API void* SteamAPI_SteamUserStats_v012() {
 FAKE_API void* SteamAPI_SteamRemoteStorage_v016() {
     return object();
 }
+FAKE_API void* SteamAPI_SteamMatchmaking_v009() {
+    return object();
+}
+FAKE_API void* SteamAPI_SteamNetworkingMessages_SteamAPI_v002() {
+    return object();
+}
+FAKE_API void* SteamAPI_SteamNetworkingUtils_SteamAPI_v004() {
+    return object();
+}
 
 FAKE_API bool SteamAPI_ISteamUser_BLoggedOn(void*) {
     return true;
@@ -154,7 +195,19 @@ FAKE_API const char* SteamAPI_ISteamFriends_GetPersonaName(void*) {
     return "Fake Player";
 }
 FAKE_API const char* SteamAPI_ISteamFriends_GetFriendPersonaName(void*, u64 id) {
+    if (const auto it = g.names.find(id); it != g.names.end()) {
+        return it->second.c_str(); // "[unknown]" until the persona arrives, as Steam has it
+    }
     return id == 2 ? "Second" : "First";
+}
+// True: Steam is fetching the name, and a PersonaStateChange_t follows.
+FAKE_API bool SteamAPI_ISteamFriends_RequestUserInformation(void*, u64 id, bool) {
+    const auto it = g.names.find(id);
+    if (it == g.names.end() || it->second != "[unknown]") {
+        return false;
+    }
+    g.requested.insert(id);
+    return true;
 }
 FAKE_API bool SteamAPI_ISteamFriends_SetRichPresence(void*, const char* key, const char* value) {
     g.presence[key] = value;
@@ -316,9 +369,220 @@ FAKE_API bool SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(void*, u64 
     return true;
 }
 
+// Lobbies.
+
+namespace {
+State::Lobby* lobby_of(u64 id) {
+    const auto it = g.lobbies.find(id);
+    return it == g.lobbies.end() ? nullptr : &it->second;
+}
+} // namespace
+
+FAKE_API sf::SteamAPICall SteamAPI_ISteamMatchmaking_RequestLobbyList(void*) {
+    g.listed.clear();
+    for (const auto& [id, lobby] : g.lobbies) {
+        if (lobby.joinable && std::ranges::find(lobby.members, self_id) == lobby.members.end()) {
+            g.listed.push_back(id);
+        }
+    }
+    return call_result(sf::cb_lobby_match_list, sf::LobbyMatchList{.count = static_cast<u32>(g.listed.size())});
+}
+FAKE_API void SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter(void*, const char* key, const char* value,
+                                                                         i32 compare) {
+    g.filters += std::string{key} + (compare == 0 ? "=" : "?") + value + ";";
+}
+FAKE_API void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void*, const char* key, int value,
+                                                                            i32 compare) {
+    g.filters += std::string{key} + (compare == 2 ? ">=" : "#") + std::to_string(value) + ";";
+}
+FAKE_API void SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void*, int slots) {
+    g.filters += "slots" + std::to_string(slots) + ";";
+}
+FAKE_API void SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void*, i32 distance) {
+    g.filters += "distance" + std::to_string(distance) + ";";
+}
+FAKE_API void SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void*, int count) {
+    g.filters += "count" + std::to_string(count) + ";";
+}
+FAKE_API u64 SteamAPI_ISteamMatchmaking_GetLobbyByIndex(void*, int i) {
+    return i >= 0 && i < static_cast<int>(g.listed.size()) ? g.listed[i] : 0;
+}
+FAKE_API sf::SteamAPICall SteamAPI_ISteamMatchmaking_CreateLobby(void*, i32, int max) {
+    const u64 id = g.next_lobby++;
+    g.lobbies[id] = {.id = id, .owner = self_id, .members = {self_id}, .limit = max};
+    const sf::SteamAPICall call =
+        call_result(sf::cb_lobby_created, sf::LobbyCreated{.result = sf::result_ok, .lobby = id});
+    push(sf::cb_lobby_enter, sf::LobbyEnter{.lobby = id, .response = sf::enter_success});
+    return call;
+}
+FAKE_API sf::SteamAPICall SteamAPI_ISteamMatchmaking_JoinLobby(void*, u64 id) {
+    State::Lobby* lobby = lobby_of(id);
+    u32 response = sf::enter_success;
+    if (!lobby) {
+        response = 2;
+    } else if (static_cast<int>(lobby->members.size()) >= lobby->limit) {
+        response = 4;
+    } else {
+        lobby->members.push_back(self_id);
+        push(sf::cb_lobby_enter, sf::LobbyEnter{.lobby = id, .response = response});
+    }
+    return call_result(sf::cb_lobby_enter, sf::LobbyEnter{.lobby = id, .response = response});
+}
+FAKE_API void SteamAPI_ISteamMatchmaking_LeaveLobby(void*, u64 id) {
+    if (State::Lobby* lobby = lobby_of(id)) {
+        std::erase(lobby->members, self_id);
+        if (lobby->owner == self_id && !lobby->members.empty()) {
+            lobby->owner = lobby->members.front();
+        }
+    }
+}
+FAKE_API int SteamAPI_ISteamMatchmaking_GetNumLobbyMembers(void*, u64 id) {
+    const State::Lobby* lobby = lobby_of(id);
+    return lobby ? static_cast<int>(lobby->members.size()) : 0;
+}
+FAKE_API u64 SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex(void*, u64 id, int i) {
+    const State::Lobby* lobby = lobby_of(id);
+    return lobby && i >= 0 && i < static_cast<int>(lobby->members.size()) ? lobby->members[i] : 0;
+}
+FAKE_API const char* SteamAPI_ISteamMatchmaking_GetLobbyData(void*, u64 id, const char* key) {
+    const State::Lobby* lobby = lobby_of(id);
+    const auto it = lobby ? lobby->data.find(key) : decltype(lobby->data)::const_iterator{};
+    return lobby && it != lobby->data.end() ? it->second.c_str() : "";
+}
+FAKE_API bool SteamAPI_ISteamMatchmaking_SetLobbyData(void*, u64 id, const char* key, const char* value) {
+    State::Lobby* lobby = lobby_of(id);
+    if (!lobby || lobby->owner != self_id) {
+        return false;
+    }
+    lobby->data[key] = value;
+    push(sf::cb_lobby_data_update, sf::LobbyDataUpdate{.lobby = id, .member = id, .success = 1});
+    return true;
+}
+FAKE_API int SteamAPI_ISteamMatchmaking_GetLobbyDataCount(void*, u64 id) {
+    const State::Lobby* lobby = lobby_of(id);
+    return lobby ? static_cast<int>(lobby->data.size()) : 0;
+}
+FAKE_API bool SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex(void*, u64 id, int i, char* key, int key_size, char* value,
+                                                             int value_size) {
+    const State::Lobby* lobby = lobby_of(id);
+    if (!lobby || i < 0 || i >= static_cast<int>(lobby->data.size())) {
+        return false;
+    }
+    auto it = std::next(lobby->data.begin(), i);
+    std::snprintf(key, key_size, "%s", it->first.c_str());
+    std::snprintf(value, value_size, "%s", it->second.c_str());
+    return true;
+}
+FAKE_API bool SteamAPI_ISteamMatchmaking_DeleteLobbyData(void*, u64, const char*) {
+    return false;
+}
+FAKE_API const char* SteamAPI_ISteamMatchmaking_GetLobbyMemberData(void*, u64 id, u64 user, const char* key) {
+    const State::Lobby* lobby = lobby_of(id);
+    if (!lobby) {
+        return "";
+    }
+    const auto it = lobby->member_data.find({user, key});
+    return it != lobby->member_data.end() ? it->second.c_str() : "";
+}
+FAKE_API void SteamAPI_ISteamMatchmaking_SetLobbyMemberData(void*, u64 id, const char* key, const char* value) {
+    if (State::Lobby* lobby = lobby_of(id)) {
+        lobby->member_data[{self_id, key}] = value;
+        push(sf::cb_lobby_data_update, sf::LobbyDataUpdate{.lobby = id, .member = self_id, .success = 1});
+    }
+}
+FAKE_API bool SteamAPI_ISteamMatchmaking_SendLobbyChatMsg(void*, u64 id, const void* body, int size) {
+    if (!lobby_of(id) || size <= 0) {
+        return false;
+    }
+    g.chat.emplace_back(static_cast<const char*>(body), static_cast<std::size_t>(size));
+    push(sf::cb_lobby_chat_msg, sf::LobbyChatMsg{.lobby = id,
+                                                 .user = self_id,
+                                                 .type = static_cast<u8>(sf::chat_message),
+                                                 .chat_id = static_cast<u32>(g.chat.size() - 1)});
+    return true;
+}
+FAKE_API int SteamAPI_ISteamMatchmaking_GetLobbyChatEntry(void*, u64, int chat, sf::SteamId* user, void* out, int size,
+                                                          i32* type) {
+    if (chat < 0 || chat >= static_cast<int>(g.chat.size())) {
+        return 0;
+    }
+    const std::string& line = g.chat[chat];
+    const int n = std::min(size, static_cast<int>(line.size()));
+    std::memcpy(out, line.data(), static_cast<std::size_t>(n));
+    user->id = self_id;
+    *type = sf::chat_message;
+    return n;
+}
+FAKE_API int SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit(void*, u64 id) {
+    const State::Lobby* lobby = lobby_of(id);
+    return lobby ? lobby->limit : 0;
+}
+FAKE_API bool SteamAPI_ISteamMatchmaking_SetLobbyJoinable(void*, u64 id, bool joinable) {
+    State::Lobby* lobby = lobby_of(id);
+    if (!lobby || lobby->owner != self_id) {
+        return false;
+    }
+    lobby->joinable = joinable;
+    return true;
+}
+FAKE_API u64 SteamAPI_ISteamMatchmaking_GetLobbyOwner(void*, u64 id) {
+    const State::Lobby* lobby = lobby_of(id);
+    return lobby ? lobby->owner : 0;
+}
+
+// Messages.
+
+namespace {
+void release_message(sf::NetworkingMessage* message) {
+    ++g.released;
+    delete[] static_cast<u8*>(message->data);
+    delete message;
+}
+} // namespace
+
+FAKE_API i32 SteamAPI_ISteamNetworkingMessages_SendMessageToUser(void*, const sf::NetworkingIdentity& to,
+                                                                 const void* data, u32 size, int flags, int channel) {
+    if (to.type != sf::identity_steam_id || to.size != 8 || to.steam_id == 0) {
+        return 8; // k_EResultInvalidParam
+    }
+    const auto* bytes = static_cast<const u8*>(data);
+    g.sent.push_back({.to = to.steam_id, .bytes = {bytes, bytes + size}, .flags = flags, .channel = channel});
+    return sf::result_ok;
+}
+FAKE_API int SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel(void*, int channel, sf::NetworkingMessage** out,
+                                                                        int max) {
+    int n = 0;
+    for (auto it = g.inbox.begin(); it != g.inbox.end() && n < max;) {
+        if (it->first == channel) {
+            out[n++] = it->second;
+            it = g.inbox.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return n;
+}
+FAKE_API bool SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(void*, const sf::NetworkingIdentity& who) {
+    g.accepted.insert(who.steam_id);
+    return true;
+}
+FAKE_API bool SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser(void*, const sf::NetworkingIdentity& who) {
+    g.closed.insert(who.steam_id);
+    return true;
+}
+FAKE_API void SteamAPI_SteamNetworkingMessage_t_Release(sf::NetworkingMessage* message) {
+    message->release(message);
+}
+FAKE_API void SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(void*) {
+    ++g.relays;
+}
+
 // What the test drives it with.
 
 FAKE_API void kin_fake_steam_reset() {
+    for (auto& [channel, message] : g.inbox) {
+        release_message(message);
+    }
     g = State{};
 }
 FAKE_API void kin_fake_steam_set_restart(bool restart) {
@@ -369,6 +633,111 @@ FAKE_API void kin_fake_steam_presence_join(const char* connect) {
 FAKE_API void kin_fake_steam_text_dismissed(bool submitted) {
     push(sf::cb_text_input_dismissed,
          sf::GamepadTextInputDismissed{.submitted = submitted, .submitted_length = submitted ? 17u : 0u});
+}
+FAKE_API void kin_fake_steam_add_lobby(u64 id, u64 owner, int limit, const char* key, const char* value) {
+    g.lobbies[id] = {.id = id, .owner = owner, .members = {owner}, .limit = limit, .data = {{key, value}}};
+}
+FAKE_API void kin_fake_steam_member_joins(u64 lobby, u64 user) {
+    if (State::Lobby* l = lobby_of(lobby)) {
+        l->members.push_back(user);
+        push(sf::cb_lobby_chat_update,
+             sf::LobbyChatUpdate{
+                 .lobby = lobby, .changed = user, .making_change = user, .state_change = sf::member_entered});
+    }
+}
+FAKE_API void kin_fake_steam_member_leaves(u64 lobby, u64 user) {
+    if (State::Lobby* l = lobby_of(lobby)) {
+        std::erase(l->members, user);
+        if (l->owner == user && !l->members.empty()) {
+            l->owner = l->members.front();
+        }
+        push(sf::cb_lobby_chat_update,
+             sf::LobbyChatUpdate{.lobby = lobby, .changed = user, .making_change = user, .state_change = 0x4});
+    }
+}
+// How many members a lobby has on "Steam's" side (a ghost member counts).
+FAKE_API int kin_fake_steam_member_count(u64 lobby) {
+    const State::Lobby* l = lobby_of(lobby);
+    return l ? static_cast<int>(l->members.size()) : -1;
+}
+// Takes a member out without telling anyone (as when the player was offline).
+FAKE_API void kin_fake_steam_drop_member(u64 lobby, u64 user) {
+    if (State::Lobby* l = lobby_of(lobby)) {
+        std::erase(l->members, user);
+    }
+}
+// The connection to Steam's servers goes away, or comes back.
+FAKE_API void kin_fake_steam_connection(bool connected) {
+    push(connected ? sf::cb_servers_connected : sf::cb_servers_disconnected, u8{0});
+}
+// A player Steam has no name for yet; then the name arriving (PersonaStateChange_t), if it was asked for.
+FAKE_API void kin_fake_steam_unnamed(u64 user) {
+    g.names[user] = "[unknown]";
+}
+FAKE_API bool kin_fake_steam_name_arrives(u64 user, const char* name) {
+    g.names[user] = name;
+    push(sf::cb_persona_state_change, sf::PersonaStateChange{.steam_id = user, .change_flags = 0x0001});
+    return g.requested.contains(user);
+}
+FAKE_API void kin_fake_steam_kicked(u64 lobby) {
+    push(sf::cb_lobby_kicked, sf::LobbyKicked{.lobby = lobby, .admin = lobby, .due_to_disconnect = 1});
+}
+FAKE_API const char* kin_fake_steam_filters() {
+    return g.filters.c_str();
+}
+FAKE_API int kin_fake_steam_sent_count() {
+    return static_cast<int>(g.sent.size());
+}
+// The i-th message sent: its bytes into `out` (returns their count), and who, how and on which channel.
+FAKE_API int kin_fake_steam_sent(int i, u8* out, int size, u64* to, int* flags, int* channel) {
+    if (i < 0 || i >= static_cast<int>(g.sent.size())) {
+        return -1;
+    }
+    const State::Sent& m = g.sent[i];
+    std::memcpy(out, m.bytes.data(), std::min<std::size_t>(size, m.bytes.size()));
+    *to = m.to;
+    *flags = m.flags;
+    *channel = m.channel;
+    return static_cast<int>(m.bytes.size());
+}
+FAKE_API void kin_fake_steam_message_from(u64 user, int channel, const u8* data, int size) {
+    auto* message = new sf::NetworkingMessage{};
+    message->data = new u8[static_cast<std::size_t>(size)];
+    std::memcpy(message->data, data, static_cast<std::size_t>(size));
+    message->size = size;
+    message->peer.type = sf::identity_steam_id;
+    message->peer.size = 8;
+    message->peer.steam_id = user;
+    message->channel = channel;
+    message->release = release_message;
+    g.inbox.emplace_back(channel, message);
+}
+FAKE_API int kin_fake_steam_released() {
+    return g.released;
+}
+FAKE_API int kin_fake_steam_relays() {
+    return g.relays;
+}
+FAKE_API void kin_fake_steam_session_request(u64 user) {
+    sf::MessagesSessionRequest request{};
+    request.remote.type = sf::identity_steam_id;
+    request.remote.size = 8;
+    request.remote.steam_id = user;
+    push(sf::cb_messages_session_request, request);
+}
+FAKE_API bool kin_fake_steam_accepted(u64 user) {
+    return g.accepted.contains(user);
+}
+FAKE_API bool kin_fake_steam_closed(u64 user) {
+    return g.closed.contains(user);
+}
+FAKE_API void kin_fake_steam_session_failed(u64 user, i32 reason) {
+    sf::MessagesSessionFailed failed{};
+    failed.remote.type = sf::identity_steam_id;
+    failed.remote.size = 8;
+    failed.remote.steam_id = user;
+    failed.end_reason = reason;
+    push(sf::cb_messages_session_failed, failed);
 }
 FAKE_API void kin_fake_steam_shutdown_signal() {
     push(sf::cb_steam_shutdown, u8{0});

@@ -30,6 +30,25 @@ releases may change APIs.
   sync model, deterministic input sync, with lockstep and rollback, clock sync
   between peers, desync detection by state hashes and a rollback sync test.
   See [networking](networking.md).
+- Joining a game in progress ([networking](networking.md#joining-a-game-in-progress)). An `InputSync` session with
+  `joinable` keeps free slots, and `allow_join(slot, peer)` lets a player take one while it runs. The host sends
+  the joiner a saved state in pieces, keeping what arrives after a loss and resending only the lost one. The joiner
+  catches up as a spectator, and then every peer takes the join at the same tick, carried with the host's command
+  for it. Nobody waits for a joiner, and one that never comes leaves the slot free. `StepInfo` gains `present` and
+  `joined`. A lost optional link no longer fails a session (`LinkInfo::optional`). Lobby matches can keep free
+  slots (`start_lobby_match(..., free_slots)`, `seat_lobby_joiners`, `free_lobby_slot`, `allow_lobby_joiners`).
+- Lobbies and messages between players ([platform services](platform_services.md#lobbies-and-messages)):
+  `PlatformServices` gains `create_lobby`, `find_lobbies` (rules over lobby data, open slots, distance), `join_lobby`,
+  `leave_lobby`, the members and owner, the lobby's data and each member's, `set_lobby_joinable`, chat, and messages
+  to players (`send_message`, unreliable or reliable, on channels; `receive_messages`), each with its events.
+  On Steam these are its matchmaking lobbies and `ISteamNetworkingMessages`, which cross NATs and go through
+  Valve's relays. Offline there are none. `kin::FakeNetwork` joins `FakeServices` in one process for tests. Scripts
+  get the lobby functions and messages in the `services` table. `LobbyMemberNamed` gives a member's name once the
+  platform has it. `kin_steam_abi_check` covers the new declarations.
+  With `KIN_ENABLE_NET`, `kin::net::ServicesTransport` plays a session over those messages (`remove_peer` frees a
+  departed player's place), and
+  `kin/net/lobby_match.hpp` turns a lobby into a match: `start_lobby_match`, `read_lobby_match`,
+  `configure_input_sync`.
 
 ## [0.3.0] — 2026-11-10
 

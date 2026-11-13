@@ -321,6 +321,7 @@ kin_add_test(kin_sdl_capabilities_tests kin-sdl-capabilities SOURCES sdl_capabil
 kin_add_test(kin_content_tests kin-content SOURCES content_tests.cpp)
 kin_add_test(kin_file_watcher_tests kin-file-watcher SOURCES file_watcher_tests.cpp)
 kin_add_component_test(NET kin_net_tests kin-net SOURCES net_tests.cpp LINK_TARGET kin::net)
+kin_add_component_test(NET kin_net_services_tests kin-net-services SOURCES net_services_tests.cpp LIBRARIES kin::net)
 kin_add_component_test(SCRIPTING kin_lua_script_tests kin-lua-script SOURCES lua_script_tests.cpp LINK_TARGET kin::scripting)
 kin_add_component_test(AUDIO kin_audio_tests kin-audio SOURCES audio_tests.cpp LINK_TARGET kin::audio_ecs
     DEFINITIONS KIN_AUDIO_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio")
