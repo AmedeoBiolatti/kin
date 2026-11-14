@@ -465,7 +465,7 @@ void GpuRenderer3D::make_gi() {
         _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 8, 4, 0);
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 1, 1, 1, 1);
         _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 9, 8, 3, 0);
-        _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
+        _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 2, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 9, 3, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
         _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 8, 0, 3, 0, 8, 8);
@@ -2476,10 +2476,12 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
         if (!pass) {
             return false;
         }
-        const SDL_GPUTextureSamplerBinding distance{g.distance.handle(), _gi_sampler};
+        const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+            SDL_GPUTextureSamplerBinding{g.distance.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.normal.handle(), _gi_sampler}};
         SDL_GPUBuffer* list = g.place_list->handle();
         SDL_BindGPUComputePipeline(pass, _gi_place);
-        SDL_BindGPUComputeSamplers(pass, 0, &distance, 1);
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), 2);
         SDL_BindGPUComputeStorageBuffers(pass, 0, &list, 1);
         SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
         const std::array<u32, 2> groups = gi_groups(placing.size());

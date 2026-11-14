@@ -329,6 +329,127 @@ void resolve_contracts(Window& window) {
     }
 }
 
+// The production placement shader must retain free nominal cells and move out through a surface's front.
+void placement_contracts(Window& window) {
+    gpu::GpuDevice device(window);
+    gpu_ready = true;
+    auto* d = device.handle();
+    constexpr auto sampled = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    constexpr auto writable = sampled | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE |
+                              SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE;
+    auto distance = device.create_volume(8, 8, 8, SDL_GPU_TEXTUREFORMAT_R32_FLOAT, sampled);
+    auto normals = device.create_volume(8, 8, 8, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, sampled);
+    auto probes = device.create_volume(2, 2, 2, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, writable);
+    auto irradiance = device.create_volume(16, 16, 2, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, writable);
+    auto moments = device.create_volume(32, 32, 2, SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, writable);
+    const u32 first = 1u << 23;
+    auto list = device.create_buffer(SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ, &first, sizeof(first));
+    SDL_GPUSamplerCreateInfo sampling{};
+    sampling.min_filter = sampling.mag_filter = SDL_GPU_FILTER_NEAREST;
+    sampling.address_mode_u = sampling.address_mode_v = sampling.address_mode_w =
+        SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    auto* sampler = SDL_CreateGPUSampler(d, &sampling);
+    const auto code = gi_test_shaders("gi_probe_place.comp.spv");
+    SDL_GPUComputePipelineCreateInfo info{};
+    info.code = code.data();
+    info.code_size = code.size();
+    info.entrypoint = "main";
+    info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    info.num_samplers = 2;
+    info.num_readonly_storage_buffers = 1;
+    info.num_readwrite_storage_textures = 3;
+    info.num_uniform_buffers = 1;
+    info.threadcount_x = 64;
+    info.threadcount_y = info.threadcount_z = 1;
+    auto* pipeline = SDL_CreateGPUComputePipeline(d, &info);
+    need(sampler && pipeline, "probe placement pipeline unavailable");
+    struct PlaceParams {
+        float size[4]{8, 8, 8, 1}, level[4][4]{{-4, -4, -4, 1}};
+        Probes probes;
+        u32 count[4]{1, 0, 0, 0};
+        float misc[4]{0, 7.9f, 0, 0};
+    } params;
+    static_assert(sizeof(PlaceParams) == 224);
+    params.probes.counts[0] = params.probes.counts[1] = params.probes.counts[2] = 2;
+    params.probes.level[0][3] = 4;
+    const auto run = [&](int plane, bool positive, bool two_sided, bool fresh, bool blocked = false) {
+        std::vector<float> distances(8 * 8 * 8);
+        std::vector<u8> faces(8 * 8 * 8 * 4);
+        for (int z = 0; z < 8; ++z)
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x) {
+                    const int at = x + 8 * (y + 8 * z), world_x = x < 4 ? x : x - 8;
+                    distances[at] = blocked ? 0.f : float(std::abs(world_x - plane));
+                    faces[at * 4] = positive ? 255 : 0;
+                    faces[at * 4 + 1] = faces[at * 4 + 2] = 128;
+                    faces[at * 4 + 3] = two_sided ? 255 : 128;
+                }
+        upload_texture(device, distance, 8, 8, 8, distances.data(), u32(distances.size() * sizeof(float)));
+        upload_texture(device, normals, 8, 8, 8, faces.data(), u32(faces.size()));
+        if (fresh) {
+            const std::vector<u16> zeros(2 * 2 * 2 * 4, 0), lit(16 * 16 * 2 * 4, 0x3c00), old(32 * 32 * 2 * 2, 0x3c00);
+            upload_texture(device, probes, 2, 2, 2, zeros.data(), u32(zeros.size() * sizeof(u16)));
+            upload_texture(device, irradiance, 16, 16, 2, lit.data(), u32(lit.size() * sizeof(u16)));
+            upload_texture(device, moments, 32, 32, 2, old.data(), u32(old.size() * sizeof(u16)));
+        }
+        const u32 entry = fresh ? 1u << 23 : 0;
+        device.upload_buffer(list, &entry, sizeof(entry));
+        auto* commands = SDL_AcquireGPUCommandBuffer(d);
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> outputs{
+            SDL_GPUStorageTextureReadWriteBinding{.texture = probes.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = irradiance.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = moments.handle()}};
+        auto* pass = SDL_BeginGPUComputePass(commands, outputs.data(), 3, nullptr, 0);
+        need(pass, "probe placement pass unavailable");
+        const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+            SDL_GPUTextureSamplerBinding{distance.handle(), sampler},
+            SDL_GPUTextureSamplerBinding{normals.handle(), sampler}};
+        SDL_GPUBuffer* input = list.handle();
+        SDL_BindGPUComputePipeline(pass, pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), 2);
+        SDL_BindGPUComputeStorageBuffers(pass, 0, &input, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, &params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, 1, 1, 1);
+        SDL_EndGPUComputePass(pass);
+        complete(d, commands);
+        std::vector<u8> bytes;
+        need(device.read_volume(probes, 2, 8, bytes), "cannot read placed probe");
+        std::array<u16, 4> encoded;
+        std::memcpy(encoded.data(), bytes.data(), sizeof(encoded));
+        return std::array<float, 4>{half(encoded[0]), half(encoded[1]), half(encoded[2]), half(encoded[3])};
+    };
+    const auto adjacent = run(2, false, false, true);
+    need(adjacent[0] == 0 && adjacent[1] == 0 && adjacent[2] == 0 && adjacent[3] == .25f,
+         "already-clear nominal probe was displaced or became ready before tracing");
+    std::vector<u8> bytes;
+    need(device.read_volume(irradiance, 2, 8, bytes), "cannot read placed probe history");
+    u16 fresh_alpha = 1, other_alpha = 0;
+    std::memcpy(&fresh_alpha, bytes.data() + ((1 + 16) * 4 + 3) * 2, 2);
+    std::memcpy(&other_alpha, bytes.data() + ((9 + 16 * 9) * 4 + 3) * 2, 2);
+    need(fresh_alpha == 0 && other_alpha == 0x3c00, "placing a new probe did not clear only its own history");
+    const auto outward = run(0, true, false, true);
+    need(outward[0] > 1 && outward[0] < 2 && outward[1] == 0 && outward[2] == 0 && outward[3] == .25f,
+         "single-sided relocation crossed behind the surface instead of reaching a front empty cell");
+    const auto negative = run(0, false, false, true);
+    need(negative[0] < -1 && negative[0] > -2 && negative[1] == 0 && negative[2] == 0,
+         "negative-facing surface did not choose its nearest front empty cell");
+    const auto retained = run(2, true, false, false);
+    need(retained == negative, "a kept free probe moved when geometry changed elsewhere");
+    const auto both = run(0, true, true, true);
+    need(both[0] < -1 && both[0] > -2, "double-sided surface lost its nearer valid side");
+    const auto trapped = run(0, true, false, true, true);
+    need(trapped[3] < 0, "probe with no free destination became usable");
+    const std::vector<u16> inside(2 * 2 * 2 * 4, 0);
+    auto marked = inside;
+    marked[3] = 0xbc00;
+    upload_texture(device, probes, 2, 2, 2, marked.data(), u32(marked.size() * sizeof(u16)));
+    const auto still_inside = run(1, false, false, false);
+    need(still_inside[3] < 0, "placement woke a probe classified inside before its rays proved it free");
+    SDL_ReleaseGPUComputePipeline(d, pipeline);
+    SDL_ReleaseGPUSampler(d, sampler);
+    std::cout << "GI placement: clear probes retained; front, double-sided, trapped and history contracts passed\n";
+}
+
 // Exercise the production probe-ray shader without beauty shading or probe integration hiding a false hit.
 void surface_hit_contracts(Window& window) {
     gpu::GpuDevice device(window);
@@ -896,6 +1017,8 @@ int main(int argc, char** argv) {
         auto& window = app.create_window({.title = "GI regression checks", .width = 96, .height = 72, .hidden = true});
         if (argc == 1)
             resolve_contracts(window);
+        else if (std::string(argv[1]) == "placement")
+            placement_contracts(window);
         else if (std::string(argv[1]) == "surface-hits")
             surface_hit_contracts(window);
         else if (std::string(argv[1]) == "surface-reconstruction")

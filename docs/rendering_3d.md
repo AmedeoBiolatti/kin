@@ -1243,8 +1243,11 @@ the plan's G5b results.
 - **The probes** (`global_illumination.probes`, a `GiProbes3D`): on a grid every `spacing` voxels (2, 4 or 8: 4; further
   apart where a level would have more than `max_gi_probes`, 65,536), a window of them in each level, moving with the
   voxels'. A probe more than 1.8 spacings from every surface sleeps (at most 7.9 voxels: the distances are kept to 8),
-  and one within 1.8 voxels of a surface moves to the place with the most room nearby; they are placed again where the
-  scene changes (one stays where it stands while that still has room, and one its rays found inside something stays
+  and one within 1.8 voxels of a surface moves to the nearest candidate with that clearance, or the roomiest
+  candidate when none has it (equally roomy candidates choose the nearest). In a surface voxel, a single-sided
+  face restricts relocation toward its front: an empty cell behind that face may be inside a closed mesh. Either
+  side of a double-sided face is valid. They are placed again where the scene changes (one stays where it stood
+  while that still has room, and one its rays found inside something stays
   so till they say otherwise: moved or woken, a probe would light with what it saw from elsewhere till its next
   update), and a probe new to its window starts empty. Each render a batch of them (`per_render`, 2,048; 0, all;
   at most a million rays) each casts `rays` rays (128, a spherical Fibonacci set turned each render) through the
