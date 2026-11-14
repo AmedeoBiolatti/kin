@@ -232,10 +232,13 @@ bool kin_gi_blended_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[
     for (int k = 0; k < levels; ++k) {
         const float spacing = g.level[k].w;
         const vec3 biased = p + (n * g.bias.x + to_eye * g.bias.y) * spacing;
-        const vec3 grid = biased / spacing - g.level[k].xyz;
-        if (any(lessThan(grid, vec3(0.0))) || any(greaterThan(grid, last))) {
+        const vec3 domain_grid = biased / spacing - g.level[k].xyz;
+        if (any(lessThan(domain_grid, vec3(0.0))) || any(greaterThan(domain_grid, last))) {
             continue;
         }
+        // The normal offset selects probes on the free side of the surface. The eye offset only protects
+        // visibility: including it in interpolation makes the irradiance field follow the camera.
+        const vec3 grid = (p + n * (g.bias.x * spacing)) / spacing - g.level[k].xyz;
         vec3 here[4];
         float ready, available;
         if (!kin_gi_level_light(g, k, p, biased, n, grid, ways, count, here, ready, available)) {
@@ -246,7 +249,7 @@ bool kin_gi_blended_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[
         // actual bounds instead. Without this guard a smooth spatial ramp still jumps whenever storage scrolls.
         const bool stationary = k == levels - 1 && g.centre.w < 0.0;
         const float guard = stationary ? 0.0 : abs(g.centre.w);
-        const vec3 fade_grid = stationary ? grid : (biased - g.centre.xyz) / spacing + g.counts.xyz * 0.5;
+        const vec3 fade_grid = stationary ? domain_grid : (biased - g.centre.xyz) / spacing + g.counts.xyz * 0.5;
         const vec3 edge = min(fade_grid, last - fade_grid) - vec3(guard);
         const float width = max(0.25, min(3.0, min(min(last.x, last.y), last.z) * 0.5 - guard));
         // A fixed outer level contains the whole requested scene: do not fade its floor/roof toward unoccluded

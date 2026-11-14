@@ -1252,10 +1252,14 @@ the plan's G5b results.
   `canyon`, a street against Cycles, the shade was 21% short after 480 renders; now 9%, 7% when settled; in the
   Bistro, the shade 5 to 7% short for ten seconds after a walk, now settled within one). One whose rays meet more
   than a quarter backs of one-sided surfaces is inside something and gives nothing.
-- **What a surface reads:** the probes of the finest level whose window holds it: the eight round it, each weighted by
-  distance, by whether it is in front of the surface, and by whether it can see it (Chebyshev's inequality on its
-  distances that way), the look-up moved out three tenths of a spacing along the normal and a tenth toward the eye;
-  times `intensity`. Over a window's last three cells of probes it smoothly fades into the next level's; the outer
+- **What a surface reads:** the probes of the finest level whose window holds it: the eight round the position moved
+  out three tenths of a spacing along the normal, each weighted by distance, by whether it is in front of the surface,
+  and by whether it can see it (Chebyshev's inequality on its distances that way); times `intensity`. Visibility tests
+  move that position another tenth of a spacing toward the eye. That eye offset also retains the window's existing
+  coverage/fade bounds, but does not move the interpolation weights: turning the camera must not drag the sampled
+  irradiance field across the surface. The normal offset keeps the query on the free side of a wall; removing it can
+  select inside probes or unstable surface-adjacent lighting. Over a window's last three cells of probes it smoothly
+  fades into the next level's; the outer
   scrolling level fades to the actual ambient/environment lighting, for diffuse and specular together. A last fixed
   level that already contains the whole requested area retains its lighting; voxel bounce feedback also retains its
   outer light rather than treating the display fallback as lost energy. A scrolling window's

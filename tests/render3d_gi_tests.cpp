@@ -275,6 +275,55 @@ void resolve_contracts(Window& window) {
         need(std::abs(coverage_at(f, 1, 1, 1) - support) < .001f, name + ": wrong domain/readiness");
         std::cout << "GI resolve " << name << ": light " << light[0] << ", coverage " << coverage << '\n';
     }
+    {
+        // The receiver lies on the z=-1 probe plane. The row nearer an occluder is darker: changing only the
+        // eye offset must not move interpolation into that row. The normal offset still selects free-side probes.
+        Fixture f(device, 8, 8);
+        f.params.previous_eye[3] = 0;
+        std::vector<float> ir(32 * 32 * 4 * 4, .1f);
+        for (int z = 0; z < 4; ++z)
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x)
+                    for (int c = 0; c < 4; ++c)
+                        ir[((z * 32 + y) * 32 + x) * 4 + c] = z == 3 ? .6f : .1f; // wrapped z=-1
+        f.upload(2, 32, 32, 4, ir);
+        for (const float normal_bias : {0.0f, .3f}) {
+            f.params.probes.bias[0] = normal_bias;
+            f.params.probes.bias[1] = 0;
+            const float reference = f.run()[0];
+            need(reference > .3f, "receiver lost its visible probe light");
+            for (const float eye_bias : {.1f, .2f}) {
+                f.params.probes.bias[1] = eye_bias;
+                const auto light = f.run();
+                std::cout << "GI receiver interpolation bias " << normal_bias << ',' << eye_bias << ": " << light[0]
+                          << '\n';
+                need(std::abs(light[0] - reference) < .001f, "eye bias displaced receiver interpolation");
+            }
+        }
+        // A probe plane inside a wall must not leave its receiver black. The free-side cell still supplies the
+        // light when all corners on the receiver's exact plane are excluded by probe placement.
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                f.probe_data[((3 * 4 + y) * 4 + x) * 4 + 3] = 0;
+        need(std::abs(f.run()[0] - .1f) < .001f, "excluded probe plane lost free-side lighting");
+        for (int i = 0; i < 64; ++i)
+            f.probe_data[i * 4 + 3] = 1;
+        // The same bias remains part of the moment test. These probes see the unbiased receiver but not its
+        // displaced endpoint, so disabling visibility bias along with the interpolation shift would leak light.
+        std::vector<float> moments(64 * 64 * 4 * 2);
+        for (size_t i = 0; i < moments.size(); i += 2) {
+            moments[i] = .3f;
+            moments[i + 1] = .09f;
+        }
+        f.upload(3, 64, 64, 4, moments);
+        f.params.probes.bias[0] = f.params.probes.bias[1] = 0;
+        need(f.run()[0] > .59f, "visible receiver lost its probe light");
+        for (const auto bias : {Vec2f{.3f, .1f}, Vec2f{0, .4f}}) {
+            f.params.probes.bias[0] = bias.x;
+            f.params.probes.bias[1] = bias.y;
+            need(f.run()[0] < .001f, "receiver interpolation removed biased visibility testing");
+        }
+    }
 }
 
 void surface_reconstruction_contracts(Window& window) {
