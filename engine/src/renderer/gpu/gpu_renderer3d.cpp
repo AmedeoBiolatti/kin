@@ -214,7 +214,8 @@ constexpr SDL_GPUBufferUsageFlags exposure_buffer_usage = SDL_GPU_BUFFERUSAGE_CO
 constexpr SDL_GPUTextureFormat pick_format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT; // position, id
 // Ambient occlusion: the pre-pass's world normals (octahedral, two floats), and the result.
 constexpr SDL_GPUTextureFormat ao_normal_format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
-constexpr SDL_GPUTextureFormat ao_format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+constexpr SDL_GPUTextureFormat ao_format = SDL_GPU_TEXTUREFORMAT_R8G8_UNORM; // full/detail AO
+constexpr SDL_GPUTextureFormat contact_format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
 constexpr u64 ao_chain_min_pixels =
     1'500'000; // the linear depth chain pays from about 1080p up (1280 x 720 is 0.92 M, 1920 x 1080 2.07 M)
 constexpr u32 ao_chain_levels = 5;                                           // the occlusion's linear depth chain
@@ -374,8 +375,9 @@ struct OcclusionUniforms {
     f32 unproject_zw[4]; // e, f, g, h
     f32 sizes[4];        // the result's size, the depth's
     f32 shape[4];        // radius, power, pixels a unit spans at depth 1, 1 if orthographic
+    f32 detail[4];       // full-weight detail reach beneath the GI lookup offset
 };
-static_assert(sizeof(OcclusionUniforms) == 128);
+static_assert(sizeof(OcclusionUniforms) == 144);
 // ao_blur.comp's.
 // ao_depth_chain.comp's.
 struct OcclusionChainUniforms {
@@ -1390,7 +1392,11 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                          SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
         if (!SDL_GPUTextureSupportsFormat(handle, ao_format, SDL_GPU_TEXTURETYPE_2D,
                                           SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
-            throw std::runtime_error("no R8 storage texture");
+            throw std::runtime_error("no RG8 storage texture for AO");
+        }
+        if (!SDL_GPUTextureSupportsFormat(handle, contact_format, SDL_GPU_TEXTURETYPE_2D,
+                                          SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
+            throw std::runtime_error("no R8 storage texture for contact shadows");
         }
         SDL_GPUSamplerCreateInfo point{};
         point.min_filter = point.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -1399,6 +1405,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _point_sampler = SDL_CreateGPUSampler(handle, &point);
         _gtao_pipeline = make_compute(handle, "gtao.comp.spv", {.samplers = 2});
         _ao_blur_pipeline = make_compute(handle, "ao_blur.comp.spv", {.samplers = 2});
+        _contact_blur_pipeline = make_compute(handle, "contact_blur.comp.spv", {.samplers = 2});
         _ao_upsample_pipeline = make_compute(handle, "ao_upsample.comp.spv", {.samplers = 3});
         _ao_blur_both_pipeline =
             make_compute(handle, "ao_blur_both.comp.spv",
@@ -1409,6 +1416,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                          SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
             _gtao_chain_pipeline = make_compute(handle, "gtao_chain.comp.spv", {.samplers = 2});
             _ao_blur_chain_pipeline = make_compute(handle, "ao_blur_chain.comp.spv", {.samplers = 2});
+            _contact_blur_chain_pipeline = make_compute(handle, "contact_blur_chain.comp.spv", {.samplers = 2});
             _ao_blur_both_chain_pipeline =
                 make_compute(handle, "ao_blur_both_chain.comp.spv", {.samplers = 3, .readwrite_textures = 2});
             _ao_chain_pipeline = make_compute(handle, "ao_depth_chain.comp.spv",
@@ -1419,7 +1427,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                                .threads_x = 16,
                                                .threads_y = 16});
         }
-        if (!_point_sampler || !_gtao_pipeline || !_ao_blur_pipeline || !_contact_pipeline) {
+        if (!_point_sampler || !_gtao_pipeline || !_ao_blur_pipeline || !_contact_pipeline || !_contact_blur_pipeline) {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
         }
         _ao_available = true;
@@ -1893,6 +1901,8 @@ GpuRenderer3D::~GpuRenderer3D() {
                                             _ao_blur_both_pipeline,
                                             _ao_upsample_pipeline,
                                             _contact_pipeline,
+                                            _contact_blur_pipeline,
+                                            _contact_blur_chain_pipeline,
                                             _fog_sun_pipeline,
                                             _taa_pipeline,
                                             _gc_cull,
@@ -3850,8 +3860,8 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
             view._ao_upsampled_ready = false;
         }
         if (!have_contact) {
-            GpuTexture raw = _device->create_target(w, h, ao_format, stored);
-            GpuTexture across = _device->create_target(w, h, ao_format, stored);
+            GpuTexture raw = _device->create_target(w, h, contact_format, stored);
+            GpuTexture across = _device->create_target(w, h, contact_format, stored);
             view._contact_raw = std::move(raw);
             view._contact_across = std::move(across);
         }
@@ -3957,8 +3967,8 @@ bool GpuRenderer3D::build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& vi
 }
 
 void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera,
-                                      const Mat4f& projection, const AmbientOcclusion3D& ao, RenderDebugStats3D& stats,
-                                      bool blur_too) {
+                                      const Mat4f& projection, const AmbientOcclusion3D& ao, f32 detail_reach,
+                                      RenderDebugStats3D& stats, bool blur_too) {
     const PassMarker marker{commands, _gpu_markers, "kin3d.ao"};
     view._ao_upsampled_ready = false;
     const Unprojection unproject = unproject_coefficients(projection);
@@ -3990,6 +4000,7 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
                           projection.at(1, 1) * 0.5f * depth_h,
                           camera.projection == Projection3D::Orthographic ? 1.0f : 0.0f};
     std::memcpy(u.shape, shape, sizeof(shape));
+    u.detail[0] = std::clamp(detail_reach, 0.001f, u.shape[0]);
     const bool use_chain = static_cast<u64>(depth_w) * static_cast<u64>(depth_h) >= ao_chain_min_pixels;
     if (use_chain && build_ao_chain(commands, view, projection, u.shape[0])) {
         const PassMarker gtao_marker{commands, _gpu_markers, "kin3d.ao_horizons"};
@@ -4002,7 +4013,7 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
             stats.ao_chain_built = 1;
             // The blurs (this one's, the contact shadows', the merged) read the chain's first level instead of the
             // depth.
-            _chain_ready = _ao_blur_chain_pipeline && _ao_blur_both_chain_pipeline;
+            _chain_ready = _ao_blur_chain_pipeline && _ao_blur_both_chain_pipeline && _contact_blur_chain_pipeline;
             if (_chain_ready) {
                 depth = inputs[0];
             }
@@ -4083,7 +4094,7 @@ void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuV
     std::memcpy(blur.sizes, sizes, sizeof(sizes));
     std::memcpy(blur.depth, unproject.zw, sizeof(unproject.zw));
     blur.step[0] = 1.0f;
-    SDL_GPUComputePipeline* const blur_pipeline = _chain_ready ? _ao_blur_chain_pipeline : _ao_blur_pipeline;
+    SDL_GPUComputePipeline* const blur_pipeline = _chain_ready ? _contact_blur_chain_pipeline : _contact_blur_pipeline;
     depth.texture = _chain_ready ? view._ao_chain.handle() : view._ao_depth.handle();
     dispatch(blur_pipeline, view._contact_across, view._contact_raw, &blur, sizeof(blur));
     std::swap(view._contact_raw, view._contact_across);
@@ -14517,7 +14528,14 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                                view->_ao_raw.height() == view->_contact_raw.height();
             _chain_ready = false;
             if (ao.enabled) {
-                compute_occlusion(commands, *view, scene.camera, ctx.main_projection, ao, stats, !merge);
+                f32 detail_reach = ao.radius;
+                if (ctx.gi_lit) {
+                    const auto& gi = (_gi_borrowed ? _gi_borrowed : view)->_gi;
+                    // GI samples 0.3 spacings out from the receiver. Keep full-weight AO for geometry beneath that
+                    // offset (at least a finest voxel); select it per surface using resolved GI coverage.
+                    detail_reach = std::max(gi.cell, gi_normal_bias * gi.cell * static_cast<f32>(gi.spacing));
+                }
+                compute_occlusion(commands, *view, scene.camera, ctx.main_projection, ao, detail_reach, stats, !merge);
             }
             if (want_contact) {
                 const PassMarker contact_marker{commands, _gpu_markers, "kin3d.contact_shadows"};

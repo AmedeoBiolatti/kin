@@ -6,7 +6,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uDepth;
 layout(set = 0, binding = 1) uniform sampler2D uNormals;
 layout(set = 0, binding = 2) uniform sampler2D uSource;
-layout(set = 1, binding = 0, r8) uniform writeonly image2D uResult;
+layout(set = 1, binding = 0, rg8) uniform writeonly image2D uResult;
 // Shared with the horizon search's OcclusionUniforms.
 layout(set = 2, binding = 0) uniform Params {
     mat4 view;
@@ -14,6 +14,7 @@ layout(set = 2, binding = 0) uniform Params {
     vec4 unproject_zw;
     vec4 sizes; // xy: AO size, zw: full-size depth/result
     vec4 shape; // x: AO radius
+    vec4 detail; // x: full-weight detail reach (shared with the horizon uniforms)
 } params;
 
 #include "kin_depth.inc.glsl"
@@ -47,13 +48,14 @@ void main() {
     const bvec2 at_start = equal(xy, start), at_end = equal(xy, end);
     if ((at_start.x || at_end.x) && (at_start.y || at_end.y)) {
         const ivec2 q = ivec2(at_start.x ? lo.x : hi.x, at_start.y ? lo.y : hi.y);
-        imageStore(uResult, xy, vec4(texelFetch(uSource, q, 0).r));
+        imageStore(uResult, xy, vec4(texelFetch(uSource, q, 0).rg, 0.0, 0.0));
         return;
     }
     const float centre = view_distance(depth);
     const vec3 normal = decode_normal(texelFetch(uNormals, xy, 0).rg);
     const float edge = max(min(0.03 * centre, 0.25 * params.shape.x), 1e-4);
-    float sum = 0.0, total = 0.0;
+    vec2 sum = vec2(0.0);
+    float total = 0.0;
     for (int y = 0; y < 2; ++y) {
         for (int x = 0; x < 2; ++x) {
             const float spatial = (x == 0 ? 1.0 - fraction.x : fraction.x) *
@@ -70,10 +72,10 @@ void main() {
             const float a2 = alignment * alignment;
             const float a4 = a2 * a2;
             const float weight = spatial * exp(-abs(view_distance(d) - centre) / edge) * a4 * a4;
-            sum += texelFetch(uSource, q, 0).r * weight;
+            sum += texelFetch(uSource, q, 0).rg * weight;
             total += weight;
         }
     }
     // No neighbour represents this surface: avoid borrowing a dark background.
-    imageStore(uResult, xy, vec4(total > 1e-5 ? sum / total : 1.0));
+    imageStore(uResult, xy, vec4(total > 1e-5 ? sum / total : vec2(1.0), 0.0, 0.0));
 }

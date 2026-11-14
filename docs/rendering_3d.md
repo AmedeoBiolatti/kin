@@ -908,7 +908,7 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   sample, whatever the view's MSAA; where the main pass has one sample too, as
   with temporal anti-aliasing, it starts from a copy of the pre-pass's depth,
   below); GTAO (2 slices, 8 steps a side, a thickness heuristic)
-  runs in compute from it, then a depth-aware blur (R8 result). A horizon stays raised while samples remain
+  runs in compute from it, then a depth-aware blur (RG8 full/detail result). A horizon stays raised while samples remain
   above the receiver plane (by more than 1% of the radius, at least 5 mm); the thin-occluder heuristic can lower it
   again when samples return to that plane. A continuing window frame or wall therefore keeps shading a recess.
   `mesh.frag`
@@ -921,11 +921,11 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   additive and wireframe meshes read no occlusion (they would read what is
   behind them), nor does the first-person overlay, which is not in the
   pre-pass either: its own lighting stays as it was. Where the device lacks a
-  sampled depth, a two-float colour target or an R8 storage texture, occlusion
+  sampled depth, a two-float colour target or an RG8 storage texture, occlusion
   is off with one line in the log. `half_resolution` computes and blurs at half
   the view's size, then reconstructs against full-size depth and normals to
   avoid borrowing occlusion from a different surface. Reconstruction adds one
-  compute dispatch and a full-size R8 target; `ao_dispatches` includes it. The
+  compute dispatch and a full-size RG8 target; `ao_dispatches` includes it. The
   original linear upscale is the fallback when that optional shader is unavailable.
   Half size remains a speed/detail tradeoff; full resolution is the default.
   `debug_stats()` has `ao_draws`, `ao_instances` and `ao_dispatches` (0 when
@@ -934,8 +934,8 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   on (and `half_resolution` off) the two blurs are one dispatch a direction
   (`debug_stats().blur_merged` is 2; the counts above still count each
   feature's own); the result is the same to the byte. The blur ends in the
-  first target again (raw, across, raw), so a feature holds two R8 textures,
-  not three. In views of 1.5 million pixels or more (about 1440 x 1040; 1920 x
+  first target again (raw, across, raw), so AO holds two RG8 textures and contact shadows two R8 textures,
+  not three of each. In views of 1.5 million pixels or more (about 1440 x 1040; 1920 x
   1080 and up) the occlusion reads a **linear depth chain** instead of the
   depth: one compute dispatch writes the distance in front of the camera of
   every pre-pass pixel and four coarser levels (R32F, a weighted average of
@@ -1312,12 +1312,21 @@ the plan's G5b results.
   normal map's
   normal for the diffuse and to the reflection: a rough surface reflects
   that, a smooth one the environment dimmed by the share of the sky's light that is. (Read by each fragment instead,
-  the probes cost the Bistro 13 ms at 2844 x 1600, the overdraw's fragments too; read so, about 1.4.) GTAO and the
-  occlusion maps still multiply both (keep GTAO's radius under the probes' spacing, or creases are darkened twice).
-  For diffuse shading, the GI coverage blends GTAO's albedo-based multi-bounce compensation toward its raw
-  visibility: the probe field already carries bounced light, and a pale receiver alone does not establish pale
-  surroundings. This uses the existing visibility pass and targets; it does not refine the voxel field or constrain
-  the lookup bias. Like GTAO itself, the correction only knows geometry in the current depth buffer.
+  the probes cost the Bistro 13 ms at 2844 x 1600, the overdraw's fragments too; read so, about 1.4.) Material occlusion
+  maps still multiply both. GTAO keeps two visibility estimates from the same depth taps: the authored radius and
+  the detail beneath the GI lookup's normal offset. Detail AO retains full weight out to that offset (0.3 finest
+  probe spacings, at least one finest voxel), followed by the existing outer 61.5% falloff, with its radius capped
+  by the authored radius. Where the authored AO's full-weight reach is already inside the unresolved region, both channels retain the
+  authored AO. Resolved GI coverage blends toward the detail estimate; outside GI coverage the authored radius
+  still applies. This reduces broad occlusion applied again over the probe field,
+  while sub-grid contacts retain local depth visibility. The short-range value is normalized against the same slices without occluders, so the horizon
+  approximation does not shade an open plane again; it is never darker than the full value.
+  Both channels share the existing blur and reconstruction passes (RG8 instead of R8: 1.76 MiB extra for two full-size
+  AO targets at 1280 x 720; 1.32 MiB extra with half-size AO and full-size reconstruction). Contact-shadow targets
+  remain R8. No extra depth taps or compute dispatches are introduced. For diffuse shading, GI coverage also blends
+  GTAO's albedo-based multi-bounce compensation toward raw visibility: the probe field already carries bounced
+  light, and a pale receiver alone does not establish pale surroundings. This does not refine the voxel field or
+  change the lookup bias. Like GTAO itself, it only knows geometry in the current depth buffer.
   Only the stock shaders' light variants read them: with them on, those draw (`debug_stats().lights_variant`); a
   custom material shader keeps the sky's light, and the overlay its own.
 - **Where:** compute that writes 3D textures of half floats, 8-bit and four-half-float texels and reads and writes

@@ -472,11 +472,15 @@ vec3 mapped_normal(vec3 n, float front) {
 
 // The ambient occlusion of the pixel (1: none, or this surface has none).
 // Only what the pre-pass drew has it: a blended surface would read what is behind it.
-float screen_occlusion() {
+vec2 screen_occlusions() {
     if (frame.occlusion.x < 0.5 || material.maps.z < 0.5) {
-        return 1.0;
+        return vec2(1.0);
     }
-    return texture(uAmbientOcclusion, gl_FragCoord.xy * frame.occlusion.zw).r;
+    return texture(uAmbientOcclusion, gl_FragCoord.xy * frame.occlusion.zw).rg;
+}
+
+float screen_occlusion() {
+    return screen_occlusions().r;
 }
 
 // The share of the sun the contact shadows let through (1: all, or this
@@ -1353,8 +1357,8 @@ vec3 kin_lit_surface(KinSurface surface) {
         }
     }
 #endif
-#ifdef KIN_GI
     float gi_share = 0.0;
+#ifdef KIN_GI
     vec3 area_light = vec3(0.0); // the area lights' (frame.gi.y), a direct light's: not occluded, not the probes'
     // With global illumination's probes the diffuse is theirs: the sky's light where they see it, the light of every
     // surface they see, kept out by walls. The reflections too, in so far as a rough surface's are its surroundings'
@@ -1445,7 +1449,10 @@ vec3 kin_lit_surface(KinSurface surface) {
         // reflections by Lagarde's specular occlusion (a smooth surface seen
         // head on is hidden less than a rough one at a slant). Returned from
         // here, so the arithmetic without it is the same as it always was.
-        const float ao = screen_occlusion();
+        // Full-radius AO belongs to ambient/environment lighting; GI already contains broad occlusion.
+        // Blend toward the short-range horizon only where this surface actually receives resolved GI.
+        const vec2 visibility = screen_occlusions();
+        const float ao = mix(visibility.r, visibility.g, gi_share);
         const vec3 a = 2.0404 * base - vec3(0.3324);
         const vec3 b = -4.7951 * base + vec3(0.6417);
         const vec3 c = 2.7552 * base + vec3(0.6903);

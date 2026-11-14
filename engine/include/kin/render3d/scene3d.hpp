@@ -518,7 +518,7 @@ struct AmbientOcclusion3D {
     f32 radius = 0.5f;    // how far from a surface something can still shut light off (units)
     f32 intensity = 1.0f; // the darkening's power: 1 is the plain answer, more is stronger
     // Compute and blur at half the view's size, then reconstruct using the
-    // full-size depth and normals (one extra dispatch and an R8 target).
+    // full-size depth and normals (one extra dispatch and an RG8 target).
     // Faster with less fine detail; falls back to linear upscaling when the
     // optional reconstruction shader is unavailable.
     bool half_resolution = false;

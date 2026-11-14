@@ -4,9 +4,9 @@
 // the weights computed, half as often as with two dispatches. Each result is what ao_blur.comp would have written.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uDepth;
-layout(set = 0, binding = 1) uniform sampler2D uSource;        // R8: the occlusion
+layout(set = 0, binding = 1) uniform sampler2D uSource;        // RG8: full/detail occlusion
 layout(set = 0, binding = 2) uniform sampler2D uSourceContact; // R8: the contact shadows
-layout(set = 1, binding = 0, r8) uniform writeonly image2D uResult;
+layout(set = 1, binding = 0, rg8) uniform writeonly image2D uResult;
 layout(set = 1, binding = 1, r8) uniform writeonly image2D uResultContact;
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // xy: the results' size, zw: the depth's
@@ -39,16 +39,17 @@ void main() {
         return;
     }
     const float centre = view_z(centre_depth);
-    float sum = 0.0, sum_contact = 0.0, total = 0.0;
+    vec2 sum = vec2(0.0);
+    float sum_contact = 0.0, total = 0.0;
     for (int i = -TAPS; i <= TAPS; ++i) {
         const ivec2 q = clamp(xy + direction * i, ivec2(0), size - 1);
         const float d = texelFetch(uDepth, min(ivec2(vec2(q) * scale), depth_size - 1), 0).r;
         // The sky has no depth to compare, and no occlusion of its own.
         const float w = WEIGHTS[abs(i)] * (d > 0.0 ? exp(-abs(view_z(d) - centre) / (EDGE * max(abs(centre), 1e-3))) : 0.0);
-        sum += texelFetch(uSource, q, 0).r * w;
+        sum += texelFetch(uSource, q, 0).rg * w;
         sum_contact += texelFetch(uSourceContact, q, 0).r * w;
         total += w;
     }
-    imageStore(uResult, xy, vec4(total > 0.0 ? sum / total : 1.0));
+    imageStore(uResult, xy, vec4(total > 0.0 ? sum / total : vec2(1.0), 0.0, 0.0));
     imageStore(uResultContact, xy, vec4(total > 0.0 ? sum_contact / total : 1.0));
 }

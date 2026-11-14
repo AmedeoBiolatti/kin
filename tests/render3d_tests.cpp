@@ -2761,9 +2761,9 @@ void test_gpu_ao_grazing_and_odd_sizes() {
                     } else {
                         const auto area = kin::u64(size.x) * kin::u64(size.y);
                         const auto half_area = kin::u64((size.x + 1) / 2) * kin::u64((size.y + 1) / 2);
-                        // Two full-size R8 AO targets become two half-size
+                        // Two full-size RG8 AO targets become two half-size
                         // targets plus the full-size reconstruction target.
-                        assert(full_bytes + 2 * half_area == r3d.debug_stats().feature_bytes + area);
+                        assert(full_bytes + 4 * half_area == r3d.debug_stats().feature_bytes + 2 * area);
                     }
                     for (std::size_t i = 0; i < off.rgba.size(); i += 4)
                         for (std::size_t c = 0; c < 3; ++c)
@@ -4477,6 +4477,88 @@ void test_gpu_gi_recess_visibility() {
                 assert(delta(on, shoot()).worst <= 2);
             }
         }
+    });
+}
+
+// AO keeps sub-grid contacts beneath a GI receiver's lookup offset, while the authored radius still applies
+// outside the probe window. The two visible wall/floor corners share geometry and materials; only the left one
+// lies in the GI field. Exercise both horizon depth paths and half-size reconstruction.
+void test_gpu_gi_ao_detail() {
+    with_gpu("test_gpu_gi_ao_detail", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination && r3d.capabilities().ambient_occlusion,
+                  "GI and ambient occlusion"))
+            return;
+        AoRoom room{r3d};
+        // Rough metal uses the same specular-visibility term on both sides. Diffuse AO's multi-bounce
+        // compensation intentionally differs where GI supplies the light, so it is not a matched oracle.
+        room.grey.metallic = 1;
+        room.grey.roughness = 1;
+        bool passed = true;
+        for (const auto size : {kin::Vec2i{641, 481}, kin::Vec2i{1601, 1001}}) {
+            auto view = r3d.create_view(size, {.samples = 1}).value_or(kin::View3D{});
+            for (const bool ortho : {false, true}) {
+                view.reset_history();
+                auto scene = GiRooms::dark(kin::Camera3D::look_at({0, 4, 10}, {0, 0.3f, -1}, 65));
+                if (ortho) {
+                    scene.camera.projection = kin::Projection3D::Orthographic;
+                    scene.camera.height = 10;
+                }
+                scene.lights.ambient = {0.6f, 0.6f, 0.6f};
+                scene.lights.ground_ambient = {.enabled = true, .color = {0.6f, 0.6f, 0.6f}};
+                scene.global_illumination = GiRooms::settings({{-7.5f, -1, -4}, {0.5f, 5, 4}}, 0.15f);
+                scene.global_illumination.side = scene.global_illumination.height = 64;
+                scene.global_illumination.probes.hysteresis = 0;
+                room.draw_floor(scene);
+                room.draw_wall(scene);
+                for (int frame = 0; frame < 32; ++frame) {
+                    render_ok(r3d, view, scene);
+                    renderer.present();
+                }
+                // Hold the field nearly steady through the paired AO captures.
+                scene.global_illumination.probes.hysteresis = .99f;
+                scene.global_illumination.probes.per_render = 1;
+                const auto value = [&](const Pixels& p, Vec3f at) {
+                    const auto pixel = scene.camera.project(at, {0, 0, float(size.x), float(size.y)});
+                    assert(pixel);
+                    float sum = 0;
+                    for (int y = -1; y <= 1; ++y)
+                        for (int x = -1; x <= 1; ++x)
+                            sum += brightness(p.at(int(pixel->pos.x) + x, int(pixel->pos.y) + y));
+                    return sum / 9;
+                };
+                const auto shoot = [&]() {
+                    auto p = shoot_large(renderer, r3d, view, scene);
+                    renderer.present();
+                    return p;
+                };
+                const auto off = shoot();
+                for (const bool half : {false, true}) {
+                    scene.ambient_occlusion = {.enabled = true, .radius = .8f, .intensity = 1.5f,
+                                               .half_resolution = half};
+                    const auto on = shoot();
+                    const auto covered_off = value(off, {-3, 0, -1.6f});
+                    const auto covered_on = value(on, {-3, 0, -1.6f});
+                    const auto outside_off = value(off, {3, 0, -1.6f});
+                    const auto outside_on = value(on, {3, 0, -1.6f});
+                    const auto contact_off = value(off, {-3, 0, -1.95f});
+                    const auto contact_on = value(on, {-3, 0, -1.95f});
+                    std::cerr << "GI detail AO " << size.x << " ortho=" << ortho << " half=" << half
+                              << ": covered " << covered_off << " -> " << covered_on << ", outside "
+                              << outside_off << " -> " << outside_on << ", contact " << contact_off << " -> "
+                              << contact_on << '\n';
+                    // The corners are symmetric about the camera. Coverage and filtering can retain some broad
+                    // AO, but it must be weaker under GI; nearby contacts and full AO outside the window remain.
+                    passed = (covered_off > 20 && outside_off > 20 &&
+                              covered_on / covered_off > outside_on / outside_off + .01f &&
+                              outside_on < outside_off * .98f && contact_on < contact_off * .98f) && passed;
+                    assert(r3d.debug_stats().ao_dispatches == kin::u32(half ? 4 : 3));
+                    assert(r3d.debug_stats().ao_chain_built == kin::u32(size.x * size.y >= 1500000));
+                    assert(delta(on, shoot()).worst <= 2);
+                }
+            }
+        }
+        assert(passed);
     });
 }
 
@@ -24132,6 +24214,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_gi_tunnel());
     RUN(test_gpu_gi_bleeding());
     RUN(test_gpu_gi_recess_visibility());
+    RUN(test_gpu_gi_ao_detail());
     RUN(test_gpu_gi_probes_scroll());
     RUN(test_gpu_gi_coverage_edge());
     RUN(test_gpu_environment());

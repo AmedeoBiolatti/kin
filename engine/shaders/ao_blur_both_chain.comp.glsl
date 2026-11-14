@@ -5,9 +5,9 @@
 // depth comes from the linear depth chain's first level (ao_depth_chain.comp), so no tap needs a divide. Each result is what ao_blur.comp would have written.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uChain; // the distance in front of the camera, 0 is nothing (level 0 only)
-layout(set = 0, binding = 1) uniform sampler2D uSource;        // R8: the occlusion
+layout(set = 0, binding = 1) uniform sampler2D uSource;        // RG8: full/detail occlusion
 layout(set = 0, binding = 2) uniform sampler2D uSourceContact; // R8: the contact shadows
-layout(set = 1, binding = 0, r8) uniform writeonly image2D uResult;
+layout(set = 1, binding = 0, rg8) uniform writeonly image2D uResult;
 layout(set = 1, binding = 1, r8) uniform writeonly image2D uResultContact;
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // xy: the results' size, zw: the depth's
@@ -35,16 +35,17 @@ void main() {
         return;
     }
     const float edge_scale = 1.0 / (EDGE * max(centre_depth, 1e-3));
-    float sum = 0.0, sum_contact = 0.0, total = 0.0;
+    vec2 sum = vec2(0.0);
+    float sum_contact = 0.0, total = 0.0;
     for (int i = -TAPS; i <= TAPS; ++i) {
         const ivec2 q = clamp(xy + direction * i, ivec2(0), size - 1);
         const float d = texelFetch(uChain, min(ivec2(vec2(q) * scale), depth_size - 1), 0).r;
         // The sky has no depth to compare, and no occlusion of its own.
         const float w = WEIGHTS[abs(i)] * (d > 0.0 ? exp(-abs(d - centre_depth) * edge_scale) : 0.0);
-        sum += texelFetch(uSource, q, 0).r * w;
+        sum += texelFetch(uSource, q, 0).rg * w;
         sum_contact += texelFetch(uSourceContact, q, 0).r * w;
         total += w;
     }
-    imageStore(uResult, xy, vec4(total > 0.0 ? sum / total : 1.0));
+    imageStore(uResult, xy, vec4(total > 0.0 ? sum / total : vec2(1.0), 0.0, 0.0));
     imageStore(uResultContact, xy, vec4(total > 0.0 ? sum_contact / total : 1.0));
 }

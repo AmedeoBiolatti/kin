@@ -15,7 +15,7 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uChain;   // the distance in front of the camera, 0 is nothing; levels 0 to 4
 layout(set = 0, binding = 1) uniform sampler2D uNormals; // world normals, octahedral
-layout(set = 1, binding = 0, r8) uniform writeonly image2D uResult;
+layout(set = 1, binding = 0, rg8) uniform writeonly image2D uResult;
 layout(set = 2, binding = 0) uniform Params {
     mat4 view;           // world to the camera's (its rotation turns the normals)
     // The inverse projection, without its zeroes (no skew): x and y are
@@ -24,6 +24,7 @@ layout(set = 2, binding = 0) uniform Params {
     vec4 unproject_zw;   // e, f, g, h
     vec4 sizes;          // xy: the result's size, zw: the depth's
     vec4 shape;          // x: radius (units), y: the power of the result, z: pixels a unit spans at depth 1, w: 1 if orthographic
+    vec4 detail;         // x: full-weight reach beneath the GI lookup offset
 } params;
 
 const float PI = 3.14159265358979;
@@ -68,6 +69,15 @@ void main() {
     const vec3 n = normalize(mat3(params.view) * decode_normal(texelFetch(uNormals, at, 0).rg));
 
     const float radius = params.shape.x;
+    // The lookup offset bounds unresolved geometry. Preserve full occlusion inside it; the authored
+    // falloff then fades that detail out, capped by the ordinary AO radius.
+    const float detail_radius = min(params.detail.x / (1.0 - FALLOFF), radius);
+    const bool separate_detail = detail_radius < radius;
+    const float detail_reach = min(params.shape.z * detail_radius / (ortho ? 1.0 : max(-p.z, 1e-3)),
+                                  MOST_PIXELS_PER_VIEW * params.sizes.w);
+    const bool gather_detail = separate_detail && detail_reach >= 1.5;
+    const float detail_falloff_mul = -1.0 / (FALLOFF * detail_radius);
+    const float detail_falloff_add = 1.0 / FALLOFF;
     const float reach = min(params.shape.z * radius / (ortho ? 1.0 : max(-p.z, 1e-3)),
                             MOST_PIXELS_PER_VIEW * params.sizes.w);
     if (reach < 1.5) {
@@ -80,7 +90,7 @@ void main() {
 
     const float angle_noise = noise(vec2(at));
     const float step_noise = noise(vec2(at.yx) + vec2(37.0, 17.0));
-    float visibility = 0.0;
+    float visibility = 0.0, detail_visibility = 0.0, detail_open = 0.0;
     for (int slice = 0; slice < SLICES; ++slice) {
         const float phi = (float(slice) + angle_noise) * (PI / float(SLICES));
         const vec2 omega = vec2(cos(phi), -sin(phi)); // in depth pixels (y down)
@@ -98,6 +108,7 @@ void main() {
         const float low1 = cos(angle_n - HALF_PI);
         float horizon0 = low0;
         float horizon1 = low1;
+        float detail0 = low0, detail1 = low1;
         for (int i = 0; i < STEPS; ++i) {
             float s = (float(i) + step_noise) / float(STEPS);
             s *= s; // more samples near the pixel
@@ -121,6 +132,17 @@ void main() {
                 const float dist2 = dot(delta, delta);
                 const float inv = inversesqrt(max(dist2, 1e-10));
                 const float weight = clamp(dist2 * inv * falloff_mul + falloff_add, 0.0, 1.0);
+                // A second horizon pair reuses the taps inside the unresolved GI near field.
+                // Far taps must not relax a short-range horizon back to the tangent plane.
+                if (gather_detail && dist2 <= detail_radius * detail_radius) {
+                    const float local_weight = clamp(dist2 * inv * detail_falloff_mul + detail_falloff_add, 0.0, 1.0);
+                    const float local_h = mix(side == 0 ? low0 : low1, dot(delta, v) * inv, local_weight);
+                    const float local_relaxation = dot(delta, n) > max(0.005, detail_radius * 0.01) ? 0.0 : THICKNESS;
+                    if (side == 0)
+                        detail0 = local_h > detail0 ? local_h : mix(detail0, local_h, local_relaxation);
+                    else
+                        detail1 = local_h > detail1 ? local_h : mix(detail1, local_h, local_relaxation);
+                }
                 float h = dot(delta, v) * inv;
                 h = mix(side == 0 ? low0 : low1, h, weight);
                 // A continuing raised surface (a recess's frame/wall) still blocks the horizon. Relax only
@@ -142,7 +164,24 @@ void main() {
         const float arc0 = (cos_n + 2.0 * h0 * sin(angle_n) - cos(2.0 * h0 - angle_n)) * 0.25;
         const float arc1 = (cos_n + 2.0 * h1 * sin(angle_n) - cos(2.0 * h1 - angle_n)) * 0.25;
         visibility += projected_length * (arc0 + arc1);
+        if (gather_detail) {
+            // Residual visibility is relative to these same slices without local occluders. Their two-slice
+            // approximation of the open hemisphere need not be one, especially at grazing normals.
+            detail_open += projected_length * (cos_n + angle_n * sin(angle_n));
+            float d0 = -acos(clamp(detail1, -1.0, 1.0));
+            float d1 = acos(clamp(detail0, -1.0, 1.0));
+            d0 = angle_n + clamp(d0 - angle_n, -HALF_PI, HALF_PI);
+            d1 = angle_n + clamp(d1 - angle_n, -HALF_PI, HALF_PI);
+            const float a0 = (cos_n + 2.0 * d0 * sin(angle_n) - cos(2.0 * d0 - angle_n)) * 0.25;
+            const float a1 = (cos_n + 2.0 * d1 * sin(angle_n) - cos(2.0 * d1 - angle_n)) * 0.25;
+            detail_visibility += projected_length * (a0 + a1);
+        }
     }
     visibility = clamp(visibility / float(SLICES), LEAST, 1.0);
-    imageStore(uResult, xy, vec4(pow(visibility, params.shape.y)));
+    const float full = pow(visibility, params.shape.y);
+    const float local = gather_detail
+                           ? pow(clamp(detail_visibility / max(detail_open, 1e-5), LEAST, 1.0), params.shape.y)
+                           : 1.0;
+    // Removing distant occluders must not make the short-range result darker.
+    imageStore(uResult, xy, vec4(full, separate_detail ? max(full, local) : full, 0.0, 0.0));
 }

@@ -387,12 +387,12 @@ private:
         false; // a render has written _pick since it was made (a new target holds whatever the memory did)
     // With Scene3D::ambient_occlusion, made by the first render that asks:
     // the pre-pass's depth and normals (one sample, whatever the view's), and
-    // the occlusion (raw, blurred across, blurred down: R8, the view's size or half).
+    // the occlusion (raw, blurred across, blurred down: RG8, the view's size or half).
     GpuTexture _ao_chain; // the linear depth chain of the occlusion (R32F, 5 levels), rebuilt each render that uses it;
                           // goes with _ao_depth
     GpuTexture _ao_depth, _ao_normals, _ao_raw,
         _ao_across;                   // the occlusion's result is in _ao_raw (the blur ends back in it)
-    GpuTexture _ao_upsampled;         // half-size AO reconstructed against full-size depth/normals; R8
+    GpuTexture _ao_upsampled;         // half-size AO reconstructed against full-size depth/normals; RG8
     bool _ao_upsampled_ready = false; // written by this render, never a previous mode/frame
     // With Scene3D::contact_shadows, the same way (the pre-pass's depth and
     // normals are shared): the march, blurred across, blurred down; R8, the view's size.
@@ -758,7 +758,7 @@ private:
     // With `blur_too` false only the first dispatch (the blur is then someone else's: blur_screen_space_both).
     bool build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, f32 radius);
     void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera,
-                           const Mat4f& projection, const AmbientOcclusion3D& ao, RenderDebugStats3D& stats,
+                           const Mat4f& projection, const AmbientOcclusion3D& ao, f32 detail_reach, RenderDebugStats3D& stats,
                            bool blur_too = true);
     // The blur of both, in one dispatch a direction (the two results at one size).
     void blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection,
@@ -931,6 +931,7 @@ private:
                           SDL_GPUTextureFormat format, u32 samples);
     // The view's GI scene and probes as the shaders read them (kin_gi.inc.glsl's KinGiScene, 5 vec4s, into `scene`;
     // KinGiProbes, 7, into `probes`; either may be null).
+    static constexpr f32 gi_normal_bias = 0.3f; // probe lookup offset; AO covers the detail beneath it
     void gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, f32* scene, f32* probes) const;
     void draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const GpuView3D& view,
                       const Scene3D& scene, const Mat4f& view_projection, SDL_GPUTextureFormat format, u32 samples,
@@ -1251,6 +1252,8 @@ private:
     bool _ao_available = false;
     bool _ao_warned = false;
     bool _contact_warned = false;
+    SDL_GPUComputePipeline* _contact_blur_pipeline = nullptr;       // R8 contact blur (AO holds two channels)
+    SDL_GPUComputePipeline* _contact_blur_chain_pipeline = nullptr; // optional linear-depth variant
     SDL_GPUComputePipeline* _contact_pipeline = nullptr;            // contact.comp
     SDL_GPUComputePipeline* _fog_sun_pipeline = nullptr;            // fog_sun.comp (Fog3D::sun_shadows)
     GpuShader _fog_sun_apply_shader;                                // fog_sun_apply.frag

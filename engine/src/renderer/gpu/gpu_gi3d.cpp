@@ -807,7 +807,7 @@ void GpuRenderer3D::gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, 
         u.counts[3] = lit ? 1.0f : 0.0f;
         // The look-up moves out from a surface by three tenths of the spacing (past the voxel the probes' rays stop at,
         // a voxel before the surface) and a tenth toward the eye.
-        u.bias[0] = 0.3f;
+        u.bias[0] = gi_normal_bias;
         u.bias[1] = 0.1f;
         u.bias[2] = std::max(intensity, 0.0f);
         u.bias[3] = static_cast<f32>(g.levels);
