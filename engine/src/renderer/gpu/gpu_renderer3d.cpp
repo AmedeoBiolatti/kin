@@ -358,8 +358,10 @@ struct FrameUniforms {
     f32 ssr_pyramid[4]; // x: the previous picture's levels, y: its projection's [1][1], z: level 0's first word, w: its
                         // grid (x + 4096 y)
     f32 ssr_previous[16]; // world to the previous frame's clip space
+    f32 portal_sun[4];    // count, shadow texel (uv), sun shadow strength
+    PortalSunLight portal[max_portal_sun_maps];
 };
-static_assert(sizeof(FrameUniforms) == 2832);
+static_assert(sizeof(FrameUniforms) == 4000 && sizeof(FrameUniforms) <= 4096);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -1094,8 +1096,12 @@ private:
 // Surface shaders keep the original uniforms and zero-based instance IDs.
 class ShadowUniforms {
 public:
-    ShadowUniforms(SDL_GPUCommandBuffer* commands, const Mat4f& projection) : _commands(commands) {
+    ShadowUniforms(SDL_GPUCommandBuffer* commands, const Mat4f& projection, Vec4f clip = {0, 0, 0, 1},
+                   bool force_clip = false)
+        : _commands(commands) {
         std::memcpy(_uniforms.view_projection, projection.m, sizeof(_uniforms.view_projection));
+        std::copy_n(&clip.x, 4, _uniforms.clip);
+        _uniforms.first[3] = force_clip ? 1u : 0u;
     }
 
     u32 bind(u32 first, u32 list, bool surface) {
@@ -1231,6 +1237,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _shadow_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow.vert.spv",
                                                          /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/2);
         _fullscreen_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "fullscreen.vert.spv");
+        _portal_shadow_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "portal_shadow.frag.spv", 1, 0);
         _bloom_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "bloom.frag.spv",
                                                  /*uniform_buffers=*/1, /*samplers=*/1);
         _output_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output.frag.spv",
@@ -3759,15 +3767,17 @@ bool GpuRenderer3D::render_lit_by(IViewBackend3D& base, const Scene3D& scene, co
     return ok;
 }
 
-u32 GpuRenderer3D::ensure_shadow_map(u32 resolution, u32 layers) {
+u32 GpuRenderer3D::ensure_shadow_map(u32 resolution, u32 layers, u32 portal_layers) {
     if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || !_shadow_shader || !_shadow_vertex_shader) {
         return 0;
     }
     resolution = std::clamp(resolution, 64u, 8192u);
     layers = std::clamp(layers, 1u, max_shadow_cascades);
+    const u32 cascades = layers;
+    layers += std::min(portal_layers, max_portal_sun_maps);
     // A map with enough layers serves fewer cascades too (the others are not drawn).
     if (_shadow_map && _shadow_size == resolution && _shadow_layers >= std::min(layers, _shadow_layers_limit)) {
-        return std::min(layers, _shadow_layers);
+        return std::min(cascades, _shadow_layers);
     }
     // Asked for more layers than a device made before: not tried again.
     for (u32 attempt = std::min(layers, _shadow_layers_limit); attempt >= 1; --attempt) {
@@ -3784,7 +3794,7 @@ u32 GpuRenderer3D::ensure_shadow_map(u32 resolution, u32 layers) {
                                (LogFields{{.name = "asked", .value = std::to_string(layers)},
                                           {.name = "made", .value = std::to_string(attempt)}}));
             }
-            return attempt;
+            return std::min(cascades, attempt);
         } catch (const std::exception& e) {
             KIN_LOG_WARN_F("render", "3D: no shadow map",
                            (LogFields{{.name = "layers", .value = std::to_string(attempt)},
@@ -4929,6 +4939,8 @@ struct GpuRenderer3D::FrameCtx {
     GpuView3D* view;
     GpuPreparedScene3D* prepared = nullptr;
     bool geometry_only = false, surface_only = false, public_shadow = false, public_local = false;
+    bool portal_shadow_pass = false;
+    PortalSunPlan portal_sun;
     SurfaceStage3D surface_stage = SurfaceStage3D::All;
     const GpuTexture* particle_depth = nullptr;
     const GpuTexture* sun_depth = nullptr;
@@ -6381,7 +6393,7 @@ void GpuRenderer3D::upload_particle_casts(FrameCtx& ctx) {
 }
 
 bool GpuRenderer3D::draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass, const Mat4f& light_view, bool local,
-                                          u32 cascade) {
+                                          u32 cascade, Vec4f clip) {
     if (_particle_cast_batches.empty() || !_particle_cast_buffer)
         return true;
     auto* pipeline = particle_cast_pipeline();
@@ -6397,6 +6409,7 @@ bool GpuRenderer3D::draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass
     const auto& camera = ctx.scene.camera;
     ParticleDrawUniforms v{};
     std::memcpy(v.view_projection, light_view.m, sizeof(v.view_projection));
+    std::copy_n(&clip.x, 4, v.clip);
     put(v.right, camera.right(), 0);
     put(v.up, camera.up(), 0);
     put(v.eye, camera.position, camera.projection == Projection3D::Orthographic ? 1.0f : 0.0f);
@@ -6834,11 +6847,21 @@ void GpuRenderer3D::fit_sun_shadow(FrameCtx& ctx) {
         length_squared(lights.sun.direction) > 0 &&
         (ctx.cascades =
              (ctx.public_shadow ? std::clamp(lights.shadow_cascades, 1u, std::min(ctx.sun_layers, max_shadow_cascades))
-                                : ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades))) > 0;
+                                : ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades,
+                                                    ctx.portal_sun.shadow_count))) > 0;
     if (!ctx.public_shadow) {
         ctx.sun_depth = &_shadow_map;
         ctx.sun_size = _shadow_size;
         ctx.sun_layers = _shadow_layers;
+    }
+    if (ctx.shadows && !ctx.public_shadow) {
+        u32 at = ctx.cascades;
+        for (u32 i = 0; i < ctx.portal_sun.count; ++i) {
+            auto& layer = ctx.portal_sun.lights[i].aperture[3];
+            if (layer < -1.5f)
+                continue;
+            layer = at < ctx.sun_layers ? f32(at++) : -2.0f;
+        }
     }
     if (ctx.shadows && ctx.cascades > 1) {
         ctx.plan = fit_shadow_cascades(scene.camera, ctx.aspect, normalize(lights.sun.direction), area, ctx.cascades,
@@ -7632,7 +7655,7 @@ bool GpuRenderer3D::same_local_gather_key(const LocalGatherKey& a, const LocalGa
 GpuRenderer3D::LocalGatherCache* GpuRenderer3D::local_gather_plan(const FrameCtx& ctx, const LocalView& view, u32 refs,
                                                                   bool& ready) {
     ready = false;
-    if (ctx.public_local || view.moon || view.gi_sun || !view.wanted)
+    if (ctx.public_local || view.moon || view.gi_sun || view.portal_sun || !view.wanted)
         return nullptr;
     const auto& source = ctx.scene;
     const LocalGatherKey key{source.draw_identity(),
@@ -7929,7 +7952,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         u32 in_batch = 0;
         for (const auto& piece : dynamic_pieces) {
             const auto& ref = _refs[piece.ref];
-            const CullGroup* group = piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
+            const CullGroup* group =
+                !ctx.portal_shadow_pass && piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
             const u32 n = piece.end - piece.begin;
             u64 accepted = 0, tested = 0;
             std::array<u8, view_limit> current{};
@@ -8167,7 +8191,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             if (!_local_views[v].wanted)
                 continue;
             for (const Piece2& piece : hits[v] ? dynamic_pieces : sphere_pieces) {
-                const CullGroup* group = piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
+                const CullGroup* group =
+                    !ctx.portal_shadow_pass && piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
                 if (group && !(group->local_mask & (u64{1} << v))) {
                     stats.local_group_rejected += piece.end - piece.begin;
                     continue;
@@ -8540,8 +8565,16 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             std::vector<u8>& bytes = _local_payload;
             bytes.clear();
             CacheBytes payload{bytes};
-            payload.value(view.moon ? generation_moon : view.gi_sun ? generation_gi : generation_local);
+            payload.value(view.portal_sun ? _shadow_generation
+                          : view.moon     ? generation_moon
+                          : view.gi_sun   ? generation_gi
+                                          : generation_local);
+            if (view.portal_sun) {
+                payload.value(ctx.portal_sun.count);
+                payload.append(ctx.portal_sun.lights.data(), ctx.portal_sun.count * sizeof(PortalSunLight));
+            }
             payload.value(view.layer);
+            payload.value(view.clip);
             payload.value(view.x);
             payload.value(view.y);
             payload.value(view.size);
@@ -8621,8 +8654,12 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 }
                 if (cache_on && same) {
                     view.cached = true;
-                    ++stats.local_shadow_cached;
-                    continue;
+                    // Portal phases share one image. Keep both selections ready;
+                    // the pair may only be reused when neither phase changed.
+                    if (!view.portal_sun) {
+                        ++stats.local_shadow_cached;
+                        continue;
+                    }
                 }
                 cache.payload.swap(bytes);
                 cache.compact = compact[v];
@@ -8721,7 +8758,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 cv.transform = ref.instances[i].transform;
                 cv.eye = view.eye;
                 cv.forward = view.axis;
-                cv.orthographic = view.moon || view.gi_sun;
+                cv.orthographic = view.moon || view.gi_sun || view.portal_sun;
                 cv.per_unit = view.per_unit;
                 cv.pixels = lv.pixels;
                 cv.nearest = view.near_plane;
@@ -9255,7 +9292,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     SDL_GPUCommandBuffer* commands = ctx.commands;
     const auto finish = [&](bool ok) {
-        if (!ctx.public_local) {
+        if (!ctx.public_local && !ctx.portal_shadow_pass) {
             stats.local_shadow_static_bytes =
                 _local_static_map ? u64(_local_side) * _local_side * _local_layers * 4 : 0;
             stats.local_shadow_bytes += stats.local_shadow_static_bytes;
@@ -9304,7 +9341,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
     // 0: original complete map; 1: bake unchanged opaque geometry; 2: live remainder.
     const auto record = [&](SDL_GPURenderPass* pass, const LocalView& view, u32 subset, bool saved) {
         bool recorded = true;
-        ShadowUniforms uniforms{commands, view.view_projection};
+        ShadowUniforms uniforms{commands, view.view_projection, view.clip, view.portal_sun};
         DrawBinder binder{pass};
         for (u32 e = view.entry_first; e < view.entry_first + view.entry_count; ++e) {
             const LocalEntry& entry = _local_entries[e];
@@ -9446,7 +9483,7 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
         }
         const auto begin = [&](SDL_GPUTexture* texture, bool restored) {
             auto depth = depth_target(texture, SDL_GPU_STOREOP_STORE, false, view.layer);
-            if (view.packed || restored)
+            if (view.packed || restored || view.append_depth)
                 depth.load_op = SDL_GPU_LOADOP_LOAD;
             SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
             if (!pass)
@@ -9495,7 +9532,30 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                 ++stats.local_shadow_static_cached;
         }
         complete = record(pass, view, static_ready ? 2u : 0u, view.static_cached && static_ready) && complete;
-        if (!ctx.public_local && !draw_particle_shadows(ctx, pass, view.view_projection, true)) {
+        if (view.portal_sun) {
+            auto* boundary = _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                                   .fragment = _portal_shadow_shader.handle(),
+                                                                   .layout = GpuVertexLayout::None,
+                                                                   .depth_stencil = _shadow_format,
+                                                                   .depth = GpuDepthTest::TestWrite,
+                                                                   .depth_only = true});
+            if (boundary) {
+                struct {
+                    Mat4f to_world;
+                    Vec4f clip, info;
+                    std::array<PortalSunLight, max_portal_sun_maps> portal;
+                } u{view.view_projection.inverse(),
+                    view.clip,
+                    {f32(ctx.portal_sun.count), f32(view.size), 0, 0},
+                    ctx.portal_sun.lights};
+                SDL_BindGPUGraphicsPipeline(pass, boundary);
+                SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+                SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+            } else {
+                complete = false;
+            }
+        }
+        if (!ctx.public_local && !draw_particle_shadows(ctx, pass, view.view_projection, true, 0, view.clip)) {
             _local_cache[view.cache].valid = false;
             complete = false;
         }
@@ -9504,6 +9564,68 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
         SDL_EndGPURenderPass(pass);
     }
     return finish(complete);
+}
+
+bool GpuRenderer3D::portal_sun_pass(FrameCtx& ctx) {
+    if (!ctx.shadows || ctx.portal_sun.count == 0)
+        return true;
+    auto original = std::move(_local_views);
+    _local_views.clear();
+    for (u32 i = 0; i < ctx.portal_sun.count; ++i) {
+        const auto& light = ctx.portal_sun.lights[i];
+        if (light.aperture[3] < 0)
+            continue;
+        Mat4f receiver;
+        std::memcpy(receiver.m, light.shadow_matrix, sizeof(receiver.m));
+        for (u32 source = 0; source < 2; ++source) {
+            LocalView view;
+            view.view_projection = source ? ctx.portal_sun.source_projection[i] : receiver;
+            view.frustum = frustum_of(view.view_projection);
+            view.texture = ctx.sun_depth->handle();
+            view.layer = u32(light.aperture[3]);
+            view.cache = gi_sun_cache + 1 + 2 * i + source;
+            view.size = ctx.sun_size;
+            view.portal_sun = true;
+            view.append_depth = source != 0;
+            view.clip = source ? ctx.portal_sun.source_clip[i]
+                               : Vec4f{light.plane[0], light.plane[1], light.plane[2], light.plane[3]};
+            view.clip.w -= 0.005f;
+            view.axis = source ? -normalize(ctx.scene.lights.sun.direction)
+                               : Vec3f{-light.direction[0], -light.direction[1], -light.direction[2]};
+            view.per_unit = 1.0f / std::max(ctx.portal_sun.texel_world[i], 1e-6f);
+            view.kind = 2;
+            _local_views.push_back(view);
+        }
+    }
+    if (_local_views.empty()) {
+        _local_views = std::move(original);
+        return true;
+    }
+    ctx.portal_shadow_pass = true;
+    if (!_particle_cast_batches.empty())
+        for (const auto& view : _local_views)
+            build_particle_cast_view(ctx, view.view_projection, false);
+    const u32 maps = ctx.stats.local_shadow_maps, drawn = ctx.stats.local_shadow_drawn;
+    build_local_shadows(ctx);
+    ctx.stats.local_shadow_maps += maps;
+    ctx.stats.local_shadow_drawn += drawn;
+    for (u32 i = 0; i + 1 < _local_views.size(); i += 2) {
+        auto& receiver = _local_views[i];
+        auto& source = _local_views[i + 1];
+        if (receiver.cached && source.cached) {
+            receiver.drawn = source.drawn = false;
+            ctx.stats.local_shadow_drawn -= 2;
+            ctx.stats.local_shadow_cached += 2;
+        }
+    }
+    upload_particle_casts(ctx);
+    _owner->flush_to_frame();
+    ctx.commands = _owner->_frame->command_buffer();
+    ctx.joints = _joints ? _joints->handle() : nullptr;
+    const bool ok = local_shadow_pass(ctx);
+    _local_views = std::move(original);
+    ctx.portal_shadow_pass = false;
+    return ok;
 }
 
 // The light variants' block for scene `s`, into `slot`. The overlay's lights are carried into its space and have no
@@ -10529,7 +10651,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     _visible.resize(total);
     // Local-light selection precedes this cull. Only keep bounds when a local/moon view
     // needs them, and only for its caster draws; no second transform/skin-bound pass.
-    const bool local_bounds = !_local_views.empty();
+    const bool portal_bounds = ctx.shadows && ctx.portal_sun.shadow_count != 0;
+    const bool local_bounds = !_local_views.empty() || portal_bounds;
     u32 scratch = 0;
     if (local_bounds)
         for (u32 p = 0; p < _pieces.size();) {
@@ -10570,7 +10693,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         return group.camera == 2 && ref.levels == 1 && !ref.clustered && !ref.skinned &&
                (!ref.caster || ctx.cascades <= 1) &&
                (!local_bounds || ref.cached_spheres || ref.scene != 0 || !casts_into_local(ref.draw->material) ||
-                !group.local_mask);
+                (!group.local_mask && !portal_bounds));
     };
     // Inactive slots are never consumed. Clear each active prefix on every
     // render, including when a later view enables more levels or cascades.
@@ -10589,7 +10712,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         const u8 camera = group ? group->camera : ref.frustum ? 1 : 2;
         const u8 sun_mask = group ? group->sun_mask : static_cast<u8>((1u << ctx.cascades) - 1);
         const bool save_bounds = local_bounds && !ref.cached_spheres && ref.scene == 0 &&
-                                 casts_into_local(ref.draw->material) && (!group || group->local_mask);
+                                 casts_into_local(ref.draw->material) && (!group || group->local_mask || portal_bounds);
         result.camera_tests() = camera == 1 ? piece.end - piece.begin : 0;
         result.bounds_tests() = 0;
         clear_counts(result.seen(), ref.levels);
@@ -10601,7 +10724,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             result.seen()[0] = piece.end - piece.begin;
             return;
         }
-        if (group && camera == 0 && sun_mask == 0 && group->local_mask == 0) {
+        if (group && camera == 0 && sun_mask == 0 && group->local_mask == 0 && ctx.portal_sun.count == 0) {
             std::fill_n(_visible.begin() + piece.flat, piece.end - piece.begin, u8{0});
             if (any_levels)
                 std::fill_n(_level_of.begin() + piece.flat, piece.end - piece.begin, u8{0});
@@ -12850,6 +12973,12 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     const bool decode =
         _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // textures stored encoded
     FrameUniforms f{};
+    if (s == 0) {
+        f.portal_sun[0] = f32(ctx.portal_sun.count);
+        f.portal_sun[1] = ctx.sun_size ? 1.0f / f32(ctx.sun_size) : 0;
+        f.portal_sun[2] = std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f);
+        std::copy_n(ctx.portal_sun.lights.data(), ctx.portal_sun.count, f.portal);
+    }
     const Mat4f to_space = s == 0 ? Mat4f{} : ctx.scenes[1]->camera.view().inverse() * scene.camera.view();
     // The sun's disc: the sky's where it draws one, else the real sun's (0.53 degrees across).
     const f32 sun_degrees = scene.sky.enabled ? std::clamp(scene.sky.sun_size, 0.0f, 20.0f) : 0.53f;
@@ -14048,6 +14177,14 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
             continue;
         taa_hash(revision, local.cache);
         taa_hash(revision, _local_cache[local.cache].revision);
+    }
+    taa_hash(revision, ctx.portal_sun.count);
+    for (u32 i = 0; i < ctx.portal_sun.count; ++i) {
+        taa_hash(revision, ctx.portal_sun.lights[i]);
+        if (map_receivers && ctx.portal_sun.lights[i].aperture[3] >= 0) {
+            taa_hash(revision, _local_cache[gi_sun_cache + 1 + 2 * i].revision);
+            taa_hash(revision, _local_cache[gi_sun_cache + 2 + 2 * i].revision);
+        }
     }
     // Each used local map's fingerprint already includes its allocation
     // generation. Expiring an unused array must not reset another map's readers.
@@ -16023,6 +16160,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
             warn_once(_decals_warned, "3D: decals asked for, but this device cannot draw them: not drawn");
     }
     prepare_decals(ctx);
+    ctx.portal_sun = portal_sun_plan(scene, scene.lights.shadow_resolution);
     fit_sun_shadow(ctx);
     choose_point_lights(ctx);
     choose_local_lights(ctx);
@@ -16052,7 +16190,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
              cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
              return true;
          },
-         [&] { return local_shadow_pass(ctx); },
+         [&] { return local_shadow_pass(ctx) && portal_sun_pass(ctx); },
          [&] {
              // (A capture borrowing a view's GI builds none of its own: that view's probes light it.)
              ctx.gi = !_gi_borrowed && gi_scene(ctx.commands, *view, scene, stats);
@@ -16066,7 +16204,10 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
                  const Mat4f to_environment =
                      Mat4f::rotation_y(ctx.sky_env_used ? 0.0f : -scene.lights.environment_rotation);
                  ctx.gi_lit =
-                     _lights_available && gi_probes(ctx.commands, *view, scene, ctx.environment, to_environment, stats);
+                     _lights_available && gi_probes(ctx.commands, *view, scene, ctx.environment, to_environment, stats,
+                                                    {ctx.portal_sun.lights.data(), ctx.portal_sun.count},
+                                                    ctx.sun_depth ? ctx.sun_depth->handle() : nullptr,
+                                                    ctx.sun_size ? 1.0f / f32(ctx.sun_size) : 0);
                  ctx.lights_variant = ctx.lights_variant || ctx.gi_lit;
              }
              return true;

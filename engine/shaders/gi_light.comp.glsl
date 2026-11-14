@@ -17,36 +17,38 @@ layout(set = 0, binding = 4) uniform sampler3D uGiIrradiance;
 layout(set = 0, binding = 5) uniform sampler3D uGiMoments;
 layout(set = 0, binding = 6) uniform sampler3D uGiProbes;
 layout(set = 0, binding = 7) uniform sampler2DArrayShadow uSunMap; // the GI's sun map (layer 0), reverse Z
+layout(set = 0, binding = 8) uniform sampler2DArrayShadow uPortalSun;
+#include "kin_portal_sun.inc.glsl"
 struct Light {
     vec4 at;     // xyz: the light's place (world); w: its reach
     vec4 colour; // rgb: linear (irradiance over pi a unit away); w: the square of its size
     vec4 axis;   // xyz: a spot's way (unit); w: the cosine of its outer angle (a point light: -2, all round)
     vec4 cone;   // x: 1 / (cos inner - cos outer)
 };
-layout(std430, set = 0, binding = 8) readonly buffer Lights {
+layout(std430, set = 0, binding = 9) readonly buffer Lights {
     Light lights[];
 };
-layout(std430, set = 0, binding = 9) readonly buffer Blocks {
+layout(std430, set = 0, binding = 10) readonly buffer Blocks {
     uint blocks[]; // a stored block: x, y and z (8 bits each), and its level (the top 8)
 };
-layout(std430, set = 0, binding = 10) readonly buffer Emitters {
+layout(std430, set = 0, binding = 11) readonly buffer Emitters {
     float strengths[]; // each emitter's emissive strength this render (an emissive voxel's alpha: its number, from 1)
 };
 // Area lights (GlobalIllumination3D::area_lights): the emitters lit exactly (kin_area_light.inc.glsl), and for each
 // GI emitter whether it is one of them (its voxels' own glow then stays out: the light it gives is counted here).
-layout(std430, set = 0, binding = 11) readonly buffer AreaTriangles {
+layout(std430, set = 0, binding = 12) readonly buffer AreaTriangles {
     vec4 kin_area_triangles[];
 };
-layout(std430, set = 0, binding = 12) readonly buffer AreaNodes {
+layout(std430, set = 0, binding = 13) readonly buffer AreaNodes {
     vec4 kin_area_nodes[];
 };
-layout(std430, set = 0, binding = 13) readonly buffer AreaEmitters {
+layout(std430, set = 0, binding = 14) readonly buffer AreaEmitters {
     vec4 kin_area_emitters[];
 };
-layout(std430, set = 0, binding = 14) readonly buffer AreaExplicit {
+layout(std430, set = 0, binding = 15) readonly buffer AreaExplicit {
     uint explicit_emitters[]; // a GI emitter's (from its number - 1): 1 when lit as an area light
 };
-layout(std430, set = 0, binding = 15) readonly buffer AreaScene {
+layout(std430, set = 0, binding = 16) readonly buffer AreaScene {
     vec4 kin_area_scene[]; // the copies' hierarchy, then the copies
 };
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D uRadiance;     // the light leaving its front
@@ -74,6 +76,8 @@ layout(std140, set = 2, binding = 0) uniform Params {
                          // z: GI emitters in AreaExplicit, w: where
                          // the copies start in AreaScene
     vec4 area_scene;     // the same, then the settled hierarchy's first node and triangle, 1 when there is one
+    vec4 portal_sun;
+    KinPortalSun portal[8];
 } p;
 
 float kin_area_strength(uint gi_emitter) {
@@ -154,7 +158,18 @@ vec3 reaching(vec3 world, float cell, vec3 n) {
         if (seen < 0.0) {
             seen = reaches(world, cell, n, p.sun_direction.xyz);
         }
-        light += p.sun_colour.rgb * mix(max(dot(n, p.sun_direction.xyz), 0.0), seen, p.sun_direction.w);
+        bool crossing = false;
+        for (int i = 0; i < int(p.portal_sun.x); ++i) {
+            crossing = crossing || kin_portal_crossing(p.portal[i], world, p.sun_direction.xyz, false);
+        }
+        if (!crossing) {
+            light += p.sun_colour.rgb * mix(max(dot(n, p.sun_direction.xyz), 0.0), seen, p.sun_direction.w);
+        }
+        for (int i = 0; i < int(p.portal_sun.x); ++i) {
+            const float visibility = kin_portal_sunlight(p.portal[i], world + n * cell, n, uPortalSun,
+                                                        p.portal_sun.y, p.portal_sun.z, true);
+            light += p.sun_colour.rgb * (max(dot(n, p.portal[i].direction.xyz), 0.0) * visibility);
+        }
     }
     if (p.fill_colour.w > 0.5) {
         light += p.fill_colour.rgb * reaches(world, cell, n, p.fill_direction.xyz);

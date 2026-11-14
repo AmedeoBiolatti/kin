@@ -3048,8 +3048,8 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   The atrium's survivor (Kenney's, CC0) walks through its portals: yours to play from behind in the gallery's `atrium` (a
   physics capsule: WASD walk in the camera's frame, the mouse turns the camera, Space jumps, Shift runs; the camera
   follows it through a portal, seeing it through the other one), or walking its round by itself (`--camera 5`).
-- **Light through the opening.** With global illumination enabled, `PlanarViews3D` registers every enabled portal,
-  including ones off screen, in `Scene3D::gi_portals`. Probe rays entering the front of an opening continue from its
+- **Light through the opening.** `PlanarViews3D` registers every enabled portal,
+  including ones off screen, in `Scene3D::portals`. Probe rays entering the front of an opening continue from its
   linked exit, with position and direction transformed as the portal camera's are. They carry sky light, emission
   and the light leaving the source world's surfaces; geometry before and after the crossing still blocks them.
   Exact area emitters restore their glow on this path alone, since their ordinary world-space direct integral does
@@ -3057,9 +3057,19 @@ view_size, view_options)` draws the surfaces into the collected scene and render
   eight valid links are traced, with at most four crossings sharing each ray's usual step budget. A cycle that uses
   up that budget, or an exit outside the voxel field, contributes no light. Keep both ends and their surroundings
   covered by the GI windows, and leave the opening clear in the voxelized geometry. Games collecting their own
-  planar views can fill `gi_portals` with `GiPortal3D` pairs;
-  `Scene3D::clear()` drops them. This carries GI light; analytic sun, point and spot terms and their shadow maps still
-  use ordinary world geometry, so sharp direct beams and specular virtual lights require separate transport.
+  planar views can fill `portals` with `PortalLink3D` pairs;
+  `Scene3D::clear()` drops them.
+  The stock renderer also carries direct sunlight, including its specular term, from the exit's front through the
+  entry. This works with GI disabled. An analytic aperture test bounds the beam; with shadows enabled, each active
+  link adds one depth layer to the sun's array. Two clipped caster passes combine source-side and receiving-side
+  blockers in the transported light's space. Keep both segments covered by `lights.shadow_area`; geometry behind
+  either opening cannot cast into the beam. Portal openings stop the ordinary straight sunlight path, and another
+  portal stops a transported beam: direct sun currently crosses one link. Turning shadows off also disables the
+  transported beam's geometry occlusion. The frame's material block stays below 4 KiB and uses the existing sun
+  sampler. The combined map is reused only when both caster passes and all openings are unchanged.
+  Rebuild cooked material graphs and custom surface shaders to include the new direct-light term.
+  Transported sunlight also enters the GI voxel lighting, so it can bounce from the receiving surfaces.
+  Point and spot lights, particle shading and volumetric fog still use their ordinary direct-light paths.
 - **Going through.** `portal_step(world, from, to)` (Lua `scene3d.portal_step(from, to)`) tests a step against every
   enabled portal: where it ends, out of the exit, and the turn to give its facing and velocity (`turn`, a quaternion),
   or nothing (nil). `portal_poses(entity)` gives an entity's portal and its exit as the camera3d.hpp helpers take them.

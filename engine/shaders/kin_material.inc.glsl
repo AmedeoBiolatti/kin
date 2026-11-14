@@ -1233,6 +1233,22 @@ vec3 kin_lit_surface(KinSurface surface) {
         light += shade(sun_surface, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
 #endif
     }
+    for (int i = 0; i < int(frame.portal_sun.x); ++i) {
+        const KinPortalSun p = frame.portal[i];
+        const vec3 portal_offset = shadow_offset_normal(n);
+        const vec3 offset = dot(n, p.direction.xyz) <= 0.0 && kin_backlit(s) ? -portal_offset : portal_offset;
+        const float seen = kin_portal_sunlight(p, vWorld, offset, uShadow, frame.portal_sun.y,
+                                              frame.portal_sun.z, material.params.z > 0.5);
+        Surface sun_surface = s;
+        sun_surface.alpha = max(s.alpha, frame.sun_direction.w);
+        sun_surface.coat_alpha = max(s.coat_alpha, frame.sun_direction.w);
+#ifdef KIN_DIRECT_LIGHT
+        light += kin_direct_light(sun_surface, p.direction.xyz, frame.sun_color.rgb, seen, KIN_LIGHT_SUN,
+                                  vec3(0.0), 0.0);
+#else
+        light += shade(sun_surface, p.direction.xyz, frame.sun_color.rgb * seen);
+#endif
+    }
     if (dot(frame.fill_color.rgb, vec3(1.0)) > 0.0) {
 #ifdef KIN_DIRECT_LIGHT
         light += kin_direct_light(s, frame.fill_direction.xyz, frame.fill_color.rgb, moonlight(offset_normal), KIN_LIGHT_FILL, vec3(0.0), 0.0);

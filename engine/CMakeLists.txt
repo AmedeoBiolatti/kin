@@ -507,6 +507,7 @@ if(KIN_EXPERIMENTAL_3D)
     if(KIN_HAS_GPU_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
                                           src/renderer/gpu/gpu_area_lights3d.cpp src/renderer/gpu/gpu_area_lights_ltc.cpp
+                                          src/renderer/gpu/gpu_portal_sun3d.cpp
                                           src/renderer/gpu/gpu_mesh_pool.cpp)
     elseif(KIN_HAS_WEBGL2_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/webgl2_renderer3d.cpp)

@@ -4,6 +4,7 @@
 #endif
 const int MAX_LIGHTS = 16;
 // The frame's, pushed once a pass.
+#include "kin_portal_sun.inc.glsl"
 layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 sun_direction; // xyz: toward the sun, length 1; w: its disc's angular radius (radians)
     vec4 sun_color;     // linear
@@ -43,4 +44,6 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 ssr_pyramid;   // the previous frame's picture in their buffer (ssr_pyramid.comp): x: levels, y: the previous
                         // projection's [1][1], z: level 0's first word
     mat4 ssr_previous;  // world to the previous frame's clip space (unjittered)
+    vec4 portal_sun; // count, shadow texel (uv), sun shadow strength
+    KinPortalSun portal[8];
 } frame;

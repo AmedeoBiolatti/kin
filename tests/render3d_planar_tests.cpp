@@ -535,7 +535,7 @@ void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
         scene.lights.sun.color = scene.lights.ambient = {0, 0, 0};
         const auto compose = [&](float x) {
             scene.clear();
-            assert(scene.gi_portals.empty());
+            assert(scene.portals.empty());
             scene.camera = Camera3D::look_at({x, 2, 6}, {0, 0, 0});
             assert(scene.draw(g.box, at({20, water ? -1.0f : 1.0f, 4}), unlit(Color::rgb(20, 230, 20))));
         };
@@ -549,7 +549,7 @@ void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
         for (const float x : {-0.4f, 0.4f}) {
             compose(x);
             assert(planar.render(world, scene, extent, {.samples = 1, .background = colors::black}));
-            assert(scene.gi_portals.size() == 1);
+            assert(scene.portals.size() == 1);
             g.frame(scene);
             const Rgb reflected = g.at(scene.camera, {0, -1, -4});
             std::cerr << (water ? "water" : "mirror") << " through portal x=" << x << ": " << reflected.r << ','
@@ -561,6 +561,100 @@ void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
         }
     }
     std::cout << "planar: mirror and water through portal\n";
+}
+
+// No GI or ambient light: a roof blocks ordinary sunlight on the floor. The rotated portal supplies a different
+// solar direction from a source opening outside the camera. Its shadow must stop at each opening's plane.
+void test_portal_sun(Gpu& g) {
+    const auto run = [&](std::string_view name, bool linked, int blocker, float shift = 0) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0, 2.5f, 6}, {0, 0, 1.5f});
+        scene.lights.ambient = {0, 0, 0};
+        scene.lights.sun = {.direction = {1, 1, 0}, .color = {.8f, .7f, .6f}};
+        scene.lights.shadow_area = {{-6, -1, -4}, {15, 8, 8}};
+        scene.lights.shadow_resolution = 256;
+        scene.lights.shadow_cascades = 4;
+        scene.lights.cache_shadows = true;
+        const Material3D black{.color = colors::black};
+        assert(scene.draw(g.floor, {}, {.color = colors::white}));
+        assert(scene.draw(g.box, Mat4f::trs({0, 3.5f, 2}, {}, {13, .25f, 10}), black));
+        if (linked)
+            scene.portals.push_back(
+                {{{shift, 1.5f, 0}, {}, {2, 3}}, {{8, 1.5f, 0}, Quatf::axis_angle({0, 1, 0}, 90), {2, 3}}});
+        if (blocker == 1)
+            assert(scene.draw(g.box, Mat4f::trs({9, 3, 0}, {}, {.25f, 4, 3}), black));
+        if (blocker == 2)
+            assert(scene.draw(g.box, Mat4f::trs({0, .8f, 1.2f}, {}, {3, .25f, .4f}), black));
+        if (blocker == 3)
+            assert(scene.draw(g.box, Mat4f::trs({7, 1, 0}, {}, {.25f, 2, 3}), black));
+        if (blocker == 4)
+            assert(scene.draw(g.box, Mat4f::trs({0, 3, -1}, {}, {3, 3, .25f}), black));
+        if (blocker == 5 || blocker == 6) {
+            const PortalPose3D obstacle = blocker == 5
+                                              ? PortalPose3D{{9, 3, 0}, Quatf::axis_angle({0, 1, 0}, 90), {3, 4}}
+                                              : PortalPose3D{{0, .8f, 1.2f}, {}, {3, 2}};
+            scene.portals.push_back({obstacle, {{40, 2, 0}, Quatf::axis_angle({0, 1, 0}, -90), {3, 4}}});
+        }
+        g.frame(scene);
+        const Rgb first = g.at(scene.camera, {shift, 0, 2});
+        g.frame(scene); // cached ordinary maps and the two new clipped passes must agree on the next frame
+        if (linked)
+            assert(g.r3d.debug_stats().local_shadow_cached >= 2);
+        const Rgb inside = g.at(scene.camera, {shift, 0, 2});
+        const Rgb outside = g.at(scene.camera, {shift + 1.5f, 0, 2});
+        const Rgb past = g.at(scene.camera, {shift, 0, 4});
+        std::cerr << name << ": " << inside.r << ',' << inside.g << ',' << inside.b << " outside=" << outside.r
+                  << " past=" << past.r << '\n';
+        g.capture(name);
+        assert(std::abs(first.r - inside.r) <= 2);
+        assert(outside.r < 25 && past.r < 25);
+        return inside;
+    };
+    const Rgb closed = run("sun-unlinked", false, 0);
+    const Rgb open = run("sun-linked", true, 0);
+    const Rgb source = run("sun-source-blocked", true, 1);
+    const Rgb target = run("sun-target-blocked", true, 2);
+    const Rgb source_behind = run("sun-source-behind", true, 3);
+    const Rgb target_behind = run("sun-target-behind", true, 4);
+    const Rgb moved = run("sun-moved", true, 0, .75f);
+    const Rgb source_portal = run("sun-source-next-portal", true, 5);
+    const Rgb target_portal = run("sun-target-next-portal", true, 6);
+    assert(closed.r < 25 && open.r > 100);
+    assert(source.r < 25 && target.r < 25);
+    assert(std::abs(source_behind.r - open.r) <= 8 && std::abs(target_behind.r - open.r) <= 8);
+    assert(std::abs(moved.r - open.r) <= 8);
+    assert(source_portal.r < 25 && target_portal.r < 25);
+    const auto bounce = [&](bool gi, bool blocked) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0, 1.5f, 3}, {0, 1.5f, 4});
+        scene.lights.ambient = {0, 0, 0};
+        scene.lights.sun = {.direction = {1, 1, 0}, .color = {2, 2, 2}};
+        scene.lights.shadow_area = {{-6, -1, -4}, {15, 8, 8}};
+        scene.lights.shadow_resolution = 256;
+        scene.global_illumination = {
+            .enabled = gi, .area = {{-4, -1, -4}, {14, 6, 8}}, .cell = .25f, .levels = 1, .side = 96, .height = 32};
+        scene.global_illumination.probes.per_render = 2048;
+        scene.global_illumination.probes.rays = 128;
+        const Material3D black{.color = colors::black};
+        assert(scene.draw(g.floor, {}, {.color = colors::white}));
+        assert(scene.draw(g.box, Mat4f::trs({0, 3.5f, 2}, {}, {13, .25f, 10}), black));
+        assert(scene.draw(g.box, Mat4f::trs({4, 3, 0}, {}, {.25f, 8, 20}), black));
+        assert(scene.draw(g.box, Mat4f::trs({0, 1.5f, 4}, {}, {3, 3, .25f}), {.color = colors::white}));
+        scene.portals.push_back({{{0, 1.5f, 0}, {}, {2, 3}}, {{8, 1.5f, 0}, Quatf::axis_angle({0, 1, 0}, 90), {2, 3}}});
+        if (blocked)
+            assert(scene.draw(g.box, Mat4f::trs({9, 3, 0}, {}, {.25f, 4, 3}), black));
+        for (int frame = 0; frame < (gi ? 128 : 2); ++frame)
+            g.frame(scene);
+        const Rgb value = g.at({80, 60});
+        const char* name = !gi ? "sun-bounce-no-gi" : blocked ? "sun-bounce-blocked" : "sun-bounce-gi";
+        g.capture(name);
+        std::cerr << name << ": " << value.r << ',' << value.g << ',' << value.b << '\n';
+        return value;
+    };
+    const Rgb no_bounce = bounce(false, false), indirect = bounce(true, false), blocked_bounce = bounce(true, true);
+    assert(no_bounce.r < 25 && indirect.r > no_bounce.r + 20);
+    assert(blocked_bounce.r + 15 < indirect.r);
+    std::cout << "planar: direct sun through portal\n";
 }
 
 // A black partition separates two places. Only the linked aperture connects a white receiver to the green emitter
@@ -593,7 +687,7 @@ void test_portal_gi(Gpu& g) {
         entry.set<Portal3D>({.enabled = linked, .size = {3, 3}, .exit = {exit.id()}});
         PlanarViews3D planar{g.r3d};
         assert(planar.render(world, scene, extent));
-        assert(scene.gi_portals.size() == (linked ? 1u : 0u));
+        assert(scene.portals.size() == (linked ? 1u : 0u));
         assert(planar.views_rendered() == 0); // lighting crosses an off-screen portal without needing its picture
         auto view = g.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
         assert(view);
@@ -663,5 +757,6 @@ int main() {
     test_mirror(g, reflection);
     test_portal(g, portal);
     test_mirror_through_portal(g, {reflection, portal});
+    test_portal_sun(g);
     test_portal_gi(g);
 }

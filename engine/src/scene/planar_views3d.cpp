@@ -369,7 +369,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     };
     std::vector<Mirror> mirrors;
     std::vector<Portal> portals;
-    scene.gi_portals.clear();
+    scene.portals.clear();
     std::size_t index = 0; // the surfaces' order, for their stand-ins' tags
     // The frame in a picture's pixels: the view's times the surface's resolution.
     const auto frame_size = [&](f32 resolution) {
@@ -607,7 +607,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
         if (!poses)
             return;
         Portal p{entity.id(), poses->first, poses->second, 0, {}, {}, {}, {}, 0};
-        scene.gi_portals.push_back({p.pose, p.exit});
+        scene.portals.push_back({p.pose, p.exit});
         p.effect = c.effect;
         p.effect_strength = c.effect_strength;
         d.keep(p.id);

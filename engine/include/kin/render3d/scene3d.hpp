@@ -801,10 +801,12 @@ struct Decal3D {
     i32 order = 0;
 };
 
-// A one-way aperture for GI rays: in through entry's front, out of exit's front, as portal_view does for a camera.
-// Both openings must have positive size. The smaller opening limits the light. At most eight links are traced;
-// both ends and the source geometry need to be in the GI field. PlanarViews3D fills these from enabled Portal3D's.
-struct GiPortal3D {
+// A one-way viewing aperture: in through entry's front, out of exit's front, as portal_view does for a camera.
+// GI rays follow this direction; direct sunlight travels the reverse path, from exit into entry's world.
+// Both openings must have positive size. The smaller limits the light. At most eight links participate.
+// GI requires both ends inside its field; direct solar shadows use lights.shadow_area on both segments.
+// PlanarViews3D fills these from enabled Portal3D's, including openings off screen.
+struct PortalLink3D {
     PortalPose3D entry, exit;
 };
 
@@ -856,8 +858,8 @@ public:
     bool specular_multiscatter = true;
     Lod3D lod{};
     GlobalIllumination3D global_illumination{};
-    std::vector<GiPortal3D> gi_portals; // this frame's apertures; clear() drops them with the scene's draws
-    RenderDebugOptions3D debug{};       // diagnostic overrides; never GPU-read back by default
+    std::vector<PortalLink3D> portals; // this frame's apertures; clear() drops them with the scene's draws
+    RenderDebugOptions3D debug{};      // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:
     // off, the picture and the cost are as without the features.
     Sky3D sky{};
@@ -968,7 +970,7 @@ public:
     std::span<const Decal3D> decals() const { return _decals; }
     void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLightSource3D& light) { lights.spots.push_back(light); }
-    // Takes the draws, point and spot lights, reflection probes, GI portals and particles away, the overlay's too
+    // Takes the draws, point and spot lights, reflection probes, portals and particles away, the overlay's too
     // (cameras, the sun and the ambient light and the weather stay), keeping their room.
     void clear();
     // The copies of draws()[draw] drawn with `material` from the next render on, their mesh and placing as they are (a

@@ -880,7 +880,7 @@ void Scene3D::clear() {
     lights.points.clear();
     lights.spots.clear();
     lights.reflection_probes.clear();
-    gi_portals.clear();
+    portals.clear();
     if (_overlay) {
         _overlay->clear();
     }

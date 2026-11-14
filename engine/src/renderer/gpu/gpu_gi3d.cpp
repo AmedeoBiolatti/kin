@@ -105,6 +105,8 @@ struct GiLightUniforms {
     f32 area[4];        // area-light emitters, 1 with area lights, GI emitters in the explicit flags
     f32 area_scene[4];  // where the copies start in the scene buffer (vec4s); the settled hierarchy's first node and
                         // first triangle, 1 when there is one (bits are floats: exact below 2^24)
+    f32 portal_sun[4];
+    PortalSunLight portal[max_portal_sun_maps];
 };
 struct GiLight {
     f32 at[4];     // place, reach
@@ -461,7 +463,7 @@ void GpuRenderer3D::make_gi() {
         _gi_voxelize = make_gi_compute(handle, "gi_voxelize.comp.spv", 2, 6, 0, 2);
         _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 8, 3, 0);
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 1, 1, 1, 1);
-        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 8, 8, 3, 0);
+        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 9, 8, 3, 0);
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 8, 3, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
@@ -2295,7 +2297,8 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
 
 bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
                               const GpuEnvironment3D* environment, const Mat4f& to_environment,
-                              RenderDebugStats3D& stats) {
+                              RenderDebugStats3D& stats, std::span<const PortalSunLight> portals,
+                              SDL_GPUTexture* portal_depth, f32 portal_texel) {
     GpuView3D::Gi& g = view._gi;
     const GiProbes3D& settings = scene.global_illumination.probes;
     if (!g.valid || !settings.enabled) {
@@ -2539,6 +2542,10 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
         ensure_buffer(g.light_list, bytes, 4096, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
         _device->upload_storage_buffer(g.light_list->handle(), 0, bytes, lit_blocks.data(), /*cycle=*/true);
         GiLightUniforms u{};
+        u.portal_sun[0] = f32(portals.size());
+        u.portal_sun[1] = portal_texel;
+        u.portal_sun[2] = std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f);
+        std::copy(portals.begin(), portals.end(), u.portal);
         u.scene = scene_u;
         u.count[0] = static_cast<u32>(list.size());
         u.count[1] = static_cast<u32>(lit_blocks.size());
@@ -2591,7 +2598,7 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             return false;
         }
         const std::array<SDL_GPUTextureSamplerBinding, 3> probes = gi_atlases(view, g.lit);
-        const std::array<SDL_GPUTextureSamplerBinding, 8> samplers{
+        const std::array<SDL_GPUTextureSamplerBinding, 9> samplers{
             SDL_GPUTextureSamplerBinding{g.distance.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.albedo.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.normal.handle(), _gi_sampler},
@@ -2600,7 +2607,8 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             probes[1],
             probes[2],
             SDL_GPUTextureSamplerBinding{_gi_sun_on && _gi_sun_map ? _gi_sun_map.handle() : _no_shadow.handle(),
-                                         _compare_sampler}};
+                                         _compare_sampler},
+            SDL_GPUTextureSamplerBinding{portal_depth ? portal_depth : _no_shadow.handle(), _compare_sampler}};
         const bool area =
             scene.global_illumination.emitters == GiEmitters3D::Exact && g.area_built && g.area_emitter_count > 0;
         const auto or_empty = [&](const std::shared_ptr<GpuBuffer>& b) {
@@ -2691,7 +2699,7 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
         const LinearRgb up = lights.ambient, down = lights.ground_ambient.enabled ? lights.ground_ambient.color : up;
         put4(u.ambient, up.r, up.g, up.b, 0.0f);
         put4(u.ground, down.r, down.g, down.b, 0.0f);
-        for (const GiPortal3D& portal : scene.gi_portals) {
+        for (const PortalLink3D& portal : scene.portals) {
             if (u.portal_count[0] == std::size(u.portals))
                 break;
             const f32 width = std::min(portal.entry.size.x, portal.exit.size.x);

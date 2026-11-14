@@ -47,6 +47,14 @@ float cascade_light(int k, vec3 n, vec3 world_dx, vec3 world_dy) {
 // the view holds this depth, faded into the next over the last tenth of its
 // range (so the border isn't a visible seam); one map is just cascade 0.
 float sunlight(vec3 n, vec3 world_dx, vec3 world_dy) {
+    // The ordinary world-space sun stops at a portal; its transported path is shaded separately.
+#ifdef KIN_PORTAL_SUN
+    for (int i = 0; i < int(frame.portal_sun.x); ++i) {
+        if (kin_portal_crossing(frame.portal[i], vWorld, frame.sun_direction.xyz, false)) {
+            return 0.0;
+        }
+    }
+#endif
     if (frame.flags.z < 0.5 || material.params.z < 0.5) {
         return 1.0;
     }

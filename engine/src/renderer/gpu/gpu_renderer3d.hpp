@@ -7,6 +7,7 @@
 #include "gpu_buffer.hpp"
 #include "gpu_light_grid3d.hpp"
 #include "gpu_mesh_pool.hpp"
+#include "gpu_portal_sun3d.hpp"
 #include "gpu_shader.hpp"
 #include "gpu_texture.hpp"
 
@@ -740,7 +741,7 @@ private:
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
     // them all, said once in the log), 0 without a map.
-    u32 ensure_shadow_map(u32 resolution, u32 layers);
+    u32 ensure_shadow_map(u32 resolution, u32 layers, u32 portal_layers = 0);
     // Records the compute passes that make `environment`'s filtered copies.
     void filter_environment(SDL_GPUCommandBuffer* commands, GpuEnvironment3D& environment);
     // An environment's textures at `w` x `h` (its picture's size), empty: for create_environment and the sky's own.
@@ -817,8 +818,9 @@ private:
     // pass in the middle of the frame is followed by resume_2d().
     struct FrameCtx;
     struct DrawRef;
-    void setup_frame(FrameCtx& ctx);     // cameras, temporal anti-aliasing and its jitter
-    void fit_sun_shadow(FrameCtx& ctx);  // the shadow map and its cascades or box
+    void setup_frame(FrameCtx& ctx);    // cameras, temporal anti-aliasing and its jitter
+    void fit_sun_shadow(FrameCtx& ctx); // the shadow map and its cascades or box
+    bool portal_sun_pass(FrameCtx& ctx);
     void cull_and_upload(FrameCtx& ctx); // what is seen, and the instance buffers
     void order_draws(FrameCtx& ctx);
     void choose_point_lights(FrameCtx& ctx);
@@ -897,7 +899,9 @@ private:
     // rays meet is `environment` (null: the hemisphere of Lights3D::ambient and ground_ambient) turned by
     // `to_environment`. True when the probes' light is in the picture this render.
     bool gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
-                   const GpuEnvironment3D* environment, const Mat4f& to_environment, RenderDebugStats3D& stats);
+                   const GpuEnvironment3D* environment, const Mat4f& to_environment, RenderDebugStats3D& stats,
+                   std::span<const PortalSunLight> portals = {}, SDL_GPUTexture* portal_depth = nullptr,
+                   f32 portal_texel = 0);
     // What the light variants bind for global illumination (samplers 12 and 13: the probes' light on the view, when
     // `resolved`), dummies without; and the probes' three atlases as the compute and the debug view read them.
     std::array<SDL_GPUTextureSamplerBinding, 3> gi_bindings(const GpuView3D& view, bool resolved) const;
@@ -1042,7 +1046,7 @@ private:
     void upload_particle_casts(FrameCtx&);
     std::vector<ParticleCastView> _particle_cast_views;
     bool draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass, const Mat4f& light_view, bool local,
-                               u32 cascade = 0);
+                               u32 cascade = 0, Vec4f clip = {0, 0, 0, 1});
     void resume_2d();
     // `buffer` as a storage buffer of at least `bytes` (grown to twice its size, and not under `minimum`).
     void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum,
@@ -1076,6 +1080,7 @@ private:
     GpuShader _unlit_shader, _unlit_textured_shader, _unlit_mask_shader, _unlit_textured_mask_shader;
     GpuShader _shadow_shader;         // shadow.frag
     GpuShader _shadow_restore_shader; // shadow_restore.frag, optional static-depth reuse
+    GpuShader _portal_shadow_shader;  // portal_shadow.frag, first-hop solar path boundary
     GpuShader _shadow_vertex_shader;  // shadow.vert
     GpuShader _fullscreen_shader;     // fullscreen.vert
     GpuShader _bloom_shader;          // bloom.frag
@@ -1309,8 +1314,8 @@ private:
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;
     u32 _shadow_layers = 0;
-    u32 _shadow_layers_limit = max_shadow_cascades; // lowered when the device would not make more
-    GpuTexture _no_shadow;                          // 1 x 1, all far: every comparison lit
+    u32 _shadow_layers_limit = max_shadow_cascades + max_portal_sun_maps; // lowered on allocation failure
+    GpuTexture _no_shadow;                                                // 1 x 1, all far: every comparison lit
     Texture _white_maps; // 1 x 1, one white layer: graph maps for a surface whose material has none
     // P3b. The local array: a layer a spot light's map and six a point light's, `_local_side` texels a side (a light
     // draws into a corner of it); the moon's cascades are an array of their own. `_*_generation` changes when one is
@@ -1350,7 +1355,8 @@ private:
         bool valid = false;
         bool compact = false; // payload describes immutable selections by their source/projection revisions
     };
-    std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades + 1> _local_cache; // (+1: the GI's sun map)
+    // Separate fingerprints for both clipped phases of each portal sun map, after the GI's sun map.
+    std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades + 1 + 2 * max_portal_sun_maps> _local_cache;
     struct LocalStaticCache {
         std::vector<u8> payload;
         u32 layer = 0, x = 0, y = 0, size = 0;
@@ -1389,7 +1395,9 @@ private:
         u32 x = 0, y = 0;
         bool packed = false;
         bool moon = false;
-        bool gi_sun = false;     // the GI's sun map: every caster over the GI's area, whatever the camera sees
+        bool gi_sun = false; // the GI's sun map: every caster over the GI's area, whatever the camera sees
+        bool portal_sun = false, append_depth = false;
+        Vec4f clip{0, 0, 0, 1};
         bool single_map = false; // a moon's lone map over the whole area (no slice test)
         Vec3f down{};            // the moon's light's way
         Vec3f centre{};          // a sphere that holds all that can cast into it (a spot's or point light's reach)
