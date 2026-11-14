@@ -51,6 +51,7 @@ layout(std430, set = 0, binding = 9) readonly buffer Sides {
 layout(set = 1, binding = 0, rgba8) uniform writeonly image3D uAlbedo;
 layout(set = 1, binding = 1, rgba8) uniform writeonly image3D uNormal;
 layout(set = 1, binding = 2, rgba16f) uniform writeonly image3D uEmission;
+layout(set = 1, binding = 3, r8) uniform writeonly image3D uSubcells;
 #else
 layout(std430, set = 1, binding = 0) buffer Owners {
     uint owners[]; // ~0: no surface
@@ -188,6 +189,39 @@ bool touches(Tri t, ivec3 voxel) {
     return true;
 }
 
+#ifndef KIN_GI_ATTRIBUTES
+// Conservative triangle coverage inside a coarse voxel. The same separating axes as touches(), applied to its
+// eight half-size boxes; keep a small geometric tolerance so a face on their boundary covers both neighbours.
+uint subcells_of(Tri t, ivec3 voxel) {
+    const vec3 lo = min(t.v0, min(t.v1, t.v2)), hi = max(t.v0, max(t.v1, t.v2));
+    const float radius = 0.25;
+    const float tolerance = 1e-3;
+    uint mask = 0u;
+    for (int b = 0; b < 8; ++b) {
+        const vec3 centre = vec3(voxel) + vec3(b & 1, (b >> 1) & 1, b >> 2) * 0.5 + radius;
+        if (any(greaterThan(lo, centre + radius + tolerance)) ||
+            any(lessThan(hi, centre - radius - tolerance)) ||
+            abs(dot(t.n, centre - t.v0)) > (radius + tolerance) * dot(abs(t.n), vec3(1.0))) {
+            continue;
+        }
+        bool covered = true;
+        for (int i = 0; i < 3; ++i) {
+            const vec3 from = i == 0 ? t.v0 : i == 1 ? t.v1 : t.v2;
+            if (dot(t.nxy[i], centre.xy - from.xy) < -(radius + tolerance) * dot(abs(t.nxy[i]), vec2(1.0)) ||
+                dot(t.nyz[i], centre.yz - from.yz) < -(radius + tolerance) * dot(abs(t.nyz[i]), vec2(1.0)) ||
+                dot(t.nzx[i], centre.zx - from.zx) < -(radius + tolerance) * dot(abs(t.nzx[i]), vec2(1.0))) {
+                covered = false;
+                break;
+            }
+        }
+        if (covered) {
+            mask |= 1u << uint(b);
+        }
+    }
+    return mask != 0u ? mask : 255u; // numerical uncertainty retains the coarse conservative hit
+}
+#endif
+
 // The barycentric weights of the triangle's point nearest `q` (Ericson, Real-Time Collision Detection, 5.1.5).
 vec3 nearest(vec3 q, vec3 a, vec3 b, vec3 c) {
     const vec3 ab = b - a, ac = c - a, aq = q - a;
@@ -297,6 +331,7 @@ void visit(Tri t, Corners k, ivec3 voxel, ivec3 st, uint item) {
     const bool both_ways = ((ways & 0x15u) & ((ways >> 1u) & 0x15u)) != 0u;
     imageStore(uNormal, stored, vec4(n * 0.5 + 0.5, p.material.z > 0.5 || both_ways ? 1.0 : 128.0 / 255.0));
     imageStore(uEmission, stored, vec4(min(emission, vec3(65000.0)), p.material.w));
+    imageStore(uSubcells, stored, vec4(float((ways >> 8u) & 255u) / 255.0));
 #else
     if (p.flags.y != 0u) {
         vec3 b;
@@ -311,7 +346,7 @@ void visit(Tri t, Corners k, ivec3 voxel, ivec3 st, uint item) {
     const vec3 face = dot(t.n, facing) < 0.0 ? -t.n : t.n;
     const vec3 a = abs(face);
     const uint axis = a.x >= a.y && a.x >= a.z ? 0u : a.y >= a.z ? 1u : 2u;
-    atomicOr(sides[at], 1u << (axis * 2u + (face[axis] < 0.0 ? 1u : 0u)));
+    atomicOr(sides[at], (1u << (axis * 2u + (face[axis] < 0.0 ? 1u : 0u))) | (subcells_of(t, voxel) << 8u));
 #endif
 }
 

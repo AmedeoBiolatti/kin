@@ -1168,7 +1168,14 @@ the plan's G5b results.
   writes its colour, normal and emission, is the touching triangle drawn first, an emissive one before any other (a
   lamp's panel a millimetre under a ceiling keeps its light). A jump flood (Rong and Tan) gives the distances:
   exactly zero in surface voxels and at least one in empty voxels. The ray marcher uses this same distance read
-  for occupancy and step length. Made again only where something changed, by blocks of 8 x 8 x 8 voxels: those a
+  for occupancy and step length. Each surface voxel also keeps a byte of conservative triangle coverage in
+  2 x 2 x 2 subcells, the union of every touching triangle that passes the voxelizer's cutout test. When a probe
+  ray would hit a one-sided back, it checks the subcells it crosses first: a ray through an empty part of the
+  voxel continues, rather than taking the owner's back as a black surface. A covered subcell retains the coarse
+  hit distance for probe visibility; unknown coverage retains the hit too. Front and two-sided hits keep their
+  coarse estimator. This reduces false dark occlusion without claiming an exact triangle intersection; it does
+  not change the occupancy used for probe placement, lighting or voxel debug views. Made again only where
+  something changed, by blocks of 8 x 8 x 8 voxels: those a
   copy that came, went, moved or changed (a pose, a mesh, a material's colour, textures, or whether it emits, a tint)
   covers or covered, a voxel more each way,
   and the slabs a window gains when it moves (all of a window that jumps past where it was; all of every level when the
@@ -1316,7 +1323,7 @@ the plan's G5b results.
   asked for. Where the device has it, the meshes' buffers are made readable by compute, and each mesh keeps the box of
   each run of 64 of its triangles (the voxelizer takes only the runs that reach what changed), which costs nothing
   unused. Not on WebGL2.
-- **Memory:** 42 bytes a voxel (the scene's 18, the lit scene's two sides' 16, the build's 8) and 1.5 KB a probe, for
+- **Memory:** 43 bytes a voxel (the scene's 19, the lit scene's two sides' 16, the build's 8) and 1.5 KB a probe, for
   every level (the default's three levels of 1 million voxels and 16,384 probes: about 200 MB), and the light on the
   view (16 bytes a pixel at half the view's size), counted in `debug_stats().feature_bytes` and given back after 120
   renders without it, as the other features'.
@@ -1328,7 +1335,8 @@ the plan's G5b results.
   shows the GI scene traced from the camera instead of the picture: each pixel walks the voxels its ray passes, in
   jumps the distances allow, to the first one a surface is in; `Radiance` is the light leaving it, `Irradiance` the
   probes' light there. `r3d.read_gi_scene(view, out)` reads the first level's voxels back (a `GiScene3D`, in its
-  window's order), waiting for the GPU. `debug_stats()` has `gi_voxels` (all the levels', 0 without), `gi_levels`,
+  window's order), waiting for the GPU. Its `subcells` byte per voxel uses bit `x + 2*y + 4*z` for the covered
+  half-size cell; empty voxels have zero. `debug_stats()` has `gi_voxels` (all the levels', 0 without), `gi_levels`,
   `gi_built`, `gi_blocks`, `gi_copies`, `gi_triangles`, `gi_dispatches`, `gi_probes`, `gi_probes_updated`, `gi_rays`,
   `gi_lit` and `gi_resolved`. With `debug.gpu_pass_markers` each of its passes is a debug group (`kin3d.gi_clear`,
   `_voxelize`, `_attributes`, `_flood`, `_place`, `_light`, `_trace`, `_update`, `_resolve`, `_area`).

@@ -480,7 +480,7 @@ private:
     // read; a window's counts, the spacing in voxels, the levels, each window's first probe, those waiting to be traced
     // first, the next in turn, the updates so far (the rays' turn) and whether their light is shown.
     struct Gi {
-        GpuTexture distance, albedo, normal, emission, radiance, radiance_back;
+        GpuTexture distance, subcells, albedo, normal, emission, radiance, radiance_back;
         std::shared_ptr<GpuBuffer> owners, seeds;
         std::array<u32, 3> size{};
         u32 levels = 0;

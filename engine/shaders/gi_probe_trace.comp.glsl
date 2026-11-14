@@ -14,13 +14,14 @@ layout(set = 0, binding = 4) uniform sampler3D uGiProbes;
 layout(set = 0, binding = 5) uniform sampler2D uSky; // the environment's specular chain (any texture without)
 layout(set = 0, binding = 6) uniform sampler3D uRadianceBack;
 layout(set = 0, binding = 7) uniform sampler3D uEmission;
-layout(std430, set = 0, binding = 8) readonly buffer List {
+layout(set = 0, binding = 8) uniform sampler3D uGiSubcells;
+layout(std430, set = 0, binding = 9) readonly buffer List {
     uint list[]; // the batch: a probe's stored index in its level, its level in the top 8
 };
-layout(std430, set = 0, binding = 9) readonly buffer Emitters {
+layout(std430, set = 0, binding = 10) readonly buffer Emitters {
     float strengths[];
 };
-layout(std430, set = 0, binding = 10) readonly buffer AreaExplicit {
+layout(std430, set = 0, binding = 11) readonly buffer AreaExplicit {
     uint explicit_emitters[];
 };
 layout(std430, set = 1, binding = 0) writeonly buffer Rays {
@@ -28,6 +29,7 @@ layout(std430, set = 1, binding = 0) writeonly buffer Rays {
 };
 
 #define KIN_GI_SCENE
+#define KIN_GI_SUBCELLS
 #include "kin_gi.inc.glsl"
 
 struct Portal {

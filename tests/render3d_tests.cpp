@@ -3283,9 +3283,11 @@ struct GiVoxels {
 // voxels after a partial rebuild or a toroidal window move, not just the samples near the test geometry.
 void expect_gi_occupancy(const kin::GiScene3D& scene) {
     assert(scene.distance.size() == scene.albedo.size());
+    assert(scene.subcells.size() == scene.albedo.size());
     for (std::size_t i = 0; i < scene.distance.size(); ++i) {
         const bool full = (scene.albedo[i] >> 24) != 0;
         assert(full ? scene.distance[i] == 0.0f : scene.distance[i] >= 1.0f);
+        assert(full == (scene.subcells[i] != 0));
     }
 }
 
@@ -3325,6 +3327,7 @@ void test_gpu_gi_scene() {
             assert(std::abs(g.distance(fx, 10 + k, fz) - static_cast<float>(std::min(k, 8))) < 0.01f);
         }
         const std::size_t f = g.index(fx, 10, fz);
+        assert(g.s.subcells[f] == 0xcc); // y=0.27 in [0.2,0.3]: only the upper half contains the floor
         const auto linear_byte = [](kin::u8 c) {
             return static_cast<int>(std::lround(kin::srgb_to_linear(static_cast<float>(c) / 255.0f) * 255.0f));
         };
@@ -3385,6 +3388,16 @@ void test_gpu_gi_scene() {
         assert(std::abs(g.s.emission[ei * 3 + 1] - green) < green * 0.01f && g.s.emission[ei * 3] < 0.01f &&
                g.s.emission[ei * 3 + 2] < 0.01f);
         assert(g.s.emission[f * 3 + 1] == 0.0f);
+        // Another sheet in the lower half of that floor voxel: both triangles' coverage survives, even though
+        // only one owns its colour/normal. Build afresh so this also exercises the voxelizer's union.
+        (void)scene.draw(level.plane,
+                         Mat4f::translation({0.0f, 0.23f, 0.0f}) * Mat4f::scaling({7.0f, 1.0f, 7.0f}));
+        kin::View3D layered = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        render_ok(r3d, layered, scene);
+        renderer.present();
+        kin::GiScene3D unioned;
+        assert(r3d.read_gi_scene(layered, unioned).value_or(false));
+        assert(unioned.subcells[f] == 0xff);
     });
 }
 
@@ -3546,12 +3559,12 @@ void test_gpu_gi_scene_builds() {
         assert(built(other, scene_of(true, 1.5f, ball)));
         const kin::GiScene3D again = voxels(other);
         assert(again.distance == first.distance && again.albedo == first.albedo && again.normal == first.normal &&
-               again.emission == first.emission);
+               again.emission == first.emission && again.subcells == first.subcells);
         // And in the first view, made again where it changed: the same voxels.
         assert(built(view, scene_of(true, 1.5f, ball)));
         const kin::GiScene3D back = voxels(view);
         assert(back.distance == first.distance && back.albedo == first.albedo && back.normal == first.normal &&
-               back.emission == first.emission);
+               back.emission == first.emission && back.subcells == first.subcells);
         // A pose that changes every render (an animation) is made every fourth render once it goes on; when it stops,
         // the scene catches up within three renders, to the byte the one built afresh.
         int made = 0;
@@ -3569,7 +3582,7 @@ void test_gpu_gi_scene_builds() {
         assert(built(third, scene_of(true, stopped, ball)));
         const kin::GiScene3D caught = voxels(view), afresh = voxels(third);
         assert(caught.distance == afresh.distance && caught.albedo == afresh.albedo && caught.normal == afresh.normal &&
-               caught.emission == afresh.emission);
+               caught.emission == afresh.emission && caught.subcells == afresh.subcells);
         // Off: nothing built or kept, and the picture as with it on.
         kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Pixels without = shoot_view(renderer, r3d, plain, scene_of(false, 1.5f, ball));
@@ -3616,7 +3629,7 @@ void test_gpu_gi_submission_order() {
         };
         const auto equal_fields = [](const kin::GiScene3D& a, const kin::GiScene3D& b) {
             assert(a.size == b.size && a.distance == b.distance && a.albedo == b.albedo && a.normal == b.normal &&
-                   a.emission == b.emission);
+                   a.emission == b.emission && a.subcells == b.subcells);
         };
         const Color green = Color::rgb(50, 200, 80), red = Color::rgb(200, 50, 80);
         assert(step(view, scene_of(false, green)));
@@ -3861,7 +3874,7 @@ void test_gpu_gi_scene_scrolls() {
             expect_gi_occupancy(afresh);
             assert(kin::length(kept.origin - afresh.origin) < 1e-4f && kept.size == afresh.size);
             assert(kept.distance == afresh.distance && kept.albedo == afresh.albedo && kept.normal == afresh.normal &&
-                   kept.emission == afresh.emission);
+                   kept.emission == afresh.emission && kept.subcells == afresh.subcells);
             return kept;
         };
         // 128 x 64 x 128 voxels a level; the first of 0.1 from (-6.4, -1.6, -6.4), the second of 0.2.
@@ -4437,6 +4450,9 @@ void test_gpu_gi_recess_visibility() {
                     render_ok(r3d, view, scene);
                     renderer.present();
                 }
+                // Hold the warmed probe field steady while measuring AO. With zero hysteresis the rotated probe
+                // rays change the card's lighting between off/on captures, which is not an AO self-shadow.
+                scene.global_illumination.probes.hysteresis = .99f;
                 const auto off = shoot();
                 const auto value = [&](const Pixels& p, Vec3f at) {
                     const auto pixel =

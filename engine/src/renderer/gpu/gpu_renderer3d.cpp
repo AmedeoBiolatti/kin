@@ -4444,11 +4444,13 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
         bytes += b ? b->size() : 0u;
     }
     // The GI scene, every level's: a half, two 8-bit texels and four halves a voxel, and the build's two words (in
-    // owners and seeds); the lit scene's four halves on each side; the probes' atlases (8 x 8 of four halves, 16 x 16
-    // of two, four halves of data a probe), their rays and lists; their light on the view (four halves a texel, twice).
+    // owners and seeds), plus the byte of subcell coverage; the lit scene's four halves on each side; the probes'
+    // atlases (8 x 8 of four halves, 16 x 16 of two, four halves of data a probe), their rays and lists; their light on
+    // the view (four halves a texel, twice).
     const GpuView3D::Gi& gi = view._gi;
     const u64 voxels = static_cast<u64>(gi.size[0]) * gi.size[1] * gi.size[2] * gi.levels;
     bytes += gi.distance ? voxels * (2 + 4 + 4 + 8) : 0u;
+    bytes += gi.subcells ? voxels : 0u;
     bytes += gi.radiance ? voxels * 16 : 0u;
     bytes += gi.irradiance ? static_cast<u64>(gi.probe_counts[0]) * gi.probe_counts[1] * gi.probe_counts[2] *
                                  gi.probe_levels * (64 * 8 + 256 * 4 + 8)

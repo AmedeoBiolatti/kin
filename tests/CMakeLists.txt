@@ -582,9 +582,12 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     kin_add_test(kin_render3d_gi_tests kin-render3d-gi-resolve SOURCES render3d_gi_tests.cpp)
     kin_compile_glsl(_gi_test_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/gi_tests/shaders"
         SOURCES "${PROJECT_SOURCE_DIR}/engine/shaders/gi_resolve.comp.glsl"
-                "${PROJECT_SOURCE_DIR}/engine/shaders/gi_surface.comp.glsl")
+                "${PROJECT_SOURCE_DIR}/engine/shaders/gi_surface.comp.glsl"
+                "${PROJECT_SOURCE_DIR}/engine/shaders/gi_probe_trace.comp.glsl")
     kin_embed_files(kin_render3d_gi_tests NAME gi_test_shaders FILES ${_gi_test_spv})
     set_tests_properties(kin-render3d-gi-resolve PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+    add_test(NAME kin-render3d-gi-surface-hits COMMAND kin_render3d_gi_tests surface-hits)
+    set_tests_properties(kin-render3d-gi-surface-hits PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     add_test(NAME kin-render3d-gi-surface-reconstruction COMMAND kin_render3d_gi_tests surface-reconstruction)
     set_tests_properties(kin-render3d-gi-surface-reconstruction PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     add_test(NAME kin-render3d-gi-surface-history COMMAND kin_render3d_gi_tests surface-history)

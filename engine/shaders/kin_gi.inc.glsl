@@ -97,6 +97,39 @@ bool kin_gi_march(KinGiScene g, vec3 o, vec3 way, float far, int max_steps, out 
             // voxel is at least one voxel from a seed, so this also gives occupancy without reading albedo.
             const float d = texelFetch(uGiDistance, at, 0).r;
             if (d == 0.0) {
+#ifdef KIN_GI_SUBCELLS
+                // A one-sided back at the boundary of a conservative cell may be a false surface. Confirm that
+                // hit against the triangle coverage; retain front/two-sided hits and their existing estimator.
+                const vec4 face = texelFetch(uNormal, at, 0);
+                const bool uncertain = face.a <= 0.75 && dot(way, face.xyz * 2.0 - 1.0) > 0.0;
+                const uint mask = uncertain ? uint(round(texelFetch(uGiSubcells, at, 0).r * 255.0)) : 255u;
+                if (mask != 0u && mask != 255u) {
+                    // A touched voxel is a broad-phase hit. Visit the at most four half-size cells crossed inside
+                    // it; empty parts do not acquire its owner's normal/radiance. A zero mask retains the coarse
+                    // hit conservatively rather than opening an uninitialized or numerically uncertain surface.
+                    const vec3 end_times = (vec3(voxel) + step(vec3(0.0), way) - lo) * inv;
+                    const float end = min(min(min(end_times.x, end_times.y), end_times.z), leave);
+                    float fine = tv;
+                    for (int j = 0; j < 4 && fine < end; ++j) {
+                        const vec3 point = lo + way * fine;
+                        const ivec3 sub = clamp(ivec3(floor((point - vec3(voxel)) * 2.0)), ivec3(0), ivec3(1));
+                        const uint bit = uint(sub.x + 2 * sub.y + 4 * sub.z);
+                        if ((mask & (1u << bit)) != 0u) {
+                            hit = at;
+                            level = k;
+                            // Coverage confirms a possible surface, not its exact intersection. Keep the coarse
+                            // entry distance conservative for the probe visibility estimator.
+                            t = tv * cell;
+                            return true;
+                        }
+                        const vec3 next =
+                            (vec3(voxel) + (vec3(sub) + step(vec3(0.0), way)) * 0.5 - lo) * inv;
+                        fine = max(min(min(next.x, next.y), next.z), fine) + 1e-4;
+                    }
+                    tv = max(end, tv) + 1e-4;
+                    continue;
+                }
+#endif
                 hit = at;
                 level = k;
                 t = tv * cell;

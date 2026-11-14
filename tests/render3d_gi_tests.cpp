@@ -46,6 +46,27 @@ float half(u16 v) {
     return std::ldexp(e ? 1.f + (v & 1023) / 1024.f : (v & 1023) / 1024.f, e ? e - 15 : -14) *
            ((v & 0x8000) ? -1.f : 1.f);
 }
+void upload_texture(gpu::GpuDevice& device, gpu::GpuTexture& texture, int w, int h, int layers, const void* data,
+                    u32 bytes) {
+    auto* d = device.handle();
+    SDL_GPUTransferBufferCreateInfo info{.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = bytes};
+    auto* transfer = SDL_CreateGPUTransferBuffer(d, &info);
+    need(transfer, "upload buffer unavailable");
+    auto* mapped = SDL_MapGPUTransferBuffer(d, transfer, false);
+    need(mapped, "upload map failed");
+    std::memcpy(mapped, data, bytes);
+    SDL_UnmapGPUTransferBuffer(d, transfer);
+    auto* cmd = SDL_AcquireGPUCommandBuffer(d);
+    need(cmd, "upload command failed");
+    auto* pass = SDL_BeginGPUCopyPass(cmd);
+    need(pass, "upload pass failed");
+    SDL_GPUTextureTransferInfo source{.transfer_buffer = transfer, .pixels_per_row = u32(w), .rows_per_layer = u32(h)};
+    SDL_GPUTextureRegion target{.texture = texture.handle(), .w = u32(w), .h = u32(h), .d = u32(layers)};
+    SDL_UploadToGPUTexture(pass, &source, &target, false);
+    SDL_EndGPUCopyPass(pass);
+    complete(d, cmd);
+    SDL_ReleaseGPUTransferBuffer(d, transfer);
+}
 struct Fixture {
     gpu::GpuDevice& device;
     SDL_GPUDevice* d;
@@ -147,25 +168,7 @@ struct Fixture {
             SDL_ReleaseGPUSampler(d, sampler);
     }
     void upload(int input, int w, int h, int layers, const std::vector<float>& values) {
-        SDL_GPUTransferBufferCreateInfo info{.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                                             .size = u32(values.size() * 4)};
-        auto* transfer = SDL_CreateGPUTransferBuffer(d, &info);
-        need(transfer, "upload buffer unavailable");
-        auto* mapped = SDL_MapGPUTransferBuffer(d, transfer, false);
-        need(mapped, "upload map failed");
-        std::memcpy(mapped, values.data(), values.size() * 4);
-        SDL_UnmapGPUTransferBuffer(d, transfer);
-        auto* cmd = SDL_AcquireGPUCommandBuffer(d);
-        need(cmd, "upload command failed");
-        auto* pass = SDL_BeginGPUCopyPass(cmd);
-        need(pass, "upload pass failed");
-        SDL_GPUTextureTransferInfo source{
-            .transfer_buffer = transfer, .pixels_per_row = u32(w), .rows_per_layer = u32(h)};
-        SDL_GPUTextureRegion target{.texture = inputs[input].handle(), .w = u32(w), .h = u32(h), .d = u32(layers)};
-        SDL_UploadToGPUTexture(pass, &source, &target, false);
-        SDL_EndGPUCopyPass(pass);
-        complete(d, cmd);
-        SDL_ReleaseGPUTransferBuffer(d, transfer);
+        upload_texture(device, inputs[input], w, h, layers, values.data(), u32(values.size() * sizeof(float)));
     }
     void old_normal(int x, int y, float nx, float ny) {
         previous_normals[(y * width + x) * 2] = nx;
@@ -324,6 +327,164 @@ void resolve_contracts(Window& window) {
             need(f.run()[0] < .001f, "receiver interpolation removed biased visibility testing");
         }
     }
+}
+
+// Exercise the production probe-ray shader without beauty shading or probe integration hiding a false hit.
+void surface_hit_contracts(Window& window) {
+    gpu::GpuDevice device(window);
+    gpu_ready = true;
+    auto* d = device.handle();
+    struct TraceParams {
+        float size[4]{}, level[4][4]{};
+        Probes probes;
+        u32 batch[4]{512, 1, 1, 0};
+        float rotation[16]{}, sky[4]{}, environment[16]{}, ambient[4]{.25f, .25f, .25f, 0},
+            ground[4]{.25f, .25f, .25f, 0};
+        struct Portal {
+            float entry[16]{}, through[16]{}, opening[4]{};
+        } portals[8];
+        u32 portal_count[4]{};
+    } params;
+    static_assert(sizeof(TraceParams) == 1552);
+    constexpr auto use = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    std::vector<gpu::GpuTexture> inputs;
+    for (int i = 0; i < 9; ++i) {
+        if (i == 5)
+            inputs.push_back(device.create_target(1, 1, SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT, use));
+        else if (i == 4)
+            inputs.push_back(device.create_volume(2, 2, 2, SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT, use));
+        else
+            inputs.push_back(device.create_volume(8, 8, 16,
+                                                  i == 0   ? SDL_GPU_TEXTUREFORMAT_R32_FLOAT
+                                                  : i == 8 ? SDL_GPU_TEXTUREFORMAT_R8_UNORM
+                                                           : SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT,
+                                                  use));
+    }
+    const u32 zero = 0;
+    auto list = device.create_buffer(SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ, &zero, sizeof(zero));
+    auto empty = device.create_buffer(SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ, &zero, sizeof(zero));
+    auto rays = device.create_buffer(SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE, nullptr, 16);
+    SDL_GPUSamplerCreateInfo sampling{};
+    sampling.min_filter = sampling.mag_filter = SDL_GPU_FILTER_NEAREST;
+    sampling.address_mode_u = sampling.address_mode_v = sampling.address_mode_w =
+        SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    auto* sampler = SDL_CreateGPUSampler(d, &sampling);
+    const auto code = gi_test_shaders("gi_probe_trace.comp.spv");
+    SDL_GPUComputePipelineCreateInfo pipeline_info{};
+    pipeline_info.code = code.data();
+    pipeline_info.code_size = code.size();
+    pipeline_info.entrypoint = "main";
+    pipeline_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    pipeline_info.num_samplers = 9;
+    pipeline_info.num_readonly_storage_buffers = 3;
+    pipeline_info.num_readwrite_storage_buffers = 1;
+    pipeline_info.num_uniform_buffers = 1;
+    pipeline_info.threadcount_x = 64;
+    pipeline_info.threadcount_y = pipeline_info.threadcount_z = 1;
+    auto* pipeline = SDL_CreateGPUComputePipeline(d, &pipeline_info);
+    need(sampler && pipeline, "probe trace pipeline unavailable");
+    const auto run = [&](Vec3f first, Vec3f point, Vec3f direction, u8 mask, int levels = 1, bool two_sided = false) {
+        std::vector<float> distance(8 * 8 * 16, 1), normal(8 * 8 * 16 * 4, .5f), radiance(normal.size(), 0),
+            back(normal.size(), 0), probes(2 * 2 * 2 * 4, 0), blank(normal.size(), 0);
+        std::vector<u8> coverage(8 * 8 * 16, 0);
+        const auto index = [&](int x, int y, int z, int level = 0) {
+            const auto wrap = [](int a) { return (a % 8 + 8) % 8; };
+            return wrap(x + int(first.x)) + 8 * (wrap(y + int(first.y)) + 8 * (wrap(z + int(first.z)) + 8 * level));
+        };
+        for (int y = 0; y < 8; ++y)
+            for (int z = 0; z < 8; ++z) {
+                const int i = index(5, y, z, levels - 1);
+                distance[i] = 0;
+                coverage[i] = 255;
+                normal[i * 4] = 0; // a real wall facing -x
+                normal[i * 4 + 3] = two_sided ? 1 : .5f;
+                radiance[i * 4 + 1] = 1;
+            }
+        const int partial = index(2, 0, 0);
+        distance[partial] = 0;
+        coverage[partial] = mask;
+        normal[partial * 4 + 2] = 1; // the column's stored normal faces +z
+        radiance[partial * 4] = 1;
+        for (int i = 0; i < 8 * 8 * 16; ++i)
+            back[i * 4 + 2] = 1;
+        const Vec3f at = first + point;
+        probes[0] = at.x;
+        probes[1] = at.y;
+        probes[2] = at.z;
+        probes[3] = 1;
+        std::fill(std::begin(params.size), std::end(params.size), 8);
+        params.size[3] = float(levels);
+        for (int k = 0; k < levels; ++k) {
+            params.level[k][0] = first.x;
+            params.level[k][1] = first.y;
+            params.level[k][2] = first.z;
+            params.level[k][3] = float(1 << k);
+        }
+        for (int a = 0; a < 3; ++a)
+            params.probes.counts[a] = 2;
+        params.probes.level[0][3] = 1;
+        const Vec3f way = normalize(direction);
+        params.rotation[0] = way.x;
+        params.rotation[1] = way.y;
+        params.rotation[2] = way.z; // the single test ray's Fibonacci direction is +x
+        const auto upload = [&](int i, const std::vector<float>& values) {
+            upload_texture(device, inputs[i], i == 4 ? 2 : 8, i == 4 ? 2 : 8, i == 4 ? 2 : 16, values.data(),
+                           u32(values.size() * sizeof(float)));
+        };
+        upload(0, distance);
+        upload(1, blank);
+        upload(2, normal);
+        upload(3, radiance);
+        upload(4, probes);
+        upload(6, back);
+        upload(7, blank);
+        const std::array<float, 4> sky{};
+        upload_texture(device, inputs[5], 1, 1, 1, sky.data(), sizeof(sky));
+        upload_texture(device, inputs[8], 8, 8, 16, coverage.data(), u32(coverage.size()));
+        auto* cmd = SDL_AcquireGPUCommandBuffer(d);
+        const SDL_GPUStorageBufferReadWriteBinding output{.buffer = rays.handle()};
+        auto* pass = SDL_BeginGPUComputePass(cmd, nullptr, 0, &output, 1);
+        need(pass, "probe trace pass failed");
+        std::vector<SDL_GPUTextureSamplerBinding> samplers;
+        for (auto& input : inputs)
+            samplers.push_back({input.handle(), sampler});
+        const std::array<SDL_GPUBuffer*, 3> buffers{list.handle(), empty.handle(), empty.handle()};
+        SDL_BindGPUComputePipeline(pass, pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), u32(samplers.size()));
+        SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), u32(buffers.size()));
+        SDL_PushGPUComputeUniformData(cmd, 0, &params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, 1, 1, 1);
+        SDL_EndGPUComputePass(pass);
+        complete(d, cmd);
+        std::vector<u8> bytes;
+        need(device.read_buffer(rays.handle(), 0, 16, bytes), "cannot read probe ray");
+        std::array<float, 4> value;
+        std::memcpy(value.data(), bytes.data(), sizeof(value));
+        return value;
+    };
+    for (const auto first : {Vec3f{0, 0, 0}, Vec3f{-5, 0, -3}}) {
+        const auto coarse = run(first, {.5f, .25f, .65f}, {1, 0, .2f}, 255);
+        need(coarse[0] == 0 && coarse[1] == 0 && coarse[3] < 0, "coarse false-backface control changed");
+        const auto clear = run(first, {.5f, .25f, .65f}, {1, 0, .2f}, 15);
+        need(clear[1] > .99f && clear[3] > 4, "empty part of occupied voxel still blocks the bright wall");
+        const auto unknown = run(first, {.5f, .25f, .65f}, {1, 0, .2f}, 0);
+        need(unknown[3] < 0, "unknown coverage opened a surface");
+        const auto later = run(first, {.1f, .25f, .25f}, {1, 0, .01f}, 0xaa);
+        need(later[0] == 0 && std::abs(later[3] + 1.9f) < .001f, "ray lost a conservative back in its covered half");
+        const auto front = run(first, {.5f, .25f, .65f}, {1, 0, -.01f}, 15);
+        need(front[0] > .99f, "front-facing coarse estimator changed");
+        const auto thin = run(first, {.5f, .25f, .4f}, {1, 0, -.1f}, 15);
+        need(thin[0] > .99f, "conservative thin-surface coverage leaked");
+        const auto blocked = run(first, {6.5f, .25f, .25f}, {-1, 0, 0}, 15);
+        need(blocked[3] < 0 && blocked[2] == 0, "real one-sided backface gained light");
+        const auto both = run(first, {6.5f, .25f, .25f}, {-1, 0, 0}, 15, 1, true);
+        need(both[2] > .99f && both[3] > 0, "double-sided surface lost its back's light");
+    }
+    const auto outer = run({}, {.5f, .25f, .65f}, {1, 0, .2f}, 15, 2);
+    need(outer[1] > .99f && outer[3] > 9, "refined ray did not continue into the outer window");
+    SDL_ReleaseGPUComputePipeline(d, pipeline);
+    SDL_ReleaseGPUSampler(d, sampler);
+    std::cout << "GI surface hits: false hits rejected; thin, back, double-sided and wrapped/coarser hits retained\n";
 }
 
 void surface_reconstruction_contracts(Window& window) {
@@ -735,6 +896,8 @@ int main(int argc, char** argv) {
         auto& window = app.create_window({.title = "GI regression checks", .width = 96, .height = 72, .hidden = true});
         if (argc == 1)
             resolve_contracts(window);
+        else if (std::string(argv[1]) == "surface-hits")
+            surface_hit_contracts(window);
         else if (std::string(argv[1]) == "surface-reconstruction")
             surface_reconstruction_contracts(window);
         else if (std::string(argv[1]) == "surface-history")

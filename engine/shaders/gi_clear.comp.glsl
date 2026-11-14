@@ -9,10 +9,11 @@ layout(std430, set = 0, binding = 0) readonly buffer Blocks {
 layout(set = 1, binding = 0, rgba8) uniform writeonly image3D uAlbedo;
 layout(set = 1, binding = 1, rgba8) uniform writeonly image3D uNormal;
 layout(set = 1, binding = 2, rgba16f) uniform writeonly image3D uEmission;
-layout(std430, set = 1, binding = 3) writeonly buffer Owners {
+layout(set = 1, binding = 3, r8) uniform writeonly image3D uSubcells;
+layout(std430, set = 1, binding = 4) writeonly buffer Owners {
     uint owners[];
 };
-layout(std430, set = 1, binding = 4) writeonly buffer Sides {
+layout(std430, set = 1, binding = 5) writeonly buffer Sides {
     uint sides[];
 };
 layout(std140, set = 2, binding = 0) uniform Params {
@@ -35,4 +36,5 @@ void main() {
     imageStore(uAlbedo, stored, vec4(0.0));
     imageStore(uNormal, stored, vec4(0.0));
     imageStore(uEmission, stored, vec4(0.0));
+    imageStore(uSubcells, stored, vec4(0.0));
 }

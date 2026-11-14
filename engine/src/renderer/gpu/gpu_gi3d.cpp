@@ -445,8 +445,9 @@ void GpuRenderer3D::make_gi() {
     try {
         const SDL_GPUTextureUsageFlags usage =
             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
-        for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_R16_FLOAT, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                                  SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT}) {
+        for (const SDL_GPUTextureFormat format :
+             {SDL_GPU_TEXTUREFORMAT_R16_FLOAT, SDL_GPU_TEXTUREFORMAT_R8_UNORM, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+              SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT}) {
             if (!SDL_GPUTextureSupportsFormat(handle, format, SDL_GPU_TEXTURETYPE_3D, usage)) {
                 throw std::runtime_error("no 3D storage texture of a format the GI scene needs");
             }
@@ -459,13 +460,13 @@ void GpuRenderer3D::make_gi() {
                 throw std::runtime_error("no 3D storage texture of a format the probes need");
             }
         }
-        _gi_clear = make_gi_compute(handle, "gi_clear.comp.spv", 0, 1, 3, 2);
+        _gi_clear = make_gi_compute(handle, "gi_clear.comp.spv", 0, 1, 4, 2);
         _gi_voxelize = make_gi_compute(handle, "gi_voxelize.comp.spv", 2, 6, 0, 2);
-        _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 8, 3, 0);
+        _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 8, 4, 0);
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 1, 1, 1, 1);
         _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 9, 8, 3, 0);
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
-        _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 8, 3, 0, 1);
+        _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 9, 3, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
         _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 8, 0, 3, 0, 8, 8);
         _gi_surface = make_gi_compute(handle, "gi_surface.comp.spv", 5, 0, 3, 0, 8, 8);
@@ -911,6 +912,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
             const u32 depth = size[2] * levels;
             g.distance = _device->create_volume(size[0], size[1], depth, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, usage);
+            g.subcells = _device->create_volume(size[0], size[1], depth, SDL_GPU_TEXTUREFORMAT_R8_UNORM, usage);
             g.albedo = _device->create_volume(size[0], size[1], depth, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, usage);
             g.normal = _device->create_volume(size[0], size[1], depth, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, usage);
             g.emission =
@@ -1698,14 +1700,15 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     // 1. The blocks emptied.
     {
         const GiMarker marker{commands, _gpu_markers, "kin3d.gi_clear"};
-        const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> textures{
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 4> textures{
             SDL_GPUStorageTextureReadWriteBinding{.texture = g.albedo.handle()},
             SDL_GPUStorageTextureReadWriteBinding{.texture = g.normal.handle()},
-            SDL_GPUStorageTextureReadWriteBinding{.texture = g.emission.handle()}};
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.emission.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.subcells.handle()}};
         const std::array<SDL_GPUStorageBufferReadWriteBinding, 2> words_rw{
             SDL_GPUStorageBufferReadWriteBinding{.buffer = g.owners->handle()},
             SDL_GPUStorageBufferReadWriteBinding{.buffer = g.seeds->handle()}};
-        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 3, words_rw.data(), 2);
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 4, words_rw.data(), 2);
         if (!pass) {
             g.valid = false;
             return false;
@@ -1822,11 +1825,12 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             SDL_EndGPUComputePass(pass);
         }
         const GiMarker marker{commands, _gpu_markers, "kin3d.gi_attributes"};
-        const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> textures{
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 4> textures{
             SDL_GPUStorageTextureReadWriteBinding{.texture = g.albedo.handle()},
             SDL_GPUStorageTextureReadWriteBinding{.texture = g.normal.handle()},
-            SDL_GPUStorageTextureReadWriteBinding{.texture = g.emission.handle()}};
-        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 3, nullptr, 0);
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.emission.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.subcells.handle()}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 4, nullptr, 0);
         if (!pass) {
             g.valid = false;
             return false;
@@ -2728,7 +2732,7 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
         const bool area =
             scene.global_illumination.emitters == GiEmitters3D::Exact && g.area_built && g.area_emitter_count > 0;
         u.portal_count[1] = area ? g.area_explicit_count : 0;
-        const std::array<SDL_GPUTextureSamplerBinding, 8> samplers{
+        const std::array<SDL_GPUTextureSamplerBinding, 9> samplers{
             SDL_GPUTextureSamplerBinding{g.distance.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.albedo.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.normal.handle(), _gi_sampler},
@@ -2737,7 +2741,8 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             environment ? SDL_GPUTextureSamplerBinding{environment->specular.handle(), _environment_sampler}
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
             SDL_GPUTextureSamplerBinding{g.radiance_back.handle(), _gi_sampler},
-            SDL_GPUTextureSamplerBinding{g.emission.handle(), _gi_sampler}};
+            SDL_GPUTextureSamplerBinding{g.emission.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.subcells.handle(), _gi_sampler}};
         const std::array<SDL_GPUBuffer*, 3> buffers{
             g.batch_list->handle(), _gi_emitters ? _gi_emitters->handle() : _gi_empty->handle(),
             area && g.area_explicit ? g.area_explicit->handle() : _gi_empty->handle()};
@@ -2862,9 +2867,10 @@ bool GpuRenderer3D::read_gi_scene(IViewBackend3D& base, GiScene3D& out) {
     }
     const GpuView3D::Gi& gi = view->_gi;
     const u32 depth = gi.size[2] * gi.levels;
-    std::vector<u8> distance, albedo, normal, emission;
+    std::vector<u8> distance, albedo, normal, emission, subcells;
     if (!_device->read_volume(gi.distance, depth, 2, distance) || !_device->read_volume(gi.albedo, depth, 4, albedo) ||
-        !_device->read_volume(gi.normal, depth, 4, normal) || !_device->read_volume(gi.emission, depth, 8, emission)) {
+        !_device->read_volume(gi.normal, depth, 4, normal) || !_device->read_volume(gi.emission, depth, 8, emission) ||
+        !_device->read_volume(gi.subcells, depth, 1, subcells)) {
         return false;
     }
     // The first level's window, in window order (it is stored wrapped round).
@@ -2878,6 +2884,7 @@ bool GpuRenderer3D::read_gi_scene(IViewBackend3D& base, GiScene3D& out) {
     out.albedo.resize(voxels);
     out.normal.resize(voxels);
     out.emission.resize(voxels * 3);
+    out.subcells.resize(voxels);
     for (u32 z = 0; z < size[2]; ++z) {
         for (u32 y = 0; y < size[1]; ++y) {
             for (u32 x = 0; x < size[0]; ++x) {
@@ -2893,6 +2900,7 @@ bool GpuRenderer3D::read_gi_scene(IViewBackend3D& base, GiScene3D& out) {
                 out.distance[i] = half_to_float(h);
                 std::memcpy(&out.albedo[i], albedo.data() + from * 4, sizeof(u32));
                 std::memcpy(&out.normal[i], normal.data() + from * 4, sizeof(u32));
+                out.subcells[i] = subcells[from];
                 // An emitter's voxel: its colour times its emitter's strength (the alpha its number).
                 std::memcpy(&h, emission.data() + from * 8 + 6, sizeof(h));
                 const u32 emitter = static_cast<u32>(std::lround(half_to_float(h)));

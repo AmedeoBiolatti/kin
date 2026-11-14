@@ -262,6 +262,8 @@ struct GiScene3D {
     std::vector<u32> normal;
     // Its emission (linear RGB, three floats a voxel).
     std::vector<f32> emission;
+    // Conservative triangle coverage inside each voxel, 2 x 2 x 2 cells: bit x + 2*y + 4*z. Empty voxels have 0.
+    std::vector<u8> subcells;
 };
 
 // A view's targets on the backend.
