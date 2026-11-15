@@ -166,23 +166,52 @@ Both paths preserve clipping, logical coordinates, transforms and draw order.
 Native-coordinate draws also skip unused SDL window-size queries per vertex.
 
 The core-quality environment includes procedural sky, sun/moon discs, shared
-height/distance fog, sun/fill/hemisphere lighting, up to 16 point lights and up
-to four directional-shadow cascades with depth24 maps and manual PCF. Float data
+height/distance fog, sun/fill/hemisphere lighting and up to four
+directional-shadow cascades with depth24 maps and manual PCF. Float data
 textures need no float color-target extension. Sky ambient lighting uses a cached
 CPU hemisphere approximation. Each view owns its cache and respects
 `Sky3D::light_threshold` and `light_interval`; shadow, sky and mesh passes reuse
 that result. A game can supply the same cached hemisphere lighting
 to either renderer and skips the separate high-resolution time-of-day ambient
 integrals, while sun/moon/fog still update each frame.
-Prefiltered IBL, star fields, spot/local shadows
-and particles remain unavailable. Point lights currently use the first 16 in
-scene order rather than the native importance ranking.
 
-Views use RGBA8 and one sample. HDR, bloom and picking views, clusters, wireframe
-and custom material shaders are refused; unsupported spot/particle draws warn.
-SDR output clips bright values and does not apply native HDR exposure/tonemapping.
-Stock GLSL ES is expanded and embedded at build time using shared pure-math
-includes; custom shader assets/reflection and general 2D effects remain pending.
+Point and spot lights are unshadowed: the 16 of each whose reach meets the view,
+the most important (brightness, reach, share of the view) when more do. Spots
+use native's cone falloff, and both widen highlights by the light's size.
+
+HDR views (`ViewOptions3D::hdr`, `bloom`) draw linear light into an RGBA16F
+target (`EXT_color_buffer_float`), then native's output: bloom (a bright pass and
+two Gaussian rounds at half size), exposure, ACES, the sRGB encode and, with a
+sky, the dither. Auto exposure takes the picture's mean over 2^k-pixel blocks (at
+most 64 x 64 of them) into native's 128-bin histogram and adapts as native's
+`exposure_adapt.comp` does; native meters 2 x 2 blocks. Without the extension an
+HDR view is drawn as SDR, and the log says so once.
+
+Material graphs and surface shaders (`Material3D::surface`) are made from their
+GLSL, not SPIR-V: `IRendererBackend3D::create_surface_source`. Cooked graphs
+(`.kingraph.spv`, version 5) carry it; a source graph is compiled on the CPU when
+there is no glslc. The browser's mesh shader then defines native's names
+(`frame`, `material`, `kin_stock_surface` and the other `kin_*` functions a
+surface calls) and lights the surface as native's hemisphere ambient branch does
+(clear coat, backlight, specular, diffuse wrap, reflection). A surface's vertex
+offset is not drawn, and shadow cascades cut by the base map's alpha.
+`Material3D::graph_maps` are 2D array textures.
+
+Volumetric fog (`Fog3D::volumetric`) lights and sums its volume as native's
+compute shaders do, in fragment passes into RGBA16F 3D textures (four slices a
+draw), and the mesh and sky shaders add it as native's do. Cells are lit at their
+middles (no jitter or history), every cell is lit (no reach culling), local lights
+light the air unshadowed, and the fill light is left out when it asks for a
+shadow. It needs `EXT_color_buffer_float` and a perspective camera.
+
+Views use one sample. A custom `Material3D::shader` or a wireframe material draws
+as the stock material; `Renderer3D::pick` finds nothing. Image environments,
+prefiltered IBL, star fields, local shadows, particles, decals, ambient occlusion,
+contact shadows, screen-space reflections, TAA, global illumination, reflection
+probes, clip planes (mirrors, portals) and weather are not drawn; the log names
+each one the first time a scene asks for it. Stock GLSL ES is expanded and
+embedded at build time using shared pure-math includes; general 2D effects remain
+pending.
 
 ## Validation
 
@@ -223,6 +252,11 @@ They also check independent wrapping on a shared texture, nearest/linear/mipmap
 filter changes and sampler state across interleaved 2D/3D renders.
 Sky/fog pixels are compared with native CPU math. Shadow cases cover casters,
 receivers, cutout changes, animated casters and cascade statistics.
+`experimental/webgl2/parity_checks.cpp` compares spot lights with native's
+falloff, HDR output with native's ACES and exposure, bloom, auto exposure's
+key, material graphs (parameters, built-in inputs, lighting equal to the stock
+material's, clear coat, noise) and volumetric fog with a CPU twin of native's
+model; a custom-shader material must draw as the stock material.
 
 Native `kin-platform` tests caller-driven frame accumulation, pause, overload
 and restart. `kin-serial-jobs` tests deferred execution under caller locks,
