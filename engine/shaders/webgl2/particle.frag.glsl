@@ -22,8 +22,12 @@ uniform vec4 uDisc;              // x: the procedural disc's softness, y: its ri
 uniform bool uFogged;            // ParticleLook3D::fogged
 uniform vec3 uSunDirection, uSunColor;
 uniform bool uLinear;            // an HDR view's float picture: linear light, not encoded
+uniform bool uCast;              // into a shadow map: only the alpha test (native particle_cast.frag)
+uniform float uCutoff;           // ParticleLook3D::shadow_cutoff
+uniform float uReceive;          // ParticleLook3D::lit when it receives shadows (0: it doesn't)
 out vec4 outColor;
 #include "environment.inc.glsl"
+#include "shadow_maps.inc.glsl"
 
 vec3 decode(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
@@ -56,6 +60,12 @@ void main() {
         }
         shape = a;
     }
+    if (uCast) {
+        float covered = tex.a * vColour.a * shape;
+        if (covered <= 0.0 || covered < uCutoff) discard;
+        outColor = vec4(0.0);
+        return;
+    }
     float fade = 1.0;
     if (uDisc.z > 0.0) {
         // The surface behind, along the camera's forward, against this fragment's: 0 where they meet; behind it, not
@@ -69,7 +79,11 @@ void main() {
         }
     }
     float k = vColour.a * shape * fade;
-    vec3 colour = tex.rgb * vColour.rgb * (uTint + vLocalLight);
+    vec3 tint = uTint + vLocalLight;
+    // Received shadows (native particle_shadow_tint): the sun's half of the tint through its cascades at this
+    // fragment, pushed toward the sun (a volume has no normal). The browser has no other shadow maps.
+    if (uReceive > 0.0) tint += 0.5 * uReceive * uSunColor * (sunlight_at(vWorld, uSunDirection) - 1.0);
+    vec3 colour = tex.rgb * vColour.rgb * max(tint, vec3(0.0));
     float alpha = tex.a * k;
     if (uFlags.z > 1.5) {
         colour *= k; // premultiplied: the texel is colour * alpha already

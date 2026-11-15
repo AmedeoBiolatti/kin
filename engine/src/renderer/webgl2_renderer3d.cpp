@@ -406,7 +406,7 @@ enum Omitted : u32 {
 constexpr std::array<const char*, 18> omitted_text{
     "custom material shaders (Material3D::shader) draw as kin's stock material",
     "wireframe materials draw filled",
-    "particles neither cast nor receive shadows",
+    "particles cast and receive the sun's shadows only (no point, spot or moon shadows)",
     "(unused)",
     "screen-space ambient occlusion is off",
     "contact shadows are off",
@@ -536,7 +536,13 @@ struct WebGLRenderer3D::Impl {
     u64 particle_serial = 0;            // the pass whose scene uniforms the particle program holds
     std::vector<ParticleSprite3D> weather_sprites_now;
     std::vector<WeatherBatch3D> weather_batches_now;
-    std::vector<ParticleRecord> particle_records;
+    std::vector<ParticleRecord> particle_records, cast_records;
+    struct ParticleCast {
+        const ParticleLook3D* look;
+        u32 first, count;
+    };
+    std::vector<ParticleCast> particle_casts; // this render's casting sprites, in `cast_buffer`
+    GLuint cast_buffer = 0;
     // The fog volume this pass's mesh and sky programs read (environment): its depth (0: none), whether it holds the
     // sun's in-scattering, the target's size.
     struct {
@@ -658,9 +664,11 @@ struct WebGLRenderer3D::Impl {
         glUseProgram(particle_program);
         glUniform1i(glGetUniformLocation(particle_program, "uTexture"), 0);
         glUniform1i(glGetUniformLocation(particle_program, "uDepth"), 1);
+        glUniform1i(glGetUniformLocation(particle_program, "uShadow"), 7);
         glUniform1i(glGetUniformLocation(particle_program, "uFogTable"), 6);
         glUniform1i(glGetUniformLocation(particle_program, "uFogVolume"), GLint(fog_volume_unit));
         glGenBuffers(1, &particle_buffer);
+        glGenBuffers(1, &cast_buffer);
         glGenVertexArrays(1, &particle_vao);
         fog_program =
             WebGLDevice::program(sky_vertex.c_str(), WebGLDevice::shader_source("fog_volume.frag.glsl").c_str());
@@ -716,7 +724,7 @@ struct WebGLRenderer3D::Impl {
         caps.depth_bits = 24;
         caps.morph_targets = true;
         caps.auto_exposure = float_targets;
-        caps.particles = caps.soft_particles = caps.decals = true;
+        caps.particles = caps.soft_particles = caps.decals = caps.particle_shadows = true;
         caps.max_spot_lights = max_spot_lights; // the most important 16 of each in view, unshadowed
         const bool unmasked =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "WEBGL_debug_renderer_info");
@@ -741,6 +749,7 @@ struct WebGLRenderer3D::Impl {
         glDeleteProgram(fog_program);
         glDeleteProgram(particle_program);
         glDeleteBuffers(1, &particle_buffer);
+        glDeleteBuffers(1, &cast_buffer);
         glDeleteVertexArrays(1, &particle_vao);
         glDeleteTextures(1, &fog_volume_dummy);
         glDeleteVertexArrays(1, &sky_vao);
@@ -964,7 +973,7 @@ struct WebGLRenderer3D::Impl {
         rgb("uGround", pass.ground);
         glUniform1f(uniform("uSpecularAa"), std::clamp(scene.specular_aa, 0.0f, 1.0f));
         glUniform1f(uniform("uSingleScatter"), scene.specular_multiscatter ? 0.0f : 1.0f);
-        shadow_uniforms(pass.view, lights);
+        shadow_uniforms(pass.view, lights, program.handle);
         if (program.surface) { // native's frame block, what a surface reads of it
             const auto set = [&](const char* name, f32 x, f32 y, f32 z, f32 w) {
                 glUniform4f(uniform(name), x, y, z, w);
@@ -1565,6 +1574,85 @@ struct WebGLRenderer3D::Impl {
         glDepthMask(GL_TRUE);
         glBindFramebuffer(GL_FRAMEBUFFER, targets.framebuffer);
     }
+    static ParticleRecord record_of(const ParticleSprite3D& p) {
+        return {{p.position.x, p.position.y, p.position.z, p.size},
+                {p.colour.r, p.colour.g, p.colour.b, p.alpha},
+                {p.velocity.x, p.velocity.y, p.velocity.z, p.rotation},
+                {p.frame, 0, 0, 0}};
+    }
+    // The scene's sprite sources: its draw_particles batches, and (`weather`) the weather's layers made this render.
+    std::vector<ParticleSource> particle_sources(const Scene3D& scene, bool weather) const {
+        std::vector<ParticleSource> sources;
+        for (const auto& batch : scene.particle_draws())
+            sources.push_back({&batch.look, scene.particle_sprites().subspan(batch.first, batch.count)});
+        if (weather)
+            for (const auto& batch : weather_batches_now)
+                sources.push_back({&batch.look, std::span{weather_sprites_now}.subspan(batch.first, batch.count)});
+        return sources;
+    }
+    // The particle program's sprite attributes from record `first` of `buffer`.
+    void particle_attributes(GLuint buffer, u32 first) {
+        glBindVertexArray(particle_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, buffer);
+        for (GLuint a = 0; a < 4; ++a) {
+            glEnableVertexAttribArray(a);
+            glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, sizeof(ParticleRecord),
+                                  reinterpret_cast<void*>(std::size_t(first) * sizeof(ParticleRecord) + a * 16));
+            glVertexAttribDivisor(a, 1);
+        }
+    }
+    // The look's quad and picture uniforms on the particle program (native's ParticleDrawUniforms per batch).
+    void particle_look(const ParticleLook3D& look) {
+        const auto loc = [&](const char* name) { return location(particle_program, name); };
+        const Vec3f axis = length_squared(look.axis) > 0.0f ? normalize(look.axis) : Vec3f{0.0f, 1.0f, 0.0f};
+        glUniform4f(loc("uAxis"), axis.x, axis.y, axis.z, f32(u32(look.facing)));
+        const u32 columns = std::max(look.atlas_columns, 1u), rows = std::max(look.atlas_rows, 1u);
+        const u32 frames = look.atlas_frames > 0 ? std::min(look.atlas_frames, columns * rows) : columns * rows;
+        glUniform4f(loc("uAtlas"), f32(columns), f32(rows), f32(frames), look.blend_frames ? 1.0f : 0.0f);
+        glUniform2f(loc("uStretch"), look.stretch, look.stretch_min);
+        const auto* picture = look.texture ? device.texture(look.texture) : nullptr;
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, (picture ? picture : device.texture(white))->handle);
+        glBindSampler(0, sampler(Wrap3D::Clamp, Wrap3D::Clamp, picture ? picture->scale_mode : ScaleMode::Linear));
+        material_bindings = {};
+        glUniform4f(loc("uFlags"), 0, 0, f32(u32(look.blend)), picture ? 1.0f : 0.0f);
+    }
+    // The casting sprites into the cascade being drawn (`matrix`): native draw_particle_shadows' quads, facing the
+    // camera, cut by ParticleLook3D::shadow_cutoff.
+    void cast_particles(const Scene3D& scene, const Mat4f& matrix, RenderDebugStats3D& stats) {
+        if (particle_casts.empty())
+            return;
+        glUseProgram(particle_program);
+        current = nullptr;
+        particle_serial = 0; // (the main pass sets its own uniforms again)
+        const auto loc = [&](const char* name) { return location(particle_program, name); };
+        const Camera3D& camera = scene.camera;
+        glUniformMatrix4fv(loc("uViewProjection"), 1, GL_FALSE, matrix.m);
+        const auto vec3 = [&](const char* name, Vec3f v) { glUniform3f(loc(name), v.x, v.y, v.z); };
+        vec3("uRight", camera.right());
+        vec3("uUp", camera.up());
+        vec3("uEye", camera.position);
+        vec3("uForward", camera.forward());
+        glUniform1i(loc("uOrtho"), camera.projection == Projection3D::Orthographic);
+        glUniform1i(loc("uCast"), 1);
+        glUniform1f(loc("uLit"), 0);
+        glDisable(GL_CULL_FACE);
+        for (const auto& cast : particle_casts) {
+            particle_look(*cast.look);
+            const auto& look = *cast.look;
+            glUniform4f(loc("uDisc"), look.softness, look.ring, 0, 0);
+            glUniform1f(loc("uCutoff"),
+                        std::isfinite(look.shadow_cutoff) ? std::clamp(look.shadow_cutoff, 0.0f, 1.0f) : 0.5f);
+            particle_attributes(cast_buffer, cast.first);
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, GLsizei(cast.count));
+            ++stats.particle_shadow_draws;
+            stats.particle_shadow_instances += cast.count;
+            ++stats.shadow_draws;
+            stats.shadow_casters += cast.count;
+        }
+        glUniform1i(loc("uCast"), 0);
+        glEnable(GL_CULL_FACE);
+    }
     // A run of `count` particle sprites of one look, from `first` of the uploaded records (native's particle pass: the
     // look's blend, light tint, picture or disc, fog). Soft ones draw through the view's colour alone, reading and
     // testing against its depth.
@@ -1595,26 +1683,20 @@ struct WebGLRenderer3D::Impl {
             const Vec3f to_sun = normalize(pass.lights->sun.direction);
             vec3("uSunDirection", to_sun);
             glUniform3f(loc("uSunColor"), pass.lights->sun.color.r, pass.lights->sun.color.g, pass.lights->sun.color.b);
+            shadow_uniforms(pass.view, *pass.lights, particle_program);
             particle_serial = pass.serial;
         }
-        const Vec3f axis = length_squared(look.axis) > 0.0f ? normalize(look.axis) : Vec3f{0.0f, 1.0f, 0.0f};
-        glUniform4f(loc("uAxis"), axis.x, axis.y, axis.z, f32(u32(look.facing)));
-        const u32 columns = std::max(look.atlas_columns, 1u), rows = std::max(look.atlas_rows, 1u);
-        const u32 frames = look.atlas_frames > 0 ? std::min(look.atlas_frames, columns * rows) : columns * rows;
-        glUniform4f(loc("uAtlas"), f32(columns), f32(rows), f32(frames), look.blend_frames ? 1.0f : 0.0f);
-        glUniform2f(loc("uStretch"), look.stretch, look.stretch_min);
+        particle_look(look);
         const f32 lit = std::clamp(look.lit, 0.0f, 1.0f);
         glUniform1f(loc("uLit"), lit);
         const LinearRgb tint = mix(LinearRgb{1, 1, 1}, particle_light_tint(*pass.lights), lit);
         glUniform3f(loc("uTint"), tint.r, tint.g, tint.b);
-        const auto* picture = look.texture ? device.texture(look.texture) : nullptr;
-        glUniform4f(loc("uFlags"), 0, 0, f32(u32(look.blend)), picture ? 1.0f : 0.0f);
+        const bool receive = look.receives_shadow && lit > 0 && pass.view && pass.view->shadow;
+        glUniform1f(loc("uReceive"), receive ? lit : 0.0f);
+        stats.particle_shadow_batches += receive ? 1 : 0;
         const bool soft = look.soft && targets && look.soft_distance > 0;
         glUniform4f(loc("uDisc"), look.softness, look.ring, soft ? look.soft_distance : 0.0f, 0);
         glUniform1i(loc("uFogged"), look.fogged);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, (picture ? picture : device.texture(white))->handle);
-        glBindSampler(0, sampler(Wrap3D::Clamp, Wrap3D::Clamp, picture ? picture->scale_mode : ScaleMode::Linear));
         if (soft) {
             glBindFramebuffer(GL_FRAMEBUFFER, targets->plain);
             glActiveTexture(GL_TEXTURE1);
@@ -1631,14 +1713,7 @@ struct WebGLRenderer3D::Impl {
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
-        glBindVertexArray(particle_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, particle_buffer);
-        for (GLuint a = 0; a < 4; ++a) {
-            glEnableVertexAttribArray(a);
-            glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, sizeof(ParticleRecord),
-                                  reinterpret_cast<void*>(std::size_t(first) * sizeof(ParticleRecord) + a * 16));
-            glVertexAttribDivisor(a, 1);
-        }
+        particle_attributes(particle_buffer, first);
         glDrawArraysInstanced(GL_TRIANGLES, 0, 6, GLsizei(count));
         if (soft) {
             glBindTexture(GL_TEXTURE_2D, 0); // (unit 1: the depth is attached again next)
@@ -1715,6 +1790,22 @@ struct WebGLRenderer3D::Impl {
         pass.scene = &scene;
         pass.lights = &scene.lights;
         pass.shadow = true;
+        // The sprites that cast (ParticleLook3D::casts_shadow), uploaded once for every cascade.
+        particle_casts.clear();
+        for (const auto& source : particle_sources(scene, true)) {
+            if (!source.look->casts_shadow)
+                continue;
+            const u32 first = u32(cast_records.size());
+            for (const auto& p : source.sprites)
+                cast_records.push_back(record_of(p));
+            particle_casts.push_back({source.look, first, u32(source.sprites.size())});
+        }
+        if (!cast_records.empty()) {
+            glBindBuffer(GL_ARRAY_BUFFER, cast_buffer);
+            glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(cast_records.size() * sizeof(ParticleRecord)), cast_records.data(),
+                         GL_STREAM_DRAW);
+            cast_records.clear();
+        }
         use(*stock);
         palette(scene);
         std::vector<u32> copies;
@@ -1740,13 +1831,17 @@ struct WebGLRenderer3D::Impl {
                 this->draw(scene, draw, 0, copies, slot < view.prepared.size() ? view.prepared[slot].get() : nullptr,
                            layer, stats, true);
             }
+            cast_particles(scene, matrix, stats);
+            use(*stock); // (the next layer's matrix goes to the mesh program)
         }
         glDisable(GL_POLYGON_OFFSET_FILL);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         stats.shadow_cascades = view.cascades.count;
     }
     // The sun's cascades on the program in use (`view`'s; none for null: the overlay).
-    void shadow_uniforms(const View* shadowed, const Lights3D& lights) {
+    // The sun's cascades on program `handle` (the mesh program in use, or the particles').
+    void shadow_uniforms(const View* shadowed, const Lights3D& lights, GLuint handle) {
+        const auto uniform = [&](const char* name) { return location(handle, name); };
         glUniform1i(uniform("uShadowCount"), shadowed && shadowed->shadow ? GLint(shadowed->cascades.count) : 0);
         glUniform1f(uniform("uShadowStrength"), std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
         if (!shadowed || !shadowed->shadow)
@@ -1893,18 +1988,10 @@ struct WebGLRenderer3D::Impl {
         }
         // The sprites: the scene's batches and the weather's layers, culled to the view; a source that is not sorted
         // (ParticleLook3D::sort off) is one item at its sprites' mean depth.
-        std::vector<ParticleSource> sources;
-        for (const auto& batch : scene.particle_draws())
-            sources.push_back({&batch.look, scene.particle_sprites().subspan(batch.first, batch.count)});
-        weather_sprites_now.clear();
-        weather_batches_now.clear();
-        if (scene.weather.active()) {
-            weather_sprites(scene.weather, scene.camera, weather_sprites_now, weather_batches_now);
-            for (const auto& batch : weather_batches_now) {
-                sources.push_back({&batch.look, std::span{weather_sprites_now}.subspan(batch.first, batch.count)});
+        const auto sources = particle_sources(scene, shadowed != nullptr); // (the overlay has no weather)
+        if (shadowed)
+            for (const auto& batch : weather_batches_now)
                 stats.weather_particles += batch.count;
-            }
-        }
         const Vec3f eye = scene.camera.position, forward = scene.camera.forward();
         std::vector<std::vector<u32>> shown(sources.size());
         for (u32 k = 0; k < sources.size(); ++k) {
@@ -1937,13 +2024,7 @@ struct WebGLRenderer3D::Impl {
             if (item.draw)
                 continue;
             const auto& source = sources[item.level];
-            const auto put = [&](u32 i) {
-                const auto& p = source.sprites[i];
-                particle_records.push_back({{p.position.x, p.position.y, p.position.z, p.size},
-                                            {p.colour.r, p.colour.g, p.colour.b, p.alpha},
-                                            {p.velocity.x, p.velocity.y, p.velocity.z, p.rotation},
-                                            {p.frame, 0, 0, 0}});
-            };
+            const auto put = [&](u32 i) { particle_records.push_back(record_of(source.sprites[i])); };
             if (item.copy == ~0u)
                 for (const u32 i : shown[item.level])
                     put(i);
@@ -2084,6 +2165,11 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     _impl->anisotropy = std::clamp(scene.anisotropy, 1u, _impl->caps.max_anisotropy);
     _impl->prepare(view->prepared, scene, stats);
     _impl->linear_output = bool(view->hdr);
+    // The weather's sprites, made once: the shadows' casts and the main pass's draws read them.
+    _impl->weather_sprites_now.clear();
+    _impl->weather_batches_now.clear();
+    if (scene.weather.active())
+        weather_sprites(scene.weather, scene.camera, _impl->weather_sprites_now, _impl->weather_batches_now);
     _impl->shadows(*view, scene, stats);
     _impl->fog_volume(*view, scene, stats);
     if (!view->fog) {

@@ -374,6 +374,34 @@ void check_particles(Renderer2D& r, Renderer3D& r3d) {
     b.render("Lit particle");
     const LinearRgb tint = particle_light_tint(scene.lights);
     near(b.at(32, 32), srgb8(tint.r, tint.g, tint.b), 2, "A lit particle must take the scene's light tint");
+    // Shadows. Cast: an invisible (additive black) sprite above a lit plane shadows it where the sun is blocked.
+    scene.clear();
+    scene.lights.ambient = {0, 0, 0};
+    scene.lights.sun = {.direction = {0.5f, 0, 1}, .color = {1, 1, 1}};
+    scene.lights.shadow_area = {{-3, -3, -1}, {3, 3, 3}}; // (empty: no sun shadows)
+    require(bool(scene.draw(b.plane, {}, {.color = colors::white})), "Parity submission failed");
+    ParticleLook3D caster{.blend = ParticleBlend3D::Additive, .softness = 0, .casts_shadow = true};
+    submit(caster, {sprite({0, 0, 1}, {0, 0, 0})});
+    b.render("Particle casting");
+    // The shadow lies half a unit (8 pixels) away from the sun: centred on pixel 24.
+    require(b.at(24, 32)[0] + 60 < b.at(48, 32)[0], "A particle that casts must shadow the surface under it");
+    require(r3d.debug_stats().particle_shadow_draws > 0, "The browser renderer must count particle shadow draws");
+    // Receive: a lit sprite whose way to the sun a mesh blocks takes none of the sun's half of its tint.
+    std::array<int, 2> received{};
+    for (const bool receives : {false, true}) {
+        scene.clear();
+        scene.lights.sun = {.direction = {1, 0, 1}, .color = {1, 1, 1}};
+        require(bool(scene.draw(b.plane, Mat4f::translation({1.6f, 0, 1.6f}) * Mat4f::scaling({0.3f, 0.3f, 1}),
+                                {.color = colors::black, .unlit = true})),
+                "Parity submission failed");
+        submit({.softness = 0, .lit = 1, .receives_shadow = receives}, {sprite({0, 0, 0}, {1, 1, 1})});
+        b.render("Particle receiving");
+        received[receives] = b.at(30, 32)[0];
+    }
+    if (!(received[0] > 150 && received[1] < 40))
+        std::cerr << "particle shadow: unshadowed " << received[0] << " shadowed " << received[1] << '\n';
+    require(received[0] > 150 && received[1] < 40, "A particle that receives shadows must lose the blocked sun");
+    scene.lights.sun = {};
     // Weather: rain's streaks round the camera.
     Bench w(r, r3d);
     w.scene.camera = Camera3D::look_at({0, 2, 0}, {0, 2, -10});
@@ -383,7 +411,7 @@ void check_particles(Renderer2D& r, Renderer3D& r3d) {
     for (std::size_t i = 0; i < w.pixels.size(); i += 4)
         drops += w.pixels[i + 2] > 10;
     require(r3d.debug_stats().weather_particles > 0 && drops > 20, "Rain must be drawn in the browser");
-    std::cout << "web parity: particles (disc, additive, sorting, depth, soft, lit, weather) passed\n";
+    std::cout << "web parity: particles (disc, additive, sorting, depth, soft, lit, shadows, weather) passed\n";
 }
 
 void check_decals(Renderer2D& r, Renderer3D& r3d) {
