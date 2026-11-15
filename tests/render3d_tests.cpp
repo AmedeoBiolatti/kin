@@ -3390,8 +3390,7 @@ void test_gpu_gi_scene() {
         assert(g.s.emission[f * 3 + 1] == 0.0f);
         // Another sheet in the lower half of that floor voxel: both triangles' coverage survives, even though
         // only one owns its colour/normal. Build afresh so this also exercises the voxelizer's union.
-        (void)scene.draw(level.plane,
-                         Mat4f::translation({0.0f, 0.23f, 0.0f}) * Mat4f::scaling({7.0f, 1.0f, 7.0f}));
+        (void)scene.draw(level.plane, Mat4f::translation({0.0f, 0.23f, 0.0f}) * Mat4f::scaling({7.0f, 1.0f, 7.0f}));
         kin::View3D layered = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         render_ok(r3d, layered, scene);
         renderer.present();
@@ -4534,8 +4533,8 @@ void test_gpu_gi_ao_detail() {
                 };
                 const auto off = shoot();
                 for (const bool half : {false, true}) {
-                    scene.ambient_occlusion = {.enabled = true, .radius = .8f, .intensity = 1.5f,
-                                               .half_resolution = half};
+                    scene.ambient_occlusion = {
+                        .enabled = true, .radius = .8f, .intensity = 1.5f, .half_resolution = half};
                     const auto on = shoot();
                     const auto covered_off = value(off, {-3, 0, -1.6f});
                     const auto covered_on = value(on, {-3, 0, -1.6f});
@@ -4543,15 +4542,15 @@ void test_gpu_gi_ao_detail() {
                     const auto outside_on = value(on, {3, 0, -1.6f});
                     const auto contact_off = value(off, {-3, 0, -1.95f});
                     const auto contact_on = value(on, {-3, 0, -1.95f});
-                    std::cerr << "GI detail AO " << size.x << " ortho=" << ortho << " half=" << half
-                              << ": covered " << covered_off << " -> " << covered_on << ", outside "
-                              << outside_off << " -> " << outside_on << ", contact " << contact_off << " -> "
-                              << contact_on << '\n';
+                    std::cerr << "GI detail AO " << size.x << " ortho=" << ortho << " half=" << half << ": covered "
+                              << covered_off << " -> " << covered_on << ", outside " << outside_off << " -> "
+                              << outside_on << ", contact " << contact_off << " -> " << contact_on << '\n';
                     // The corners are symmetric about the camera. Coverage and filtering can retain some broad
                     // AO, but it must be weaker under GI; nearby contacts and full AO outside the window remain.
                     passed = (covered_off > 20 && outside_off > 20 &&
                               covered_on / covered_off > outside_on / outside_off + .01f &&
-                              outside_on < outside_off * .98f && contact_on < contact_off * .98f) && passed;
+                              outside_on < outside_off * .98f && contact_on < contact_off * .98f) &&
+                             passed;
                     assert(r3d.debug_stats().ao_dispatches == kin::u32(half ? 4 : 3));
                     assert(r3d.debug_stats().ao_chain_built == kin::u32(size.x * size.y >= 1500000));
                     assert(delta(on, shoot()).worst <= 2);

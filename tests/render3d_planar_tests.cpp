@@ -512,6 +512,8 @@ void test_portal(Gpu& g, const SurfaceShader3D& window) {
     std::cout << "planar: portal\n";
 }
 
+#if KIN_ENABLE_PHYSICS3D
+// ECS planar-view orchestration is built with the 3D physics components.
 // The mirror is outside the main camera's view, but visible through the portal. Its picture must be made for the
 // portal's camera: the green box's reflected image is below the floor, apart from the box seen directly above it.
 void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
@@ -562,6 +564,7 @@ void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
     }
     std::cout << "planar: mirror and water through portal\n";
 }
+#endif
 
 // No GI or ambient light: a roof blocks ordinary sunlight on the floor. The rotated portal supplies a different
 // solar direction from a source opening outside the camera. Its shadow must stop at each opening's plane.
@@ -657,6 +660,7 @@ void test_portal_sun(Gpu& g) {
     std::cout << "planar: direct sun through portal\n";
 }
 
+#if KIN_ENABLE_PHYSICS3D
 // A black partition separates two places. Only the linked aperture connects a white receiver to the green emitter
 // in the other place. A blocker on either segment must stop that light; reducing the opening must reduce it too.
 void test_portal_gi(Gpu& g) {
@@ -720,6 +724,7 @@ void test_portal_gi(Gpu& g) {
     assert(std::abs(probes.g - open.g) <= 4); // the portal's emitter path is counted once with either strategy
     std::cout << "planar: GI through portals\n";
 }
+#endif
 
 } // namespace
 
@@ -756,7 +761,11 @@ int main() {
     test_render_part(g);
     test_mirror(g, reflection);
     test_portal(g, portal);
+#if KIN_ENABLE_PHYSICS3D
     test_mirror_through_portal(g, {reflection, portal});
+#endif
     test_portal_sun(g);
+#if KIN_ENABLE_PHYSICS3D
     test_portal_gi(g);
+#endif
 }

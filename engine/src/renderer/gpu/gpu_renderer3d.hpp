@@ -758,8 +758,8 @@ private:
     // With `blur_too` false only the first dispatch (the blur is then someone else's: blur_screen_space_both).
     bool build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, f32 radius);
     void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera,
-                           const Mat4f& projection, const AmbientOcclusion3D& ao, f32 detail_reach, RenderDebugStats3D& stats,
-                           bool blur_too = true);
+                           const Mat4f& projection, const AmbientOcclusion3D& ao, f32 detail_reach,
+                           RenderDebugStats3D& stats, bool blur_too = true);
     // The blur of both, in one dispatch a direction (the two results at one size).
     void blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection,
                                 RenderDebugStats3D& stats);

@@ -65,9 +65,9 @@ public:
     // and renders the pictures they need: a mirror's when it is on screen, a portal's level by level while the level
     // before sees it (Portal3D::depth), deepest first. Mirrors and refracting water seen through a portal get pictures
     // of their own from that portal level's camera; other planar surfaces inside those pictures are stand-ins.
-    // Registers every enabled portal in scene.portals for sun and GI light transport, including off-screen ones. `scene`
-    // is then ready for the view: render it. `view_size` is the view's, `like` its options (the pictures keep its
-    // background and samples, without bloom, picking or HDR tonemapping; compressed linear light is read back by
+    // Registers every enabled portal in scene.portals for sun and GI light transport, including off-screen ones.
+    // `scene` is then ready for the view: render it. `view_size` is the view's, `like` its options (the pictures keep
+    // its background and samples, without bloom, picking or HDR tonemapping; compressed linear light is read back by
     // their surfaces). Views are kept from one call to the next, keyed by surface and viewer, resized as needed,
     // and dropped when no longer used.
     // `lit_by`: the view the scene is then rendered into, whose global illumination lights the pictures too (as it
