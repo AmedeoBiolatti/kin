@@ -184,7 +184,9 @@ hysteresis; a spot's perspective map, a point light's six cube faces, each a lay
 of one depth array (its own resolution in a corner of the largest's), with
 native's bias, normal offset, softness and fade. The moon (`Lights3D::fill_shadow`)
 gets its cascades as the sun does. Each map's matrix and settings are a row of a
-float texture, not uniforms.
+float texture, and so are the pass's lights (`lights.inc.glsl`), not uniforms: a
+surface shader's program stays near 110 of the 224 fragment uniform vectors
+WebGL2 guarantees.
 
 HDR views (`ViewOptions3D::hdr`, `bloom`) draw linear light into an RGBA16F
 target (`EXT_color_buffer_float`), then native's output: bloom (a bright pass and

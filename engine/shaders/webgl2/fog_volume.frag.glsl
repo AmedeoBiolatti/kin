@@ -17,13 +17,11 @@ uniform vec3 uRay00, uRayX, uRayY; // the bottom-left corner's ray at view depth
 uniform KinFog uFog;
 uniform float uAnisotropy;   // the local lights' lobe (VolumetricFog3D::anisotropy)
 uniform float uLeast;        // the least share of light that reaches the camera (1 - the fog's greatest opacity)
-uniform int uPointCount, uSpotCount;
-uniform vec4 uPoints[32];    // as mesh.frag's, their colour times the fog's intensity and each one's `volumetric`
-uniform vec4 uSpots[64];
 uniform vec4 uSun, uSunLight;   // xyz toward the sun, w its shadow's strength; rgb its light (0: not in the volume)
 uniform vec4 uFill, uFillLight; // the fill light's (the moon's), unshadowed
 uniform vec3 uForward;
 uniform highp sampler3D uLit; // mode 1: the lit cells
+#include "lights.inc.glsl"
 #include "shadow_maps.inc.glsl"
 layout(location = 0) out vec4 out0;
 layout(location = 1) out vec4 out1;
@@ -58,8 +56,8 @@ vec3 in_scattered(vec3 p, vec3 dir, float depth) {
     vec3 sum = vec3(0.0);
     for (int i = 0; i < uPointCount + uSpotCount; ++i) {
         bool spot = i >= uPointCount;
-        vec4 at = spot ? uSpots[4 * (i - uPointCount)] : uPoints[2 * i];
-        vec4 colour = spot ? uSpots[4 * (i - uPointCount) + 1] : uPoints[2 * i + 1];
+        vec4 at = spot ? spot_light(i - uPointCount, 0) : point_light(i, 0);
+        vec4 colour = spot ? spot_light(i - uPointCount, 1) : point_light(i, 1);
         vec3 to = at.xyz - p;
         float d2 = dot(to, to);
         if (d2 >= at.w * at.w) continue;
@@ -68,7 +66,7 @@ vec3 in_scattered(vec3 p, vec3 dir, float depth) {
         float k = window * window / max(d2, colour.w);
         vec3 toward = to * inversesqrt(max(d2, 1e-8));
         if (spot) {
-            vec4 axis = uSpots[4 * (i - uPointCount) + 2], more = uSpots[4 * (i - uPointCount) + 3];
+            vec4 axis = spot_light(i - uPointCount, 2), more = spot_light(i - uPointCount, 3);
             float cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
             k *= cone * cone;
             if (k > 0.0 && more.y >= 0.0) k *= local_shadow_at(int(more.y), p, vec3(0.0), toward, sqrt(d2), 1);

@@ -17,10 +17,7 @@ uniform bool uIndependentEmission;
 uniform bool uLinear; // an HDR view's float picture: linear light, not encoded
 uniform float uSpecularAa; // Scene3D::specular_aa
 uniform float uSingleScatter; // 1: Scene3D::specular_multiscatter off
-uniform int uBlend, uPointCount, uSpotCount;
-uniform vec4 uPoints[32];
-// A spot a 4: position and radius, colour and size squared, axis and cos(outer), 1 / (cos inner - cos outer).
-uniform vec4 uSpots[64];
+uniform int uBlend;
 #ifdef KIN_DECAL
 // A decal (decal.vert's box) has no mesh: what it shades is the surface the view's depth and normals hold under the
 // pixel, put here by main before the lighting reads them.
@@ -41,6 +38,7 @@ layout(location = 1) out vec4 outNormal;
 const float PI = 3.14159265358979;
 #include "kin_brdf.inc.glsl"
 #include "environment.inc.glsl"
+#include "lights.inc.glsl"
 #include "shadow.inc.glsl"
 
 vec3 decode(vec3 c) {
@@ -136,7 +134,7 @@ vec3 lighting(Lit L) {
     vec3 light = shade(s, uSunDirection, uSunColor*sunlight()) +
                  shade(s, uFillDirection, uFillColor*(uReceivesShadow ? moonlight_at(vWorld, g, 9) : 1.0));
     for (int i=0; i<uPointCount; ++i) {
-        vec4 at = uPoints[2*i], color = uPoints[2*i+1];
+        vec4 at = point_light(i, 0), color = point_light(i, 1);
         vec3 to = at.xyz-vWorld;
         float d2 = dot(to,to), r2 = d2/(at.w*at.w);
         float window = clamp(1.0-r2*r2, 0.0, 1.0);
@@ -150,15 +148,15 @@ vec3 lighting(Lit L) {
         light += shade(sphere_light(s, color.w, d2), toward, color.rgb*(k*seen));
     }
     for (int i=0; i<uSpotCount; ++i) {
-        vec4 at = uSpots[4*i], color = uSpots[4*i+1], axis = uSpots[4*i+2];
+        vec4 at = spot_light(i, 0), color = spot_light(i, 1), axis = spot_light(i, 2);
         vec3 to = at.xyz-vWorld;
         float d2 = dot(to,to), r2 = d2/(at.w*at.w);
         float window = clamp(1.0-r2*r2, 0.0, 1.0);
         vec3 toward = to*inversesqrt(max(d2,1e-8));
-        float cone = clamp((dot(-toward, axis.xyz)-axis.w)*uSpots[4*i+3].x, 0.0, 1.0);
+        float cone = clamp((dot(-toward, axis.xyz)-axis.w)*spot_light(i, 3).x, 0.0, 1.0);
         float k = window*window*cone*cone / max(d2, color.w);
         if (k <= 0.0) continue;
-        float seen = 1.0, layer = uSpots[4*i+3].y;
+        float seen = 1.0, layer = spot_light(i, 3).y;
         bool behind = dot(n, toward) <= 0.0;
         if (layer >= 0.0 && uReceivesShadow && (!behind || backlit))
             seen = local_shadow_at(int(layer), vWorld, behind && backlit ? -g : g, toward, sqrt(d2), 9);

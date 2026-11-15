@@ -14,9 +14,7 @@ uniform vec4 uAxis;    // xyz: the Axis and Flat facings' axis (unit), w: the fa
 uniform vec4 uAtlas;   // x: columns, y: rows, z: frames, w: 1 to mix two frames
 uniform vec2 uStretch; // x: seconds a streak spans, y: its least length
 uniform float uLit;    // ParticleLook3D::lit: the local lights' share at the sprite's centre (0: none)
-uniform int uPointCount, uSpotCount;
-uniform vec4 uPoints[32]; // as mesh.frag's
-uniform vec4 uSpots[64];
+#include "lights.inc.glsl"
 out vec2 vUV0;
 out vec2 vUV1;
 out vec4 vColour;
@@ -77,14 +75,14 @@ void main() {
     vLocalLight = vec3(0.0);
     if (uLit > 0.0) {
         for (int i = 0; i < uPointCount; ++i) {
-            vec4 at = uPoints[2 * i], colour = uPoints[2 * i + 1];
+            vec4 at = point_light(i, 0), colour = point_light(i, 1);
             vec3 to = at.xyz - centre;
             float d2 = dot(to, to), r2 = d2 / (at.w * at.w);
             float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
             vLocalLight += colour.rgb * (window * window / max(d2, colour.w));
         }
         for (int i = 0; i < uSpotCount; ++i) {
-            vec4 at = uSpots[4 * i], colour = uSpots[4 * i + 1], axis = uSpots[4 * i + 2], more = uSpots[4 * i + 3];
+            vec4 at = spot_light(i, 0), colour = spot_light(i, 1), axis = spot_light(i, 2), more = spot_light(i, 3);
             vec3 to = at.xyz - centre;
             float d2 = dot(to, to), r2 = d2 / (at.w * at.w);
             float window = clamp(1.0 - r2 * r2, 0.0, 1.0);

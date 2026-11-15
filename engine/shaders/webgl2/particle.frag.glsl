@@ -22,15 +22,13 @@ uniform vec4 uFlags;             // z: blend (0 alpha, 1 additive, 2 premultipli
 uniform vec4 uDisc;              // x: the procedural disc's softness, y: its ring, z: the soft fade's distance (0: none)
 uniform bool uFogged;            // ParticleLook3D::fogged
 uniform vec3 uSunDirection, uSunColor, uFillDirection, uFillColor;
-uniform int uPointCount, uSpotCount; // (the vertex shader's lights, for received shadows)
-uniform vec4 uPoints[32];
-uniform vec4 uSpots[64];
 uniform bool uLinear;            // an HDR view's float picture: linear light, not encoded
 uniform bool uCast;              // into a shadow map: only the alpha test (native particle_cast.frag)
 uniform float uCutoff;           // ParticleLook3D::shadow_cutoff
 uniform float uReceive;          // ParticleLook3D::lit when it receives shadows (0: it doesn't)
 out vec4 outColor;
 #include "environment.inc.glsl"
+#include "lights.inc.glsl"
 #include "shadow_maps.inc.glsl"
 
 vec3 decode(vec3 c) {
@@ -92,7 +90,7 @@ void main() {
                            (uSunColor * (sunlight_at(vWorld, uSunDirection) - 1.0) +
                             uFillColor * (moonlight_at(vWorld, uFillDirection, 9) - 1.0));
         for (int i = 0; i < uPointCount; ++i) {
-            vec4 at = uPoints[2 * i], c = uPoints[2 * i + 1];
+            vec4 at = point_light(i, 0), c = point_light(i, 1);
             vec3 to = at.xyz - vCentre;
             float d2 = dot(to, to), r2 = d2 / (at.w * at.w);
             float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
@@ -104,7 +102,7 @@ void main() {
             tint += 0.5 * uReceive * c.rgb * (window * window * seen / max(d2, c.w));
         }
         for (int i = 0; i < uSpotCount; ++i) {
-            vec4 at = uSpots[4 * i], c = uSpots[4 * i + 1], axis = uSpots[4 * i + 2], more = uSpots[4 * i + 3];
+            vec4 at = spot_light(i, 0), c = spot_light(i, 1), axis = spot_light(i, 2), more = spot_light(i, 3);
             vec3 to = at.xyz - vCentre;
             float d2 = dot(to, to), r2 = d2 / (at.w * at.w);
             float window = clamp(1.0 - r2 * r2, 0.0, 1.0);

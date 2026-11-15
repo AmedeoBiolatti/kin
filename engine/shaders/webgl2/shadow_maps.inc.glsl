@@ -41,7 +41,6 @@ float sunlight_at(vec3 world,vec3 n) {
 uniform highp sampler2DArray uLocalShadow;
 uniform highp sampler2D uShadowData;
 uniform float uLocalTexel;              // 1 / the local array's side
-uniform vec4 uPointShadow[4];           // the mesh lights' (uPoints) first cube layer, -1: none
 uniform highp sampler2DArray uMoonShadow;
 uniform int uMoonCount, uMoonRow;       // the moon's cascades (0: none) and their first row
 uniform vec4 uMoonEnds, uMoonBlend;
@@ -92,7 +91,7 @@ float point_shadow_at(float first, vec3 world, vec3 offset_normal, vec3 toward, 
     return local_shadow_at(int(first) + face, world, offset_normal, toward, distance, taps);
 }
 float point_shadow_layer(int i) {
-    return uPointShadow[i / 4][i % 4];
+    return point_light(i, 2).x; // (lights.inc.glsl's)
 }
 // One of the moon's cascades; -1 outside its map.
 float moon_cascade_at(int k, vec3 world, vec3 offset_normal, int taps) {

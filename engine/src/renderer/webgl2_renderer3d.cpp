@@ -451,9 +451,10 @@ struct MeshProgram {
         : handle(program), surface(is_surface), alive(std::move(liveness)) {
         glUseProgram(handle);
         // Sampler units belong to the linked program, not individual draws.
-        constexpr std::array names{"uTexture",    "uNormal",       "uMetalRough",  "uOcclusion",  "uEmission",
-                                   "uJoints",     "uFogTable",     "uShadow",      "uGraphMaps",  "uFogVolume",
-                                   "uDecalDepth", "uDecalNormals", "uLocalShadow", "uShadowData", "uMoonShadow"};
+        constexpr std::array names{"uTexture",     "uNormal",     "uMetalRough", "uOcclusion",
+                                   "uEmission",    "uJoints",     "uFogTable",   "uShadow",
+                                   "uGraphMaps",   "uFogVolume",  "uDecalDepth", "uDecalNormals",
+                                   "uLocalShadow", "uShadowData", "uMoonShadow", "uLightData"};
         for (u32 unit = 0; unit < names.size(); ++unit)
             glUniform1i(location(names[unit]), GLint(unit));
         draw = {location("uShadowPass"),
@@ -489,7 +490,10 @@ struct MeshProgram {
     }
 };
 constexpr GLuint graph_maps_unit = 8, fog_volume_unit = 9, decal_depth_unit = 10, decal_normals_unit = 11,
-                 local_shadow_unit = 12, shadow_data_unit = 13, moon_shadow_unit = 14;
+                 local_shadow_unit = 12, shadow_data_unit = 13, moon_shadow_unit = 14, light_data_unit = 15;
+// lights.inc.glsl's rows: 16 point lights, then 16 spots, four texels each.
+constexpr u32 light_rows = 16 + max_spot_lights;
+using LightRows = std::array<f32, light_rows * 16>;
 // A particle sprite as the vertex shader reads it (native GpuParticle3D's layout).
 struct ParticleRecord {
     std::array<f32, 4> position_size, colour, axis_rotation, frame;
@@ -554,7 +558,7 @@ struct WebGLRenderer3D::Impl {
     };
     ShadowSlots3D spot_slots, point_slots;
     std::vector<f32> point_layer_of, spot_layer_of;
-    GLuint shadow_data = 0;
+    GLuint shadow_data = 0, light_data = 0, fog_light_data = 0;
     bool has_local = false;
     f32 local_texel = 1.0f;
     struct {
@@ -702,6 +706,15 @@ struct WebGLRenderer3D::Impl {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         const std::array<f32, 24> no_rows{};
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 6, 1, 0, GL_RGBA, GL_FLOAT, no_rows.data());
+        for (GLuint* t : {&light_data, &fog_light_data}) {
+            glGenTextures(1, t);
+            glActiveTexture(GL_TEXTURE0 + light_data_unit);
+            glBindTexture(GL_TEXTURE_2D, *t);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, 4, GLsizei(light_rows));
+        }
+        glUniform1i(glGetUniformLocation(particle_program, "uLightData"), GLint(light_data_unit));
         glUniform1i(glGetUniformLocation(particle_program, "uFogTable"), 6);
         glUniform1i(glGetUniformLocation(particle_program, "uFogVolume"), GLint(fog_volume_unit));
         glGenBuffers(1, &particle_buffer);
@@ -717,6 +730,7 @@ struct WebGLRenderer3D::Impl {
         glUniform1i(glGetUniformLocation(fog_program, "uLocalShadow"), GLint(local_shadow_unit));
         glUniform1i(glGetUniformLocation(fog_program, "uShadowData"), GLint(shadow_data_unit));
         glUniform1i(glGetUniformLocation(fog_program, "uMoonShadow"), GLint(moon_shadow_unit));
+        glUniform1i(glGetUniformLocation(fog_program, "uLightData"), GLint(light_data_unit));
         glUseProgram(sky_program);
         glUniform1i(glGetUniformLocation(sky_program, "uFogTable"), 6);
         glUniform1i(glGetUniformLocation(sky_program, "uFogVolume"), GLint(fog_volume_unit));
@@ -795,6 +809,8 @@ struct WebGLRenderer3D::Impl {
             glDeleteFramebuffers(1, &a->framebuffer);
         }
         glDeleteTextures(1, &shadow_data);
+        glDeleteTextures(1, &light_data);
+        glDeleteTextures(1, &fog_light_data);
         glDeleteBuffers(1, &particle_buffer);
         glDeleteBuffers(1, &cast_buffer);
         glDeleteBuffers(1, &decal_buffer);
@@ -998,6 +1014,21 @@ struct WebGLRenderer3D::Impl {
         if (program.serial != pass.serial)
             apply(program);
     }
+    // Packed lights (points: 8 floats each, spots: 16, their shadow layers) into lights.inc.glsl's rows of `texture`,
+    // bound to its unit.
+    void upload_lights(GLuint texture, const std::array<f32, 128>& points,
+                       const std::array<f32, 16 * max_spot_lights>& spots, const std::array<f32, 16>& point_shadow) {
+        LightRows rows{};
+        for (u32 i = 0; i < 16; ++i) {
+            std::copy_n(points.data() + 8 * i, 8, rows.data() + 16 * i);
+            rows[16 * i + 8] = point_shadow[i];
+        }
+        std::copy(spots.begin(), spots.end(), rows.data() + 16 * 16);
+        glActiveTexture(GL_TEXTURE0 + light_data_unit);
+        glBindSampler(light_data_unit, 0);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, GLsizei(light_rows), GL_RGBA, GL_FLOAT, rows.data());
+    }
     // A light's first shadow layer this render (-1: none; none for the overlay, `shadowed` null).
     static f32 layer_of(const std::vector<f32>& layers, u32 index, const void* shadowed) {
         return shadowed && index < layers.size() ? layers[index] : -1.0f;
@@ -1012,12 +1043,7 @@ struct WebGLRenderer3D::Impl {
         glUniform3f(uniform("uEye"), scene.camera.position.x, scene.camera.position.y, scene.camera.position.z);
         glUniformMatrix4fv(uniform("uViewProjection"), 1, GL_FALSE, pass.view_projection.m);
         glUniform1i(uniform("uPointCount"), GLint(pass.point_count));
-        if (pass.point_count)
-            glUniform4fv(uniform("uPoints[0]"), GLsizei(pass.point_count * 2), pass.points.data());
         glUniform1i(uniform("uSpotCount"), GLint(pass.spot_count));
-        if (pass.spot_count)
-            glUniform4fv(uniform("uSpots[0]"), GLsizei(pass.spot_count * 4), pass.spots.data());
-        glUniform4fv(uniform("uPointShadow[0]"), 4, pass.point_shadow.data());
         const Lights3D& lights = *pass.lights;
         direction("uSunDirection", lights.sun.direction);
         direction("uFillDirection", lights.fill.direction);
@@ -1486,11 +1512,8 @@ struct WebGLRenderer3D::Impl {
         glUniform1f(loc("uAnisotropy"), std::clamp(settings.anisotropy, -0.9f, 0.9f));
         glUniform1f(loc("uLeast"), 1.0f - std::clamp(fog.max_opacity, 0.0f, 1.0f));
         glUniform1i(loc("uPointCount"), GLint(point_count));
-        if (point_count)
-            glUniform4fv(loc("uPoints[0]"), GLsizei(point_count * 2), points.data());
         glUniform1i(loc("uSpotCount"), GLint(spot_count));
-        if (spot_count)
-            glUniform4fv(loc("uSpots[0]"), GLsizei(spot_count * 4), spots.data());
+        upload_lights(fog_light_data, points, spots, point_shadow);
         const Vec3f to_sun = normalize(lights.sun.direction), to_fill = normalize(lights.fill.direction);
         glUniform4f(loc("uSun"), to_sun.x, to_sun.y, to_sun.z, std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
         glUniform4f(loc("uSunLight"), sun ? lights.sun.color.r : 0, sun ? lights.sun.color.g : 0,
@@ -1500,7 +1523,6 @@ struct WebGLRenderer3D::Impl {
                     fill ? lights.fill.color.b : 0, 0);
         // The maps (drawn this render), as the mesh programs have them.
         shadow_uniforms(&view, lights, fog_program);
-        glUniform4fv(loc("uPointShadow[0]"), 4, point_shadow.data());
         vec3("uForward", forward);
         bind_shadow_units(true);
         glActiveTexture(GL_TEXTURE7);
@@ -1738,16 +1760,11 @@ struct WebGLRenderer3D::Impl {
             vec3("uUp", camera.up());
             glUniform1i(loc("uOrtho"), camera.projection == Projection3D::Orthographic);
             glUniform1i(loc("uPointCount"), GLint(pass.point_count));
-            if (pass.point_count)
-                glUniform4fv(loc("uPoints[0]"), GLsizei(pass.point_count * 2), pass.points.data());
             glUniform1i(loc("uSpotCount"), GLint(pass.spot_count));
-            if (pass.spot_count)
-                glUniform4fv(loc("uSpots[0]"), GLsizei(pass.spot_count * 4), pass.spots.data());
             const Vec3f to_sun = normalize(pass.lights->sun.direction);
             vec3("uSunDirection", to_sun);
             glUniform3f(loc("uSunColor"), pass.lights->sun.color.r, pass.lights->sun.color.g, pass.lights->sun.color.b);
             shadow_uniforms(pass.view, *pass.lights, particle_program);
-            glUniform4fv(loc("uPointShadow[0]"), 4, pass.point_shadow.data());
             vec3("uFillDirection", normalize(pass.lights->fill.direction));
             glUniform3f(loc("uFillColor"), pass.lights->fill.color.r, pass.lights->fill.color.g,
                         pass.lights->fill.color.b);
@@ -2198,6 +2215,7 @@ struct WebGLRenderer3D::Impl {
         pass.ambient = sky_lighting ? ambient.ambient : lights.ambient;
         pass.ground = sky_lighting ? ambient.ground
                                    : (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient);
+        upload_lights(light_data, pass.points, pass.spots, pass.point_shadow);
         pass.serial = ++serials;
         pass.scene = &scene;
         pass.lights = &lights;
