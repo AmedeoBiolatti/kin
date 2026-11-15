@@ -264,7 +264,10 @@ void main() {
             }
             const vec3 compressed = compress(c.rgb);
 #ifdef KIN_TEMPORAL_UPSCALE
-            const vec2 away = vec2(p + ivec2(x, y)) - sample_position - params.jitter.xy;
+            // Measure the reconstruction footprint in output pixels. The native input-pixel footprint
+            // grows with the upscale ratio and blurs away detail before history can accumulate it.
+            const vec2 away = (vec2(p + ivec2(x, y)) - sample_position - params.jitter.xy) *
+                              params.sizes.xy * params.input_size.zw;
 #else
             const vec2 away = vec2(x, y) - params.jitter.xy;
 #endif
@@ -330,8 +333,28 @@ void main() {
     const float speed = length(velocity * params.sizes.xy);
     // (Nothing of this where a still pixel keeps no more than a moving one: TemporalAA3D::still_blend at blend.)
     const float still = params.still.y > 0.5 ? 1.0 - clamp(speed / 0.5, 0.0, 1.0) : 0.0;
-    box_low = mix(box_low, min(box_low, mean - 2.5 * spread), still);
-    box_high = mix(box_high, max(box_high, mean + 2.5 * spread), still);
+#ifdef KIN_TEMPORAL_UPSCALE
+    // Jitter only sometimes supplies an input sample close to this output pixel. Preserve history's
+    // detail when this frame poorly samples it; a close sample can update it more decisively.
+    // Integral of exp(-6*r*r) is pi/6; multiply by shading-sample density in output pixels.
+    // Normalise the update rate so close samples can replace more than an ordinary frame's share.
+    const float average_weight = (3.14159265358979 / 6.0) *
+                                 params.input_size.x * params.input_size.y * params.sizes.z * params.sizes.w;
+    const float sample_mass = filtered_weight / average_weight;
+    const float sample_trust = clamp(sample_mass, 0.0, 1.0);
+    const float clip_hold = params.still.y > 0.5 ? 1.0 - sample_trust : 0.0;
+#else
+    const float clip_hold = still;
+#endif
+    box_low = mix(box_low, min(box_low, mean - 2.5 * spread), clip_hold);
+    box_high = mix(box_high, max(box_high, mean + 2.5 * spread), clip_hold);
+#ifdef KIN_TEMPORAL_UPSCALE
+    // A sparse input neighbourhood can put the output's own valid sample in the minority. Clipping its
+    // history away from that sample erases thin features even when reprojection agrees.
+    const vec3 reconstruction = to_ycocg(filtered / filtered_weight);
+    box_low = min(box_low, reconstruction);
+    box_high = max(box_high, reconstruction);
+#endif
 
     vec4 history = history_at(past);
     if (any(isnan(history)) || any(isinf(history))) {
@@ -362,7 +385,14 @@ void main() {
     // A still pixel's history is read from its own place, exactly (no blur to accumulate): it keeps more of it (the
     // mean of the frames the history holds while they are few, then more than a moving pixel). The tests below still
     // drop it where it is of another surface or the light changed.
+#ifdef KIN_TEMPORAL_UPSCALE
+    float weight = params.still.y > 0.5
+                       ? clamp(1.0 - (1.0 - min(params.params.x, params.still.x)) * sample_mass,
+                               0.0, params.still.x)
+                       : params.params.x;
+#else
     float weight = mix(params.params.x, params.still.x, still);
+#endif
     // Illumination changes lower confidence continuously. Small fire flicker
     // still accumulates coverage samples; larger moving-light/shadow changes
     // respond promptly over the full reconstruction footprint.
@@ -380,6 +410,7 @@ void main() {
     // A moving picture is read less exactly (every sub-pixel shift blurs it a
     // little), and a history that had to be pulled far into the box was
     // probably not this surface.
+#ifndef KIN_TEMPORAL_UPSCALE
     weight *= 1.0 - 0.25 * clamp(speed / 3.0, 0.0, 1.0);
     // Reading between two pixels blurs (each frame's, kept for ten): the further from a
     // pixel centre the history is read, the less of it is trusted. Only a little: the
@@ -390,6 +421,7 @@ void main() {
     weight *= 1.0 - 0.3 * clamp(max(between.x, between.y) * 3.0, 0.0, 1.0);
     // (Not for a still pixel, whose wider box already sets how far its history may be.)
     weight *= 1.0 - 0.5 * clamp(outside - 1.0, 0.0, 1.0) * (1.0 - still);
+#endif
     const vec3 colour = mix(filtered / filtered_weight, from_ycocg(h), weight);
     imageStore(uResult, output_pixel, vec4(expand(colour), mix(filtered_alpha / filtered_weight, history.a, weight)));
 }

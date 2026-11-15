@@ -3267,6 +3267,12 @@ motion and screen-space lighting remain at `ceil(output_size * render_scale)`; h
 are at output resolution. Bloom, exposure and output follow reconstruction. This is Kin's experimental TAAU
 implementation, with its own quality tradeoffs.
 
+At reduced scale, the reconstruction footprint is measured in output pixels. Input samples close to an output
+pixel contribute more; the update rate is normalised by shading-sample density. When `still_blend > blend`,
+`still_blend` also caps this reconstruction history during motion, with the usual warm-up after a reset.
+Motion consistency and transparent/particle reactivity still reject invalid history. The clipping range includes
+the current reconstruction so that a sparse neighbourhood cannot clip away its own valid sample.
+
 Camera aspect, picking coordinates and pick targets remain at output resolution, including odd-size resizes.
 LOD error remains in output pixels. Texture mip bias adds `log2(render_scale)` to the authored bias, and the
 jitter period grows with the output-to-input pixel ratio, up to the existing 16-phase limit. Each view keeps
