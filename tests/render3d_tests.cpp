@@ -526,6 +526,11 @@ void test_sdl_renderer_has_no_3d() {
     assert(caps.depth_bits == 0 && caps.max_samples == 1 && caps.max_samples_hdr == 1 && caps.max_anisotropy == 1 &&
            !caps.texture_lod_bias);
     assert(!r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({}).valid());
+    // Unsupported/invalid temporal history must fail through the facade, including its 2D fallback.
+    for (const float density :
+         {0.f, .99f, 2.01f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+        assert(!r3d.create_view({40, 30}, {.temporal_history_scale = density}));
+    assert(!r3d.create_view({40, 30}, {.temporal_history_scale = 2.f}));
 
     kin::View3D view = r3d.create_view({40, 30}, {.background = Color::rgb(0, 128, 0)}).value_or({});
     assert(view.valid() && view.size() == (kin::Vec2i{40, 30}) && view.samples() == 1);

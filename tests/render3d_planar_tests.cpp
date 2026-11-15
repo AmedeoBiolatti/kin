@@ -566,9 +566,16 @@ void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
             // scaled cached view here would fail rendering because reconstruction requires TAA.
             PlanarViews3D scaled_planar{g.r3d, surfaces};
             scene.taa.enabled = true;
-            compose(0);
-            assert(scaled_planar.render(world, scene, extent, {.samples = 1, .render_scale = 2.f / 3.f}));
-            g.frame(scene);
+            // Cached portal/reflection views must adopt a changed history density without changing shading scale.
+            for (const float density : {1.f, 1.5f, 2.f, 1.f}) {
+                compose(0);
+                assert(
+                    scaled_planar.render(world, scene, extent,
+                                         {.samples = 1, .render_scale = 2.f / 3.f, .temporal_history_scale = density}));
+                assert(g.r3d.debug_stats().taa_dispatches == (density > 1.f ? 2u : 1u));
+                g.frame(scene);
+                assert(g.at(scene.camera, {0, -1, -4}).g > 175);
+            }
             scene.taa.enabled = false;
             compose(0);
             assert(scaled_planar.render(world, scene, extent, {.samples = 1}));
