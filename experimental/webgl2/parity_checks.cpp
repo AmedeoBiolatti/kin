@@ -3,6 +3,7 @@
 // volumetric fog.
 #include "render_checks.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -109,9 +110,61 @@ void check_unrunnable_shaders(Renderer2D& r, Renderer3D& r3d) {
     near(b.at(32, 32), {200, 30, 40, 255}, 2, "A custom-shader material must draw as kin's stock material");
     std::cout << "web parity: custom-shader fallback passed\n";
 }
+// Native kin_view_output.inc.glsl's tonemap of linear light, then the sRGB encode, as an 8-bit value.
+int tonemapped(f32 x) {
+    const f32 a = std::clamp((x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f), 0.0f, 1.0f);
+    return int(std::lround(linear_to_srgb(a) * 255.0f));
+}
+
+void check_hdr_views(Renderer2D& r, Renderer3D& r3d) {
+    for (const f32 exposure : {1.0f, 0.5f}) {
+        Bench b(r, r3d, {.samples = 1, .hdr = true, .exposure = exposure});
+        Material3D glow{.color = colors::black, .unlit = true};
+        glow.set_emission({2.0f, 1.0f, 0.25f}, 1);
+        b.scene.draw(b.plane, Mat4f::scaling({0.5f, 0.5f, 1}), glow);
+        b.render("HDR view");
+        near(b.at(32, 32),
+             {tonemapped(2.0f * exposure), tonemapped(1.0f * exposure), tonemapped(0.25f * exposure), 255}, 3,
+             "An HDR view must expose and tonemap its linear light as native's output does");
+        near(b.at(4, 4), {0, 0, 0, 255}, 0, "An HDR view's empty pixels must show what is under the view");
+    }
+    // Bloom: a glow round what is brighter than the threshold, and none round what is not.
+    const auto halo = [&](f32 strength, f32 light) {
+        Bench b(r, r3d, {.samples = 1, .hdr = true, .bloom = strength, .bloom_threshold = 1});
+        Material3D glow{.color = colors::black, .unlit = true};
+        glow.set_emission({light, light, light}, 1);
+        b.scene.draw(b.plane, Mat4f::scaling({0.1f, 0.1f, 1}), glow);
+        b.render("Bloom view");
+        return b.at(32 + 6, 32)[0]; // a few pixels off the bright square's edge
+    };
+    require(halo(0, 8) == 0, "Without bloom nothing glows past an edge");
+    require(halo(1, 8) > 20, "Bloom must spread what is brighter than its threshold");
+    require(halo(1, 0.5f) == 0, "Bloom must leave what is under its threshold");
+    // Auto exposure brings a dim and a bright scene to the key (mid-grey) alike.
+    std::array<int, 2> metered{};
+    for (u32 i = 0; i < 2; ++i) {
+        ViewOptions3D options{.samples = 1, .hdr = true};
+        options.auto_exposure.enabled = true;
+        Bench b(r, r3d, options);
+        Material3D grey{.color = colors::black, .unlit = true};
+        const f32 light = i == 0 ? 0.02f : 3.0f;
+        grey.set_emission({light, light, light}, 1);
+        b.scene.camera.height = 3; // the plane fills the view
+        b.scene.draw(b.plane, {}, grey);
+        b.render("Auto exposure view");
+        metered[i] = b.at(32, 32)[0];
+    }
+    const int key = tonemapped(0.18f);
+    if (std::abs(metered[0] - key) > 8 || std::abs(metered[1] - key) > 8)
+        std::cerr << "auto exposure: dim " << metered[0] << " bright " << metered[1] << " key " << key << '\n';
+    require(std::abs(metered[0] - key) <= 8 && std::abs(metered[1] - key) <= 8,
+            "Auto exposure must bring a dim and a bright view to its key on its first frame");
+    std::cout << "web parity: HDR exposure/tonemap, bloom and auto exposure passed\n";
+}
 } // namespace
 
 void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
     check_spot_lights(r, r3d);
     check_unrunnable_shaders(r, r3d);
+    check_hdr_views(r, r3d);
 }

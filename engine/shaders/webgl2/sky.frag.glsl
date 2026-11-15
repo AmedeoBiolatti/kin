@@ -6,6 +6,7 @@ uniform mat4 uInverseViewProjection;
 uniform vec2 uTarget;
 uniform vec4 uDisc;
 uniform vec3 uMoonColor, uSunColor;
+uniform bool uLinear; // an HDR view's float picture: linear light
 out vec4 outColor;
 vec3 encode(vec3 c) {
     c=clamp(c,0.0,1.0);
@@ -32,5 +33,5 @@ void main() {
         vec3 tint=uFog.colour.w>0.5 ? scattered : uFog.colour.rgb;
         color=mix(color,kin_fog_sun(uFog,tint,d,uSky.sun.xyz,uSunColor),opacity);
     }
-    outColor=vec4(encode(color),1.0);
+    outColor=uLinear ? vec4(color,1.0) : vec4(encode(color),1.0);
 }

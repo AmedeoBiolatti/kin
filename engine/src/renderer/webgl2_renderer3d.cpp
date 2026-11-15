@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -73,6 +74,62 @@ struct Shadow {
         }
     }
 };
+// A float colour target (EXT_color_buffer_float) of an HDR view, with an optional depth buffer.
+struct FloatTarget {
+    GLuint texture = 0, framebuffer = 0, depth = 0;
+    Vec2i size{};
+    u32 levels = 1;
+    std::shared_ptr<bool> alive;
+    FloatTarget() = default;
+    FloatTarget(const FloatTarget&) = delete;
+    FloatTarget& operator=(const FloatTarget&) = delete;
+    ~FloatTarget() {
+        if (alive && *alive) {
+            glDeleteFramebuffers(1, &framebuffer);
+            glDeleteRenderbuffers(1, &depth);
+            glDeleteTextures(1, &texture);
+        }
+    }
+};
+std::shared_ptr<FloatTarget> float_target(std::shared_ptr<bool> alive, Vec2i size, GLenum format, bool depth,
+                                          u32 levels = 1) {
+    auto t = std::make_shared<FloatTarget>();
+    t->alive = std::move(alive);
+    t->size = size;
+    t->levels = levels;
+    glGenTextures(1, &t->texture);
+    glBindTexture(GL_TEXTURE_2D, t->texture);
+    glTexStorage2D(GL_TEXTURE_2D, GLsizei(levels), format, size.x, size.y);
+    const bool filtered = format == GL_RGBA16F;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    !filtered    ? GL_NEAREST
+                    : levels > 1 ? GL_LINEAR_MIPMAP_NEAREST
+                                 : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filtered ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1, &t->framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, t->framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->texture, 0);
+    if (depth) {
+        glGenRenderbuffers(1, &t->depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, t->depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, size.x, size.y);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, t->depth);
+    }
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return {};
+    return t;
+}
+// An HDR view's float picture and what its output needs (bloom, auto exposure), as native GpuView3D's.
+struct HdrTargets {
+    std::shared_ptr<FloatTarget> scene, bloom_a, bloom_b, meter;
+    std::array<std::shared_ptr<FloatTarget>, 2> state; // auto exposure's, read one, write the other
+    u32 state_read = 0, meter_level = 0;
+    bool exposure_valid = false, exposure_time_seen = false;
+    f32 exposure_time = 0;
+    std::chrono::steady_clock::time_point exposure_wall{};
+};
 struct PreparedInstances;
 struct View final : IViewBackend3D {
     Texture color;
@@ -82,6 +139,7 @@ struct View final : IViewBackend3D {
     ShadowCascades3D cascades;
     sky_model::AmbientLight3D ambient, overlay_ambient;
     std::vector<std::shared_ptr<PreparedInstances>> prepared, overlay_prepared;
+    std::shared_ptr<HdrTargets> hdr; // null: an SDR view, drawn straight into `color`
     Texture texture() const override { return color; }
     Vec2i size() const override { return color.size(); }
     u32 samples() const override { return 1; }
@@ -316,11 +374,15 @@ struct WebGLRenderer3D::Impl {
     };
     WebGL2Renderer2DBackend& renderer;
     WebGLDevice& device;
-    GLuint program = 0, instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0;
+    GLuint program = 0, instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0,
+           post_program = 0;
+    bool float_targets = false; // EXT_color_buffer_float: HDR views can be drawn
+    bool linear_output = false; // this render draws an HDR view's float picture
     Texture white;
     RendererCapabilities3D caps{};
     u32 omitted_told = 0; // the Omitted bits already warned about
-    std::unordered_map<std::string_view, GLint> uniforms, sky_uniforms;
+    bool hdr_refused_told = false, pick_told = false;
+    std::unordered_map<std::string_view, GLint> uniforms, sky_uniforms, post_uniforms;
     sky_model::FogTable3D fog_table;
     // By wrap and filter, then the mipmapped ones' by anisotropy (2 to 16) and wrap; the mipmapped ones read with
     // `anisotropy`, this render's Scene3D::anisotropy, clamped.
@@ -392,6 +454,13 @@ struct WebGLRenderer3D::Impl {
         const auto sky_vertex = WebGLDevice::shader_source("sky.vert.glsl");
         const auto sky_fragment = WebGLDevice::shader_source("sky.frag.glsl");
         sky_program = WebGLDevice::program(sky_vertex.c_str(), sky_fragment.c_str());
+        post_program = WebGLDevice::program(sky_vertex.c_str(), WebGLDevice::shader_source("post.frag.glsl").c_str());
+        glUseProgram(post_program);
+        glUniform1i(glGetUniformLocation(post_program, "uSource"), 0);
+        glUniform1i(glGetUniformLocation(post_program, "uBloom"), 1);
+        glUniform1i(glGetUniformLocation(post_program, "uState"), 2);
+        float_targets =
+            emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "EXT_color_buffer_float");
         glGenVertexArrays(1, &sky_vao);
         glGenTextures(1, &shadow_dummy);
         glActiveTexture(GL_TEXTURE7);
@@ -477,6 +546,7 @@ struct WebGLRenderer3D::Impl {
             glUniform1i(uniform(names[unit]), GLint(unit));
         caps.depth_bits = 24;
         caps.morph_targets = true;
+        caps.auto_exposure = float_targets;
         caps.max_spot_lights = max_spot_lights; // the most important 16 of each in view, unshadowed
         const bool unmasked =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "WEBGL_debug_renderer_info");
@@ -497,12 +567,13 @@ struct WebGLRenderer3D::Impl {
         glDeleteTextures(1, &joints);
         glDeleteTextures(1, &fog_texture);
         glDeleteProgram(sky_program);
+        glDeleteProgram(post_program);
         glDeleteVertexArrays(1, &sky_vao);
         glDeleteTextures(1, &shadow_dummy);
         glDeleteProgram(program);
     }
     GLint location(GLuint handle, const char* name) {
-        auto& cache = handle == program ? uniforms : sky_uniforms;
+        auto& cache = handle == program ? uniforms : handle == sky_program ? sky_uniforms : post_uniforms;
         const auto found = cache.find(name);
         if (found != cache.end())
             return found->second;
@@ -565,6 +636,7 @@ struct WebGLRenderer3D::Impl {
                             std::max(0.0f, fog.sun_scatter), std::clamp(fog.sun_anisotropy, -0.95f, 0.95f)});
         set("uFog.view", {scene.camera.projection == Projection3D::Orthographic ? 1.0f : 0.0f, 0, 0, 0});
         glUniform1i(loc("uFogEnabled"), fog.enabled);
+        glUniform1i(loc("uLinear"), linear_output);
         vector("uEye", scene.camera.position);
         vector("uForward", scene.camera.forward());
         glActiveTexture(GL_TEXTURE6);
@@ -804,6 +876,130 @@ struct WebGLRenderer3D::Impl {
             if (material.texture)
                 ++stats.unlit_textured_draws;
         }
+    }
+    // An HDR view's targets (null where float targets can't be drawn: the view is then SDR, told once).
+    std::shared_ptr<HdrTargets> hdr_targets(Vec2i size, const ViewOptions3D& options) {
+        if (!options.hdr && options.bloom <= 0)
+            return {};
+        if (!float_targets) {
+            if (!hdr_refused_told)
+                KIN_LOG_WARN("render", "WebGL2: no EXT_color_buffer_float; HDR views are drawn as SDR (no bloom, "
+                                       "exposure or tonemapping)");
+            hdr_refused_told = true;
+            return {};
+        }
+        auto t = std::make_shared<HdrTargets>();
+        const auto alive = device.alive();
+        // The meter: the picture's mean over 2^level pixels a side, at most 64 texels a side.
+        while ((size.x >> t->meter_level) > 64 || (size.y >> t->meter_level) > 64)
+            ++t->meter_level;
+        const u32 levels = options.auto_exposure.enabled ? t->meter_level + 1 : 1;
+        t->scene = float_target(alive, size, GL_RGBA16F, true, levels);
+        if (!t->scene)
+            return {};
+        if (options.bloom > 0) {
+            const Vec2i half{std::max(1, size.x / 2), std::max(1, size.y / 2)};
+            t->bloom_a = float_target(alive, half, GL_RGBA16F, false);
+            t->bloom_b = float_target(alive, half, GL_RGBA16F, false);
+            if (!t->bloom_a || !t->bloom_b)
+                return {};
+        }
+        if (options.auto_exposure.enabled) {
+            t->meter =
+                float_target(alive, {std::max(1, size.x >> t->meter_level), std::max(1, size.y >> t->meter_level)},
+                             GL_RGBA32F, false);
+            for (auto& state : t->state)
+                state = float_target(alive, {1, 1}, GL_RGBA32F, false);
+            if (!t->meter || !t->state[0] || !t->state[1])
+                return {};
+        }
+        return t;
+    }
+    // A full-screen pass of the post program into `framebuffer` (`size`), reading `source` (unit 0).
+    void post_pass(GLuint framebuffer, Vec2i size, int mode, GLuint source, std::array<f32, 4> a,
+                   RenderDebugStats3D& stats) {
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glViewport(0, 0, size.x, size.y);
+        glUniform1i(location(post_program, "uMode"), mode);
+        glUniform2f(location(post_program, "uTarget"), f32(size.x), f32(size.y));
+        glUniform4f(location(post_program, "uA"), a[0], a[1], a[2], a[3]);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, source);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (mode <= 1)
+            ++stats.bloom_draws;
+        else if (mode <= 3)
+            ++stats.exposure_dispatches;
+        else
+            ++stats.output_draws;
+    }
+    // An HDR view's float picture out to its 2D texture: bloom, auto exposure's metering and adaptation, then the
+    // exposure, ACES and the sRGB encode (native finish_view's order).
+    void finish_hdr(View& view, const Scene3D& scene, RenderDebugStats3D& stats) {
+        auto& t = *view.hdr;
+        const auto& options = view.options;
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glUseProgram(post_program);
+        glBindVertexArray(sky_vao);
+        for (GLuint unit = 0; unit < 3; ++unit)
+            glBindSampler(unit, 0);
+        material_bindings = {};
+        const bool bloom = options.bloom > 0 && t.bloom_a;
+        if (bloom) {
+            const Vec2i half = t.bloom_a->size;
+            post_pass(t.bloom_a->framebuffer, half, 0, t.scene->texture,
+                      {0, options.bloom_threshold, 1.0f / t.scene->size.x, 1.0f / t.scene->size.y}, stats);
+            for (int i = 0; i < 2; ++i) {
+                const f32 step = f32(i + 1);
+                post_pass(t.bloom_b->framebuffer, half, 1, t.bloom_a->texture, {0, 0, step / half.x, 0}, stats);
+                post_pass(t.bloom_a->framebuffer, half, 1, t.bloom_b->texture, {0, 0, 0, step / half.y}, stats);
+            }
+        }
+        const bool metered = options.auto_exposure.enabled && t.meter;
+        if (metered) {
+            const AutoExposure3D& a = options.auto_exposure;
+            glBindTexture(GL_TEXTURE_2D, t.scene->texture);
+            glGenerateMipmap(GL_TEXTURE_2D);
+            post_pass(t.meter->framebuffer, t.meter->size, 2, t.scene->texture,
+                      {std::clamp(a.centre_weight, 0.0f, 1.0f), f32(t.meter_level), 0, 0}, stats);
+            // dt as native meter_exposure's: the scene's clock, else the wall clock (at most 0.25 s).
+            const auto now = std::chrono::steady_clock::now();
+            f32 dt = 0;
+            if (t.exposure_valid) {
+                const f32 step = scene.time - t.exposure_time;
+                dt = t.exposure_time_seen && step > 0 && step <= 1
+                         ? step
+                         : std::min(0.25f, std::chrono::duration<f32>(now - t.exposure_wall).count());
+            }
+            t.exposure_time = scene.time;
+            t.exposure_time_seen = true;
+            t.exposure_wall = now;
+            const f32 low = std::clamp(a.low, 0.0f, 1.0f), high = std::clamp(a.high, low, 1.0f);
+            glUniform4f(location(post_program, "uB"), std::log2(std::max(a.key, 1e-6f)), std::min(a.min_ev, a.max_ev),
+                        std::max(a.min_ev, a.max_ev), t.exposure_valid ? 0.0f : 1.0f);
+            glUniform4f(location(post_program, "uC"), 1.0f - std::exp(-dt * std::max(a.speed_up, 0.0f)),
+                        1.0f - std::exp(-dt * std::max(a.speed_down, 0.0f)), 1.0f, a.compensation_ev);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, t.state[t.state_read]->texture);
+            const u32 write = 1 - t.state_read;
+            post_pass(t.state[write]->framebuffer, {1, 1}, 3, t.meter->texture, {0, 0, low, high}, stats);
+            t.state_read = write;
+            t.exposure_valid = true;
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, t.state[t.state_read]->texture);
+        }
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, bloom ? t.bloom_a->texture : t.scene->texture);
+        // Dithered as native's for a view with a sky: a night sky's range is a few 8-bit levels.
+        post_pass(
+            view.surface->framebuffer, view.size(), 4, t.scene->texture,
+            {bloom ? options.bloom : 0.0f, options.exposure, metered ? 1.0f : 0.0f, scene.sky.enabled ? 1.0f : 0.0f},
+            stats);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
     }
     void palette(const Scene3D& scene, RenderDebugStats3D* stats = nullptr) {
         glActiveTexture(GL_TEXTURE5);
@@ -1099,14 +1295,16 @@ bool WebGLRenderer3D::update_mesh_vertices(IMeshBackend3D& backend, std::span<co
     return true;
 }
 std::shared_ptr<IViewBackend3D> WebGLRenderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
-    if (options.hdr || options.bloom > 0 || options.pick) {
-        KIN_LOG_WARN("render", "WebGL2: HDR, bloom and picking views are not implemented yet; use an SDR view");
-        return {};
+    if (options.pick && !_impl->pick_told) {
+        _impl->pick_told = true;
+        KIN_LOG_WARN("render", "WebGL2: picking is not implemented; Renderer3D::pick finds nothing");
     }
     _impl->renderer.before_3d();
     auto view = std::make_shared<View>();
     view->options = options;
-    view->color = _impl->device.create_surface(size, true);
+    view->hdr = _impl->hdr_targets(size, options);
+    // An HDR view's 2D texture takes the output pass; it needs no depth of its own.
+    view->color = _impl->device.create_surface(size, !view->hdr);
     view->surface = _impl->device.surface(view->color);
     return view->surface ? view : nullptr;
 }
@@ -1136,9 +1334,10 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy.
     _impl->anisotropy = std::clamp(scene.anisotropy, 1u, _impl->caps.max_anisotropy);
     _impl->prepare(view->prepared, scene, stats);
+    _impl->linear_output = bool(view->hdr);
     _impl->shadows(*view, scene, stats);
     _impl->shadow_uniforms(*view, scene.lights);
-    glBindFramebuffer(GL_FRAMEBUFFER, view->surface->framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, view->hdr ? view->hdr->scene->framebuffer : view->surface->framebuffer);
     glViewport(0, 0, view->size().x, view->size().y);
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_DEPTH_TEST);
@@ -1150,7 +1349,11 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     glCullFace(GL_BACK);
     const Color color = view->options.background;
     const f32 alpha = color.a / 255.0f;
-    glClearColor(color.r / 255.0f * alpha, color.g / 255.0f * alpha, color.b / 255.0f * alpha, alpha);
+    if (view->hdr) { // linear light, as native's float picture holds it
+        const LinearColor l = to_linear(color);
+        glClearColor(l.r * l.a, l.g * l.a, l.b * l.a, l.a);
+    } else
+        glClearColor(color.r / 255.0f * alpha, color.g / 255.0f * alpha, color.b / 255.0f * alpha, alpha);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     _impl->sky(scene, view->size(), stats);
     _impl->scene(scene, scene.lights, view->size(), stats, view->ambient, view->prepared);
@@ -1163,6 +1366,8 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
         _impl->scene(*overlay, scene.lights, view->size(), stats, view->overlay_ambient, view->overlay_prepared);
     } else
         view->overlay_prepared.clear();
+    if (view->hdr)
+        _impl->finish_hdr(*view, scene, stats);
     stats.retained_gpu_bytes = _impl->instance_budget->gpu_bytes;
     stats.samples = 1;
     return true;

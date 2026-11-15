@@ -9,6 +9,7 @@ uniform bool uUnlit, uHasNormal, uHasEmission;
 uniform float uEmissive, uAlphaCutoff, uMetallic, uRoughness, uNormalScale, uOcclusionStrength;
 uniform vec3 uEmissionColor;
 uniform bool uIndependentEmission;
+uniform bool uLinear; // an HDR view's float picture: linear light, not encoded
 uniform float uSpecularAa; // Scene3D::specular_aa
 uniform float uSingleScatter; // 1: Scene3D::specular_multiscatter off
 uniform int uBlend, uPointCount, uSpotCount;
@@ -122,8 +123,9 @@ void main() {
                                 : uIndependentEmission ? vec3(1.0) : base.rgb;
     if (uIndependentEmission) emission *= uEmissionColor;
     vec3 color = (uUnlit ? base.rgb : lighting(base.rgb,normal_for_surface(),metallic,roughness,occlusion))+emission*uEmissive;
-    // The view stores display-encoded, premultiplied color for the gamma 2D frame.
+    // An SDR view stores display-encoded, premultiplied color for the gamma 2D frame; an HDR one (uLinear) linear
+    // light, premultiplied, that its output exposes and tonemaps.
     float alpha = uBlend == 1 || uBlend == 2 ? base.a : 1.0;
     color=fogged(color,vWorld,uSunDirection,uSunColor,uBlend==2);
-    outColor = vec4(encode(color)*alpha,alpha);
+    outColor = uLinear ? vec4(max(color, vec3(0.0))*alpha,alpha) : vec4(encode(color)*alpha,alpha);
 }

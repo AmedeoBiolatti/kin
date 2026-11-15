@@ -54,8 +54,8 @@ public:
         _target = ctx.renderer.create_render_target({256, 192}, ScaleMode::Nearest);
         _nested = ctx.renderer.create_render_target({16, 16}, ScaleMode::Nearest);
         require(_texture && _target && _nested, "Texture/target allocation failed");
-        // Unsupported requests must fail visibly instead of returning a background-only view.
-        require(!r3d.create_view({8, 8}, {.samples = 1, .hdr = true}), "Initial core profile must refuse HDR");
+        // HDR views are drawn (exposed and tonemapped: parity_checks.cpp); oversized ones fail visibly.
+        require(bool(r3d.create_view({8, 8}, {.samples = 1, .hdr = true})), "HDR views must be made");
         require(!r3d.create_view({1 << 20, 1}, {.samples = 1}), "Oversized views must be refused without GL errors");
     }
     void update(SceneContext& ctx) override {
