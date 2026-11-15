@@ -11,8 +11,10 @@ uniform vec3 uEmissionColor;
 uniform bool uIndependentEmission;
 uniform float uSpecularAa; // Scene3D::specular_aa
 uniform float uSingleScatter; // 1: Scene3D::specular_multiscatter off
-uniform int uBlend, uPointCount;
+uniform int uBlend, uPointCount, uSpotCount;
 uniform vec4 uPoints[32];
+// A spot a 4: position and radius, colour and size squared, axis and cos(outer), 1 / (cos inner - cos outer).
+uniform vec4 uSpots[64];
 in vec3 vWorld;
 in vec3 vNormal;
 in vec2 vUV;
@@ -51,6 +53,13 @@ vec3 normal_for_surface() {
     mapped.xy *= uNormalScale;
     return normalize(front * (t * mapped.x - b * mapped.y) + n * mapped.z);
 }
+// A light of size squared `r2` `d2` away is a sphere: its highlight no sharper than the angle it spans (kin_sphere_light).
+Surface sphere_light(Surface s, float r2, float d2) {
+    float spans = sqrt(clamp(r2 / max(d2, 1e-8), 0.0, 1.0));
+    s.alpha = max(s.alpha, spans);
+    s.coat_alpha = max(s.coat_alpha, spans);
+    return s;
+}
 vec3 lighting(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
     // Specular anti-aliasing, as kin_lit's: the roughness raised by how much the normal turns across the pixel.
     if (uSpecularAa > 0.0) {
@@ -80,7 +89,17 @@ vec3 lighting(vec3 base, vec3 n, float metallic, float roughness, float occlusio
         float d2 = dot(to,to), r2 = d2/(at.w*at.w);
         float window = clamp(1.0-r2*r2, 0.0, 1.0);
         float k = window*window / max(d2, color.w);
-        if (k > 0.0) light += shade(s, to*inversesqrt(max(d2,1e-8)), color.rgb*k);
+        if (k > 0.0) light += shade(sphere_light(s, color.w, d2), to*inversesqrt(max(d2,1e-8)), color.rgb*k);
+    }
+    for (int i=0; i<uSpotCount; ++i) {
+        vec4 at = uSpots[4*i], color = uSpots[4*i+1], axis = uSpots[4*i+2];
+        vec3 to = at.xyz-vWorld;
+        float d2 = dot(to,to), r2 = d2/(at.w*at.w);
+        float window = clamp(1.0-r2*r2, 0.0, 1.0);
+        vec3 toward = to*inversesqrt(max(d2,1e-8));
+        float cone = clamp((dot(-toward, axis.xyz)-axis.w)*uSpots[4*i+3].x, 0.0, 1.0);
+        float k = window*window*cone*cone / max(d2, color.w);
+        if (k > 0.0) light += shade(sphere_light(s, color.w, d2), toward, color.rgb*k);
     }
     vec3 reflected = normalize(mix(reflect(-v,n),n,s.alpha));
     vec3 around = mix(uGround,uAmbient,n.y*0.5+0.5);

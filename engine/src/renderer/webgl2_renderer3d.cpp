@@ -9,6 +9,7 @@
 #include <cstring>
 #include <emscripten/html5.h>
 #include <kin/platform/log.hpp>
+#include <kin/render3d/local_lights3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
 #include <numeric>
 #include <optional>
@@ -227,6 +228,73 @@ u32 level_for(const Scene3D& scene, const Scene3D::Draw& draw, const MeshInstanc
             return l;
     return 0;
 }
+// The local lights the mesh shader takes (at most `limit`): those whose light reaches into the view, the most important
+// (shadow_importance: brightness, reach and the share of the view they fill) when there are more, in scene order.
+template <class Light, class Sphere>
+std::vector<u32> chosen_lights(std::span<const Light> lights, u32 limit, const Mat4f& view_projection, Vec3f eye,
+                               Sphere sphere) {
+    std::vector<std::pair<f32, u32>> ranked;
+    for (u32 i = 0; i < lights.size(); ++i) {
+        Vec3f centre;
+        f32 radius = 0;
+        sphere(lights[i], centre, radius);
+        if (!(radius > 0) ||
+            !visible({centre - Vec3f{radius, radius, radius}, centre + Vec3f{radius, radius, radius}}, view_projection))
+            continue;
+        const auto& c = lights[i].color;
+        ranked.push_back({-shadow_importance(std::max({c.r, c.g, c.b}), radius, centre, radius, eye), i});
+    }
+    if (ranked.size() > limit) {
+        std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        ranked.resize(limit);
+    }
+    std::vector<u32> order;
+    for (const auto& [importance, index] : ranked)
+        order.push_back(index);
+    std::sort(order.begin(), order.end());
+    return order;
+}
+// What a scene asks for that this renderer leaves out, a bit each: each is told once (a log warning) per renderer.
+enum Omitted : u32 {
+    omit_shader = 1u << 0,
+    omit_wireframe = 1u << 1,
+    omit_particles = 1u << 2,
+    omit_decals = 1u << 3,
+    omit_ambient_occlusion = 1u << 4,
+    omit_contact_shadows = 1u << 5,
+    omit_ssr = 1u << 6,
+    omit_taa = 1u << 7,
+    omit_gi = 1u << 8,
+    omit_probes = 1u << 9,
+    omit_environment = 1u << 10,
+    omit_local_shadows = 1u << 11,
+    omit_clip = 1u << 12,
+    omit_light_count = 1u << 13,
+    omit_stars = 1u << 14,
+    omit_volumetric = 1u << 15,
+    omit_surface = 1u << 16,
+    omit_weather = 1u << 17,
+};
+constexpr std::array<const char*, 18> omitted_text{
+    "custom material shaders (Material3D::shader) draw as kin's stock material",
+    "wireframe materials draw filled",
+    "particles are not drawn",
+    "decals are not drawn",
+    "screen-space ambient occlusion is off",
+    "contact shadows are off",
+    "screen-space reflections are off",
+    "temporal anti-aliasing is off",
+    "global illumination is off (the ambient light stands in)",
+    "reflection probes are not used",
+    "image environments (Lights3D::environment, SkyMode3D::Image) are not used",
+    "point and spot lights cast no shadows",
+    "Camera3D::clip_plane is not supported; the view draws everything",
+    "only the 16 most important point lights and 16 spot lights in view are drawn",
+    "the night sky has no stars",
+    "volumetric fog (Fog3D::volumetric) is off",
+    "surface shaders and material graphs (Material3D::surface) draw as kin's stock material",
+    "weather (rain, snow, wet surfaces) is not drawn",
+};
 } // namespace
 
 struct WebGLRenderer3D::Impl {
@@ -251,7 +319,7 @@ struct WebGLRenderer3D::Impl {
     GLuint program = 0, instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0;
     Texture white;
     RendererCapabilities3D caps{};
-    bool warned = false, clip_warned = false;
+    u32 omitted_told = 0; // the Omitted bits already warned about
     std::unordered_map<std::string_view, GLint> uniforms, sky_uniforms;
     sky_model::FogTable3D fog_table;
     // By wrap and filter, then the mipmapped ones' by anisotropy (2 to 16) and wrap; the mipmapped ones read with
@@ -409,7 +477,7 @@ struct WebGLRenderer3D::Impl {
             glUniform1i(uniform(names[unit]), GLint(unit));
         caps.depth_bits = 24;
         caps.morph_targets = true;
-        caps.max_spot_lights = 0; // the initial mesh path draws no spot lights (and the first 16 point lights)
+        caps.max_spot_lights = max_spot_lights; // the most important 16 of each in view, unshadowed
         const bool unmasked =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "WEBGL_debug_renderer_info");
         const auto* driver = reinterpret_cast<const char*>(glGetString(unmasked ? 0x9246 : GL_RENDERER));
@@ -551,9 +619,8 @@ struct WebGLRenderer3D::Impl {
         for (const auto& draw : scene.draws()) {
             const auto& material = draw.material;
             const auto* mesh = dynamic_cast<const Mesh*>(draw.mesh.backend().get());
-            if (!mesh || mesh->alive != device.alive() || (draw.skinned && !caps.skinning) || material.wireframe ||
-                material.shader) {
-                KIN_LOG_WARN("render", "WebGL2: foreign mesh, wireframe or custom material shader is unsupported");
+            if (!mesh || mesh->alive != device.alive() || (draw.skinned && !caps.skinning)) {
+                KIN_LOG_WARN("render", "WebGL2: a mesh of another renderer, or skinned beyond the device's attributes");
                 return false;
             }
             for (const Texture* image : {&material.texture, &material.normal, &material.metallic_roughness,
@@ -571,6 +638,43 @@ struct WebGLRenderer3D::Impl {
         if (const auto* overlay = scene.overlay_if_any(); overlay && !supported(*overlay, target))
             return false;
         return true;
+    }
+    // What `scene` (and its overlay) asks for that is left out: the Omitted bits.
+    u32 omitted(const Scene3D& scene) const {
+        u32 bits = 0;
+        const auto& l = scene.lights;
+        for (const auto& draw : scene.draws()) {
+            bits |= draw.material.shader ? omit_shader : 0;
+            bits |= draw.material.wireframe ? omit_wireframe : 0;
+            bits |= draw.material.surface ? omit_surface : 0;
+        }
+        bits |= scene.particle_draws().empty() ? 0 : omit_particles;
+        bits |= scene.decals().empty() ? 0 : omit_decals;
+        bits |= scene.ambient_occlusion.enabled ? omit_ambient_occlusion : 0;
+        bits |= scene.contact_shadows.enabled ? omit_contact_shadows : 0;
+        bits |= scene.ssr.enabled ? omit_ssr : 0;
+        bits |= scene.taa.enabled ? omit_taa : 0;
+        bits |= scene.global_illumination.enabled ? omit_gi : 0;
+        bits |= l.reflection_probes.empty() ? 0 : omit_probes;
+        bits |= l.environment || (scene.sky.enabled && scene.sky.mode == SkyMode3D::Image) ? omit_environment : 0;
+        const auto shadowed = [](const auto& light) { return light.shadow_enabled; };
+        bits |=
+            std::ranges::any_of(l.points, shadowed) || std::ranges::any_of(l.spots, shadowed) ? omit_local_shadows : 0;
+        bits |= scene.camera.clipped() ? omit_clip : 0;
+        bits |= l.points.size() > 16 || l.spots.size() > max_spot_lights ? omit_light_count : 0;
+        bits |= scene.sky.enabled && scene.sky.stars ? omit_stars : 0;
+        bits |= scene.fog.enabled && scene.fog.volumetric.enabled ? omit_volumetric : 0;
+        bits |= scene.weather.active() ? omit_weather : 0;
+        if (const auto* overlay = scene.overlay_if_any())
+            bits |= omitted(*overlay);
+        return bits;
+    }
+    void tell_omitted(const Scene3D& scene) {
+        const u32 fresh = omitted(scene) & ~omitted_told;
+        for (u32 bit = 0; bit < omitted_text.size(); ++bit)
+            if (fresh & (1u << bit))
+                KIN_LOG_WARN_F("render", "WebGL2: left out", (LogFields{{.name = "what", .value = omitted_text[bit]}}));
+        omitted_told |= fresh;
     }
     void draw(const Scene3D& scene, const Scene3D::Draw& draw, u32 level, std::span<const u32> order,
               PreparedInstances* prepared, u32 pass, RenderDebugStats3D& stats, bool shadow_pass = false) {
@@ -825,10 +929,16 @@ struct WebGLRenderer3D::Impl {
         stats.fog_applied = stats.fog_applied || scene.fog.enabled;
         palette(scene, &stats);
         glUniform3f(uniform("uEye"), scene.camera.position.x, scene.camera.position.y, scene.camera.position.z);
+        const Mat4f vp = scene.camera.view_projection(f32(size.x) / size.y);
         std::array<f32, 128> points{};
-        const u32 count = std::min<std::size_t>(16, lights.points.size());
+        const auto point_order = chosen_lights(std::span{lights.points}, 16, vp, scene.camera.position,
+                                               [](const PointLightSource3D& p, Vec3f& centre, f32& radius) {
+                                                   centre = p.position;
+                                                   radius = p.radius;
+                                               });
+        const u32 count = u32(point_order.size());
         for (u32 i = 0; i < count; ++i) {
-            const auto& point = lights.points[i];
+            const auto& point = lights.points[point_order[i]];
             auto* at = points.data() + 8 * i;
             at[0] = point.position.x;
             at[1] = point.position.y;
@@ -840,9 +950,38 @@ struct WebGLRenderer3D::Impl {
             at[7] = std::max(0.0001f, point.size * point.size);
         }
         glUniform1i(uniform("uPointCount"), GLint(count));
-        glUniform4fv(uniform("uPoints[0]"), GLsizei(count * 2), points.data());
+        if (count)
+            glUniform4fv(uniform("uPoints[0]"), GLsizei(count * 2), points.data());
+        std::array<f32, 16 * max_spot_lights> spots{};
+        const auto spot_order =
+            chosen_lights(std::span{lights.spots}, max_spot_lights, vp, scene.camera.position, spot_bounding_sphere);
+        for (u32 i = 0; i < spot_order.size(); ++i) {
+            const auto& spot = lights.spots[spot_order[i]];
+            const SpotCone3D cone = spot_cone(spot);
+            auto* at = spots.data() + 16 * i;
+            const std::array<f32, 16> packed{spot.position.x,
+                                             spot.position.y,
+                                             spot.position.z,
+                                             std::max(0.01f, spot.radius),
+                                             spot.color.r,
+                                             spot.color.g,
+                                             spot.color.b,
+                                             std::max(0.0001f, spot.size * spot.size),
+                                             cone.axis.x,
+                                             cone.axis.y,
+                                             cone.axis.z,
+                                             cone.cos_outer,
+                                             cone.scale,
+                                             0,
+                                             0,
+                                             0};
+            std::copy(packed.begin(), packed.end(), at);
+        }
+        glUniform1i(uniform("uSpotCount"), GLint(spot_order.size()));
+        if (!spot_order.empty())
+            glUniform4fv(uniform("uSpots[0]"), GLsizei(spot_order.size() * 4), spots.data());
         stats.lights += count;
-        const Mat4f vp = scene.camera.view_projection(f32(size.x) / size.y);
+        stats.spots += u32(spot_order.size());
         glUniformMatrix4fv(uniform("uViewProjection"), 1, GL_FALSE, vp.m);
         direction("uSunDirection", lights.sun.direction);
         direction("uFillDirection", lights.fill.direction);
@@ -990,14 +1129,7 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     if (!view || !view->surface || view->surface->alive != _impl->device.alive() ||
         !_impl->supported(scene, view->surface.get()))
         return false;
-    if (!_impl->warned && (!scene.lights.spots.empty() || !scene.particle_draws().empty())) {
-        _impl->warned = true;
-        KIN_LOG_WARN("render", "WebGL2: initial mesh path omits spot lights and particles");
-    }
-    if (!_impl->clip_warned && scene.camera.clipped()) {
-        _impl->clip_warned = true;
-        KIN_LOG_WARN("render", "WebGL2: Camera3D::clip_plane is not supported; the view draws everything");
-    }
+    _impl->tell_omitted(scene);
     _impl->renderer.before_3d();
     // The 2D pass and texture uploads can change bindings between 3D renders.
     _impl->material_bindings = {};

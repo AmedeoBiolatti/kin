@@ -153,6 +153,7 @@ public:
             check_webgl_geometry2d(r);
             check_webgl_materials(r, r3d);
             check_webgl_instances(r, r3d);
+            check_webgl_parity(r, r3d);
             _checked = true;
         }
         r.pop_render_target();

@@ -1,5 +1,5 @@
 if(KIN_BUILD_WEBGL2_FIXTURE)
-    add_executable(webgl2_3d_fixture main.cpp render_checks.cpp)
+    add_executable(webgl2_3d_fixture main.cpp render_checks.cpp parity_checks.cpp)
     target_link_libraries(webgl2_3d_fixture PRIVATE kin::engine)
     kin_game(webgl2_3d_fixture TITLE "Kin WebGL2: 2D and 3D" NO_CONTENT)
 endif()
