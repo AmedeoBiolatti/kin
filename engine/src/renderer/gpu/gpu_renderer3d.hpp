@@ -429,6 +429,7 @@ private:
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
+    std::array<GpuTexture, 2> _taa_confidence; // scaled views only: local history age (R16F)
     // The velocities the resolve took (the nearest surface's round each pixel; two halves in R32_UINT, their lowest
     // bits holding how recently the depth bent there, for the sharpening), this frame's and the last, read and written
     // as the history is: the next frame compares its own with them.

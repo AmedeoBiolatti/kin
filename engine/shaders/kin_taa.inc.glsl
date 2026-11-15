@@ -31,13 +31,17 @@ layout(set = 0, binding = 4) uniform sampler2D uDepth;      // the main pass's d
 layout(set = 0, binding = 5) uniform usampler2D uPastDilated; // the velocities the last frame's resolve took
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uResult;
 layout(set = 1, binding = 1, r32ui) uniform writeonly uimage2D uDilated; // this frame's (pack_dilated), for the next
+#ifdef KIN_TEMPORAL_UPSCALE
+layout(set = 0, binding = 6) uniform sampler2D uPastConfidence;
+layout(set = 1, binding = 2, r16f) uniform writeonly image2D uConfidence;
+#endif
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // the picture's width and height, and 1 over them
     vec4 params; // x: history weight, y: 1 when there is no history, z: 1 to sharpen instead, w: sharpness
     vec4 jitter; // xy: jitter, z: coverage present (2: frozen jitter), w: physical coverage changed (excluding jitter)
     vec4 depth;  // x: 1 when uDepth is the main pass's depth; y: where the overlay's slice of it starts (2: none);
                  // z: 1 when the sharpening follows (the resolve keeps where the depth bent, for it)
-    vec4 still;  // x: the history weight of a still pixel; y: 1 when still pixels keep more than moving ones
+    vec4 still;  // x: native still weight; y: still hold enabled; z: scaled-view history weight cap
     vec4 input_size; // shading extent and reciprocals; sizes is the display/history extent
 }
 params;
@@ -287,6 +291,7 @@ void main() {
 #ifdef KIN_TEMPORAL_UPSCALE
     // A reset is a spatially reconstructed frame, with no uninitialised history or velocity reads.
     if (no_history) {
+        imageStore(uConfidence, output_pixel, vec4(1.0));
         imageStore(uResult, output_pixel, vec4(expand(filtered / filtered_weight), filtered_alpha / filtered_weight));
         return;
     }
@@ -317,6 +322,9 @@ void main() {
             }
         }
         if (transient) {
+#ifdef KIN_TEMPORAL_UPSCALE
+            imageStore(uConfidence, output_pixel, vec4(0.0));
+#endif
             // Keep spatial reconstruction of the jittered sample, without a
             // fictitious single velocity for several transparent layers.
             imageStore(uResult, output_pixel, vec4(expand(filtered / filtered_weight), filtered_alpha / filtered_weight));
@@ -358,6 +366,9 @@ void main() {
 
     vec4 history = history_at(past);
     if (any(isnan(history)) || any(isinf(history))) {
+#ifdef KIN_TEMPORAL_UPSCALE
+        imageStore(uConfidence, output_pixel, vec4(0.0));
+#endif
         imageStore(uResult, output_pixel, current);
         return;
     }
@@ -386,10 +397,16 @@ void main() {
     // mean of the frames the history holds while they are few, then more than a moving pixel). The tests below still
     // drop it where it is of another surface or the light changed.
 #ifdef KIN_TEMPORAL_UPSCALE
+    // Warm up the reprojected pixel, not the whole view. Newly exposed pixels and rejected history have
+    // few valid frames even when the rest of the view has been refining for a long time.
+    const float previous_age = textureLod(uPastConfidence, past, 0.0).r;
+    const float max_age = 1.0 / max(1.0 - params.still.z, .02) - 1.0;
+    const float local_age = !isnan(previous_age) && !isinf(previous_age) ? clamp(previous_age, 0.0, max_age) : 0.0;
+    const float local_weight = min(params.still.z, local_age / (local_age + 1.0));
     float weight = params.still.y > 0.5
-                       ? clamp(1.0 - (1.0 - min(params.params.x, params.still.x)) * sample_mass,
-                               0.0, params.still.x)
+                       ? clamp(1.0 - (1.0 - min(params.params.x, local_weight)) * sample_mass, 0.0, local_weight)
                        : params.params.x;
+    float confidence_retention = min(1.0, .0005 / max(lighting_change, .0005));
 #else
     float weight = mix(params.params.x, params.still.x, still);
 #endif
@@ -399,8 +416,12 @@ void main() {
     weight *= min(1.0, .0005 / max(lighting_change, .0005));
     // With frozen sample positions there are no new edge samples to retain.
     // Match the current illumination exactly for deterministic inspection.
-    if (params.jitter.z > 1.5 && lighting_change > 0.0)
+    if (params.jitter.z > 1.5 && lighting_change > 0.0) {
         weight = 0.0;
+#ifdef KIN_TEMPORAL_UPSCALE
+        confidence_retention = 0.0;
+#endif
+    }
     // A composite has several depths. Use the foremost contributing layer's
     // reprojection with bounded confidence, rather than disabling temporal AA
     // for every transparent whenever anything moves elsewhere in the scene.
@@ -421,6 +442,11 @@ void main() {
     weight *= 1.0 - 0.3 * clamp(max(between.x, between.y) * 3.0, 0.0, 1.0);
     // (Not for a still pixel, whose wider box already sets how far its history may be.)
     weight *= 1.0 - 0.5 * clamp(outside - 1.0, 0.0, 1.0) * (1.0 - still);
+#endif
+#ifdef KIN_TEMPORAL_UPSCALE
+    // Reduce the next frame's age as well as this frame's colour weight on motion or lighting rejection.
+    confidence_retention *= 1.0 - clamp((mismatch_px - (0.35 + 0.05 * speed)) / 0.4, 0.0, 1.0);
+    imageStore(uConfidence, output_pixel, vec4(min(max_age, 1.0 + local_age * confidence_retention)));
 #endif
     const vec3 colour = mix(filtered / filtered_weight, from_ycocg(h), weight);
     imageStore(uResult, output_pixel, vec4(expand(colour), mix(filtered_alpha / filtered_weight, history.a, weight)));

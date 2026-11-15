@@ -3269,7 +3269,10 @@ implementation, with its own quality tradeoffs.
 
 At reduced scale, the reconstruction footprint is measured in output pixels. Input samples close to an output
 pixel contribute more; the update rate is normalised by shading-sample density. When `still_blend > blend`,
-`still_blend` also caps this reconstruction history during motion, with the usual warm-up after a reset.
+`still_blend` also caps this reconstruction history during motion. Warm-up follows each reprojected pixel's
+history age rather than the whole view's age; motion and lighting rejection reduce it locally, so a newly
+exposed surface starts accumulating independently of established surfaces. Two R16F metadata textures track
+this age at output resolution (about 6.9 MiB together at 1704x1065), without an additional pass.
 Motion consistency and transparent/particle reactivity still reject invalid history. The clipping range includes
 the current reconstruction so that a sparse neighbourhood cannot clip away its own valid sample.
 

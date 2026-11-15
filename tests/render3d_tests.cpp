@@ -6000,6 +6000,54 @@ void test_gpu_temporal_upscaling() {
     });
 }
 
+// A surface arriving from outside the view starts its own reconstruction history. Its recovery must not
+// depend on how long unrelated pixels have been visible. Frozen jitter isolates local history from phase.
+void test_gpu_temporal_upscaling_recovery() {
+    with_gpu("test_gpu_temporal_upscaling_recovery", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_upscaling, "temporal upscaling"))
+            return;
+        const PatternSurface pattern = make_pattern_surface(r3d, renderer);
+        auto warm = r3d.create_view({160, 120}, {.render_scale = 2.f / 3.f}).value_or({});
+        auto fresh = r3d.create_view({160, 120}, {.render_scale = 2.f / 3.f}).value_or({});
+        assert(warm && fresh);
+        kin::Scene3D scene;
+        scene.camera = flat_camera();
+        scene.taa = {.enabled = true, .sharpness = 0.f};
+        scene.debug.freeze_jitter = true;
+        const auto pose = [&](float x, float camera_x) {
+            scene.clear();
+            scene.camera = flat_camera(camera_x);
+            assert(scene.draw(pattern.mesh, Mat4f::translation({x, 0, 0}),
+                              {.unlit = true, .texture = pattern.texture, .wrap_u = kin::Wrap3D::Repeat},
+                              kin::colors::white, 41));
+        };
+        const auto shoot = [&](kin::View3D& view) {
+            auto p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        pose(120.f, 0.f);
+        for (int i = 0; i < 64; ++i)
+            shoot(warm);
+        shoot(fresh);
+        int worst = 0;
+        for (int frame = 0; frame < 8; ++frame) {
+            // Continue moving after arrival so the reconstruction changes despite frozen jitter.
+            pose(0.f, frame * .013f);
+            const auto a = shoot(warm);
+            assert(!r3d.debug_stats().taa_reset);
+            const auto b = shoot(fresh);
+            assert(!r3d.debug_stats().taa_reset);
+            for (int y = 20; y < 100; ++y)
+                for (int x = 30; x < 130; ++x)
+                    worst = std::max(worst, std::abs(int(a.at(x, y).g) - int(b.at(x, y).g)));
+        }
+        std::cout << "  local recovery independent of view age: worst=" << worst << '\n';
+        assert(worst <= 1);
+    });
+}
+
 void test_gpu_taa() {
     with_gpu("test_gpu_taa", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -24260,6 +24308,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_taa());
     RUN(test_gpu_temporal_upscaling());
     RUN(test_gpu_temporal_upscaling_detail());
+    RUN(test_gpu_temporal_upscaling_recovery());
     RUN(test_gpu_temporal_upscaling_transient_effects());
     RUN(test_gpu_taa_slow_motion());
     RUN(test_gpu_taa_over_detail());

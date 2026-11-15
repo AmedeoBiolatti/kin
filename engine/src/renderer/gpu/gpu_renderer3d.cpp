@@ -944,14 +944,16 @@ bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeli
     return true;
 }
 
-// The same into two textures of one size (ao_blur_both.comp).
+// Two primary outputs of one size, with optional reconstruction confidence metadata.
 bool compute_pass_two(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeline, const GpuTexture& first,
                       const GpuTexture& second, std::span<const SDL_GPUTextureSamplerBinding> inputs,
-                      const void* uniforms, u32 bytes, Vec2i part = {}) {
-    const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> outputs{
+                      const void* uniforms, u32 bytes, Vec2i part = {}, const GpuTexture* metadata = nullptr) {
+    const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> outputs{
         SDL_GPUStorageTextureReadWriteBinding{.texture = first.handle(), .mip_level = 0, .layer = 0, .cycle = false},
-        SDL_GPUStorageTextureReadWriteBinding{.texture = second.handle(), .mip_level = 0, .layer = 0, .cycle = false}};
-    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, outputs.data(), 2, nullptr, 0);
+        SDL_GPUStorageTextureReadWriteBinding{.texture = second.handle(), .mip_level = 0, .layer = 0, .cycle = false},
+        SDL_GPUStorageTextureReadWriteBinding{
+            .texture = metadata ? metadata->handle() : nullptr, .mip_level = 0, .layer = 0, .cycle = false}};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, outputs.data(), metadata ? 3 : 2, nullptr, 0);
     if (!pass) {
         return false;
     }
@@ -1551,8 +1553,10 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     _capabilities.ambient_occlusion = _capabilities.contact_shadows = _ao_available;
     _capabilities.temporal_aa = _taa_available;
-    if (_taa_available && _taa_depth_sampled)
-        _taau_pipeline = make_compute(handle, "taau.comp.spv", {.samplers = 6, .readwrite_textures = 2});
+    if (_taa_available && _taa_depth_sampled &&
+        SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                     SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE))
+        _taau_pipeline = make_compute(handle, "taau.comp.spv", {.samplers = 7, .readwrite_textures = 3});
     _capabilities.temporal_upscaling = _taau_pipeline != nullptr;
     // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
     make_gi();
@@ -4456,11 +4460,26 @@ u64 texture_bytes(const GpuTexture& t) {
 
 u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     u64 bytes = 0;
-    for (const GpuTexture* t :
-         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._ao_upsampled,
-          &view._contact_raw, &view._contact_across, &view._fog_sun, &view._taa_depth, &view._taa_in, &view._taa_sharp,
-          &view._taa_motion, &view._taa_history[0], &view._taa_history[1], &view._taa_dilated[0], &view._taa_dilated[1],
-          &view._occ_depth}) {
+    for (const GpuTexture* t : {&view._ao_chain,
+                                &view._ao_depth,
+                                &view._ao_normals,
+                                &view._ao_raw,
+                                &view._ao_across,
+                                &view._ao_upsampled,
+                                &view._contact_raw,
+                                &view._contact_across,
+                                &view._fog_sun,
+                                &view._taa_depth,
+                                &view._taa_in,
+                                &view._taa_sharp,
+                                &view._taa_motion,
+                                &view._taa_history[0],
+                                &view._taa_history[1],
+                                &view._taa_dilated[0],
+                                &view._taa_dilated[1],
+                                &view._taa_confidence[0],
+                                &view._taa_confidence[1],
+                                &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
@@ -4523,6 +4542,7 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
     view._taa_sharp = {};
     view._taa_motion = {};
     view._taa_history = {};
+    view._taa_confidence = {};
     view._taa_dilated = {};
     view._taa_valid = false;
     view._taa_coverage_key = 0;
@@ -4552,6 +4572,15 @@ bool GpuRenderer3D::ensure_taa_targets(GpuView3D& view, bool sharpen) {
                 history = _device->create_target(ow, oh, hdr_format, stored);
                 view._taa_valid = false; // nothing in it
                 made = true;
+            }
+        }
+        if (view.upscaled()) {
+            for (GpuTexture& confidence : view._taa_confidence) {
+                if (!output_sized(confidence)) {
+                    confidence = _device->create_target(ow, oh, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, stored);
+                    view._taa_valid = false;
+                    made = true;
+                }
             }
         }
         for (GpuTexture& dilated : view._taa_dilated) {
@@ -4931,27 +4960,32 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
     const f32 still_blend = std::min(most, 1.0f - 1.0f / static_cast<f32>(held + 1));
     const auto dispatch = [&](const GpuTexture& target, const GpuTexture& current, const GpuTexture& history,
                               f32 sharpen, f32 amount) {
-        const std::array<SDL_GPUTextureSamplerBinding, 6> inputs{
+        const bool upscale = view.upscaled() && sharpen == 0.0f;
+        const std::array<SDL_GPUTextureSamplerBinding, 7> inputs{
             SDL_GPUTextureSamplerBinding{current.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{history.handle(), _owner->_sampler_linear},
             SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{depth ? depth->handle() : _owner->_white.handle(), _point_sampler},
-            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler}};
+            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{upscale && !reset ? view._taa_confidence[view._taa_read].handle()
+                                                           : _owner->_white.handle(),
+                                         _owner->_sampler_linear}};
         const TaaUniforms u{
             {w, h, 1.0f / w, 1.0f / h},
             {blend, reset ? 1.0f : 0.0f, sharpen, amount},
             {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
              reject ? 1.0f : 0.0f},
             {depth ? 1.0f : 0.0f, overlaid ? overlay_split : 2.0f, depth && sharpened ? 1.0f : 0.0f, 0.0f},
-            {still_blend, hold ? 1.0f : 0.0f, 0.0f, 0.0f},
+            {still_blend, hold ? 1.0f : 0.0f, std::max(blend, most), 0.0f},
             {static_cast<f32>(current.width()), static_cast<f32>(current.height()), 1.0f / current.width(),
              1.0f / current.height()}};
         // (The sharpening dispatch binds this frame's velocities as its second output too, and writes nothing there;
         // it reads them, with where the depth bent, as its last input.)
-        auto* pipeline = view.upscaled() && sharpen == 0.0f ? _taau_pipeline : _taa_pipeline;
-        if (!compute_pass_two(commands, pipeline, target, view._taa_dilated[1 - view._taa_read], inputs, &u,
-                              sizeof(u))) {
+        auto* pipeline = upscale ? _taau_pipeline : _taa_pipeline;
+        if (!compute_pass_two(commands, pipeline, target, view._taa_dilated[1 - view._taa_read],
+                              std::span{inputs}.first(upscale ? 7 : 6), &u, sizeof(u), {},
+                              upscale ? &view._taa_confidence[1 - view._taa_read] : nullptr)) {
             return false;
         }
         ++stats.taa_dispatches;
