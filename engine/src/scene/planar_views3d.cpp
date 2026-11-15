@@ -221,7 +221,7 @@ struct PlanarViews3D::Data {
         Entry& e = entries[id];
         e.frame = frame;
         if (e.options.hdr != options.hdr || e.options.samples != options.samples ||
-            e.options.background != options.background) {
+            e.options.background != options.background || e.options.render_scale != options.render_scale) {
             e.views.clear();
             e.room.clear();
             e.options = options;

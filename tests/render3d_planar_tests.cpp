@@ -561,6 +561,20 @@ void test_mirror_through_portal(Gpu& g, const PlanarSurfaces3D& surfaces) {
             if (x < 0)
                 g.capture(water ? "water-through-portal" : "mirror-through-portal");
         }
+        if (g.r3d.capabilities().temporal_upscaling) {
+            // The same planar renderer can switch back to native pictures when TAA is disabled. Reusing a
+            // scaled cached view here would fail rendering because reconstruction requires TAA.
+            PlanarViews3D scaled_planar{g.r3d, surfaces};
+            scene.taa.enabled = true;
+            compose(0);
+            assert(scaled_planar.render(world, scene, extent, {.samples = 1, .render_scale = 2.f / 3.f}));
+            g.frame(scene);
+            scene.taa.enabled = false;
+            compose(0);
+            assert(scaled_planar.render(world, scene, extent, {.samples = 1}));
+            g.frame(scene);
+            assert(g.at(scene.camera, {0, -1, -4}).g > 175);
+        }
     }
     std::cout << "planar: mirror and water through portal\n";
 }

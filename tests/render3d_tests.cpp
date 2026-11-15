@@ -5914,6 +5914,92 @@ void test_gpu_taa_slow_motion() {
 // one sample; the gun overlay stays in front and is not smeared; picking does
 // not see the jitter; works with ambient occlusion and contact shadows, with an
 // HDR view and bloom.
+// Display coordinates, history resets and disocclusion must survive a separate shading extent. Also exercise
+// odd-size resize, picking and HDR/sharpening: sampling a render-sized motion texture with output coordinates
+// used to be harmless at scale 1, but is out of bounds in an upscaler.
+void test_gpu_temporal_upscaling() {
+    with_gpu("test_gpu_temporal_upscaling", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_upscaling, "temporal upscaling"))
+            return;
+        for (const float invalid : {0.f, .49f, 1.01f, std::numeric_limits<float>::quiet_NaN()})
+            assert(!r3d.create_view({160, 120}, {.render_scale = invalid}));
+        const auto box = make_box(r3d, {2, 2, .2f});
+        for (const float scale : {2.f / 3.f, .5f}) {
+            for (const bool hdr : {false, true}) {
+                kin::ViewOptions3D options;
+                options.background = kin::colors::black;
+                options.hdr = hdr;
+                options.bloom = hdr ? .1f : 0.f;
+                options.pick = true;
+                options.render_scale = scale;
+                auto view = r3d.create_view({160, 120}, options).value_or({});
+                assert(view && view.samples() == 1);
+                assert((view.size() == kin::Vec2i{160, 120} && view.texture().size() == view.size()));
+                assert((view.render_resolution() == kin::Vec2i{static_cast<int>(std::ceil(160 * scale)),
+                                                               static_cast<int>(std::ceil(120 * scale))}));
+                kin::Scene3D scene;
+                scene.camera = flat_camera();
+                assert(!r3d.can_render_part(view, scene) && !view.set_render_size({80, 60}));
+                assert(!r3d.render(view, scene)); // reconstruction is mandatory, not a stretched fallback
+                scene.taa = {.enabled = true, .sharpness = hdr ? .2f : 0.f};
+                const auto pose = [&](float x, Color color) {
+                    scene.clear();
+                    assert(scene.draw(box, Mat4f::translation({x, 0, 0}), {.color = color, .unlit = true},
+                                      kin::colors::white, 42));
+                };
+                const auto shoot = [&] {
+                    auto p = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                    return p;
+                };
+                pose(0, Color::rgb(255, 0, 0));
+                Pixels p;
+                for (int frame = 0; frame < 32; ++frame)
+                    p = shoot();
+                assert(p.at(80, 60).r > 150 && p.at(80, 60).g < 5);
+                assert(r3d.debug_stats().taa_dispatches == (hdr ? 2u : 1u));
+                // Move a matched copy off its old footprint. Its history must not leave a red trail.
+                pose(4, Color::rgb(255, 0, 0));
+                for (int frame = 0; frame < 8; ++frame)
+                    p = shoot();
+                assert(p.at(80, 60).r < 5);
+                const auto at = scene.camera.project({4, 0, 0}, screen);
+                assert(at && p.at(at->pos).r > 150);
+                const auto picked = r3d.pick(view, {int(at->pos.x), int(at->pos.y)}).value_or({});
+                assert(picked.hit && picked.id == 42);
+                // A reset must agree with a fresh view, including the first spatially reconstructed frame.
+                scene.debug.freeze_jitter = true;
+                pose(0, Color::rgb(0, 255, 0));
+                view.reset_history();
+                const auto cut = shoot();
+                auto fresh = r3d.create_view({160, 120}, options).value_or({});
+                auto first = shoot_view(renderer, r3d, fresh, scene);
+                renderer.present();
+                assert(cut.rgba == first.rgba);
+                assert(r3d.resize(view, {161, 123}));
+                assert((view.size() == kin::Vec2i{161, 123} && view.render_size() == view.size()));
+                assert(view.texture().size() == view.size());
+                p = shoot();
+                assert(r3d.debug_stats().taa_reset && p.at(80, 60).g > 100 && p.at(80, 60).r < 5);
+                assert(view.set_render_size({}));
+            }
+        }
+        // Authored jitter periods keep their existing clamp contract before scaling the phase count.
+        auto bounded = r3d.create_view({160, 120}, {.render_scale = .5f}).value_or({});
+        kin::Scene3D scene;
+        scene.taa.enabled = true;
+        scene.taa.jitter_samples = std::numeric_limits<kin::u32>::max();
+        for (kin::u32 frame = 0; frame < 2; ++frame) {
+            render_ok(r3d, bounded, scene);
+            const auto want = kin::taa_jitter(frame, kin::max_taa_jitter_samples);
+            const auto got = r3d.debug_stats().taa_jitter;
+            assert(got.x == want.x && got.y == want.y);
+            renderer.present();
+        }
+    });
+}
+
 void test_gpu_taa() {
     with_gpu("test_gpu_taa", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -24126,6 +24212,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_ao_half_resolution_silhouette());
     RUN(test_taa_jitter());
     RUN(test_gpu_taa());
+    RUN(test_gpu_temporal_upscaling());
     RUN(test_gpu_taa_slow_motion());
     RUN(test_gpu_taa_over_detail());
     RUN(test_gpu_taa_still_detail());

@@ -45,6 +45,7 @@ struct RendererCapabilities3D {
     bool ambient_occlusion = false;
     bool contact_shadows = false;
     bool temporal_aa = false;
+    bool temporal_upscaling = false; // lower-resolution shading into display-resolution temporal history
     // Whether Scene3D::lod's cluster cut can run in compute (Scene3D::debug.gpu_culling): compute with storage buffers
     // read and written, buffers that are index and indirect-argument buffers a compute pass writes. Else the CPU cuts.
     bool gpu_driven_clusters = false;
@@ -134,6 +135,10 @@ struct ViewOptions3D {
     // white (a sun glint, a lamp) survives an 8-bit picture, for a reader that takes it back (x / (1 - x)): kin's
     // planar views' pictures (a mirror's, a portal's), which the view seeing them tonemaps (and blooms) as its own.
     bool compress = false;
+    // Native temporal upscaling: shade at ceil(size * render_scale), reconstruct to size before bloom/output.
+    // [0.5, 1], 1 preserves native rendering. Below 1 requires temporal_upscaling and Scene3D::taa.enabled.
+    // Picking and texture()/size() remain in output pixels. Partial-view rendering is unavailable below 1.
+    f32 render_scale = 1.0f;
 };
 
 // Single-sample data attachments. Depth is reverse Z (0 background/far, 1 near),
@@ -281,6 +286,7 @@ public:
     // The part of the picture renders fill, from its top-left corner (View3D::set_render_size): the whole unless the
     // backend renders parts and was asked to.
     virtual Vec2i render_size() const { return size(); }
+    virtual Vec2i render_resolution() const { return render_size(); }
     virtual bool set_render_size(Vec2i) { return false; }
 };
 
