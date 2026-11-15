@@ -150,6 +150,54 @@ struct FogVolume {
         }
     }
 };
+// What a view's scene is drawn into: its colour (the SDR texture or the HDR float picture), a depth texture and the
+// surfaces' normals (both read by decals and soft particles), and a framebuffer of the colour alone, through which
+// those draw while they read the depth.
+struct SceneTargets {
+    GLuint framebuffer = 0, plain = 0, depth = 0, normals = 0;
+    std::shared_ptr<bool> alive;
+    SceneTargets() = default;
+    SceneTargets(const SceneTargets&) = delete;
+    SceneTargets& operator=(const SceneTargets&) = delete;
+    ~SceneTargets() {
+        if (alive && *alive) {
+            glDeleteFramebuffers(1, &framebuffer);
+            glDeleteFramebuffers(1, &plain);
+            glDeleteTextures(1, &depth);
+            glDeleteTextures(1, &normals);
+        }
+    }
+};
+std::shared_ptr<SceneTargets> scene_targets(std::shared_ptr<bool> alive, Vec2i size, GLuint colour) {
+    auto t = std::make_shared<SceneTargets>();
+    t->alive = std::move(alive);
+    const auto texture = [&](GLuint& handle, GLenum format) {
+        glGenTextures(1, &handle);
+        glBindTexture(GL_TEXTURE_2D, handle);
+        glTexStorage2D(GL_TEXTURE_2D, 1, format, size.x, size.y);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    };
+    texture(t->depth, GL_DEPTH_COMPONENT24);
+    texture(t->normals, GL_RGBA8);
+    glGenFramebuffers(1, &t->framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, t->framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colour, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, t->normals, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, t->depth, 0);
+    const std::array<GLenum, 2> one{GL_COLOR_ATTACHMENT0, GL_NONE};
+    glDrawBuffers(2, one.data());
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return {};
+    glGenFramebuffers(1, &t->plain);
+    glBindFramebuffer(GL_FRAMEBUFFER, t->plain);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colour, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return {};
+    return t;
+}
 struct PreparedInstances;
 struct View final : IViewBackend3D {
     Texture color;
@@ -161,6 +209,7 @@ struct View final : IViewBackend3D {
     std::vector<std::shared_ptr<PreparedInstances>> prepared, overlay_prepared;
     std::shared_ptr<HdrTargets> hdr; // null: an SDR view, drawn straight into `color`
     std::shared_ptr<FogVolume> fog;  // Fog3D::volumetric's, while it is on
+    std::shared_ptr<SceneTargets> targets;
     Texture texture() const override { return color; }
     Vec2i size() const override { return color.size(); }
     u32 samples() const override { return 1; }
@@ -357,8 +406,8 @@ enum Omitted : u32 {
 constexpr std::array<const char*, 18> omitted_text{
     "custom material shaders (Material3D::shader) draw as kin's stock material",
     "wireframe materials draw filled",
-    "particles are not drawn",
-    "decals are not drawn",
+    "particles neither cast nor receive shadows",
+    "(unused)",
     "screen-space ambient occlusion is off",
     "contact shadows are off",
     "screen-space reflections are off",
@@ -372,7 +421,7 @@ constexpr std::array<const char*, 18> omitted_text{
     "the night sky has no stars",
     "volumetric fog (Fog3D::volumetric) needs EXT_color_buffer_float and a perspective camera: off",
     "surface shaders and material graphs (Material3D::surface) draw as kin's stock material",
-    "weather (rain, snow, wet surfaces) is not drawn",
+    "(unused)",
 };
 // A draw's uniforms, cached per program (their values belong to the linked program).
 struct DrawUniforms {
@@ -402,8 +451,8 @@ struct MeshProgram {
         : handle(program), surface(is_surface), alive(std::move(liveness)) {
         glUseProgram(handle);
         // Sampler units belong to the linked program, not individual draws.
-        constexpr std::array names{"uTexture", "uNormal",   "uMetalRough", "uOcclusion", "uEmission",
-                                   "uJoints",  "uFogTable", "uShadow",     "uGraphMaps", "uFogVolume"};
+        constexpr std::array names{"uTexture",  "uNormal", "uMetalRough", "uOcclusion", "uEmission",   "uJoints",
+                                   "uFogTable", "uShadow", "uGraphMaps",  "uFogVolume", "uDecalDepth", "uDecalNormals"};
         for (u32 unit = 0; unit < names.size(); ++unit)
             glUniform1i(location(names[unit]), GLint(unit));
         draw = {location("uShadowPass"),
@@ -438,7 +487,17 @@ struct MeshProgram {
         return locations.emplace(name, glGetUniformLocation(handle, name)).first->second;
     }
 };
-constexpr GLuint graph_maps_unit = 8, fog_volume_unit = 9;
+constexpr GLuint graph_maps_unit = 8, fog_volume_unit = 9, decal_depth_unit = 10, decal_normals_unit = 11;
+// A particle sprite as the vertex shader reads it (native GpuParticle3D's layout).
+struct ParticleRecord {
+    std::array<f32, 4> position_size, colour, axis_rotation, frame;
+};
+static_assert(sizeof(ParticleRecord) == 64);
+// A source of sprites: a Scene3D::draw_particles batch or a weather layer.
+struct ParticleSource {
+    const ParticleLook3D* look = nullptr;
+    std::span<const ParticleSprite3D> sprites;
+};
 // A surface shader made by this renderer (create_surface_source): its program.
 struct SurfaceProgram final : ISurfaceShaderBackend3D {
     std::shared_ptr<MeshProgram> program;
@@ -471,7 +530,13 @@ struct WebGLRenderer3D::Impl {
     MeshProgram* current = nullptr;                          // the mesh program in use (null: another, or none)
     std::string mesh_vertex, mesh_fragment, graph_functions; // the sources surface programs are made from
     GLuint instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0, post_program = 0,
-           graph_maps_dummy = 0, fog_program = 0, fog_volume_dummy = 0;
+           graph_maps_dummy = 0, fog_program = 0, fog_volume_dummy = 0, particle_program = 0, particle_vao = 0,
+           particle_buffer = 0;
+    std::shared_ptr<MeshProgram> decal; // mesh.frag with KIN_DECAL, decal.vert's boxes
+    u64 particle_serial = 0;            // the pass whose scene uniforms the particle program holds
+    std::vector<ParticleSprite3D> weather_sprites_now;
+    std::vector<WeatherBatch3D> weather_batches_now;
+    std::vector<ParticleRecord> particle_records;
     // The fog volume this pass's mesh and sky programs read (environment): its depth (0: none), whether it holds the
     // sun's in-scattering, the target's size.
     struct {
@@ -485,7 +550,7 @@ struct WebGLRenderer3D::Impl {
     RendererCapabilities3D caps{};
     u32 omitted_told = 0; // the Omitted bits already warned about
     bool hdr_refused_told = false, pick_told = false;
-    std::unordered_map<std::string_view, GLint> sky_uniforms, post_uniforms, fog_uniforms;
+    std::unordered_map<std::string_view, GLint> sky_uniforms, post_uniforms, fog_uniforms, particle_uniforms;
     // What a pass sets on every mesh program it draws with (apply), once per program: `serial` names the pass.
     struct Pass {
         u64 serial = 0;
@@ -581,6 +646,22 @@ struct WebGLRenderer3D::Impl {
         glUniform1i(glGetUniformLocation(post_program, "uState"), 2);
         float_targets =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "EXT_color_buffer_float");
+        {
+            std::string decal_fragment = mesh_fragment;
+            decal_fragment.insert(decal_fragment.find('\n') + 1, "#define KIN_DECAL\n");
+            decal = std::make_shared<MeshProgram>(
+                WebGLDevice::program(WebGLDevice::shader_source("decal.vert.glsl").c_str(), decal_fragment.c_str()),
+                false, device.alive());
+        }
+        particle_program = WebGLDevice::program(WebGLDevice::shader_source("particle.vert.glsl").c_str(),
+                                                WebGLDevice::shader_source("particle.frag.glsl").c_str());
+        glUseProgram(particle_program);
+        glUniform1i(glGetUniformLocation(particle_program, "uTexture"), 0);
+        glUniform1i(glGetUniformLocation(particle_program, "uDepth"), 1);
+        glUniform1i(glGetUniformLocation(particle_program, "uFogTable"), 6);
+        glUniform1i(glGetUniformLocation(particle_program, "uFogVolume"), GLint(fog_volume_unit));
+        glGenBuffers(1, &particle_buffer);
+        glGenVertexArrays(1, &particle_vao);
         fog_program =
             WebGLDevice::program(sky_vertex.c_str(), WebGLDevice::shader_source("fog_volume.frag.glsl").c_str());
         glUseProgram(fog_program);
@@ -635,6 +716,7 @@ struct WebGLRenderer3D::Impl {
         caps.depth_bits = 24;
         caps.morph_targets = true;
         caps.auto_exposure = float_targets;
+        caps.particles = caps.soft_particles = caps.decals = true;
         caps.max_spot_lights = max_spot_lights; // the most important 16 of each in view, unshadowed
         const bool unmasked =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "WEBGL_debug_renderer_info");
@@ -657,6 +739,9 @@ struct WebGLRenderer3D::Impl {
         glDeleteProgram(sky_program);
         glDeleteProgram(post_program);
         glDeleteProgram(fog_program);
+        glDeleteProgram(particle_program);
+        glDeleteBuffers(1, &particle_buffer);
+        glDeleteVertexArrays(1, &particle_vao);
         glDeleteTextures(1, &fog_volume_dummy);
         glDeleteVertexArrays(1, &sky_vao);
         glDeleteTextures(1, &shadow_dummy);
@@ -665,7 +750,10 @@ struct WebGLRenderer3D::Impl {
     GLint location(GLuint handle, const char* name) {
         if (current && handle == current->handle)
             return current->location(name);
-        auto& cache = handle == sky_program ? sky_uniforms : handle == fog_program ? fog_uniforms : post_uniforms;
+        auto& cache = handle == sky_program        ? sky_uniforms
+                      : handle == fog_program      ? fog_uniforms
+                      : handle == particle_program ? particle_uniforms
+                                                   : post_uniforms;
         const auto found = cache.find(name);
         if (found != cache.end())
             return found->second;
@@ -923,8 +1011,10 @@ struct WebGLRenderer3D::Impl {
                         ? omit_surface
                         : 0;
         }
-        bits |= scene.particle_draws().empty() ? 0 : omit_particles;
-        bits |= scene.decals().empty() ? 0 : omit_decals;
+        bits |= std::ranges::any_of(scene.particle_draws(),
+                                    [](const auto& d) { return d.look.casts_shadow || d.look.receives_shadow; })
+                    ? omit_particles
+                    : 0;
         bits |= scene.ambient_occlusion.enabled ? omit_ambient_occlusion : 0;
         bits |= scene.contact_shadows.enabled ? omit_contact_shadows : 0;
         bits |= scene.ssr.enabled ? omit_ssr : 0;
@@ -942,7 +1032,6 @@ struct WebGLRenderer3D::Impl {
                         (!float_targets || scene.camera.projection == Projection3D::Orthographic)
                     ? omit_volumetric
                     : 0;
-        bits |= scene.weather.active() ? omit_weather : 0;
         if (const auto* overlay = scene.overlay_if_any())
             bits |= omitted(*overlay);
         return bits;
@@ -1107,7 +1196,7 @@ struct WebGLRenderer3D::Impl {
         while ((size.x >> t->meter_level) > 64 || (size.y >> t->meter_level) > 64)
             ++t->meter_level;
         const u32 levels = options.auto_exposure.enabled ? t->meter_level + 1 : 1;
-        t->scene = float_target(alive, size, GL_RGBA16F, true, levels);
+        t->scene = float_target(alive, size, GL_RGBA16F, false, levels); // (the view's targets hold the depth)
         if (!t->scene)
             return {};
         if (options.bloom > 0) {
@@ -1409,6 +1498,156 @@ struct WebGLRenderer3D::Impl {
         glEnable(GL_DEPTH_TEST);
         glDepthMask(GL_TRUE);
     }
+    // Scene3D's decals (native decal.vert/decal.frag's): each box's back faces, through the view's colour alone, so
+    // the fragment reads the depth and normals the opaque receivers left; lit and fogged as a material, blended over
+    // them. Lower `order` first; one decal a draw.
+    void draw_decals(const Scene3D& scene, const SceneTargets& targets, Vec2i size, RenderDebugStats3D& stats) {
+        std::vector<const Decal3D*> order;
+        for (const auto& d : scene.decals())
+            order.push_back(&d);
+        std::stable_sort(order.begin(), order.end(), [](const auto* a, const auto* b) { return a->order < b->order; });
+        glBindFramebuffer(GL_FRAMEBUFFER, targets.plain);
+        glActiveTexture(GL_TEXTURE0 + decal_depth_unit);
+        glBindSampler(decal_depth_unit, 0);
+        glBindTexture(GL_TEXTURE_2D, targets.depth);
+        glActiveTexture(GL_TEXTURE0 + decal_normals_unit);
+        glBindSampler(decal_normals_unit, 0);
+        glBindTexture(GL_TEXTURE_2D, targets.normals);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+        use(*decal);
+        const Mat4f to_world = pass.view_projection.inverse();
+        glUniformMatrix4fv(uniform("uToWorld"), 1, GL_FALSE, to_world.m);
+        glUniform2f(uniform("uTargetInv"), 1.0f / f32(size.x), 1.0f / f32(size.y));
+        glBindVertexArray(sky_vao);
+        for (const Decal3D* d : order) {
+            const Mat4f& m = d->transform;
+            const Bounds3D box{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
+            if (scene.cull && !visible(box, pass.view_projection * m)) {
+                ++stats.decals_culled;
+                continue;
+            }
+            const Mat4f to_decal = m.inverse();
+            glUniformMatrix4fv(uniform("uModel"), 1, GL_FALSE, m.m);
+            glUniformMatrix4fv(uniform("uDecalToDecal"), 1, GL_FALSE, to_decal.m);
+            const LinearColor c = to_linear(d->color);
+            glUniform4f(uniform("uDecalColour"), c.r, c.g, c.b, c.a);
+            glUniform4f(uniform("uDecalSurface"), d->roughness, d->metallic, d->normal ? d->normal_strength : 0.0f,
+                        d->emission);
+            glUniform4f(uniform("uDecalFade"), d->normal_fade, d->depth_fade, 0, 0);
+            const auto axis = [&](const char* name, int column) {
+                const Vec3f v = normalize(Vec3f{m.at(0, column), m.at(1, column), m.at(2, column)});
+                glUniform3f(uniform(name), v.x, v.y, v.z);
+            };
+            axis("uDecalAxisX", 0);
+            axis("uDecalAxisY", 1);
+            axis("uDecalAxisZ", 2);
+            for (const GLuint unit : {0u, 1u}) {
+                const Texture& image = unit == 0 ? d->texture : d->normal;
+                const auto* texture = device.texture(image ? image : white);
+                glActiveTexture(GL_TEXTURE0 + unit);
+                glBindTexture(GL_TEXTURE_2D, texture->handle);
+                glBindSampler(unit, sampler(d->wrap, d->wrap, texture->scale_mode));
+            }
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            ++stats.decals_drawn;
+            ++stats.decal_draws;
+        }
+        material_bindings = {};
+        glCullFace(GL_BACK);
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glBindFramebuffer(GL_FRAMEBUFFER, targets.framebuffer);
+    }
+    // A run of `count` particle sprites of one look, from `first` of the uploaded records (native's particle pass: the
+    // look's blend, light tint, picture or disc, fog). Soft ones draw through the view's colour alone, reading and
+    // testing against its depth.
+    void draw_particles(const Scene3D& scene, const ParticleLook3D& look, u32 first, u32 count,
+                        const SceneTargets* targets, Vec2i size, RenderDebugStats3D& stats) {
+        if (!count)
+            return;
+        glUseProgram(particle_program);
+        current = nullptr;
+        const auto loc = [&](const char* name) { return location(particle_program, name); };
+        if (particle_serial != pass.serial) {
+            environment(particle_program, scene);
+            const Camera3D& camera = scene.camera;
+            const auto vec3 = [&](const char* name, Vec3f v) { glUniform3f(loc(name), v.x, v.y, v.z); };
+            glUniformMatrix4fv(loc("uViewProjection"), 1, GL_FALSE, pass.view_projection.m);
+            const Mat4f to_world = pass.view_projection.inverse();
+            glUniformMatrix4fv(loc("uToWorld"), 1, GL_FALSE, to_world.m);
+            glUniform2f(loc("uTargetInv"), 1.0f / f32(size.x), 1.0f / f32(size.y));
+            vec3("uRight", camera.right());
+            vec3("uUp", camera.up());
+            glUniform1i(loc("uOrtho"), camera.projection == Projection3D::Orthographic);
+            glUniform1i(loc("uPointCount"), GLint(pass.point_count));
+            if (pass.point_count)
+                glUniform4fv(loc("uPoints[0]"), GLsizei(pass.point_count * 2), pass.points.data());
+            glUniform1i(loc("uSpotCount"), GLint(pass.spot_count));
+            if (pass.spot_count)
+                glUniform4fv(loc("uSpots[0]"), GLsizei(pass.spot_count * 4), pass.spots.data());
+            const Vec3f to_sun = normalize(pass.lights->sun.direction);
+            vec3("uSunDirection", to_sun);
+            glUniform3f(loc("uSunColor"), pass.lights->sun.color.r, pass.lights->sun.color.g, pass.lights->sun.color.b);
+            particle_serial = pass.serial;
+        }
+        const Vec3f axis = length_squared(look.axis) > 0.0f ? normalize(look.axis) : Vec3f{0.0f, 1.0f, 0.0f};
+        glUniform4f(loc("uAxis"), axis.x, axis.y, axis.z, f32(u32(look.facing)));
+        const u32 columns = std::max(look.atlas_columns, 1u), rows = std::max(look.atlas_rows, 1u);
+        const u32 frames = look.atlas_frames > 0 ? std::min(look.atlas_frames, columns * rows) : columns * rows;
+        glUniform4f(loc("uAtlas"), f32(columns), f32(rows), f32(frames), look.blend_frames ? 1.0f : 0.0f);
+        glUniform2f(loc("uStretch"), look.stretch, look.stretch_min);
+        const f32 lit = std::clamp(look.lit, 0.0f, 1.0f);
+        glUniform1f(loc("uLit"), lit);
+        const LinearRgb tint = mix(LinearRgb{1, 1, 1}, particle_light_tint(*pass.lights), lit);
+        glUniform3f(loc("uTint"), tint.r, tint.g, tint.b);
+        const auto* picture = look.texture ? device.texture(look.texture) : nullptr;
+        glUniform4f(loc("uFlags"), 0, 0, f32(u32(look.blend)), picture ? 1.0f : 0.0f);
+        const bool soft = look.soft && targets && look.soft_distance > 0;
+        glUniform4f(loc("uDisc"), look.softness, look.ring, soft ? look.soft_distance : 0.0f, 0);
+        glUniform1i(loc("uFogged"), look.fogged);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, (picture ? picture : device.texture(white))->handle);
+        glBindSampler(0, sampler(Wrap3D::Clamp, Wrap3D::Clamp, picture ? picture->scale_mode : ScaleMode::Linear));
+        if (soft) {
+            glBindFramebuffer(GL_FRAMEBUFFER, targets->plain);
+            glActiveTexture(GL_TEXTURE1);
+            glBindSampler(1, 0);
+            glBindTexture(GL_TEXTURE_2D, targets->depth);
+            ++stats.particle_soft;
+        }
+        material_bindings = {}; // (units 0 and 1)
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        if (look.blend == ParticleBlend3D::Additive)
+            glBlendFunc(GL_ONE, GL_ONE);
+        else
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(particle_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, particle_buffer);
+        for (GLuint a = 0; a < 4; ++a) {
+            glEnableVertexAttribArray(a);
+            glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, sizeof(ParticleRecord),
+                                  reinterpret_cast<void*>(std::size_t(first) * sizeof(ParticleRecord) + a * 16));
+            glVertexAttribDivisor(a, 1);
+        }
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, GLsizei(count));
+        if (soft) {
+            glBindTexture(GL_TEXTURE_2D, 0); // (unit 1: the depth is attached again next)
+            glBindFramebuffer(GL_FRAMEBUFFER, targets->framebuffer);
+        }
+        glDisable(GL_BLEND);
+        ++stats.particle_batches;
+        stats.particles_drawn += count;
+    }
     void palette(const Scene3D& scene, RenderDebugStats3D* stats = nullptr) {
         glActiveTexture(GL_TEXTURE5);
         glBindSampler(5, 0);
@@ -1532,7 +1771,7 @@ struct WebGLRenderer3D::Impl {
     }
     void scene(const Scene3D& scene, const Lights3D& lights, Vec2i size, RenderDebugStats3D& stats,
                sky_model::AmbientLight3D& ambient, const std::vector<std::shared_ptr<PreparedInstances>>& prepared,
-               const View* shadowed) {
+               const View* shadowed, const SceneTargets* targets) {
         stats.fog_applied = stats.fog_applied || scene.fog.enabled;
         palette(scene, &stats);
         const Mat4f vp = scene.camera.view_projection(f32(size.x) / size.y);
@@ -1600,45 +1839,137 @@ struct WebGLRenderer3D::Impl {
         glActiveTexture(GL_TEXTURE7);
         glBindSampler(7, 0);
         glBindTexture(GL_TEXTURE_2D_ARRAY, shadowed && shadowed->shadow ? shadowed->shadow->texture : shadow_dummy);
+        // Opaque meshes that take decals, the decals, the opaque meshes that don't (drawn over them: native's order),
+        // then what is blended: transparent copies and particle sprites, back to front together.
         struct Transparent {
-            const Scene3D::Draw* draw;
-            PreparedInstances* prepared;
-            u32 level, copy;
-            f32 depth;
+            const Scene3D::Draw* draw = nullptr; // a mesh's copy, else a sprite
+            PreparedInstances* prepared = nullptr;
+            u32 level = 0, copy = 0; // (a sprite: its source and its index in it)
+            f32 depth = 0;
         };
         std::vector<Transparent> transparent;
         std::array<std::vector<u32>, max_mesh_levels> batches;
-        for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
-            const auto& draw = scene.draws()[slot];
-            if (draw.clip == DrawClip3D::whole_if_cut)
-                continue; // (nothing is cut here: Camera3D::clip_plane is not supported)
-            auto* records = slot < prepared.size() ? prepared[slot].get() : nullptr;
-            for (auto& batch : batches)
-                batch.clear();
-            const auto copies =
-                (draw.batch ? draw.batch.instances() : scene.instances()).subspan(draw.first, draw.count);
-            for (u32 copy_index = 0; copy_index < copies.size(); ++copy_index) {
-                const auto& copy = copies[copy_index];
-                if (!draw.skinned && scene.cull && !visible(draw.mesh.bounds(), vp * copy.transform)) {
-                    ++stats.culled;
-                    continue;
-                }
-                const u32 level = level_for(scene, draw, copy, f32(size.y));
-                if (draw.material.blend == Blend3D::Alpha || draw.material.blend == Blend3D::Additive)
-                    transparent.push_back(
-                        {&draw, records, level, copy_index,
-                         dot(copy.transform.apply(draw.mesh.bounds().center()) - scene.camera.position,
-                             scene.camera.forward())});
-                else
-                    batches[level].push_back(copy_index);
+        const bool decals = targets && !scene.decals().empty();
+        if (decals) {
+            const std::array<GLenum, 2> both{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+            glDrawBuffers(2, both.data());
+        }
+        for (int round = 0; round < 2; ++round) {
+            if (round == 1 && decals) {
+                const std::array<GLenum, 2> one{GL_COLOR_ATTACHMENT0, GL_NONE};
+                glDrawBuffers(2, one.data());
+                draw_decals(scene, *targets, size, stats);
             }
-            for (u32 level = 0; level < max_mesh_levels; ++level)
-                this->draw(scene, draw, level, batches[level], records, max_shadow_cascades + level, stats);
+            for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
+                const auto& draw = scene.draws()[slot];
+                if (draw.clip == DrawClip3D::whole_if_cut)
+                    continue; // (nothing is cut here: Camera3D::clip_plane is not supported)
+                const bool blended = draw.material.blend == Blend3D::Alpha || draw.material.blend == Blend3D::Additive;
+                if (blended ? round != 0 : draw.material.receives_decals != (round == 0))
+                    continue;
+                auto* records = slot < prepared.size() ? prepared[slot].get() : nullptr;
+                for (auto& batch : batches)
+                    batch.clear();
+                const auto copies =
+                    (draw.batch ? draw.batch.instances() : scene.instances()).subspan(draw.first, draw.count);
+                for (u32 copy_index = 0; copy_index < copies.size(); ++copy_index) {
+                    const auto& copy = copies[copy_index];
+                    if (!draw.skinned && scene.cull && !visible(draw.mesh.bounds(), vp * copy.transform)) {
+                        ++stats.culled;
+                        continue;
+                    }
+                    const u32 level = level_for(scene, draw, copy, f32(size.y));
+                    if (blended)
+                        transparent.push_back(
+                            {&draw, records, level, copy_index,
+                             dot(copy.transform.apply(draw.mesh.bounds().center()) - scene.camera.position,
+                                 scene.camera.forward())});
+                    else
+                        batches[level].push_back(copy_index);
+                }
+                for (u32 level = 0; level < max_mesh_levels; ++level)
+                    this->draw(scene, draw, level, batches[level], records, max_shadow_cascades + level, stats);
+            }
+        }
+        // The sprites: the scene's batches and the weather's layers, culled to the view; a source that is not sorted
+        // (ParticleLook3D::sort off) is one item at its sprites' mean depth.
+        std::vector<ParticleSource> sources;
+        for (const auto& batch : scene.particle_draws())
+            sources.push_back({&batch.look, scene.particle_sprites().subspan(batch.first, batch.count)});
+        weather_sprites_now.clear();
+        weather_batches_now.clear();
+        if (scene.weather.active()) {
+            weather_sprites(scene.weather, scene.camera, weather_sprites_now, weather_batches_now);
+            for (const auto& batch : weather_batches_now) {
+                sources.push_back({&batch.look, std::span{weather_sprites_now}.subspan(batch.first, batch.count)});
+                stats.weather_particles += batch.count;
+            }
+        }
+        const Vec3f eye = scene.camera.position, forward = scene.camera.forward();
+        std::vector<std::vector<u32>> shown(sources.size());
+        for (u32 k = 0; k < sources.size(); ++k) {
+            const auto& source = sources[k];
+            stats.particles_submitted += u32(source.sprites.size());
+            f32 sum = 0;
+            for (u32 i = 0; i < source.sprites.size(); ++i) {
+                const auto& sprite = source.sprites[i];
+                f32 reach = sprite.size * 0.75f;
+                if (source.look->facing == ParticleFacing3D::Stretched)
+                    reach += length(particle_streak(sprite, *source.look));
+                const Vec3f r{reach, reach, reach};
+                if (scene.cull && !visible({sprite.position - r, sprite.position + r}, vp))
+                    continue;
+                const f32 depth = dot(sprite.position - eye, forward);
+                shown[k].push_back(i);
+                if (source.look->sort)
+                    transparent.push_back({nullptr, nullptr, k, i, depth});
+                else
+                    sum += depth;
+            }
+            if (!source.look->sort && !shown[k].empty())
+                transparent.push_back({nullptr, nullptr, k, ~0u, sum / f32(shown[k].size())});
         }
         std::stable_sort(transparent.begin(), transparent.end(),
                          [](const auto& a, const auto& b) { return a.depth > b.depth; });
+        // The sprites' records in the order they are drawn (one upload); consecutive sprites of a source are one draw.
+        particle_records.clear();
         for (const auto& item : transparent) {
-            draw(scene, *item.draw, item.level, {&item.copy, 1}, item.prepared, ~0u, stats);
+            if (item.draw)
+                continue;
+            const auto& source = sources[item.level];
+            const auto put = [&](u32 i) {
+                const auto& p = source.sprites[i];
+                particle_records.push_back({{p.position.x, p.position.y, p.position.z, p.size},
+                                            {p.colour.r, p.colour.g, p.colour.b, p.alpha},
+                                            {p.velocity.x, p.velocity.y, p.velocity.z, p.rotation},
+                                            {p.frame, 0, 0, 0}});
+            };
+            if (item.copy == ~0u)
+                for (const u32 i : shown[item.level])
+                    put(i);
+            else
+                put(item.copy);
+        }
+        if (!particle_records.empty()) {
+            glBindBuffer(GL_ARRAY_BUFFER, particle_buffer);
+            glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(particle_records.size() * sizeof(ParticleRecord)),
+                         particle_records.data(), GL_STREAM_DRAW);
+        }
+        u32 record = 0;
+        for (std::size_t i = 0; i < transparent.size();) {
+            const auto& item = transparent[i];
+            if (item.draw) {
+                draw(scene, *item.draw, item.level, {&item.copy, 1}, item.prepared, ~0u, stats);
+                ++i;
+                continue;
+            }
+            u32 count = 0;
+            std::size_t j = i;
+            for (; j < transparent.size() && !transparent[j].draw && transparent[j].level == item.level; ++j)
+                count += transparent[j].copy == ~0u ? u32(shown[item.level].size()) : 1u;
+            draw_particles(scene, *sources[item.level].look, record, count, targets, size, stats);
+            record += count;
+            i = j;
         }
     }
 };
@@ -1713,9 +2044,17 @@ std::shared_ptr<IViewBackend3D> WebGLRenderer3D::create_view(Vec2i size, const V
     view->options = options;
     view->hdr = _impl->hdr_targets(size, options);
     // An HDR view's 2D texture takes the output pass; it needs no depth of its own.
-    view->color = _impl->device.create_surface(size, !view->hdr);
+    view->color = _impl->device.create_surface(size, false);
     view->surface = _impl->device.surface(view->color);
-    return view->surface ? view : nullptr;
+    if (!view->surface)
+        return nullptr;
+    GLint limit = 0;
+    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &limit);
+    if (size.x > limit || size.y > limit)
+        return nullptr;
+    view->targets =
+        scene_targets(_impl->device.alive(), size, view->hdr ? view->hdr->scene->texture : view->surface->handle);
+    return view->targets ? view : nullptr;
 }
 bool WebGLRenderer3D::resize_view(IViewBackend3D& backend, Vec2i size) {
     auto* view = dynamic_cast<View*>(&backend);
@@ -1751,7 +2090,7 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
         glActiveTexture(GL_TEXTURE0 + fog_volume_unit);
         glBindTexture(GL_TEXTURE_3D, _impl->fog_volume_dummy);
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, view->hdr ? view->hdr->scene->framebuffer : view->surface->framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, view->targets->framebuffer);
     glViewport(0, 0, view->size().x, view->size().y);
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_DEPTH_TEST);
@@ -1770,14 +2109,15 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
         glClearColor(color.r / 255.0f * alpha, color.g / 255.0f * alpha, color.b / 255.0f * alpha, alpha);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     _impl->sky(scene, view->size(), stats);
-    _impl->scene(scene, scene.lights, view->size(), stats, view->ambient, view->prepared, view);
+    _impl->scene(scene, scene.lights, view->size(), stats, view->ambient, view->prepared, view, view->targets.get());
     if (const auto* overlay = scene.overlay_if_any()) {
         _impl->prepare(view->overlay_prepared, *overlay, stats);
         _impl->fog_state = {}; // (the overlay's things are not in the scene's air)
         glDepthMask(GL_TRUE);
         glClear(GL_DEPTH_BUFFER_BIT);
+        // (The overlay takes no decals; its soft particles still read the depth.)
         _impl->scene(*overlay, scene.lights, view->size(), stats, view->overlay_ambient, view->overlay_prepared,
-                     nullptr);
+                     nullptr, view->targets.get());
     } else
         view->overlay_prepared.clear();
     if (view->hdr)

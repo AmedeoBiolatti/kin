@@ -21,13 +21,23 @@ uniform int uBlend, uPointCount, uSpotCount;
 uniform vec4 uPoints[32];
 // A spot a 4: position and radius, colour and size squared, axis and cos(outer), 1 / (cos inner - cos outer).
 uniform vec4 uSpots[64];
+#ifdef KIN_DECAL
+// A decal (decal.vert's box) has no mesh: what it shades is the surface the view's depth and normals hold under the
+// pixel, put here by main before the lighting reads them.
+vec3 vWorld, vNormal, vLocal, vObject;
+vec2 vUV;
+vec4 vColor;
+#else
 in vec3 vWorld;
 in vec3 vNormal;
 in vec2 vUV;
 in vec4 vColor;
 in vec3 vLocal;       // the point in the copy's own space (posed when skinned)
 flat in vec3 vObject; // the copy's origin in the world
-out vec4 outColor;
+#endif
+layout(location = 0) out vec4 outColor;
+// The surface's normal (the mesh's, before its normal map), for the decals drawn after the opaque meshes: xyz * 0.5 + 0.5.
+layout(location = 1) out vec4 outNormal;
 const float PI = 3.14159265358979;
 #include "kin_brdf.inc.glsl"
 #include "environment.inc.glsl"
@@ -43,6 +53,11 @@ vec3 encode(vec3 c) {
 // The maps' UV (native kin_map_uv: the material's scale and offset), and a render target's rows flipped.
 vec2 map_uv() { return vUV * uUvTransform.xy + uUvTransform.zw; }
 vec2 uv_for(bool flip) { vec2 uv = map_uv(); return vec2(uv.x, flip ? 1.0 - uv.y : uv.y); }
+// The face's normal toward the viewer, before any normal map.
+vec3 geometric_normal() {
+    float front = gl_FrontFacing ? 1.0 : -1.0;
+    return dot(vNormal, vNormal) < 1e-20 ? normalize(cross(dFdx(vWorld), dFdy(vWorld))) : normalize(vNormal) * front;
+}
 vec3 normal_for_surface() {
     vec3 dx = dFdx(vWorld), dy = dFdy(vWorld);
     // GL framebuffer Y increases upward; this cross product faces the viewer.
@@ -253,7 +268,70 @@ KinSurface kin_stock_surface() {
 // KIN_SURFACE_SOURCE
 #endif
 
+#ifdef KIN_DECAL
+uniform highp sampler2D uDecalDepth; // the view's depth (reverse Z: 0 is the sky)
+uniform sampler2D uDecalNormals;     // and its surfaces' normals
+uniform mat4 uDecalToDecal, uToWorld;
+uniform vec4 uDecalColour;  // linear, straight alpha
+uniform vec4 uDecalSurface; // x roughness, y metallic, z normal map strength (0: none), w emission
+uniform vec4 uDecalFade;    // x normal fade, y depth fade
+uniform vec3 uDecalAxisX, uDecalAxisY, uDecalAxisZ;
+uniform vec2 uTargetInv;
+// The world position the view's depth holds at pixel `p`, and the depth.
+vec3 decal_world(ivec2 p, out float depth) {
+    depth = texelFetch(uDecalDepth, p, 0).r;
+    vec4 w = uToWorld * vec4((vec2(p) + 0.5) * uTargetInv * 2.0 - 1.0, depth, 1.0);
+    return w.xyz / w.w;
+}
+#endif
+
 void main() {
+#ifdef KIN_DECAL
+    // Native decal.frag: the picture projected along the box's -Y onto the surface under the pixel, lit as a material.
+    ivec2 size = textureSize(uDecalDepth, 0);
+    ivec2 p = clamp(ivec2(gl_FragCoord.xy), ivec2(0), size - 1);
+    float depth;
+    vec3 world = decal_world(p, depth);
+    if (depth <= 0.0) discard;
+    vec3 local = (uDecalToDecal * vec4(world, 1.0)).xyz;
+    if (any(greaterThan(abs(local), vec3(0.5)))) discard;
+    // The texture's gradients from the neighbours on the same surface (the nearer in depth of each pair).
+    float d0, d1, d2, d3;
+    vec3 right = decal_world(min(p + ivec2(1, 0), size - 1), d0), left = decal_world(max(p - ivec2(1, 0), 0), d1);
+    vec3 above = decal_world(min(p + ivec2(0, 1), size - 1), d2), below = decal_world(max(p - ivec2(0, 1), 0), d3);
+    vec3 dx = abs(d0 - depth) < abs(depth - d1) ? right - world : world - left;
+    vec3 dy = abs(d2 - depth) < abs(depth - d3) ? above - world : world - below;
+    vec2 uv = local.xz + 0.5;
+    vec2 uv_dx = (mat3(uDecalToDecal) * dx).xz, uv_dy = (mat3(uDecalToDecal) * dy).xz;
+    vec3 n = normalize(texelFetch(uDecalNormals, p, 0).xyz * 2.0 - 1.0);
+    float facing = dot(n, uDecalAxisY);
+    float fade = facing > 0.0 ? (uDecalFade.x > 0.0 ? clamp(facing / uDecalFade.x, 0.0, 1.0) : 1.0) : 0.0;
+    if (uDecalFade.y > 0.0) fade *= clamp((0.5 - abs(local.y)) / (0.5 * uDecalFade.y), 0.0, 1.0);
+    vec4 base = textureGrad(uTexture, uv, uv_dx, uv_dy);
+    base.rgb = decode(base.rgb);
+    base *= uDecalColour;
+    float alpha = base.a * fade;
+    if (alpha < 1.0 / 512.0) discard;
+    vWorld = world;
+    vNormal = n;
+    vColor = vec4(1.0);
+    vUV = uv;
+    if (uDecalSurface.z > 0.0) {
+        // The picture's frame on the surface: u along the box's X, the map's green up toward the picture's top (-Z).
+        vec3 t = normalize(uDecalAxisX - n * dot(n, uDecalAxisX));
+        vec3 b = normalize(-uDecalAxisZ - n * dot(n, -uDecalAxisZ));
+        vec3 m = textureGrad(uNormal, uv, uv_dx, uv_dy).xyz * 2.0 - 1.0;
+        if (m.z < 0.0) m.z = sqrt(max(1.0 - dot(m.xy, m.xy), 0.0));
+        m.xy *= uDecalSurface.z;
+        n = normalize(t * m.x + b * m.y + n * m.z);
+    }
+    vec3 color = lighting(stock_lit(base.rgb, n, uDecalSurface.y, clamp(uDecalSurface.x, 0.045, 1.0), 1.0)) +
+                 base.rgb * uDecalSurface.w;
+    color = fogged(color, vWorld, uSunDirection, uSunColor, false);
+    outColor = uLinear ? vec4(max(color, vec3(0.0)) * alpha, alpha) : vec4(encode(color) * alpha, alpha);
+    outNormal = vec4(0.0);
+#else
+    outNormal = vec4(geometric_normal() * 0.5 + 0.5, 1.0);
 #ifdef KIN_SURFACE
     KinSurface s = kin_stock_surface();
     kin_surface(s);
@@ -279,4 +357,5 @@ void main() {
     float alpha = uBlend == 1 || uBlend == 2 ? base.a : 1.0;
     color=fogged(color,vWorld,uSunDirection,uSunColor,uBlend==2);
     outColor = uLinear ? vec4(max(color, vec3(0.0))*alpha,alpha) : vec4(encode(color)*alpha,alpha);
+#endif
 }

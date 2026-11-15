@@ -204,12 +204,25 @@ middles (no jitter or history), every cell is lit (no reach culling), local ligh
 light the air unshadowed, and the fill light is left out when it asks for a
 shadow. It needs `EXT_color_buffer_float` and a perspective camera.
 
+Particles (`Scene3D::draw_particles`) and the weather's layers draw as native's
+do: the four facings, flipbooks, the procedural disc and ring, the three blends,
+`lit` (the scene's tint and the local lights at each sprite), fog, and soft
+particles, which read the view's depth texture. Each sprite is sorted back to
+front with transparent meshes (a look with `sort` off: once, at its mean depth).
+Particles neither cast nor receive shadows.
+
+Views draw into a colour, a depth texture and a normal target. Decals
+(`Scene3D::draw_decal`) are drawn after the opaque meshes that take them and
+before those that don't (`Material3D::receives_decals`), as native's: each box's
+back faces, reading the depth and normals under the pixel, lit and fogged as a
+material, blended over the surface, lower `order` first, one decal a draw.
+
 Views use one sample. A custom `Material3D::shader` or a wireframe material draws
 as the stock material; `Renderer3D::pick` finds nothing. Image environments,
-prefiltered IBL, star fields, local shadows, particles, decals, ambient occlusion,
-contact shadows, screen-space reflections, TAA, global illumination, reflection
-probes, clip planes (mirrors, portals) and weather are not drawn; the log names
-each one the first time a scene asks for it. Stock GLSL ES is expanded and
+prefiltered IBL, star fields, local shadows, ambient occlusion, contact shadows,
+screen-space reflections, TAA, global illumination, reflection probes and clip
+planes (mirrors, portals) are not drawn; the log names each one the first time a
+scene asks for it. Stock GLSL ES is expanded and
 embedded at build time using shared pure-math includes; general 2D effects remain
 pending.
 
@@ -255,8 +268,11 @@ receivers, cutout changes, animated casters and cascade statistics.
 `experimental/webgl2/parity_checks.cpp` compares spot lights with native's
 falloff, HDR output with native's ACES and exposure, bloom, auto exposure's
 key, material graphs (parameters, built-in inputs, lighting equal to the stock
-material's, clear coat, noise) and volumetric fog with a CPU twin of native's
-model; a custom-shader material must draw as the stock material.
+material's, clear coat, noise), volumetric fog with a CPU twin of native's
+model, particles (discs, additive and encoded blending, sorting with blended
+meshes, depth, soft fades, flipbooks, the light tint, rain) and decals (lit as the
+material of their colour, their box, alpha, surfaces that take none); a
+custom-shader material must draw as the stock material.
 
 Native `kin-platform` tests caller-driven frame accumulation, pause, overload
 and restart. `kin-serial-jobs` tests deferred execution under caller locks,

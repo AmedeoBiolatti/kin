@@ -9,6 +9,7 @@
 #include <iostream>
 #include <kin/render3d/local_lights3d.hpp>
 #include <kin/render3d/material_graph3d.hpp>
+#include <kin/render3d/particles3d.hpp>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -307,6 +308,121 @@ void check_volumetric_fog(Renderer2D& r, Renderer3D& r3d) {
             "A surface in front of a light takes only the air's light before it");
     std::cout << "web parity: volumetric fog passed\n";
 }
+void check_particles(Renderer2D& r, Renderer3D& r3d) {
+    Bench b(r, r3d);
+    auto& scene = b.scene;
+    const auto sprite = [](Vec3f at, LinearRgb colour, f32 alpha = 1, f32 size = 1) {
+        return ParticleSprite3D{.position = at, .size = size, .colour = colour, .alpha = alpha};
+    };
+    const auto submit = [&](const ParticleLook3D& look, std::vector<ParticleSprite3D> sprites) {
+        require(bool(scene.draw_particles(look, sprites)), "Particle submission failed");
+    };
+    // A hard procedural disc, its colour as it is (unlit): inside, the colour; outside its radius, nothing.
+    ParticleLook3D disc{.softness = 0};
+    submit(disc, {sprite({0, 0, 0}, {0.5f, 0.2f, 0.1f})});
+    b.render("Particle");
+    near(b.at(32, 32), srgb8(0.5f, 0.2f, 0.1f), 2, "A particle must draw its colour");
+    near(b.at(32 + 10, 32), {0, 0, 0, 255}, 0, "A particle's disc must end at its radius");
+    require(r3d.debug_stats().particles_drawn == 1 && r3d.debug_stats().particle_batches == 1,
+            "The browser renderer must count the particles it draws");
+    // Additive sprites add.
+    scene.clear();
+    ParticleLook3D glow{.blend = ParticleBlend3D::Additive, .softness = 0};
+    submit(glow, {sprite({0, 0, 0}, {0.2f, 0.1f, 0}), sprite({0, 0, 0.1f}, {0.2f, 0.1f, 0})});
+    b.render("Additive particles");
+    // (An 8-bit view adds them encoded, as native's does.)
+    const auto one = srgb8(0.2f, 0.1f, 0);
+    near(b.at(32, 32), {2 * one[0], 2 * one[1], 0, 255}, 2, "Additive particles must add");
+    // Sorted with transparent meshes: a half-transparent red sprite in front of a half-transparent blue plane,
+    // submitted first, still lies over it.
+    scene.clear();
+    submit(disc, {sprite({0, 0, 1}, {1, 0, 0}, 0.5f)});
+    require(bool(scene.draw(b.plane, {}, {.color = {0, 0, 255, 128}, .unlit = true, .blend = Blend3D::Alpha})),
+            "Parity submission failed");
+    b.render("Sorted particle");
+    near(b.at(32, 32), {128, 0, 64, 255}, 3, "A sprite in front of a blended mesh must be drawn over it");
+    // Behind an opaque surface: hidden. Soft, just in front of one: faded to almost nothing.
+    scene.clear();
+    require(bool(scene.draw(b.plane, {}, {.color = colors::black, .unlit = true})), "Parity submission failed");
+    submit(disc, {sprite({0, 0, -0.5f}, {1, 1, 1})});
+    b.render("Hidden particle");
+    near(b.at(32, 32), {0, 0, 0, 255}, 0, "A particle behind an opaque surface must be hidden");
+    for (const bool soft : {false, true}) {
+        scene.clear();
+        require(bool(scene.draw(b.plane, {}, {.color = colors::black, .unlit = true})), "Parity submission failed");
+        ParticleLook3D look{.softness = 0, .soft = soft, .soft_distance = 0.5f};
+        submit(look, {sprite({0, 0, 0.05f}, {1, 1, 1})});
+        b.render("Soft particle");
+        const int at = b.at(32, 32)[0];
+        // Its coverage times smoothstep(0.05 / 0.5) = 0.028: white over black is 0.028 * 255 (the fade is alpha).
+        require(soft ? at >= 5 && at <= 9 : at > 250, "A soft particle must fade near the surface behind it");
+    }
+    // A flipbook: a 2 x 1 atlas (red, green); frame 1 shows the second.
+    scene.clear();
+    const std::array<u8, 8> atlas{255, 0, 0, 255, 0, 255, 0, 255};
+    ParticleLook3D book{.texture = r.create_texture_from_rgba(atlas.data(), Vec2i{2, 1}), .atlas_columns = 2};
+    auto frame = sprite({0, 0, 0}, {1, 1, 1});
+    frame.frame = 1;
+    submit(book, {frame});
+    b.render("Flipbook particle");
+    near(b.at(32, 32), {0, 255, 0, 255}, 1, "A flipbook particle must show its frame");
+    // Lit: the colour times the scene's tint (ambient, half the sun and the fill).
+    scene.clear();
+    scene.lights.ambient = {0.4f, 0.4f, 0.4f};
+    ParticleLook3D lit{.softness = 0, .lit = 1};
+    submit(lit, {sprite({0, 0, 0}, {1, 1, 1})});
+    b.render("Lit particle");
+    const LinearRgb tint = particle_light_tint(scene.lights);
+    near(b.at(32, 32), srgb8(tint.r, tint.g, tint.b), 2, "A lit particle must take the scene's light tint");
+    // Weather: rain's streaks round the camera.
+    Bench w(r, r3d);
+    w.scene.camera = Camera3D::look_at({0, 2, 0}, {0, 2, -10});
+    w.scene.weather.rain.intensity = 1;
+    w.render("Weather");
+    u32 drops = 0;
+    for (std::size_t i = 0; i < w.pixels.size(); i += 4)
+        drops += w.pixels[i + 2] > 10;
+    require(r3d.debug_stats().weather_particles > 0 && drops > 20, "Rain must be drawn in the browser");
+    std::cout << "web parity: particles (disc, additive, sorting, depth, soft, lit, weather) passed\n";
+}
+
+void check_decals(Renderer2D& r, Renderer3D& r3d) {
+    Bench b(r, r3d);
+    auto& scene = b.scene;
+    scene.lights.ambient = {0.8f, 0.8f, 0.8f};
+    // The box's +Y (where it is projected from) toward the camera: rotated a quarter turn about X.
+    const Mat4f box = Mat4f::rotation_x(90);
+    const Color red = Color::rgb(200, 40, 30);
+    // The reference: the plane itself red, lit as the decal is (roughness 0.6, not metal).
+    require(bool(scene.draw(b.plane, {}, {.color = red, .metallic = 0, .roughness = 0.6f})),
+            "Parity submission failed");
+    b.render("Decal reference");
+    const auto expected = b.at(32, 32);
+    scene.clear();
+    require(bool(scene.draw(b.plane, {}, {.color = Color::rgb(90, 90, 90)})), "Parity submission failed");
+    require(bool(scene.draw_decal({.transform = box, .color = red})), "Decal submission failed");
+    b.render("Decal");
+    near(b.at(32, 32), expected, 3, "A decal must be lit as a material of its colour on the surface under it");
+    require(b.at(32 + 12, 32) != expected, "A decal must end at its box");
+    require(r3d.debug_stats().decals_drawn == 1, "The browser renderer must count the decals it draws");
+    // Half its alpha: halfway (in the 8-bit picture, as the blend is) between the surface and the decal.
+    const auto grey = b.at(32 + 12, 32);
+    scene.clear();
+    require(bool(scene.draw(b.plane, {}, {.color = Color::rgb(90, 90, 90)})), "Parity submission failed");
+    require(bool(scene.draw_decal({.transform = box, .color = Color{200, 40, 30, 128}})), "Decal submission failed");
+    b.render("Half decal");
+    for (u32 c = 0; c < 3; ++c)
+        require(std::abs(b.at(32, 32)[c] - (expected[c] * 128 + grey[c] * 127) / 255) <= 3,
+                "A decal's alpha must blend it over the surface");
+    // A surface that takes no decals is drawn over them.
+    scene.clear();
+    require(bool(scene.draw(b.plane, {}, {.color = Color::rgb(90, 90, 90), .receives_decals = false})),
+            "Parity submission failed");
+    require(bool(scene.draw_decal({.transform = box, .color = red})), "Decal submission failed");
+    b.render("Decal on a non-receiver");
+    near(b.at(32, 32), grey, 1, "A surface that takes no decals must not show them");
+    std::cout << "web parity: decals (lighting, box, alpha, receivers) passed\n";
+}
 } // namespace
 
 void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
@@ -315,4 +431,6 @@ void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
     check_hdr_views(r, r3d);
     check_material_graphs(r, r3d);
     check_volumetric_fog(r, r3d);
+    check_particles(r, r3d);
+    check_decals(r, r3d);
 }

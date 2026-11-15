@@ -16,13 +16,19 @@ float shadow_cascade(int layer,vec3 n) {
     }
     return seen/9.0;
 }
+// A decal shades the surface under it, whose normal faces the viewer (its box's back faces are what is drawn).
+#ifdef KIN_DECAL
+float front_facing() { return 1.0; }
+#else
+float front_facing() { return gl_FrontFacing ? 1.0 : -1.0; }
+#endif
 float sunlight() {
     if (uShadowCount==0 || !uReceivesShadow) return 1.0;
     float depth=dot(vWorld-uEye,uForward);
     if (depth>uShadowEnds[uShadowCount-1]) return 1.0;
     int layer=0;
     for (int i=0;i<3;++i) if (i<uShadowCount-1 && depth>uShadowEnds[i]) layer=i+1;
-    vec3 n=dot(vNormal,vNormal)>1e-20 ? normalize(vNormal)*(gl_FrontFacing ? 1.0 : -1.0) : normalize(cross(dFdx(vWorld),dFdy(vWorld)));
+    vec3 n=dot(vNormal,vNormal)>1e-20 ? normalize(vNormal)*front_facing() : normalize(cross(dFdx(vWorld),dFdy(vWorld)));
     float seen=shadow_cascade(layer,n);
     if (layer<uShadowCount-1 && depth>uShadowBlend[layer]) {
         float w=smoothstep(uShadowBlend[layer],uShadowEnds[layer],depth);
