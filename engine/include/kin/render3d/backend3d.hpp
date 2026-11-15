@@ -139,6 +139,9 @@ struct ViewOptions3D {
     // [0.5, 1], 1 preserves native rendering. Below 1 requires temporal_upscaling and Scene3D::taa.enabled.
     // Picking and texture()/size() remain in output pixels. Partial-view rendering is unavailable below 1.
     f32 render_scale = 1.0f;
+    // Temporal history size relative to output, [1, 2]. Above 1 requires render_scale < 1.
+    // 1 keeps output-resolution history; 2 keeps four times its pixels, then downsamples before bloom/output.
+    f32 temporal_history_scale = 1.0f;
 };
 
 // Single-sample data attachments. Depth is reverse Z (0 background/far, 1 near),

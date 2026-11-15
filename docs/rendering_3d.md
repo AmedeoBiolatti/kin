@@ -3264,15 +3264,28 @@ below 1 requires `RendererCapabilities3D::temporal_upscaling`. Creation fails ex
 and rendering a scaled view requires `Scene3D::taa.enabled`. The native path uses one shading sample and reuses
 TAA's motion, transparent/particle reactivity, nearest-surface velocity and history rejection. Colour, depth,
 motion and screen-space lighting remain at `ceil(output_size * render_scale)`; history and its dilated velocity
-are at output resolution. Bloom, exposure and output follow reconstruction. This is Kin's experimental TAAU
+are at output resolution by default. Bloom, exposure and output follow reconstruction. This is Kin's experimental TAAU
 implementation, with its own quality tradeoffs.
 
-At reduced scale, the reconstruction footprint is measured in output pixels. Input samples close to an output
-pixel contribute more; the update rate is normalised by shading-sample density. When `still_blend > blend`,
+`ViewOptions3D::temporal_history_scale` optionally keeps denser history, in [1, 2], default 1. Above 1 requires
+`render_scale < 1`; native views retain their existing TAA path. Colour, dilated velocity and history age use
+`ceil(output_size * temporal_history_scale)`. Shading resolution, camera aspect, LOD and picking stay unchanged.
+The dense history resolves to output size in linear light before bloom and exposure, sharing that dispatch with
+optional sharpening. The default 1 keeps the existing dispatch path and output.
+
+At 1704x1065 output, 1.5x and 2x histories add about 60.6 and 145.4 MiB of history targets respectively. With
+sharpening off, the output resolve also needs a 13.8 MiB target. Resolve work grows with history pixel count
+(about 2.25x or 4x); select density as a quality/memory tradeoff rather than a reduction in shading cost.
+
+The reconstruction footprint follows the history pixel grid, which is the output grid at the default density.
+Input samples close to a history pixel contribute more; the update rate is normalised by shading-sample density
+in that grid. Motion rejection thresholds remain in display pixels regardless of history density.
+
+When `still_blend > blend`,
 `still_blend` also caps this reconstruction history during motion. Warm-up follows each reprojected pixel's
 history age rather than the whole view's age; motion and lighting rejection reduce it locally, so a newly
 exposed surface starts accumulating independently of established surfaces. Two R16F metadata textures track
-this age at output resolution (about 6.9 MiB together at 1704x1065), without an additional pass.
+this age at history resolution (about 6.9 MiB together at 1704x1065 with the default density), within the resolve.
 Motion consistency and transparent/particle reactivity still reject invalid history. The clipping range includes
 the current reconstruction so that a sparse neighbourhood cannot clip away its own valid sample.
 

@@ -1230,11 +1230,12 @@ private:
     // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.
     bool _taa_warned = false;
     bool _taa_prepass_warned = false;
-    SDL_GPUComputePipeline* _taa_pipeline = nullptr;  // taa.comp
-    SDL_GPUComputePipeline* _taau_pipeline = nullptr; // full-resolution reconstruction from render-resolution inputs
-    std::shared_ptr<GpuBuffer> _previous;             // last frame's matrix of each copy in _instances; grows
-    std::vector<Mat4f> _taa_prev;                     // render()'s scratch: a matrix per copy of the scene
-    std::vector<Mat4f> _taa_ordered;                  // and per copy in _instances
+    SDL_GPUComputePipeline* _taa_pipeline = nullptr;         // taa.comp
+    SDL_GPUComputePipeline* _taau_pipeline = nullptr;        // reconstruction from render-resolution inputs
+    SDL_GPUComputePipeline* _taau_output_pipeline = nullptr; // dense history to output, with optional sharpening
+    std::shared_ptr<GpuBuffer> _previous;                    // last frame's matrix of each copy in _instances; grows
+    std::vector<Mat4f> _taa_prev;                            // render()'s scratch: a matrix per copy of the scene
+    std::vector<Mat4f> _taa_ordered;                         // and per copy in _instances
     struct CopyRef {
         u32 slot = 0;                        // a draw's first copy among its group's in the view's record,
         u32 past = 0;                        // and where its place was last frame (~0: no same-sized group then)

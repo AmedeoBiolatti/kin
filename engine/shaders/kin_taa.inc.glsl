@@ -42,7 +42,10 @@ layout(set = 2, binding = 0) uniform Params {
     vec4 depth;  // x: 1 when uDepth is the main pass's depth; y: where the overlay's slice of it starts (2: none);
                  // z: 1 when the sharpening follows (the resolve keeps where the depth bent, for it)
     vec4 still;  // x: native still weight; y: still hold enabled; z: scaled-view history weight cap
-    vec4 input_size; // shading extent and reciprocals; sizes is the display/history extent
+    vec4 input_size; // shading extent and reciprocals; sizes is the history extent
+#ifdef KIN_TEMPORAL_UPSCALE
+    vec4 output_size; // display extent and reciprocals, independent of history density
+#endif
 }
 params;
 
@@ -210,8 +213,8 @@ void main() {
         return;
     }
 #ifdef KIN_TEMPORAL_UPSCALE
-    // Output pixel centres projected onto the jittered shading grid. Motion/depth and current colour stay
-    // at shading resolution; history and the previous dilated velocity stay at output resolution.
+    // History pixel centres projected onto the jittered shading grid. Motion/depth and current colour stay
+    // at shading resolution; history and the previous dilated velocity use the history grid.
     const vec2 sample_position = (vec2(output_pixel) + .5) * params.input_size.xy * params.sizes.zw - .5;
     const ivec2 p = clamp(ivec2(floor(sample_position + .5)), ivec2(0), input_extent() - 1);
 #else
@@ -268,8 +271,8 @@ void main() {
             }
             const vec3 compressed = compress(c.rgb);
 #ifdef KIN_TEMPORAL_UPSCALE
-            // Measure the reconstruction footprint in output pixels. The native input-pixel footprint
-            // grows with the upscale ratio and blurs away detail before history can accumulate it.
+            // Reconstruct points on the history grid, before display filtering for dense history. Measuring
+            // this in input pixels would grow the footprint and blur detail before history accumulates it.
             const vec2 away = (vec2(p + ivec2(x, y)) - sample_position - params.jitter.xy) *
                               params.sizes.xy * params.input_size.zw;
 #else
@@ -338,13 +341,18 @@ void main() {
     // one frame's samples can all miss a detail finer than a pixel (the jitter puts them elsewhere), and clipped to
     // them its history was pulled to the background and back once a period. A flat neighbourhood (no spread) clips as
     // tightly as before, so a change of light on it is followed at once.
-    const float speed = length(velocity * params.sizes.xy);
+#ifdef KIN_TEMPORAL_UPSCALE
+    const vec2 motion_extent = params.output_size.xy;
+#else
+    const vec2 motion_extent = params.sizes.xy;
+#endif
+    const float speed = length(velocity * motion_extent);
     // (Nothing of this where a still pixel keeps no more than a moving one: TemporalAA3D::still_blend at blend.)
     const float still = params.still.y > 0.5 ? 1.0 - clamp(speed / 0.5, 0.0, 1.0) : 0.0;
 #ifdef KIN_TEMPORAL_UPSCALE
     // Jitter only sometimes supplies an input sample close to this output pixel. Preserve history's
     // detail when this frame poorly samples it; a close sample can update it more decisively.
-    // Integral of exp(-6*r*r) is pi/6; multiply by shading-sample density in output pixels.
+    // Integral of exp(-6*r*r) is pi/6; multiply by shading-sample density in history pixels.
     // Normalise the update rate so close samples can replace more than an ordinary frame's share.
     const float average_weight = (3.14159265358979 / 6.0) *
                                  params.input_size.x * params.input_size.y * params.sizes.z * params.sizes.w;
@@ -392,7 +400,7 @@ void main() {
     // (The last frame's velocity there as its resolve took it: a pixel at that edge took the edge's then, as this one
     // does now.)
     const vec2 then = dilated_velocity(texelFetch(uPastDilated, nearest, 0).r);
-    const float mismatch_px = length((then - velocity) * params.sizes.xy);
+    const float mismatch_px = length((then - velocity) * motion_extent);
     // A still pixel's history is read from its own place, exactly (no blur to accumulate): it keeps more of it (the
     // mean of the frames the history holds while they are few, then more than a moving pixel). The tests below still
     // drop it where it is of another surface or the light changed.
