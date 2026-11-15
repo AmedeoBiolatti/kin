@@ -581,6 +581,8 @@ struct TemporalAA3D {
     // shimmering with the jitter's period. Its clip is wider too (by the spread of the colours round it). After a
     // reset (a cut, the first frame) a still pixel takes the mean of the frames the history holds until that weighs
     // as much. At blend or below, still pixels are treated as moving ones.
+    // Below native shading resolution, this also caps sample-weighted reconstruction history during motion
+    // (when greater than blend); invalid motion and changing transparent coverage still reject it.
     f32 still_blend = 0.96f;
     // A local-contrast boost on the result, 0 (off) to 1, within surfaces: not at a silhouette or a crease (where the
     // depth bends), whose anti-aliased pixels it would push back into steps. Costs one more dispatch.

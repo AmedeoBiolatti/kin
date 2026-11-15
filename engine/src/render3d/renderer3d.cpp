@@ -298,6 +298,19 @@ Result3D<View3D> Renderer3D::create_view(Vec2i size, const ViewOptions3D& option
 View3D Renderer3D::create_view_operation(Vec2i size, const ViewOptions3D& options) {
     _errors.clear();
     size = at_least_one(size);
+    if (!std::isfinite(options.render_scale) || options.render_scale < 0.5f || options.render_scale > 1.0f ||
+        (options.render_scale < 1.0f && (!_backend || !_backend->capabilities().temporal_upscaling))) {
+        fail3d(_errors, "Renderer3D::create_view",
+               "render_scale must be in [0.5, 1]; below 1 requires native temporal upscaling support");
+        return {};
+    }
+    if (!std::isfinite(options.temporal_history_scale) || options.temporal_history_scale < 1.0f ||
+        options.temporal_history_scale > 2.0f ||
+        (options.temporal_history_scale > 1.0f && options.render_scale == 1.0f)) {
+        fail3d(_errors, "Renderer3D::create_view",
+               "temporal_history_scale must be in [1, 2]; above 1 requires render_scale below 1");
+        return {};
+    }
     const AutoExposure3D& a = options.auto_exposure;
     if (a.enabled && !(std::isfinite(a.key) && a.key > 0 && std::isfinite(a.min_ev) && std::isfinite(a.max_ev) &&
                        a.min_ev <= a.max_ev && std::isfinite(a.compensation_ev) && std::isfinite(a.speed_up) &&

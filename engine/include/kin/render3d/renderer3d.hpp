@@ -67,6 +67,8 @@ public:
     // (0, 0) to render_size() / size(). A resize renders the whole again.
     bool set_render_size(Vec2i size) { return _backend && _backend->set_render_size(size); }
     Vec2i render_size() const { return _backend ? _backend->render_size() : Vec2i{}; }
+    // Shading resolution, before temporal upscaling. size()/texture() remain at output resolution.
+    Vec2i render_resolution() const { return _backend ? _backend->render_resolution() : Vec2i{}; }
     // Drops the history Scene3D::taa blends in, so that the next frame does
     // not show the one before: call it when the camera cuts to somewhere
     // else, or the scene is replaced. (A resize does it by itself.)

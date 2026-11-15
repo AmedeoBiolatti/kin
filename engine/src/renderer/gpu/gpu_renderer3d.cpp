@@ -422,8 +422,10 @@ struct TaaUniforms {
                    // y: where the overlay's slice of it starts (2: no overlay); z: 1 when the sharpening follows (the
                    // resolve keeps where the depth bent, for it)
     f32 still[4];  // x: the history weight of a still pixel; y: 1 when still pixels keep more than moving ones
+    f32 input_size[4];  // shading width/height and their reciprocals; sizes is the history extent
+    f32 output_size[4]; // TAAU only: display width/height and reciprocals, for motion thresholds in display pixels
 };
-static_assert(sizeof(TaaUniforms) == 80);
+static_assert(offsetof(TaaUniforms, output_size) == 96 && sizeof(TaaUniforms) == 112);
 // shadow_mask.frag's and pick_mask.frag's.
 struct CutoffUniforms {
     f32 cutoff[4]; // the alpha below which nothing is drawn
@@ -943,14 +945,16 @@ bool compute_pass(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeli
     return true;
 }
 
-// The same into two textures of one size (ao_blur_both.comp).
+// Two primary outputs of one size, with optional reconstruction confidence metadata.
 bool compute_pass_two(SDL_GPUCommandBuffer* commands, SDL_GPUComputePipeline* pipeline, const GpuTexture& first,
                       const GpuTexture& second, std::span<const SDL_GPUTextureSamplerBinding> inputs,
-                      const void* uniforms, u32 bytes, Vec2i part = {}) {
-    const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> outputs{
+                      const void* uniforms, u32 bytes, Vec2i part = {}, const GpuTexture* metadata = nullptr) {
+    const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> outputs{
         SDL_GPUStorageTextureReadWriteBinding{.texture = first.handle(), .mip_level = 0, .layer = 0, .cycle = false},
-        SDL_GPUStorageTextureReadWriteBinding{.texture = second.handle(), .mip_level = 0, .layer = 0, .cycle = false}};
-    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, outputs.data(), 2, nullptr, 0);
+        SDL_GPUStorageTextureReadWriteBinding{.texture = second.handle(), .mip_level = 0, .layer = 0, .cycle = false},
+        SDL_GPUStorageTextureReadWriteBinding{
+            .texture = metadata ? metadata->handle() : nullptr, .mip_level = 0, .layer = 0, .cycle = false}};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, outputs.data(), metadata ? 3 : 2, nullptr, 0);
     if (!pass) {
         return false;
     }
@@ -1550,6 +1554,13 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     _capabilities.ambient_occlusion = _capabilities.contact_shadows = _ao_available;
     _capabilities.temporal_aa = _taa_available;
+    if (_taa_available && _taa_depth_sampled &&
+        SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                     SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE))
+        _taau_pipeline = make_compute(handle, "taau.comp.spv", {.samplers = 7, .readwrite_textures = 3});
+    if (_taau_pipeline)
+        _taau_output_pipeline = make_compute(handle, "taau_output.comp.spv", {.samplers = 2, .readwrite_textures = 1});
+    _capabilities.temporal_upscaling = _taau_pipeline && _taau_output_pipeline;
     // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
     make_gi();
     // Fog and the sky (P3a): the fog variants of the stock mesh shaders (one more uniform block, in the slot custom
@@ -1905,6 +1916,8 @@ GpuRenderer3D::~GpuRenderer3D() {
                                             _contact_blur_chain_pipeline,
                                             _fog_sun_pipeline,
                                             _taa_pipeline,
+                                            _taau_pipeline,
+                                            _taau_output_pipeline,
                                             _gc_cull,
                                             _gc_scan,
                                             _gc_args,
@@ -3644,11 +3657,12 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
         want_hdr && SDL_GPUTextureSupportsFormat(_device->handle(), hdr_format, SDL_GPU_TEXTURETYPE_2D,
                                                  SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
     const SDL_GPUTextureFormat format = hdr ? hdr_format : output;
-    const u32 samples = usable_samples(std::max(1u, view._options.samples), format);
+    const u32 samples = view.upscaled() ? 1u : usable_samples(std::max(1u, view._options.samples), format);
     const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
     constexpr SDL_GPUTextureUsageFlags drawn = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
     try {
-        GpuTexture resolved = _device->create_target(w, h, output, drawn);
+        GpuTexture resolved =
+            _device->create_target(static_cast<u32>(view.size().x), static_cast<u32>(view.size().y), output, drawn);
         GpuTexture scene = hdr ? _device->create_target(w, h, hdr_format, drawn) : GpuTexture{};
         GpuTexture colour =
             samples > 1 ? _device->create_target(w, h, format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, sample_count(samples))
@@ -3659,13 +3673,17 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
         if (view._options.pick && _pick_shader &&
             SDL_GPUTextureSupportsFormat(_device->handle(), pick_format, SDL_GPU_TEXTURETYPE_2D,
                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET)) {
-            pick = _device->create_target(w, h, pick_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
-            pick_depth = _device->create_target(w, h, _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
+            pick = _device->create_target(static_cast<u32>(view.size().x), static_cast<u32>(view.size().y), pick_format,
+                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
+            pick_depth = _device->create_target(static_cast<u32>(view.size().x), static_cast<u32>(view.size().y),
+                                                _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
         }
         GpuTexture bloom_a, bloom_b;
         if (hdr && view._options.bloom > 0.0f) {
-            bloom_a = _device->create_target(std::max(1u, w / 2), std::max(1u, h / 2), hdr_format, drawn);
-            bloom_b = _device->create_target(std::max(1u, w / 2), std::max(1u, h / 2), hdr_format, drawn);
+            bloom_a = _device->create_target(std::max(1u, static_cast<u32>(view.size().x) / 2),
+                                             std::max(1u, static_cast<u32>(view.size().y) / 2), hdr_format, drawn);
+            bloom_b = _device->create_target(std::max(1u, static_cast<u32>(view.size().x) / 2),
+                                             std::max(1u, static_cast<u32>(view.size().y) / 2), hdr_format, drawn);
         }
         // Render targets' convention: premultiplied, sampled smoothly. SDL
         // frees the old targets once the GPU is done with them.
@@ -3724,8 +3742,17 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
 }
 
 std::shared_ptr<IViewBackend3D> GpuRenderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
+    if (!std::isfinite(options.render_scale) || options.render_scale < .5f || options.render_scale > 1.f ||
+        !std::isfinite(options.temporal_history_scale) || options.temporal_history_scale < 1.f ||
+        options.temporal_history_scale > 2.f || (options.temporal_history_scale > 1.f && options.render_scale == 1.f) ||
+        (options.render_scale < 1.f && !_capabilities.temporal_upscaling))
+        return {};
     auto view = std::make_shared<GpuView3D>();
-    view->_size = size;
+    view->_output_size = size;
+    view->_size = options.render_scale == 1.f
+                      ? size
+                      : Vec2i{std::max(1, static_cast<i32>(std::ceil(size.x * options.render_scale))),
+                              std::max(1, static_cast<i32>(std::ceil(size.y * options.render_scale)))};
     view->_options = options;
     if (!make_targets(*view)) {
         return {};
@@ -3739,9 +3766,15 @@ bool GpuRenderer3D::resize_view(IViewBackend3D& base, Vec2i size) {
         return false;
     }
     const Vec2i old = view->_size;
-    view->_size = size;
+    const Vec2i old_output = view->_output_size;
+    view->_output_size = size;
+    view->_size = view->_options.render_scale == 1.f
+                      ? size
+                      : Vec2i{std::max(1, static_cast<i32>(std::ceil(size.x * view->_options.render_scale))),
+                              std::max(1, static_cast<i32>(std::ceil(size.y * view->_options.render_scale)))};
     if (!make_targets(*view)) {
         view->_size = old;
+        view->_output_size = old_output;
         return false;
     }
     view->_extent = {};      // (the whole again)
@@ -3755,7 +3788,7 @@ bool GpuRenderer3D::resize_view(IViewBackend3D& base, Vec2i size) {
 // shafts, the occlusion pyramid, picking, the contact shadows, the overlay's velocity).
 bool GpuRenderer3D::renders_part(const IViewBackend3D& base, const Scene3D& scene, const IViewBackend3D* lit_by) const {
     const auto* view = dynamic_cast<const GpuView3D*>(&base);
-    if (!view || view->_hdr || view->_options.pick)
+    if (!view || view->_hdr || view->_options.pick || view->upscaled())
         return false;
     const Scene3D* overlay = scene.overlay_if_any();
     // (A GI of its own builds windows round the view's whole picture; one borrowed is resolved over the part.)
@@ -4433,11 +4466,26 @@ u64 texture_bytes(const GpuTexture& t) {
 
 u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     u64 bytes = 0;
-    for (const GpuTexture* t :
-         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._ao_upsampled,
-          &view._contact_raw, &view._contact_across, &view._fog_sun, &view._taa_depth, &view._taa_in, &view._taa_sharp,
-          &view._taa_motion, &view._taa_history[0], &view._taa_history[1], &view._taa_dilated[0], &view._taa_dilated[1],
-          &view._occ_depth}) {
+    for (const GpuTexture* t : {&view._ao_chain,
+                                &view._ao_depth,
+                                &view._ao_normals,
+                                &view._ao_raw,
+                                &view._ao_across,
+                                &view._ao_upsampled,
+                                &view._contact_raw,
+                                &view._contact_across,
+                                &view._fog_sun,
+                                &view._taa_depth,
+                                &view._taa_in,
+                                &view._taa_sharp,
+                                &view._taa_motion,
+                                &view._taa_history[0],
+                                &view._taa_history[1],
+                                &view._taa_dilated[0],
+                                &view._taa_dilated[1],
+                                &view._taa_confidence[0],
+                                &view._taa_confidence[1],
+                                &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
@@ -4500,6 +4548,7 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
     view._taa_sharp = {};
     view._taa_motion = {};
     view._taa_history = {};
+    view._taa_confidence = {};
     view._taa_dilated = {};
     view._taa_valid = false;
     view._taa_coverage_key = 0;
@@ -4512,6 +4561,12 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
 bool GpuRenderer3D::ensure_taa_targets(GpuView3D& view, bool sharpen) {
     const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
     const auto sized = [&](const GpuTexture& t) { return t && t.width() == w && t.height() == h; };
+    const u32 ow = static_cast<u32>(view.size().x), oh = static_cast<u32>(view.size().y);
+    const auto output_sized = [&](const GpuTexture& t) { return t && t.width() == ow && t.height() == oh; };
+    const f32 history_scale = view._options.temporal_history_scale;
+    const u32 hw = static_cast<u32>(std::ceil(ow * history_scale)),
+              hh = static_cast<u32>(std::ceil(oh * history_scale));
+    const auto history_sized = [&](const GpuTexture& t) { return t && t.width() == hw && t.height() == hh; };
     bool made = false;
     try {
         constexpr SDL_GPUTextureUsageFlags stored =
@@ -4523,15 +4578,24 @@ bool GpuRenderer3D::ensure_taa_targets(GpuView3D& view, bool sharpen) {
             made = true;
         }
         for (GpuTexture& history : view._taa_history) {
-            if (!sized(history)) {
-                history = _device->create_target(w, h, hdr_format, stored);
+            if (!history_sized(history)) {
+                history = _device->create_target(hw, hh, hdr_format, stored);
                 view._taa_valid = false; // nothing in it
                 made = true;
             }
         }
+        if (view.upscaled()) {
+            for (GpuTexture& confidence : view._taa_confidence) {
+                if (!history_sized(confidence)) {
+                    confidence = _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, stored);
+                    view._taa_valid = false;
+                    made = true;
+                }
+            }
+        }
         for (GpuTexture& dilated : view._taa_dilated) {
-            if (!sized(dilated)) {
-                dilated = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R32_UINT, stored);
+            if (!history_sized(dilated)) {
+                dilated = _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R32_UINT, stored);
                 view._taa_valid = false;
                 made = true;
             }
@@ -4547,10 +4611,10 @@ bool GpuRenderer3D::ensure_taa_targets(GpuView3D& view, bool sharpen) {
                                                   SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
             made = true;
         }
-        if (sharpen && !sized(view._taa_sharp)) {
-            view._taa_sharp = _device->create_target(w, h, hdr_format, stored);
+        if ((sharpen || history_scale > 1.f) && !output_sized(view._taa_sharp)) {
+            view._taa_sharp = _device->create_target(ow, oh, hdr_format, stored);
             made = true;
-        } else if (!sharpen) {
+        } else if (!sharpen && history_scale == 1.f) {
             view._taa_sharp = {};
         }
     } catch (const std::exception& e) {
@@ -4892,7 +4956,7 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
                                              const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive,
                                              bool reject, bool fixed_jitter, const GpuTexture* depth, bool overlaid,
                                              RenderDebugStats3D& stats) {
-    const f32 w = static_cast<f32>(view._size.x), h = static_cast<f32>(view._size.y);
+    const f32 w = static_cast<f32>(view.size().x), h = static_cast<f32>(view.size().y);
     const GpuTexture& past_motion = reset ? view._ao_normals : view._taa_motion;
     const f32 sharpness = std::clamp(taa.sharpness, 0.0f, 1.0f);
     const bool sharpened = sharpness > 0.0f && view._taa_sharp;
@@ -4906,24 +4970,36 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
     const f32 still_blend = std::min(most, 1.0f - 1.0f / static_cast<f32>(held + 1));
     const auto dispatch = [&](const GpuTexture& target, const GpuTexture& current, const GpuTexture& history,
                               f32 sharpen, f32 amount) {
-        const std::array<SDL_GPUTextureSamplerBinding, 6> inputs{
+        const bool upscale = view.upscaled() && sharpen == 0.0f;
+        const f32 rw = upscale ? static_cast<f32>(target.width()) : w,
+                  rh = upscale ? static_cast<f32>(target.height()) : h;
+        const std::array<SDL_GPUTextureSamplerBinding, 7> inputs{
             SDL_GPUTextureSamplerBinding{current.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{history.handle(), _owner->_sampler_linear},
             SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{depth ? depth->handle() : _owner->_white.handle(), _point_sampler},
-            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler}};
+            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{upscale && !reset ? view._taa_confidence[view._taa_read].handle()
+                                                           : _owner->_white.handle(),
+                                         _owner->_sampler_linear}};
         const TaaUniforms u{
-            {w, h, 1.0f / w, 1.0f / h},
+            {rw, rh, 1.0f / rw, 1.0f / rh},
             {blend, reset ? 1.0f : 0.0f, sharpen, amount},
             {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
              reject ? 1.0f : 0.0f},
             {depth ? 1.0f : 0.0f, overlaid ? overlay_split : 2.0f, depth && sharpened ? 1.0f : 0.0f, 0.0f},
-            {still_blend, hold ? 1.0f : 0.0f, 0.0f, 0.0f}};
+            {still_blend, hold ? 1.0f : 0.0f, std::max(blend, most), 0.0f},
+            {static_cast<f32>(current.width()), static_cast<f32>(current.height()), 1.0f / current.width(),
+             1.0f / current.height()},
+            {w, h, 1.0f / w, 1.0f / h}};
         // (The sharpening dispatch binds this frame's velocities as its second output too, and writes nothing there;
         // it reads them, with where the depth bent, as its last input.)
-        if (!compute_pass_two(commands, _taa_pipeline, target, view._taa_dilated[1 - view._taa_read], inputs, &u,
-                              sizeof(u))) {
+        auto* pipeline = upscale ? _taau_pipeline : _taa_pipeline;
+        if (!compute_pass_two(commands, pipeline, target, view._taa_dilated[1 - view._taa_read],
+                              std::span{inputs}.first(upscale ? 7 : 6), &u,
+                              upscale ? sizeof(u) : offsetof(TaaUniforms, output_size), {},
+                              upscale ? &view._taa_confidence[1 - view._taa_read] : nullptr)) {
             return false;
         }
         ++stats.taa_dispatches;
@@ -4938,6 +5014,18 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
     view._taa_reactive = reactive;
     view._taa_held = reset ? 1u : std::min(view._taa_held + 1u, 1000u);
     const GpuTexture* shown = &view._taa_history[write];
+    if (view._options.temporal_history_scale > 1.f) {
+        // Downsample in linear light before bloom, exposure and output. Sharpening shares this pass.
+        const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+            SDL_GPUTextureSamplerBinding{shown->handle(), _owner->_sampler_linear},
+            SDL_GPUTextureSamplerBinding{view._taa_dilated[write].handle(), _point_sampler}};
+        const f32 params[8] = {w, h, 1.f / w, 1.f / h, sharpness, depth ? 1.f : 0.f, 0.f, 0.f};
+        if (compute_pass(commands, _taau_output_pipeline, view._taa_sharp, inputs, params, sizeof(params))) {
+            ++stats.taa_dispatches;
+            shown = &view._taa_sharp;
+        }
+        return shown;
+    }
     if (sharpened && dispatch(view._taa_sharp, *shown, *shown, 1.0f, sharpness)) {
         shown = &view._taa_sharp;
     }
@@ -6713,7 +6801,8 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
-    ctx.aspect = static_cast<f32>(view->extent().x) / static_cast<f32>(view->extent().y);
+    const Vec2i camera_size = view->upscaled() ? view->size() : view->extent();
+    ctx.aspect = static_cast<f32>(camera_size.x) / static_cast<f32>(camera_size.y);
     const Scene3D* overlay = scene.overlay_if_any();
     ctx.scenes = {&scene, !ctx.geometry_only && overlay && !overlay->draws().empty() ? overlay : nullptr};
     for (u32 s = 0; s < 2; ++s) {
@@ -6729,7 +6818,11 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy and mip bias.
     _anisotropy = std::clamp(scene.anisotropy, 1u, _capabilities.max_anisotropy);
     _lod_bias = _capabilities.texture_lod_bias && std::isfinite(scene.texture_lod_bias)
-                    ? static_cast<i32>(std::lround(std::clamp(scene.texture_lod_bias, -2.0f, 2.0f) * 16.0f))
+                    ? static_cast<i32>(
+                          std::lround(std::clamp(scene.texture_lod_bias +
+                                                     (view->upscaled() ? std::log2(view->_options.render_scale) : 0.0f),
+                                                 -2.0f, 2.0f) *
+                                      16.0f))
                     : 0;
 
     if (ctx.geometry_only || ctx.surface_only) {
@@ -6813,7 +6906,9 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     }
     ctx.drawn = ctx.view_projections;
     if (ctx.taa) {
-        const u32 period = std::clamp(taa_settings.jitter_samples, 1u, max_taa_jitter_samples);
+        const f32 phases = view->upscaled() ? 1.0f / (view->_options.render_scale * view->_options.render_scale) : 1.f;
+        const u32 asked_phases = std::clamp(taa_settings.jitter_samples, 1u, max_taa_jitter_samples);
+        const u32 period = std::clamp(static_cast<u32>(std::ceil(asked_phases * phases)), 1u, max_taa_jitter_samples);
         const Vec2f raw = taa_jitter(scene.debug.freeze_jitter ? 0u : view->_taa_frame++, period);
         ctx.jitter = {raw.x * taa_settings.jitter_scale, raw.y * taa_settings.jitter_scale};
         for (u32 s = 0; s < 2; ++s) {
@@ -10244,7 +10339,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s] && ctx.scenes[s]->lod.enabled) {
             lod[s] = lod_view_of(ctx.scenes[s]->lod, ctx.scenes[s]->debug, ctx.scenes[s]->camera,
-                                 static_cast<f32>(view->extent().y));
+                                 static_cast<f32>(view->upscaled() ? view->size().y : view->extent().y));
         }
     }
     static_assert(max_local_shadow_layers + max_shadow_cascades + 1 <= 64); // CullGroup's masks
@@ -15829,7 +15924,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
         const SDL_GPUDepthStencilTargetInfo pick_depth =
             depth_target(view->_pick_depth.handle(), SDL_GPU_STOREOP_DONT_CARE, /*cycle=*/true);
         if (SDL_GPURenderPass* picking = SDL_BeginGPURenderPass(commands, &target, 1, &pick_depth)) {
-            set_viewport(picking, view->_size.x, view->_size.y);
+            set_viewport(picking, view->size().x, view->size().y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
             put_clip(u.clip, ctx.scenes[0]);
@@ -16174,6 +16269,8 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     if (prepared && !preparation_live(prepared->frame))
         return false;
     setup_frame(ctx);
+    if (view->upscaled() && !ctx.taa)
+        return false; // a scaled view must reconstruct; never silently publish a low-resolution fallback
     if (!scene.decals().empty()) {
         ctx.decals = _capabilities.decals && _ao_available;
         if (!ctx.decals)
@@ -16618,7 +16715,7 @@ Result3D<PickResult3D> GpuRenderer3D::pick(IViewBackend3D& base, Vec2i pixel) {
     auto* view = dynamic_cast<GpuView3D*>(&base);
     if (!view || !view->_pick || !view->_pick_valid)
         return {std::nullopt, {"GPU picking requires a rendered view with picking enabled"}};
-    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= view->_size.x || pixel.y >= view->_size.y)
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= view->size().x || pixel.y >= view->size().y)
         return result3d(PickResult3D{});
     // What is recorded so far goes to the GPU first (2D carries on in a new
     // command buffer, as after a read-back).

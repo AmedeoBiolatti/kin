@@ -92,6 +92,44 @@ void cpu() {
     check(runtime.poll_changes() == SceneAssetRuntimeChange::SceneAsset, "deleted scene not detected");
 }
 
+// Environment options can change through the ordinary world API as well as editor field edits. A cached
+// session view must follow both shading scale and history density, even when every other option is unchanged.
+void gpu_temporal_view_options(Renderer2D& renderer) {
+    Renderer3D r3d{renderer};
+    if (!r3d.capabilities().temporal_upscaling)
+        return;
+    Scratch scratch;
+    write(scratch.path / "temporal.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}}]})");
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("temporal.kinscene"), "temporal view fixture failed");
+    const auto environment = session.entity("environment");
+    auto settings = *environment.get<SceneEnvironment3D>();
+    settings.taa.enabled = true;
+    for (const Vec2f scales : {Vec2f{2.f / 3.f, 1.f}, Vec2f{2.f / 3.f, 1.5f}, Vec2f{2.f / 3.f, 2.f}, Vec2f{1.f, 1.f}}) {
+        const auto previous = session.view()->backend();
+        settings.view.render_scale = scales.x;
+        settings.view.temporal_history_scale = scales.y;
+        environment.raw().set<SceneEnvironment3D>(settings);
+        check(session.collect(), "temporal environment update failed");
+        check(session.view()->backend() != previous, "temporal environment update reused stale view");
+        const Vec2i shading{int(std::ceil(160 * scales.x)), int(std::ceil(120 * scales.x))};
+        check(session.view()->render_resolution() == shading, "temporal environment shading resolution is stale");
+        check(session.view_options()->render_scale == scales.x &&
+                  session.view_options()->temporal_history_scale == scales.y,
+              "temporal environment view options are stale");
+        check(session.render(), "temporal environment render failed");
+        check(r3d.debug_stats().taa_dispatches == (scales.y > 1.f ? 2u : 1u),
+              "temporal environment history density is stale");
+        renderer.present();
+    }
+}
+
 void gpu_live_edits(Renderer2D& renderer) {
     Scratch scratch;
     std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
@@ -1588,6 +1626,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("GPU backend required for lifecycle checks");
         ready = true;
         Renderer2D renderer{std::move(backend)};
+        gpu_temporal_view_options(renderer);
         gpu_live_edits(renderer);
         gpu_session(renderer);
         gpu_prepared_requests(renderer);

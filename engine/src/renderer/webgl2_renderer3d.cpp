@@ -2407,6 +2407,8 @@ bool WebGLRenderer3D::update_mesh_vertices(IMeshBackend3D& backend, std::span<co
     return true;
 }
 std::shared_ptr<IViewBackend3D> WebGLRenderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
+    if (options.render_scale != 1.0f || options.temporal_history_scale != 1.0f)
+        return {};
     if (options.pick && !_impl->pick_told) {
         _impl->pick_told = true;
         KIN_LOG_WARN("render", "WebGL2: picking is not implemented; Renderer3D::pick finds nothing");

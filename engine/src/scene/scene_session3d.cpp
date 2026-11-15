@@ -379,7 +379,8 @@ struct BoolScope {
 bool same_options(const ViewOptions3D& a, const ViewOptions3D& b) {
     return a.samples == b.samples && a.background == b.background && a.hdr == b.hdr && a.exposure == b.exposure &&
            a.bloom == b.bloom && a.bloom_threshold == b.bloom_threshold && a.pick == b.pick &&
-           a.auto_exposure == b.auto_exposure;
+           a.auto_exposure == b.auto_exposure && a.render_scale == b.render_scale &&
+           a.temporal_history_scale == b.temporal_history_scale;
 }
 bool runtime_script_field(std::string_view component, std::string_view field) {
     if (component == "Transform3D" && (field == "position" || field == "rotation"))

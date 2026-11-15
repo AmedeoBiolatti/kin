@@ -329,7 +329,7 @@ struct GpuExposureReadback {
 class GpuView3D final : public IViewBackend3D {
 public:
     Texture texture() const override;
-    Vec2i size() const override { return _size; }
+    Vec2i size() const override { return _output_size.x > 0 ? _output_size : _size; }
     u32 samples() const override { return _samples; }
     void reset_history() override {
         _taa_reset_asked = true;
@@ -337,8 +337,11 @@ public:
         _exposure_valid = false;
         _fog_volume_valid = false;
     }
-    Vec2i render_size() const override { return extent(); }
+    Vec2i render_size() const override { return upscaled() ? size() : extent(); }
+    Vec2i render_resolution() const override { return extent(); }
     bool set_render_size(Vec2i size) override {
+        if (upscaled() && size.x > 0 && size.y > 0)
+            return false;
         _extent = size.x > 0 && size.y > 0 ? Vec2i{std::min(size.x, _size.x), std::min(size.y, _size.y)} : Vec2i{};
         return true;
     }
@@ -347,7 +350,9 @@ private:
     friend class GpuRenderer3D;
     // What a render fills, from the top-left (set_render_size): the whole when unset.
     Vec2i extent() const { return _extent.x > 0 ? _extent : _size; }
+    bool upscaled() const { return _options.render_scale < 1.0f; }
     Vec2i _extent{};
+    Vec2i _output_size{}; // logical/display extent; _size and the screen-space inputs stay at shading resolution
     // Scene3D::time of its frame and of the frame before (a moving surface's previous position, for the velocity).
     f32 _offset_clock[2] = {0.0f, 0.0f};
     bool _offset_clock_seen = false;
@@ -424,6 +429,7 @@ private:
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
+    std::array<GpuTexture, 2> _taa_confidence; // scaled views only: local history age (R16F)
     // The velocities the resolve took (the nearest surface's round each pixel; two halves in R32_UINT, their lowest
     // bits holding how recently the depth bent there, for the sharpening), this frame's and the last, read and written
     // as the history is: the next frame compares its own with them.
@@ -1224,10 +1230,12 @@ private:
     // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.
     bool _taa_warned = false;
     bool _taa_prepass_warned = false;
-    SDL_GPUComputePipeline* _taa_pipeline = nullptr; // taa.comp
-    std::shared_ptr<GpuBuffer> _previous;            // last frame's matrix of each copy in _instances; grows
-    std::vector<Mat4f> _taa_prev;                    // render()'s scratch: a matrix per copy of the scene
-    std::vector<Mat4f> _taa_ordered;                 // and per copy in _instances
+    SDL_GPUComputePipeline* _taa_pipeline = nullptr;         // taa.comp
+    SDL_GPUComputePipeline* _taau_pipeline = nullptr;        // reconstruction from render-resolution inputs
+    SDL_GPUComputePipeline* _taau_output_pipeline = nullptr; // dense history to output, with optional sharpening
+    std::shared_ptr<GpuBuffer> _previous;                    // last frame's matrix of each copy in _instances; grows
+    std::vector<Mat4f> _taa_prev;                            // render()'s scratch: a matrix per copy of the scene
+    std::vector<Mat4f> _taa_ordered;                         // and per copy in _instances
     struct CopyRef {
         u32 slot = 0;                        // a draw's first copy among its group's in the view's record,
         u32 past = 0;                        // and where its place was last frame (~0: no same-sized group then)

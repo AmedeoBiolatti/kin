@@ -3249,6 +3249,53 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
 device has fewer); `background` shows where nothing is drawn (transparent lets
 the 2D under the view show).
 
+### Temporal upscaling
+
+Native views can shade at a lower resolution and reconstruct into display-resolution temporal history:
+
+```cpp
+auto view = renderer3d.create_view({1704, 1065}, {.samples = 1, .hdr = true, .render_scale = 2.0f / 3.0f});
+scene.taa.enabled = true;
+// view->size() and texture(): 1704x1065; view->render_resolution(): 1136x710.
+```
+
+`ViewOptions3D::render_scale` defaults to 1, preserving native rendering. Values in [0.5, 1] are accepted;
+below 1 requires `RendererCapabilities3D::temporal_upscaling`. Creation fails explicitly on unsupported backends,
+and rendering a scaled view requires `Scene3D::taa.enabled`. The native path uses one shading sample and reuses
+TAA's motion, transparent/particle reactivity, nearest-surface velocity and history rejection. Colour, depth,
+motion and screen-space lighting remain at `ceil(output_size * render_scale)`; history and its dilated velocity
+are at output resolution by default. Bloom, exposure and output follow reconstruction. This is Kin's experimental TAAU
+implementation, with its own quality tradeoffs.
+
+`ViewOptions3D::temporal_history_scale` optionally keeps denser history, in [1, 2], default 1. Above 1 requires
+`render_scale < 1`; native views retain their existing TAA path. Colour, dilated velocity and history age use
+`ceil(output_size * temporal_history_scale)`. Shading resolution, camera aspect, LOD and picking stay unchanged.
+The dense history resolves to output size in linear light before bloom and exposure, sharing that dispatch with
+optional sharpening. The default 1 keeps the existing dispatch path and output.
+
+At 1704x1065 output, 1.5x and 2x histories add about 60.6 and 145.4 MiB of history targets respectively. With
+sharpening off, the output resolve also needs a 13.8 MiB target. Resolve work grows with history pixel count
+(about 2.25x or 4x); select density as a quality/memory tradeoff rather than a reduction in shading cost.
+
+The reconstruction footprint follows the history pixel grid, which is the output grid at the default density.
+Input samples close to a history pixel contribute more; the update rate is normalised by shading-sample density
+in that grid. Motion rejection thresholds remain in display pixels regardless of history density.
+
+When `still_blend > blend`,
+`still_blend` also caps this reconstruction history during motion. Warm-up follows each reprojected pixel's
+history age rather than the whole view's age; motion and lighting rejection reduce it locally, so a newly
+exposed surface starts accumulating independently of established surfaces. Two R16F metadata textures track
+this age at history resolution (about 6.9 MiB together at 1704x1065 with the default density), within the resolve.
+Motion consistency and transparent/particle reactivity still reject invalid history. The clipping range includes
+the current reconstruction so that a sparse neighbourhood cannot clip away its own valid sample.
+
+Camera aspect, picking coordinates and pick targets remain at output resolution, including odd-size resizes.
+LOD error remains in output pixels. Texture mip bias adds `log2(render_scale)` to the authored bias, and the
+jitter period grows with the output-to-input pixel ratio, up to the existing 16-phase limit. Each view keeps
+independent history; resize and `reset_history()` discard it. `set_render_size()` cannot select a partial
+rectangle of a scaled view; `render_size()` remains its full displayed size, while `render_resolution()` reports
+the shading extent. Use a new view to change its scale.
+
 A view made with `pick` also keeps, a pixel each, the world point and the id
 of the scene's opaque or alpha mesh drawn there (not wireframes, additive
 glows or the overlay). `Renderer3D::pick(view, pixel)` reads one back: `hit`,

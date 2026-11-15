@@ -9,6 +9,12 @@ releases may change APIs.
 
 ### Added
 
+- Experimental native temporal upscaling ([3D rendering](rendering_3d.md#temporal-upscaling)):
+  `ViewOptions3D::render_scale` shades at a lower resolution while retaining display-size output, picking and LOD;
+  `View3D::render_resolution()` reports the shading size. Requires temporal AA and backend support.
+  History warms up per pixel, with motion and transparent/particle rejection. Optional
+  `temporal_history_scale` keeps denser history at additional memory and resolve cost. Both scales default to 1,
+  preserving native rendering; cached portal and scene-session views follow changed temporal settings.
 - Determinism for replayed and networked games ([determinism](determinism.md)):
   - `kin::dmath` (sin, cos, sincos, tan, asin, acos, atan, atan2 in f32) gives
     the same bits with every compiler and CPU, checked by a golden hash on x64.

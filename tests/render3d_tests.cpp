@@ -526,6 +526,11 @@ void test_sdl_renderer_has_no_3d() {
     assert(caps.depth_bits == 0 && caps.max_samples == 1 && caps.max_samples_hdr == 1 && caps.max_anisotropy == 1 &&
            !caps.texture_lod_bias);
     assert(!r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({}).valid());
+    // Unsupported/invalid temporal history must fail through the facade, including its 2D fallback.
+    for (const float density :
+         {0.f, .99f, 2.01f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+        assert(!r3d.create_view({40, 30}, {.temporal_history_scale = density}));
+    assert(!r3d.create_view({40, 30}, {.temporal_history_scale = 2.f}));
 
     kin::View3D view = r3d.create_view({40, 30}, {.background = Color::rgb(0, 128, 0)}).value_or({});
     assert(view.valid() && view.size() == (kin::Vec2i{40, 30}) && view.samples() == 1);
@@ -5914,6 +5919,165 @@ void test_gpu_taa_slow_motion() {
 // one sample; the gun overlay stays in front and is not smeared; picking does
 // not see the jitter; works with ambient occlusion and contact shadows, with an
 // HDR view and bloom.
+// Display coordinates, history resets and disocclusion must survive a separate shading extent. Also exercise
+// odd-size resize, picking and HDR/sharpening: sampling a render-sized motion texture with output coordinates
+// used to be harmless at scale 1, but is out of bounds in an upscaler.
+void test_gpu_temporal_upscaling() {
+    with_gpu("test_gpu_temporal_upscaling", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_upscaling, "temporal upscaling"))
+            return;
+        for (const float invalid : {0.f, .49f, 1.01f, std::numeric_limits<float>::quiet_NaN()})
+            assert(!r3d.create_view({160, 120}, {.render_scale = invalid}));
+        for (const float invalid : {0.f, .99f, 2.01f, std::numeric_limits<float>::quiet_NaN()})
+            assert(!r3d.create_view({160, 120}, {.render_scale = .5f, .temporal_history_scale = invalid}));
+        assert(!r3d.create_view({160, 120}, {.temporal_history_scale = 2.f}));
+        const auto box = make_box(r3d, {2, 2, .2f});
+        for (const float scale : {2.f / 3.f, .5f}) {
+            std::array<kin::u64, 2> history_bytes{};
+            for (const float history_scale : {1.f, 1.5f, 2.f}) {
+                for (const bool hdr : {false, true}) {
+                    kin::ViewOptions3D options;
+                    options.background = kin::colors::black;
+                    options.hdr = hdr;
+                    options.bloom = hdr ? .1f : 0.f;
+                    options.pick = true;
+                    options.render_scale = scale;
+                    options.temporal_history_scale = history_scale;
+                    auto view = r3d.create_view({160, 120}, options).value_or({});
+                    assert(view && view.samples() == 1);
+                    assert((view.size() == kin::Vec2i{160, 120} && view.texture().size() == view.size()));
+                    assert((view.render_resolution() == kin::Vec2i{static_cast<int>(std::ceil(160 * scale)),
+                                                                   static_cast<int>(std::ceil(120 * scale))}));
+                    kin::Scene3D scene;
+                    scene.camera = flat_camera();
+                    assert(!r3d.can_render_part(view, scene) && !view.set_render_size({80, 60}));
+                    assert(!r3d.render(view, scene)); // reconstruction is mandatory, not a stretched fallback
+                    scene.taa = {.enabled = true, .sharpness = hdr ? .2f : 0.f};
+                    const auto pose = [&](float x, Color color) {
+                        scene.clear();
+                        assert(scene.draw(box, Mat4f::translation({x, 0, 0}), {.color = color, .unlit = true},
+                                          kin::colors::white, 42));
+                    };
+                    const auto shoot = [&] {
+                        auto p = shoot_view(renderer, r3d, view, scene);
+                        renderer.present();
+                        return p;
+                    };
+                    pose(0, Color::rgb(255, 0, 0));
+                    Pixels p;
+                    for (int frame = 0; frame < 32; ++frame)
+                        p = shoot();
+                    assert(p.at(80, 60).r > 150 && p.at(80, 60).g < 5);
+                    assert(r3d.debug_stats().taa_dispatches == (hdr || history_scale > 1.f ? 2u : 1u));
+                    const auto bytes = r3d.stats().feature_bytes;
+                    if (history_scale == 1.f) {
+                        history_bytes[hdr] = bytes;
+                    } else {
+                        const auto pixels = static_cast<kin::u64>(std::ceil(160 * history_scale)) *
+                                            static_cast<kin::u64>(std::ceil(120 * history_scale));
+                        // Two RGBA16F colours, R32UI velocities and R16F ages; a display target when not sharpened.
+                        const auto extra = (pixels - 160 * 120) * 28 + (hdr ? 0 : 160 * 120 * 8);
+                        assert(bytes == history_bytes[hdr] + extra);
+                    }
+                    // Move a matched copy off its old footprint. Its history must not leave a red trail.
+                    pose(4, Color::rgb(255, 0, 0));
+                    for (int frame = 0; frame < 8; ++frame)
+                        p = shoot();
+                    assert(p.at(80, 60).r < 5);
+                    const auto at = scene.camera.project({4, 0, 0}, screen);
+                    assert(at && p.at(at->pos).r > 150);
+                    const auto picked = r3d.pick(view, {int(at->pos.x), int(at->pos.y)}).value_or({});
+                    assert(picked.hit && picked.id == 42);
+                    // A reset must agree with a fresh view, including the first spatially reconstructed frame.
+                    scene.debug.freeze_jitter = true;
+                    pose(0, Color::rgb(0, 255, 0));
+                    view.reset_history();
+                    const auto cut = shoot();
+                    auto fresh = r3d.create_view({160, 120}, options).value_or({});
+                    auto first = shoot_view(renderer, r3d, fresh, scene);
+                    renderer.present();
+                    assert(cut.rgba == first.rgba);
+                    assert(r3d.resize(view, {161, 123}));
+                    assert((view.size() == kin::Vec2i{161, 123} && view.render_size() == view.size()));
+                    assert(view.texture().size() == view.size());
+                    p = shoot();
+                    assert(r3d.debug_stats().taa_reset && p.at(80, 60).g > 100 && p.at(80, 60).r < 5);
+                    assert(view.set_render_size({}));
+                }
+            }
+        }
+        // Authored jitter periods keep their existing clamp contract before scaling the phase count.
+        auto bounded = r3d.create_view({160, 120}, {.render_scale = .5f}).value_or({});
+        kin::Scene3D scene;
+        scene.taa.enabled = true;
+        scene.taa.jitter_samples = std::numeric_limits<kin::u32>::max();
+        for (kin::u32 frame = 0; frame < 2; ++frame) {
+            render_ok(r3d, bounded, scene);
+            const auto want = kin::taa_jitter(frame, kin::max_taa_jitter_samples);
+            const auto got = r3d.debug_stats().taa_jitter;
+            assert(got.x == want.x && got.y == want.y);
+            renderer.present();
+        }
+    });
+}
+
+// A surface arriving from outside the view starts its own reconstruction history. Its recovery must not
+// depend on how long unrelated pixels have been visible. Frozen jitter isolates local history from phase.
+void test_gpu_temporal_upscaling_recovery(float history_scale = 1.f) {
+    const char* name =
+        history_scale > 1.f ? "test_gpu_temporal_upscaling_dense_recovery" : "test_gpu_temporal_upscaling_recovery";
+    with_gpu(name, [history_scale](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_upscaling, "temporal upscaling"))
+            return;
+        const PatternSurface pattern = make_pattern_surface(r3d, renderer);
+        auto warm = r3d.create_view({160, 120}, {.render_scale = 2.f / 3.f, .temporal_history_scale = history_scale})
+                        .value_or({});
+        auto fresh = r3d.create_view({160, 120}, {.render_scale = 2.f / 3.f, .temporal_history_scale = history_scale})
+                         .value_or({});
+        assert(warm && fresh);
+        kin::Scene3D scene;
+        scene.camera = flat_camera();
+        scene.taa = {.enabled = true, .sharpness = 0.f};
+        scene.debug.freeze_jitter = true;
+        const auto pose = [&](float x, float camera_x) {
+            scene.clear();
+            scene.camera = flat_camera(camera_x);
+            assert(scene.draw(pattern.mesh, Mat4f::translation({x, 0, 0}),
+                              {.unlit = true, .texture = pattern.texture, .wrap_u = kin::Wrap3D::Repeat},
+                              kin::colors::white, 41));
+        };
+        const auto shoot = [&](kin::View3D& view) {
+            auto p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        pose(120.f, 0.f);
+        for (int i = 0; i < 64; ++i)
+            shoot(warm);
+        shoot(fresh);
+        int worst = 0;
+        for (int frame = 0; frame < 8; ++frame) {
+            // Continue moving after arrival so the reconstruction changes despite frozen jitter.
+            pose(0.f, frame * .013f);
+            const auto a = shoot(warm);
+            assert(!r3d.debug_stats().taa_reset);
+            const auto b = shoot(fresh);
+            assert(!r3d.debug_stats().taa_reset);
+            for (int y = 20; y < 100; ++y)
+                for (int x = 30; x < 130; ++x)
+                    worst = std::max(worst, std::abs(int(a.at(x, y).g) - int(b.at(x, y).g)));
+        }
+        std::cout << "  local recovery independent of view age: worst=" << worst << '\n';
+        assert(worst <= 1);
+    });
+}
+
+void test_gpu_temporal_upscaling_dense_recovery() {
+    test_gpu_temporal_upscaling_recovery(2.f);
+}
+
 void test_gpu_taa() {
     with_gpu("test_gpu_taa", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -6232,9 +6396,14 @@ void test_gpu_taa() {
 // neighbourhoods span dark to light so the clip lets a wrong history through,
 // and a camera panning over a coarser one. The pixels the block has left must
 // look as they do without it, and a panned picture must stay near the supersampled one.
-void test_gpu_taa_over_detail() {
-    with_gpu("test_gpu_taa_over_detail", [](kin::Renderer2D& renderer) {
+void test_gpu_taa_over_detail(float render_scale = 1.0f, float history_scale = 1.0f) {
+    const char* name = history_scale > 1.f  ? "test_gpu_temporal_upscaling_dense_detail"
+                       : render_scale < 1.f ? "test_gpu_temporal_upscaling_detail"
+                                            : "test_gpu_taa_over_detail";
+    with_gpu(name, [render_scale, history_scale](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
+        if (render_scale < 1.f && lacks(r3d.capabilities().temporal_upscaling, "temporal upscaling"))
+            return;
         const kin::Mesh3D back = make_box(r3d, {20.0f, 14.0f, 0.1f});
         const kin::Mesh3D cell = make_box(r3d, {0.1f, 0.1f, 0.1f});
         const kin::Mesh3D big_cell = make_box(r3d, {0.4f, 0.4f, 0.1f});
@@ -6242,7 +6411,11 @@ void test_gpu_taa_over_detail() {
         const kin::Material3D light{.color = Color::rgb(220, 220, 220), .unlit = true};
         const kin::Material3D dark{.color = Color::rgb(30, 30, 30), .unlit = true};
         const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1,
+                                                        .background = Color::rgb(0, 0, 0),
+                                                        .render_scale = render_scale,
+                                                        .temporal_history_scale = history_scale})
+                               .value_or({});
         kin::Scene3D scene;
         std::vector<kin::MeshInstance3D> small_cells, large_cells;
         for (int y = 0; y < 120; ++y) {
@@ -6288,8 +6461,8 @@ void test_gpu_taa_over_detail() {
             (void)scene.draw(surface, Mat4f::identity(),
                              {.unlit = true, .texture = pattern, .wrap_u = kin::Wrap3D::Repeat});
         };
-        // A 16-sample reference (the camera shifted by sub-pixel steps), in linear light, drawn on a view of its own
-        // so that the temporal view keeps its history.
+        // A 16-sample reference (the camera shifted by sub-pixel steps), in linear light, drawn on a view of its
+        // own so that the temporal view keeps its history.
         kin::View3D plain_view =
             r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         const auto supersample = [&](float cam_x, bool large, bool with_block = false, float block_x = 0.0f,
@@ -6335,10 +6508,14 @@ void test_gpu_taa_over_detail() {
         const std::vector<int> reference = supersample(0.0f, false);
 
         // The block crosses, 3 pixels a frame. Where it has been, the picture is as bright as the checker alone
-        // drawn the same way (a ghost of the white block would lift the zone's mean; the 1-pixel pattern is softened
-        // by the reconstruction filter, so what is compared is the same softened picture, and by its mean).
-        kin::View3D alone_view =
-            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+        // drawn the same way (a ghost of the white block would lift the zone's mean; the 1-pixel pattern is
+        // softened by the reconstruction filter, so what is compared is the same softened picture, and by its
+        // mean).
+        kin::View3D alone_view = r3d.create_view({160, 120}, {.samples = 1,
+                                                              .background = Color::rgb(0, 0, 0),
+                                                              .render_scale = render_scale,
+                                                              .temporal_history_scale = history_scale})
+                                     .value_or({});
         Pixels alone;
         for (int f = 0; f < 30; ++f) {
             scene.taa = {.enabled = true};
@@ -6379,20 +6556,41 @@ void test_gpu_taa_over_detail() {
         // against the supersample of each frame's own pose, next to the same pose drawn without it.
         double errors[4][2] = {};
         int index = 0;
+        kin::View3D spatial_view;
         for (const float step : {0.0f, 0.0213f, 0.1f, 0.237f}) {
-            view.reset_history();
+            if (render_scale < 1.f) {
+                // Compare temporal and spatial reconstruction at the same shading budget. New views align their
+                // jitter phases; reset_history() deliberately retains a view's sample sequence.
+                const kin::ViewOptions3D options{.samples = 1,
+                                                 .background = Color::rgb(0, 0, 0),
+                                                 .render_scale = render_scale,
+                                                 .temporal_history_scale = history_scale};
+                view = r3d.create_view({160, 120}, options).value_or({});
+                spatial_view = r3d.create_view({160, 120}, options).value_or({});
+            } else {
+                view.reset_history();
+            }
             double taa_error = 0.0, plain_error = 0.0;
             for (int f = 0; f < 48; ++f) {
                 const float cam_x = -5.03f + step * static_cast<float>(f); // 0.3 of a pixel off the pattern's grid
                 scene.taa = {.enabled = true};
                 textured(cam_x);
                 const Pixels p = shoot(view, scene);
+                Pixels spatial;
+                if (render_scale < 1.f) {
+                    scene.taa.blend = 0;
+                    spatial = shoot(spatial_view, scene);
+                }
                 if (f >= 32) {
                     const std::vector<int> truth = supersample(cam_x, true, false, 0.0f, true);
-                    scene.taa = {};
-                    textured(cam_x);
                     taa_error += mean_square(p, truth) / 16.0;
-                    plain_error += mean_square(shoot(plain_view, scene), truth) / 16.0;
+                    if (render_scale < 1.f) {
+                        plain_error += mean_square(spatial, truth) / 16.0;
+                    } else {
+                        scene.taa = {};
+                        textured(cam_x);
+                        plain_error += mean_square(shoot(plain_view, scene), truth) / 16.0;
+                    }
                 }
             }
             std::cerr << "taa: panning " << step * 10.0f
@@ -6402,13 +6600,22 @@ void test_gpu_taa_over_detail() {
             errors[index][1] = plain_error;
             ++index;
         }
-        // Held still it settles to a fraction of the plain picture's error; panning slowly or by whole pixels a frame
-        // it stays well under it; panning fast the history is trusted less (every sub-pixel shift blurs it, and
-        // what it lacks is made up by the one sample a frame) and the gain is smaller, but there is some.
+        // Held still it settles to a fraction of the plain picture's error; panning slowly or by whole pixels a
+        // frame it stays well under it; panning fast the history is trusted less (every sub-pixel shift blurs it,
+        // and what it lacks is made up by the one sample a frame) and the gain is smaller, but there is some.
         assert(errors[0][0] < errors[0][1] * 0.25);
         assert(errors[1][0] < errors[1][1] * 0.5 && errors[2][0] < errors[2][1] * 0.4);
         assert(errors[3][0] < errors[3][1] * 0.75);
     });
+}
+
+// Reuse the independent 16-sample reference and moving-occluder trail checks at a lower shading resolution.
+void test_gpu_temporal_upscaling_detail() {
+    test_gpu_taa_over_detail(2.f / 3.f);
+}
+
+void test_gpu_temporal_upscaling_dense_detail() {
+    test_gpu_taa_over_detail(2.f / 3.f, 2.f);
 }
 
 // Detail finer than a pixel under a still camera: bars seven tenths of a pixel wide in front of a stone-like wall
@@ -21629,9 +21836,14 @@ void test_gpu_taa_static_glass() {
     });
 }
 
-void test_gpu_taa_transient_effects() {
-    with_gpu("test_gpu_taa_transient_effects", [](kin::Renderer2D& renderer) {
+void test_gpu_taa_transient_effects(float render_scale = 1.0f, float history_scale = 1.0f) {
+    const char* name = history_scale > 1.f  ? "test_gpu_temporal_upscaling_dense_transient_effects"
+                       : render_scale < 1.f ? "test_gpu_temporal_upscaling_transient_effects"
+                                            : "test_gpu_taa_transient_effects";
+    with_gpu(name, [render_scale, history_scale](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
+        if (render_scale < 1.f && lacks(r3d.capabilities().temporal_upscaling, "temporal upscaling"))
+            return;
         if (lacks(r3d.capabilities().temporal_aa && r3d.capabilities().particles, "TAA and particles"))
             return;
         const auto box = make_box(r3d, {1, 1, 1});
@@ -21657,8 +21869,16 @@ void test_gpu_taa_transient_effects() {
                 const bool hdr = mode == 5 || mode == 13;
                 const bool invisible = mode == 11 || mode == 12;
                 const bool checker_backdrop = mode == 16 || mode == 17;
-                auto view = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .3f : 0.0f}).value_or({});
-                auto oracle = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .3f : 0.0f}).value_or({});
+                auto view = r3d.create_view({160, 120}, {.hdr = hdr,
+                                                         .bloom = hdr ? .3f : 0.0f,
+                                                         .render_scale = render_scale,
+                                                         .temporal_history_scale = history_scale})
+                                .value_or({});
+                auto oracle = r3d.create_view({160, 120}, {.hdr = hdr,
+                                                           .bloom = hdr ? .3f : 0.0f,
+                                                           .render_scale = render_scale,
+                                                           .temporal_history_scale = history_scale})
+                                  .value_or({});
                 double worst_mean = 0;
                 int worst = 0, removed_worst = 0;
                 kin::u64 bytes = 0;
@@ -21673,8 +21893,10 @@ void test_gpu_taa_transient_effects() {
                         scene.camera = kin::Camera3D::look_at({camera_x, 0, 6}, {camera_x, 0, 0}, 60);
                         scene.lights.sun.color = {};
                         scene.lights.ambient = {.3f, .3f, .3f};
-                        scene.taa = {
-                            .enabled = true, .blend = .98f, .sharpness = 0, .jitter_scale = jittered ? 1.0f : 0.0f};
+                        scene.taa = {.enabled = true,
+                                     .blend = render_scale < 1.f ? .9f : .98f,
+                                     .sharpness = 0,
+                                     .jitter_scale = jittered ? 1.0f : 0.0f};
                         if (mode != 13)
                             (void)scene.draw(box, Mat4f::translation({0, 0, -1}) * Mat4f::scaling({12, 8, .2f}),
                                              {.color = checker_backdrop ? kin::colors::white : Color::rgb(60, 80, 100),
@@ -21814,6 +22036,15 @@ void test_gpu_taa_transient_effects() {
                 assert(removed_worst <= 3);
             }
     });
+}
+
+// Scaled reconstruction must also discard moved, faded and removed transparent/particle composites promptly.
+void test_gpu_temporal_upscaling_transient_effects() {
+    test_gpu_taa_transient_effects(2.f / 3.f);
+}
+
+void test_gpu_temporal_upscaling_dense_transient_effects() {
+    test_gpu_taa_transient_effects(2.f / 3.f, 2.f);
 }
 
 // The lit fraction includes positional lights at the sprite centre. Independent
@@ -24126,6 +24357,13 @@ int main(int argc, char** argv) {
     RUN(test_gpu_ao_half_resolution_silhouette());
     RUN(test_taa_jitter());
     RUN(test_gpu_taa());
+    RUN(test_gpu_temporal_upscaling());
+    RUN(test_gpu_temporal_upscaling_detail());
+    RUN(test_gpu_temporal_upscaling_dense_detail());
+    RUN(test_gpu_temporal_upscaling_recovery());
+    RUN(test_gpu_temporal_upscaling_dense_recovery());
+    RUN(test_gpu_temporal_upscaling_transient_effects());
+    RUN(test_gpu_temporal_upscaling_dense_transient_effects());
     RUN(test_gpu_taa_slow_motion());
     RUN(test_gpu_taa_over_detail());
     RUN(test_gpu_taa_still_detail());
