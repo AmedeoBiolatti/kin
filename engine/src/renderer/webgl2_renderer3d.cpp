@@ -451,8 +451,9 @@ struct MeshProgram {
         : handle(program), surface(is_surface), alive(std::move(liveness)) {
         glUseProgram(handle);
         // Sampler units belong to the linked program, not individual draws.
-        constexpr std::array names{"uTexture",  "uNormal", "uMetalRough", "uOcclusion", "uEmission",   "uJoints",
-                                   "uFogTable", "uShadow", "uGraphMaps",  "uFogVolume", "uDecalDepth", "uDecalNormals"};
+        constexpr std::array names{"uTexture",    "uNormal",       "uMetalRough",  "uOcclusion",  "uEmission",
+                                   "uJoints",     "uFogTable",     "uShadow",      "uGraphMaps",  "uFogVolume",
+                                   "uDecalDepth", "uDecalNormals", "uLocalShadow", "uShadowData", "uMoonShadow"};
         for (u32 unit = 0; unit < names.size(); ++unit)
             glUniform1i(location(names[unit]), GLint(unit));
         draw = {location("uShadowPass"),
@@ -487,7 +488,8 @@ struct MeshProgram {
         return locations.emplace(name, glGetUniformLocation(handle, name)).first->second;
     }
 };
-constexpr GLuint graph_maps_unit = 8, fog_volume_unit = 9, decal_depth_unit = 10, decal_normals_unit = 11;
+constexpr GLuint graph_maps_unit = 8, fog_volume_unit = 9, decal_depth_unit = 10, decal_normals_unit = 11,
+                 local_shadow_unit = 12, shadow_data_unit = 13, moon_shadow_unit = 14;
 // A particle sprite as the vertex shader reads it (native GpuParticle3D's layout).
 struct ParticleRecord {
     std::array<f32, 4> position_size, colour, axis_rotation, frame;
@@ -545,6 +547,21 @@ struct WebGLRenderer3D::Impl {
     std::vector<ParticleRecord> particle_records, cast_records;
     std::vector<DecalRecord> decal_records;
     GLuint decal_buffer = 0, decal_vao = 0;
+    // Local and moon shadows (local_maps): the arrays, the rows of uShadowData, each light's first layer (-1: none).
+    struct DepthArrayHandles {
+        GLuint texture = 0, framebuffer = 0;
+        u32 side = 0, layers = 0;
+    };
+    ShadowSlots3D spot_slots, point_slots;
+    std::vector<f32> point_layer_of, spot_layer_of;
+    GLuint shadow_data = 0;
+    bool has_local = false;
+    f32 local_texel = 1.0f;
+    struct {
+        u32 count = 0, row = 0;
+        std::array<f32, 4> ends{}, blend{};
+        f32 texel = 1.0f, strength = 0.0f;
+    } moon;
     struct ParticleCast {
         const ParticleLook3D* look;
         u32 first, count;
@@ -576,6 +593,7 @@ struct WebGLRenderer3D::Impl {
         Mat4f view_projection{};
         std::array<f32, 128> points{};
         std::array<f32, 16 * max_spot_lights> spots{};
+        std::array<f32, 16> point_shadow{}; // each packed point light's first cube layer (-1: none)
         u32 point_count = 0, spot_count = 0;
         LinearRgb ambient{}, ground{};
     } pass;
@@ -666,6 +684,7 @@ struct WebGLRenderer3D::Impl {
             decal = std::make_shared<MeshProgram>(
                 WebGLDevice::program(WebGLDevice::shader_source("decal.vert.glsl").c_str(), decal_fragment.c_str()),
                 false, device.alive());
+            glUniform1i(decal->location("uReceivesShadow"), 1); // (a decal is lit as the surface under it)
         }
         particle_program = WebGLDevice::program(WebGLDevice::shader_source("particle.vert.glsl").c_str(),
                                                 WebGLDevice::shader_source("particle.frag.glsl").c_str());
@@ -673,6 +692,16 @@ struct WebGLRenderer3D::Impl {
         glUniform1i(glGetUniformLocation(particle_program, "uTexture"), 0);
         glUniform1i(glGetUniformLocation(particle_program, "uDepth"), 1);
         glUniform1i(glGetUniformLocation(particle_program, "uShadow"), 7);
+        glUniform1i(glGetUniformLocation(particle_program, "uLocalShadow"), GLint(local_shadow_unit));
+        glUniform1i(glGetUniformLocation(particle_program, "uShadowData"), GLint(shadow_data_unit));
+        glUniform1i(glGetUniformLocation(particle_program, "uMoonShadow"), GLint(moon_shadow_unit));
+        glGenTextures(1, &shadow_data);
+        glActiveTexture(GL_TEXTURE0 + shadow_data_unit);
+        glBindTexture(GL_TEXTURE_2D, shadow_data);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        const std::array<f32, 24> no_rows{};
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 6, 1, 0, GL_RGBA, GL_FLOAT, no_rows.data());
         glUniform1i(glGetUniformLocation(particle_program, "uFogTable"), 6);
         glUniform1i(glGetUniformLocation(particle_program, "uFogVolume"), GLint(fog_volume_unit));
         glGenBuffers(1, &particle_buffer);
@@ -685,6 +714,9 @@ struct WebGLRenderer3D::Impl {
         glUseProgram(fog_program);
         glUniform1i(glGetUniformLocation(fog_program, "uLit"), 0);
         glUniform1i(glGetUniformLocation(fog_program, "uShadow"), 7);
+        glUniform1i(glGetUniformLocation(fog_program, "uLocalShadow"), GLint(local_shadow_unit));
+        glUniform1i(glGetUniformLocation(fog_program, "uShadowData"), GLint(shadow_data_unit));
+        glUniform1i(glGetUniformLocation(fog_program, "uMoonShadow"), GLint(moon_shadow_unit));
         glUseProgram(sky_program);
         glUniform1i(glGetUniformLocation(sky_program, "uFogTable"), 6);
         glUniform1i(glGetUniformLocation(sky_program, "uFogVolume"), GLint(fog_volume_unit));
@@ -734,7 +766,7 @@ struct WebGLRenderer3D::Impl {
         caps.depth_bits = 24;
         caps.morph_targets = true;
         caps.auto_exposure = float_targets;
-        caps.particles = caps.soft_particles = caps.decals = caps.particle_shadows = true;
+        caps.particles = caps.soft_particles = caps.decals = caps.particle_shadows = caps.local_shadows = true;
         caps.max_spot_lights = max_spot_lights; // the most important 16 of each in view, unshadowed
         const bool unmasked =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "WEBGL_debug_renderer_info");
@@ -758,6 +790,11 @@ struct WebGLRenderer3D::Impl {
         glDeleteProgram(post_program);
         glDeleteProgram(fog_program);
         glDeleteProgram(particle_program);
+        for (const auto* a : {&local, &moon_maps}) {
+            glDeleteTextures(1, &a->texture);
+            glDeleteFramebuffers(1, &a->framebuffer);
+        }
+        glDeleteTextures(1, &shadow_data);
         glDeleteBuffers(1, &particle_buffer);
         glDeleteBuffers(1, &cast_buffer);
         glDeleteBuffers(1, &decal_buffer);
@@ -961,6 +998,10 @@ struct WebGLRenderer3D::Impl {
         if (program.serial != pass.serial)
             apply(program);
     }
+    // A light's first shadow layer this render (-1: none; none for the overlay, `shadowed` null).
+    static f32 layer_of(const std::vector<f32>& layers, u32 index, const void* shadowed) {
+        return shadowed && index < layers.size() ? layers[index] : -1.0f;
+    }
     // The pass's scene uniforms on the program in use (`current`).
     void apply(MeshProgram& program) {
         const Scene3D& scene = *pass.scene;
@@ -976,6 +1017,7 @@ struct WebGLRenderer3D::Impl {
         glUniform1i(uniform("uSpotCount"), GLint(pass.spot_count));
         if (pass.spot_count)
             glUniform4fv(uniform("uSpots[0]"), GLsizei(pass.spot_count * 4), pass.spots.data());
+        glUniform4fv(uniform("uPointShadow[0]"), 4, pass.point_shadow.data());
         const Lights3D& lights = *pass.lights;
         direction("uSunDirection", lights.sun.direction);
         direction("uFillDirection", lights.fill.direction);
@@ -1032,10 +1074,6 @@ struct WebGLRenderer3D::Impl {
                         ? omit_surface
                         : 0;
         }
-        bits |= std::ranges::any_of(scene.particle_draws(),
-                                    [](const auto& d) { return d.look.casts_shadow || d.look.receives_shadow; })
-                    ? omit_particles
-                    : 0;
         bits |= scene.ambient_occlusion.enabled ? omit_ambient_occlusion : 0;
         bits |= scene.contact_shadows.enabled ? omit_contact_shadows : 0;
         bits |= scene.ssr.enabled ? omit_ssr : 0;
@@ -1043,9 +1081,6 @@ struct WebGLRenderer3D::Impl {
         bits |= scene.global_illumination.enabled ? omit_gi : 0;
         bits |= l.reflection_probes.empty() ? 0 : omit_probes;
         bits |= l.environment || (scene.sky.enabled && scene.sky.mode == SkyMode3D::Image) ? omit_environment : 0;
-        const auto shadowed = [](const auto& light) { return light.shadow_enabled; };
-        bits |=
-            std::ranges::any_of(l.points, shadowed) || std::ranges::any_of(l.spots, shadowed) ? omit_local_shadows : 0;
         bits |= scene.camera.clipped() ? omit_clip : 0;
         bits |= l.points.size() > 16 || l.spots.size() > max_spot_lights ? omit_light_count : 0;
         bits |= scene.sky.enabled && scene.sky.stars ? omit_stars : 0;
@@ -1346,6 +1381,8 @@ struct WebGLRenderer3D::Impl {
         std::array<f32, 128> points{};
         std::array<f32, 16 * max_spot_lights> spots{};
         u32 point_count = 0, spot_count = 0;
+        std::array<f32, 16> point_shadow{};
+        point_shadow.fill(-1.0f);
         for (const u32 i : chosen_lights(std::span{lights.points}, 16, vp, eye,
                                          [](const PointLightSource3D& p, Vec3f& centre, f32& radius) {
                                              centre = p.position;
@@ -1358,6 +1395,7 @@ struct WebGLRenderer3D::Impl {
             const f32 r = std::max(l.size, 0.01f);
             const std::array<f32, 8> packed{l.position.x,  l.position.y,  l.position.z,  std::max(0.01f, l.radius),
                                             l.color.r * k, l.color.g * k, l.color.b * k, r * r};
+            point_shadow[point_count] = layer_of(point_layer_of, i, &view);
             std::copy(packed.begin(), packed.end(), points.data() + 8 * point_count++);
         }
         for (const u32 i : chosen_lights(std::span{lights.spots}, max_spot_lights, vp, eye, spot_bounding_sphere)) {
@@ -1380,19 +1418,18 @@ struct WebGLRenderer3D::Impl {
                                              cone.axis.z,
                                              cone.cos_outer,
                                              cone.scale,
-                                             0,
+                                             layer_of(spot_layer_of, i, &view),
                                              0,
                                              0};
             std::copy(packed.begin(), packed.end(), spots.data() + 16 * spot_count++);
         }
-        // The sun and the fill light (sun_and_moon), as the main pass's fog scatters the sun; the fill only where
-        // native's would be unshadowed too (the browser has no fill shadow).
+        // The sun and the fill light (sun_and_moon), as the main pass's fog scatters the sun, each through its maps.
         const auto shines = [](const DirectionalLight3D& l) {
             return l.color.r + l.color.g + l.color.b > 0.0f && length_squared(l.direction) > 0.0f;
         };
         const bool directional = settings.sun_and_moon && fog.sun_scatter > 0.0f;
         const bool sun = directional && shines(lights.sun);
-        const bool fill = directional && shines(lights.fill) && !lights.fill_shadow.enabled;
+        const bool fill = directional && shines(lights.fill);
         if (!point_count && !spot_count && !sun && !fill) {
             view.fog.reset();
             return;
@@ -1461,22 +1498,11 @@ struct WebGLRenderer3D::Impl {
         glUniform4f(loc("uFill"), to_fill.x, to_fill.y, to_fill.z, 0);
         glUniform4f(loc("uFillLight"), fill ? lights.fill.color.r : 0, fill ? lights.fill.color.g : 0,
                     fill ? lights.fill.color.b : 0, 0);
-        // The sun's cascades (drawn this render), as the mesh programs' shadow_uniforms have them.
-        const u32 cascades = view.shadow ? view.cascades.count : 0;
-        glUniform1i(loc("uShadowCount"), GLint(cascades));
-        if (cascades) {
-            std::array<Mat4f, 4> matrices;
-            std::array<f32, 4> ends{}, bias{};
-            for (u32 k = 0; k < cascades; ++k) {
-                const auto& c = view.cascades.cascade[k];
-                matrices[k] = c.view_projection;
-                ends[k] = c.slice_far;
-                bias[k] = std::max(0.0f, lights.shadow_bias) * c.texel_world / std::max(1e-6f, c.depth_range);
-            }
-            glUniformMatrix4fv(loc("uShadowMatrix[0]"), 4, GL_FALSE, matrices[0].m);
-            glUniform4fv(loc("uShadowEnds"), 1, ends.data());
-            glUniform4fv(loc("uShadowBias"), 1, bias.data());
-        }
+        // The maps (drawn this render), as the mesh programs have them.
+        shadow_uniforms(&view, lights, fog_program);
+        glUniform4fv(loc("uPointShadow[0]"), 4, point_shadow.data());
+        vec3("uForward", forward);
+        bind_shadow_units(true);
         glActiveTexture(GL_TEXTURE7);
         glBindSampler(7, 0);
         glBindTexture(GL_TEXTURE_2D_ARRAY, view.shadow ? view.shadow->texture : shadow_dummy);
@@ -1721,6 +1747,10 @@ struct WebGLRenderer3D::Impl {
             vec3("uSunDirection", to_sun);
             glUniform3f(loc("uSunColor"), pass.lights->sun.color.r, pass.lights->sun.color.g, pass.lights->sun.color.b);
             shadow_uniforms(pass.view, *pass.lights, particle_program);
+            glUniform4fv(loc("uPointShadow[0]"), 4, pass.point_shadow.data());
+            vec3("uFillDirection", normalize(pass.lights->fill.direction));
+            glUniform3f(loc("uFillColor"), pass.lights->fill.color.r, pass.lights->fill.color.g,
+                        pass.lights->fill.color.b);
             particle_serial = pass.serial;
         }
         particle_look(look);
@@ -1771,6 +1801,59 @@ struct WebGLRenderer3D::Impl {
                 stats->skin_matrices += u32(values.size());
         }
     }
+    // A depth array of `layers` layers `side` texels a side (shadow maps), with a framebuffer to draw its layers.
+    using DepthArray = DepthArrayHandles;
+    DepthArray local, moon_maps; // the point and spot lights' maps, the moon's cascades
+    void depth_array(DepthArray& a, u32 side, u32 layers) {
+        if (a.texture && a.side == side && a.layers == layers)
+            return;
+        glDeleteTextures(1, &a.texture);
+        glDeleteFramebuffers(1, &a.framebuffer);
+        a = {.side = side, .layers = layers};
+        glGenTextures(1, &a.texture);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, a.texture);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH_COMPONENT24, GLsizei(side), GLsizei(side), GLsizei(layers));
+        glGenFramebuffers(1, &a.framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, a.framebuffer);
+        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, a.texture, 0, 0);
+        const GLenum none = GL_NONE;
+        glDrawBuffers(1, &none);
+        glReadBuffer(GL_NONE);
+    }
+    // The shadow casters (opaque meshes that cast, particles that cast) into the map being drawn (`matrix`'s), its
+    // layer cleared first; `retained`: the prepared-instance slot of a sun cascade (~0u: stream).
+    void cast_into(const Scene3D& scene, const View& view, const Mat4f& matrix, u32 retained,
+                   RenderDebugStats3D& stats) {
+        glClear(GL_DEPTH_BUFFER_BIT);
+        use(*stock);
+        glUniformMatrix4fv(uniform("uViewProjection"), 1, GL_FALSE, matrix.m);
+        std::vector<u32> copies;
+        for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
+            const auto& draw = scene.draws()[slot];
+            if (!draw.material.casts_shadow || draw.material.blend == Blend3D::Alpha ||
+                draw.material.blend == Blend3D::Additive || draw.clip == DrawClip3D::whole_if_cut)
+                continue;
+            copies.clear();
+            const auto source =
+                (draw.batch ? draw.batch.instances() : scene.instances()).subspan(draw.first, draw.count);
+            for (u32 i = 0; i < source.size(); ++i) {
+                const auto& copy = source[i];
+                if (!draw.skinned && scene.cull && !visible(draw.mesh.bounds(), matrix * copy.transform))
+                    continue;
+                copies.push_back(i);
+            }
+            this->draw(scene, draw, 0, copies,
+                       retained != ~0u && slot < view.prepared.size() ? view.prepared[slot].get() : nullptr, retained,
+                       stats, true);
+        }
+        cast_particles(scene, matrix, stats);
+    }
+    // The shadow maps of this render: the sun's cascades (the view's), the point and spot lights' (local_maps), the
+    // moon's cascades. Their texture units hold placeholders meanwhile (no map is read while it is drawn).
     void shadows(View& view, const Scene3D& scene, RenderDebugStats3D& stats) {
         const auto& lights = scene.lights;
         const u32 resolution = std::min(lights.shadow_resolution, u32(device.max_texture_size()));
@@ -1779,39 +1862,11 @@ struct WebGLRenderer3D::Impl {
                 ? fit_shadow_cascades(scene.camera, f32(view.size().x) / view.size().y, lights.sun.direction,
                                       lights.shadow_area, lights.shadow_cascades, lights.shadow_distance, resolution)
                 : ShadowCascades3D{};
-        glActiveTexture(GL_TEXTURE7);
-        glBindSampler(7, 0);
-        glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_dummy);
-        if (!view.cascades.count) {
-            view.shadow.reset();
-            return;
-        }
-        if (!view.shadow || view.shadow->resolution != resolution || view.shadow->count != view.cascades.count) {
-            auto value = std::make_shared<Shadow>();
-            value->alive = device.alive();
-            value->resolution = resolution;
-            value->count = view.cascades.count;
-            glGenTextures(1, &value->texture);
-            glBindTexture(GL_TEXTURE_2D_ARRAY, value->texture);
-            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24, GLsizei(resolution), GLsizei(resolution),
-                         GLsizei(value->count), 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
-            glGenFramebuffers(1, &value->framebuffer);
-            glBindFramebuffer(GL_FRAMEBUFFER, value->framebuffer);
-            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, value->texture, 0, 0);
-            const GLenum none = GL_NONE;
-            glDrawBuffers(1, &none);
-            glReadBuffer(GL_NONE);
-            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-                throw std::runtime_error("WebGL2 cascaded depth framebuffer is incomplete");
-            view.shadow = std::move(value);
+        for (const GLuint unit : {7u, local_shadow_unit, moon_shadow_unit}) {
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindSampler(unit, 0);
             glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_dummy);
         }
-        glBindFramebuffer(GL_FRAMEBUFFER, view.shadow->framebuffer);
-        glViewport(0, 0, GLsizei(resolution), GLsizei(resolution));
         glDisable(GL_SCISSOR_TEST);
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_GREATER);
@@ -1827,7 +1882,7 @@ struct WebGLRenderer3D::Impl {
         pass.scene = &scene;
         pass.lights = &scene.lights;
         pass.shadow = true;
-        // The sprites that cast (ParticleLook3D::casts_shadow), uploaded once for every cascade.
+        // The sprites that cast (ParticleLook3D::casts_shadow), uploaded once for every map.
         particle_casts.clear();
         for (const auto& source : particle_sources(scene, true)) {
             if (!source.look->casts_shadow)
@@ -1845,40 +1900,218 @@ struct WebGLRenderer3D::Impl {
         }
         use(*stock);
         palette(scene);
-        std::vector<u32> copies;
-        for (u32 layer = 0; layer < view.cascades.count; ++layer) {
-            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, view.shadow->texture, 0, GLint(layer));
-            glClear(GL_DEPTH_BUFFER_BIT);
-            const Mat4f& matrix = view.cascades.cascade[layer].view_projection;
-            glUniformMatrix4fv(uniform("uViewProjection"), 1, GL_FALSE, matrix.m);
-            for (u32 slot = 0; slot < scene.draws().size(); ++slot) {
-                const auto& draw = scene.draws()[slot];
-                if (!draw.material.casts_shadow || draw.material.blend == Blend3D::Alpha ||
-                    draw.material.blend == Blend3D::Additive || draw.clip == DrawClip3D::whole_if_cut)
-                    continue;
-                copies.clear();
-                const auto source =
-                    (draw.batch ? draw.batch.instances() : scene.instances()).subspan(draw.first, draw.count);
-                for (u32 i = 0; i < source.size(); ++i) {
-                    const auto& copy = source[i];
-                    if (!draw.skinned && scene.cull && !visible(draw.mesh.bounds(), matrix * copy.transform))
-                        continue;
-                    copies.push_back(i);
-                }
-                this->draw(scene, draw, 0, copies, slot < view.prepared.size() ? view.prepared[slot].get() : nullptr,
-                           layer, stats, true);
+        if (!view.cascades.count) {
+            view.shadow.reset();
+        } else {
+            if (!view.shadow || view.shadow->resolution != resolution || view.shadow->count != view.cascades.count) {
+                auto value = std::make_shared<Shadow>();
+                value->alive = device.alive();
+                value->resolution = resolution;
+                value->count = view.cascades.count;
+                DepthArray made;
+                depth_array(made, resolution, view.cascades.count);
+                value->texture = made.texture;
+                value->framebuffer = made.framebuffer;
+                view.shadow = std::move(value);
             }
-            cast_particles(scene, matrix, stats);
-            use(*stock); // (the next layer's matrix goes to the mesh program)
+            glBindFramebuffer(GL_FRAMEBUFFER, view.shadow->framebuffer);
+            glViewport(0, 0, GLsizei(resolution), GLsizei(resolution));
+            for (u32 layer = 0; layer < view.cascades.count; ++layer) {
+                glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, view.shadow->texture, 0, GLint(layer));
+                cast_into(scene, view, view.cascades.cascade[layer].view_projection, layer, stats);
+            }
         }
+        local_maps(view, scene, stats);
         glDisable(GL_POLYGON_OFFSET_FILL);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         stats.shadow_cascades = view.cascades.count;
+    }
+    // The point and spot lights' maps (native P3b: the most important lights of those that ask, held across frames by
+    // assign_shadow_slots' hysteresis; a spot's perspective map, a point light's six cube faces) and the moon's
+    // cascades (Lights3D::fill_shadow), into their arrays, and every map's row of uShadowData.
+    void local_maps(const View& view, const Scene3D& scene, RenderDebugStats3D& stats) {
+        const Lights3D& lights = scene.lights;
+        point_layer_of.assign(lights.points.size(), -1.0f);
+        spot_layer_of.assign(lights.spots.size(), -1.0f);
+        moon = {};
+        const Vec2i size = view.size();
+        const Mat4f vp = scene.camera.view_projection(f32(size.x) / size.y);
+        const Vec3f eye = scene.camera.position;
+        struct Map {
+            LocalShadowView3D view;
+            u32 res;
+            Vec3f position;
+            f32 bias, normal_offset, softness, fade;
+        };
+        std::vector<Map> maps;
+        const auto resolution_of = [&](u32 asked) {
+            return std::clamp(asked != 0 ? asked : lights.local_shadow_resolution, 64u,
+                              std::min(4096u, u32(device.max_texture_size())));
+        };
+        const auto add = [&](const LocalShadowView3D& v, u32 res, const auto& light) {
+            maps.push_back({v, res, light.position, std::max(light.shadow_bias, 0.0f),
+                            std::max(light.shadow_normal_offset, 0.0f), std::clamp(light.shadow_softness, 0.25f, 4.0f),
+                            local_shadow_far(light.shadow_distance, light.radius)});
+        };
+        // Spots (of those the main pass draws: in view, the 16 most important), then point lights' cubes.
+        const auto spot_order = chosen_lights(std::span{lights.spots}, max_spot_lights, vp, eye, spot_bounding_sphere);
+        std::vector<ShadowRequest3D> requests;
+        std::vector<i32> slot_of;
+        for (const u32 i : spot_order) {
+            const auto& l = lights.spots[i];
+            Vec3f c;
+            f32 r;
+            spot_bounding_sphere(l, c, r);
+            const u64 key = (1ull << 48) | (l.id != 0 ? (1ull << 32) | l.id : u64(i) + 1);
+            requests.push_back({l.shadow_enabled ? key : 0u,
+                                shadow_importance(std::max({l.color.r, l.color.g, l.color.b}), l.radius, c, r, eye)});
+        }
+        spot_slots.held.resize(std::min(lights.max_shadowed_spots, max_spot_shadow_maps), 0);
+        assign_shadow_slots(spot_slots, requests, shadow_hysteresis, slot_of);
+        for (u32 k = 0; k < spot_order.size(); ++k)
+            if (slot_of[k] >= 0) {
+                const auto& l = lights.spots[spot_order[k]];
+                const u32 res = resolution_of(l.shadow_resolution);
+                spot_layer_of[spot_order[k]] = f32(maps.size());
+                if (spot_order[k] < RenderDebugStats3D::max_reported_lights)
+                    stats.spot_slot[spot_order[k]] = slot_of[k];
+                add(spot_shadow_view(l, res), res, l);
+            }
+        const auto point_order = chosen_lights(std::span{lights.points}, 16, vp, eye,
+                                               [](const PointLightSource3D& p, Vec3f& centre, f32& radius) {
+                                                   centre = p.position;
+                                                   radius = p.radius;
+                                               });
+        requests.clear();
+        for (const u32 i : point_order) {
+            const auto& l = lights.points[i];
+            const u64 key = (2ull << 48) | (l.id != 0 ? (1ull << 32) | l.id : u64(i) + 1);
+            requests.push_back(
+                {l.shadow_enabled ? key : 0u,
+                 shadow_importance(std::max({l.color.r, l.color.g, l.color.b}), l.radius, l.position, l.radius, eye)});
+        }
+        point_slots.held.resize(std::min(lights.max_shadowed_points, max_point_shadow_maps), 0);
+        assign_shadow_slots(point_slots, requests, shadow_hysteresis, slot_of);
+        for (u32 k = 0; k < point_order.size(); ++k)
+            if (slot_of[k] >= 0) {
+                const auto& l = lights.points[point_order[k]];
+                const u32 res = resolution_of(l.shadow_resolution);
+                point_layer_of[point_order[k]] = f32(maps.size());
+                if (point_order[k] < RenderDebugStats3D::max_reported_lights)
+                    stats.point_slot[point_order[k]] = slot_of[k];
+                for (u32 face = 0; face < cube_faces; ++face)
+                    add(cube_face_view(l, face, res), res, l);
+            }
+        std::vector<std::array<f32, 24>> rows; // a map's row: its matrix, a, b
+        if (!maps.empty()) {
+            u32 side = 0;
+            for (const auto& m : maps)
+                side = std::max(side, m.res);
+            depth_array(local, side, u32(maps.size()));
+            glBindFramebuffer(GL_FRAMEBUFFER, local.framebuffer);
+            for (u32 layer = 0; layer < maps.size(); ++layer) {
+                const auto& m = maps[layer];
+                glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, local.texture, 0, GLint(layer));
+                // (The map's corner of the layer; the whole layer is cleared, as the scissor is off.)
+                glViewport(0, 0, GLsizei(m.res), GLsizei(m.res));
+                cast_into(scene, view, m.view.view_projection, ~0u, stats);
+                std::array<f32, 24> row{};
+                std::copy_n(m.view.view_projection.m, 16, row.data());
+                const f32 r = f32(m.res);
+                const std::array<f32, 8> ab{r / f32(side),
+                                            2.0f * m.view.tan_half / r,
+                                            m.view.near_plane,
+                                            m.view.far_plane,
+                                            m.bias,
+                                            m.normal_offset,
+                                            m.softness,
+                                            m.fade};
+                std::copy(ab.begin(), ab.end(), row.data() + 16);
+                rows.push_back(row);
+                ++stats.local_shadow_drawn;
+            }
+            local_texel = 1.0f / f32(side);
+            stats.local_shadow_maps = u32(maps.size());
+        }
+        // The moon's cascades.
+        const DirectionalShadow3D& fs = lights.fill_shadow;
+        const Vec3f area = lights.shadow_area.size();
+        if (fs.enabled && fs.strength > 0 && lights.fill.color.r + lights.fill.color.g + lights.fill.color.b > 0 &&
+            length_squared(lights.fill.direction) > 0 && area.x > 0 && area.z > 0 && area.y >= 0) {
+            const u32 res = std::clamp(fs.resolution != 0 ? fs.resolution : lights.shadow_resolution, 64u,
+                                       std::min(8192u, u32(device.max_texture_size())));
+            const u32 count = std::clamp(fs.cascades, 1u, max_shadow_cascades);
+            const Vec3f to_moon = normalize(lights.fill.direction);
+            ShadowCascades3D plan;
+            if (count > 1) {
+                plan = fit_shadow_cascades(scene.camera, f32(size.x) / size.y, to_moon, lights.shadow_area, count,
+                                           fs.distance > 0 ? fs.distance : lights.shadow_distance, res);
+            } else {
+                const SunBox3D box = fit_sun_box(lights.shadow_area, to_moon);
+                plan.count = 1;
+                plan.cascade[0].view_projection =
+                    Mat4f::orthographic(box.lo.x, box.hi.x, box.lo.y, box.hi.y, box.z_near, box.z_far) * box.light_view;
+                plan.cascade[0].texel_world = std::max(box.hi.x - box.lo.x, box.hi.y - box.lo.y) / f32(res);
+                plan.cascade[0].depth_range = std::max(box.z_far - box.z_near, 0.01f);
+            }
+            if (plan.count) {
+                depth_array(moon_maps, res, plan.count);
+                glBindFramebuffer(GL_FRAMEBUFFER, moon_maps.framebuffer);
+                glViewport(0, 0, GLsizei(res), GLsizei(res));
+                moon.count = plan.count;
+                moon.row = u32(rows.size());
+                moon.texel = 1.0f / f32(res);
+                moon.strength = std::clamp(fs.strength, 0.0f, 1.0f);
+                for (u32 k = 0; k < plan.count; ++k) {
+                    const auto& c = plan.cascade[k];
+                    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, moon_maps.texture, 0, GLint(k));
+                    cast_into(scene, view, c.view_projection, ~0u, stats);
+                    std::array<f32, 24> row{};
+                    std::copy_n(c.view_projection.m, 16, row.data());
+                    row[16] = c.texel_world / c.depth_range;
+                    row[17] = c.texel_world * 1.5f;
+                    rows.push_back(row);
+                    moon.ends[k] = c.slice_far;
+                    moon.blend[k] = c.blend_from;
+                }
+                stats.moon_cascades = plan.count;
+            }
+        }
+        // Their rows: six RGBA32F texels each.
+        glActiveTexture(GL_TEXTURE0 + shadow_data_unit);
+        glBindTexture(GL_TEXTURE_2D, shadow_data);
+        if (!rows.empty())
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 6, GLsizei(rows.size()), 0, GL_RGBA, GL_FLOAT, rows.data());
+        has_local = !maps.empty();
+    }
+    // Every program's shadow units: the maps drawn this render (`real`), else placeholders of the right types.
+    void bind_shadow_units(bool real) {
+        const std::array<std::pair<GLuint, GLuint>, 2> arrays{
+            {{local_shadow_unit, real && has_local ? local.texture : shadow_dummy},
+             {moon_shadow_unit, real && moon.count ? moon_maps.texture : shadow_dummy}}};
+        for (const auto& [unit, texture] : arrays) {
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindSampler(unit, 0);
+            glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+        }
+        glActiveTexture(GL_TEXTURE0 + shadow_data_unit);
+        glBindSampler(shadow_data_unit, 0);
+        glBindTexture(GL_TEXTURE_2D, shadow_data);
     }
     // The sun's cascades on the program in use (`view`'s; none for null: the overlay).
     // The sun's cascades on program `handle` (the mesh program in use, or the particles').
     void shadow_uniforms(const View* shadowed, const Lights3D& lights, GLuint handle) {
         const auto uniform = [&](const char* name) { return location(handle, name); };
+        // The local maps and the moon's (this render's: none for the overlay).
+        glUniform1f(uniform("uLocalTexel"), local_texel);
+        glUniform1i(uniform("uMoonCount"), shadowed ? GLint(moon.count) : 0);
+        if (shadowed && moon.count) {
+            glUniform1i(uniform("uMoonRow"), GLint(moon.row));
+            glUniform4fv(uniform("uMoonEnds"), 1, moon.ends.data());
+            glUniform4fv(uniform("uMoonBlend"), 1, moon.blend.data());
+            glUniform1f(uniform("uMoonTexel"), moon.texel);
+            glUniform1f(uniform("uMoonStrength"), moon.strength);
+        }
         glUniform1i(uniform("uShadowCount"), shadowed && shadowed->shadow ? GLint(shadowed->cascades.count) : 0);
         glUniform1f(uniform("uShadowStrength"), std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
         if (!shadowed || !shadowed->shadow)
@@ -1926,7 +2159,10 @@ struct WebGLRenderer3D::Impl {
             at[5] = point.color.g;
             at[6] = point.color.b;
             at[7] = std::max(0.0001f, point.size * point.size);
+            pass.point_shadow[i] = layer_of(point_layer_of, point_order[i], shadowed);
         }
+        for (u32 i = count; i < 16; ++i)
+            pass.point_shadow[i] = -1.0f;
         pass.point_count = count;
         auto& spots = pass.spots;
         const auto spot_order =
@@ -1948,7 +2184,7 @@ struct WebGLRenderer3D::Impl {
                                              cone.axis.z,
                                              cone.cos_outer,
                                              cone.scale,
-                                             0,
+                                             layer_of(spot_layer_of, spot_order[i], shadowed),
                                              0,
                                              0};
             std::copy(packed.begin(), packed.end(), at);
@@ -2208,6 +2444,7 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     if (scene.weather.active())
         weather_sprites(scene.weather, scene.camera, _impl->weather_sprites_now, _impl->weather_batches_now);
     _impl->shadows(*view, scene, stats);
+    _impl->bind_shadow_units(true);
     _impl->fog_volume(*view, scene, stats);
     if (!view->fog) {
         glActiveTexture(GL_TEXTURE0 + fog_volume_unit);

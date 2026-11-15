@@ -483,6 +483,79 @@ void check_decals(Renderer2D& r, Renderer3D& r3d) {
             "A decal of a higher order must lie over a lower one");
     std::cout << "web parity: decals (lighting, box, alpha, receivers, batches, order) passed\n";
 }
+void check_local_shadows(Renderer2D& r, Renderer3D& r3d) {
+    Bench b(r, r3d);
+    auto& scene = b.scene;
+    // A light up and to the right of the plane's middle, a small caster halfway: its shadow falls on the middle (pixel
+    // 32, 32), while the camera sees the caster at pixel 48.
+    const Vec3f at{2, 0, 3};
+    const auto shade = [&](auto light_setup) {
+        scene.clear();
+        scene.lights.points.clear();
+        scene.lights.spots.clear();
+        scene.lights.fill.color = {0, 0, 0};
+        scene.lights.fill_shadow = {};
+        scene.lights.shadow_area = {{-3, -3, -1}, {3, 3, 4}};
+        light_setup();
+        require(bool(scene.draw(b.plane, {}, {.color = colors::white})), "Parity submission failed");
+        require(bool(scene.draw(b.plane, Mat4f::translation(at * 0.5f) * Mat4f::scaling({0.08f, 0.08f, 1}),
+                                {.color = colors::black, .unlit = true, .double_sided = true})),
+                "Parity submission failed");
+        b.render("Local shadow");
+        return std::array<int, 2>{b.at(32, 32)[0], b.at(32, 20)[0]}; // the shadow, and lit plane above it
+    };
+    for (const bool shadowed : {false, true}) {
+        const auto spot = shade([&] {
+            SpotLightSource3D l{.position = at, .direction = -at, .color = {6, 6, 6}, .radius = 12};
+            l.inner_angle = 40;
+            l.outer_angle = 50;
+            l.shadow_enabled = shadowed;
+            scene.lights.spots.push_back(l);
+        });
+        const auto point = shade([&] {
+            PointLightSource3D l{.position = at, .color = {6, 6, 6}, .radius = 12};
+            l.shadow_enabled = shadowed;
+            scene.lights.points.push_back(l);
+        });
+        const auto moon = shade([&] {
+            scene.lights.fill = {.direction = at, .color = {0.8f, 0.8f, 0.8f}};
+            scene.lights.fill_shadow = {.enabled = shadowed, .cascades = 1};
+        });
+        for (const auto& [name, v] : {std::pair{"spot", spot}, {"point", point}, {"moon", moon}}) {
+            if (shadowed ? !(v[0] + 40 < v[1]) : std::abs(v[0] - v[1]) > 30)
+                std::cerr << name << (shadowed ? " shadowed" : " unshadowed") << ": " << v[0] << " vs " << v[1] << '\n';
+            require(shadowed ? v[0] + 40 < v[1] : std::abs(v[0] - v[1]) <= 30,
+                    std::string("A ") + name + " light's shadow must fall where (and only when) it is asked for");
+        }
+    }
+    require(r3d.debug_stats().moon_cascades == 1, "The browser renderer must count the moon's cascades");
+    // In volumetric fog: a spot's beam below a caster is darker with its shadow.
+    std::array<int, 2> beam{};
+    for (const bool shadowed : {false, true}) {
+        Bench f(r, r3d);
+        f.scene.camera = Camera3D::look_at({0, 0, 0}, {0, 0, -1});
+        f.scene.fog.enabled = true;
+        f.scene.fog.density = 0.08f;
+        f.scene.fog.colour = {0, 0, 0};
+        f.scene.fog.volumetric = {.enabled = true, .distance = 20, .tile = 4, .slices = 64};
+        SpotLightSource3D l{.position = {0, 3, -6}, .direction = {0, -1, 0}, .color = {8, 8, 8}, .radius = 10};
+        l.inner_angle = 25;
+        l.outer_angle = 35;
+        l.shadow_enabled = shadowed;
+        f.scene.lights.spots.push_back(l);
+        require(
+            bool(f.scene.draw(
+                f.plane, Mat4f::translation({0, 1.8f, -6}) * Mat4f::rotation_x(-90) * Mat4f::scaling({0.3f, 0.3f, 1}),
+                {.color = colors::black, .unlit = true, .double_sided = true})),
+            "Parity submission failed");
+        f.render("Shadowed beam");
+        beam[shadowed] = f.at(32, 30)[0];
+    }
+    if (!(beam[1] + 10 < beam[0]))
+        std::cerr << "fog beam: unshadowed " << beam[0] << " shadowed " << beam[1] << '\n';
+    require(beam[1] + 10 < beam[0], "A spot's shadow must darken its beam in the fog");
+    std::cout << "web parity: spot, point and moon shadows (surfaces and fog) passed\n";
+}
 } // namespace
 
 void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
@@ -493,4 +566,5 @@ void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
     check_volumetric_fog(r, r3d);
     check_particles(r, r3d);
     check_decals(r, r3d);
+    check_local_shadows(r, r3d);
 }

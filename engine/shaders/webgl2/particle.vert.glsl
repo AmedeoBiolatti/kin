@@ -25,6 +25,7 @@ out float vDepth; // along the camera's forward
 out float vMix;   // the second frame's share
 out vec3 vLocalLight;
 out vec3 vWorld;
+flat out vec3 vCentre;
 const vec2 CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));
 const int CORNER_OF[6] = int[6](0, 1, 2, 0, 2, 3);
 
@@ -71,6 +72,7 @@ void main() {
     // Kin's reverse-Z projection maps depth to 0..1. WebGL clips -w..w.
     gl_Position.z = 2.0 * gl_Position.z - gl_Position.w;
     vWorld = world;
+    vCentre = centre;
     vColour = aColour;
     vLocalLight = vec3(0.0);
     if (uLit > 0.0) {

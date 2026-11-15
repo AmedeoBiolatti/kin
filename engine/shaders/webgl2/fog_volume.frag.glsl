@@ -2,8 +2,8 @@
 // Volumetric fog (Fog3D::volumetric) in WebGL2: native fog_volume.comp's light of each cell and
 // fog_volume_integrate.comp's sum along each ray, as fragments (no compute here). A draw fills four slices of a 3D
 // texture, one an attachment; a fragment is a column of cells (tiles of the view across, rows up as GL's). Each cell is
-// lit at its middle (no jitter or history), every cell is lit (no reach culling), and local lights light the air
-// unshadowed (the browser has no local shadow maps); the sun goes through its cascades.
+// lit at its middle (no jitter or history) and every cell is lit (no reach culling); the lights' maps and the sun's
+// and the moon's cascades shadow the air with one comparison each, as native's.
 precision highp float;
 precision highp int;
 precision highp sampler3D;
@@ -22,11 +22,9 @@ uniform vec4 uPoints[32];    // as mesh.frag's, their colour times the fog's int
 uniform vec4 uSpots[64];
 uniform vec4 uSun, uSunLight;   // xyz toward the sun, w its shadow's strength; rgb its light (0: not in the volume)
 uniform vec4 uFill, uFillLight; // the fill light's (the moon's), unshadowed
-uniform highp sampler2DArray uShadow; // the sun's cascades (depth)
-uniform int uShadowCount;
-uniform mat4 uShadowMatrix[4];
-uniform vec4 uShadowEnds, uShadowBias;
+uniform vec3 uForward;
 uniform highp sampler3D uLit; // mode 1: the lit cells
+#include "shadow_maps.inc.glsl"
 layout(location = 0) out vec4 out0;
 layout(location = 1) out vec4 out1;
 layout(location = 2) out vec4 out2;
@@ -70,9 +68,12 @@ vec3 in_scattered(vec3 p, vec3 dir, float depth) {
         float k = window * window / max(d2, colour.w);
         vec3 toward = to * inversesqrt(max(d2, 1e-8));
         if (spot) {
-            vec4 axis = uSpots[4 * (i - uPointCount) + 2];
-            float cone = clamp((dot(-toward, axis.xyz) - axis.w) * uSpots[4 * (i - uPointCount) + 3].x, 0.0, 1.0);
+            vec4 axis = uSpots[4 * (i - uPointCount) + 2], more = uSpots[4 * (i - uPointCount) + 3];
+            float cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
             k *= cone * cone;
+            if (k > 0.0 && more.y >= 0.0) k *= local_shadow_at(int(more.y), p, vec3(0.0), toward, sqrt(d2), 1);
+        } else if (k > 0.0) {
+            k *= point_shadow_at(point_shadow_layer(i), p, vec3(0.0), toward, sqrt(d2), 1);
         }
         if (k <= 0.0) continue;
         // Henyey-Greenstein over 4 pi.
@@ -83,7 +84,7 @@ vec3 in_scattered(vec3 p, vec3 dir, float depth) {
     if (dot(uSunLight.rgb, vec3(1.0)) > 0.0)
         sum += kin_fog_sun_light(uFog, dir, uSun.xyz, uSunLight.rgb) * sunlit(p, depth);
     if (dot(uFillLight.rgb, vec3(1.0)) > 0.0)
-        sum += kin_fog_sun_light(uFog, dir, uFill.xyz, uFillLight.rgb);
+        sum += kin_fog_sun_light(uFog, dir, uFill.xyz, uFillLight.rgb) * moonlight_at(p, vec3(0.0), 1);
     return sum;
 }
 // Cell (this column, slice z): rgb the light it scatters toward the camera per unit of length, a its extinction.

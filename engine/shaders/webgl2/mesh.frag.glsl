@@ -55,7 +55,7 @@ vec2 map_uv() { return vUV * uUvTransform.xy + uUvTransform.zw; }
 vec2 uv_for(bool flip) { vec2 uv = map_uv(); return vec2(uv.x, flip ? 1.0 - uv.y : uv.y); }
 // The face's normal toward the viewer, before any normal map.
 vec3 geometric_normal() {
-    float front = gl_FrontFacing ? 1.0 : -1.0;
+    float front = front_facing();
     return dot(vNormal, vNormal) < 1e-20 ? normalize(cross(dFdx(vWorld), dFdy(vWorld))) : normalize(vNormal) * front;
 }
 vec3 normal_for_surface() {
@@ -129,14 +129,25 @@ vec3 lighting(Lit L) {
     s.coat_alpha = coat_roughness * coat_roughness;
     s.dielectric = f0_dielectric;
     s.wrap = L.wrap;
-    vec3 light = shade(s, uSunDirection, uSunColor*sunlight()) + shade(s, uFillDirection, uFillColor);
+    // The local lights' and the moon's shadows push off along the mesh's own normal, not a normal map's (native
+    // shadow_offset_normal); a back-lit thin surface's from its other side.
+    vec3 g = geometric_normal();
+    bool backlit = dot(L.backlight, vec3(1.0)) > 0.0;
+    vec3 light = shade(s, uSunDirection, uSunColor*sunlight()) +
+                 shade(s, uFillDirection, uFillColor*(uReceivesShadow ? moonlight_at(vWorld, g, 9) : 1.0));
     for (int i=0; i<uPointCount; ++i) {
         vec4 at = uPoints[2*i], color = uPoints[2*i+1];
         vec3 to = at.xyz-vWorld;
         float d2 = dot(to,to), r2 = d2/(at.w*at.w);
         float window = clamp(1.0-r2*r2, 0.0, 1.0);
         float k = window*window / max(d2, color.w);
-        if (k > 0.0) light += shade(sphere_light(s, color.w, d2), to*inversesqrt(max(d2,1e-8)), color.rgb*k);
+        if (k <= 0.0) continue;
+        vec3 toward = to*inversesqrt(max(d2,1e-8));
+        float seen = 1.0;
+        bool behind = dot(n, toward) <= 0.0;
+        if (uReceivesShadow && (!behind || backlit))
+            seen = point_shadow_at(point_shadow_layer(i), vWorld, behind && backlit ? -g : g, toward, sqrt(d2), 9);
+        light += shade(sphere_light(s, color.w, d2), toward, color.rgb*(k*seen));
     }
     for (int i=0; i<uSpotCount; ++i) {
         vec4 at = uSpots[4*i], color = uSpots[4*i+1], axis = uSpots[4*i+2];
@@ -146,7 +157,12 @@ vec3 lighting(Lit L) {
         vec3 toward = to*inversesqrt(max(d2,1e-8));
         float cone = clamp((dot(-toward, axis.xyz)-axis.w)*uSpots[4*i+3].x, 0.0, 1.0);
         float k = window*window*cone*cone / max(d2, color.w);
-        if (k > 0.0) light += shade(sphere_light(s, color.w, d2), toward, color.rgb*k);
+        if (k <= 0.0) continue;
+        float seen = 1.0, layer = uSpots[4*i+3].y;
+        bool behind = dot(n, toward) <= 0.0;
+        if (layer >= 0.0 && uReceivesShadow && (!behind || backlit))
+            seen = local_shadow_at(int(layer), vWorld, behind && backlit ? -g : g, toward, sqrt(d2), 9);
+        light += shade(sphere_light(s, color.w, d2), toward, color.rgb*(k*seen));
     }
     vec3 reflected = normalize(mix(reflect(-v,n),n,s.alpha));
     vec3 coat_reflected = normalize(mix(reflect(-v,n),n,s.coat_alpha));

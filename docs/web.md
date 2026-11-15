@@ -175,9 +175,16 @@ that result. A game can supply the same cached hemisphere lighting
 to either renderer and skips the separate high-resolution time-of-day ambient
 integrals, while sun/moon/fog still update each frame.
 
-Point and spot lights are unshadowed: the 16 of each whose reach meets the view,
-the most important (brightness, reach, share of the view) when more do. Spots
-use native's cone falloff, and both widen highlights by the light's size.
+Point and spot lights: the 16 of each whose reach meets the view, the most
+important (brightness, reach, share of the view) when more do. Spots use native's
+cone falloff, and both widen highlights by the light's size. Their shadows are
+native's: of the lights that ask (`shadow_enabled`), `Lights3D::max_shadowed_spots`
+and `max_shadowed_points` (at most 8 each), chosen by importance with native's
+hysteresis; a spot's perspective map, a point light's six cube faces, each a layer
+of one depth array (its own resolution in a corner of the largest's), with
+native's bias, normal offset, softness and fade. The moon (`Lights3D::fill_shadow`)
+gets its cascades as the sun does. Each map's matrix and settings are a row of a
+float texture, not uniforms.
 
 HDR views (`ViewOptions3D::hdr`, `bloom`) draw linear light into an RGBA16F
 target (`EXT_color_buffer_float`), then native's output: bloom (a bright pass and
@@ -200,19 +207,19 @@ offset is not drawn, and shadow cascades cut by the base map's alpha.
 Volumetric fog (`Fog3D::volumetric`) lights and sums its volume as native's
 compute shaders do, in fragment passes into RGBA16F 3D textures (four slices a
 draw), and the mesh and sky shaders add it as native's do. Cells are lit at their
-middles (no jitter or history), every cell is lit (no reach culling), local lights
-light the air unshadowed, and the fill light is left out when it asks for a
-shadow. It needs `EXT_color_buffer_float` and a perspective camera.
+middles (no jitter or history) and every cell is lit (no reach culling); the
+lights' maps and the sun's and moon's cascades shadow the air, one comparison
+each, as native's. It needs `EXT_color_buffer_float` and a perspective camera.
 
 Particles (`Scene3D::draw_particles`) and the weather's layers draw as native's
 do: the four facings, flipbooks, the procedural disc and ring, the three blends,
 `lit` (the scene's tint and the local lights at each sprite), fog, and soft
 particles, which read the view's depth texture. Each sprite is sorted back to
 front with transparent meshes (a look with `sort` off: once, at its mean depth).
-Particles with `casts_shadow` are drawn into the sun's cascades (the
+Particles with `casts_shadow` are drawn into every shadow map (the
 camera-facing quad, cut by `shadow_cutoff`), and lit ones with `receives_shadow`
-lose the blocked share of the sun's half of their tint; the browser has no
-point, spot or moon maps, so those lights stay unshadowed for them as for meshes.
+take the sun's, the moon's and the local lights' light through their maps at
+each fragment, as native's `particle_shadow_tint`.
 
 Views draw into a colour, a depth texture and a normal target. Decals
 (`Scene3D::draw_decal`) are drawn after the opaque meshes that take them and
@@ -224,7 +231,7 @@ the order each picture first appears, as native's.
 
 Views use one sample. A custom `Material3D::shader` or a wireframe material draws
 as the stock material; `Renderer3D::pick` finds nothing. Image environments,
-prefiltered IBL, star fields, local shadows, ambient occlusion, contact shadows,
+prefiltered IBL, star fields, ambient occlusion, contact shadows,
 screen-space reflections, TAA, global illumination, reflection probes and clip
 planes (mirrors, portals) are not drawn; the log names each one the first time a
 scene asks for it. Stock GLSL ES is expanded and
@@ -276,7 +283,8 @@ key, material graphs (parameters, built-in inputs, lighting equal to the stock
 material's, clear coat, noise), volumetric fog with a CPU twin of native's
 model, particles (discs, additive and encoded blending, sorting with blended
 meshes, depth, soft fades, flipbooks, the light tint, cast and received sun
-shadows, rain) and decals (lit as the material of their colour, their box, alpha,
+shadows, rain), spot, point and moon shadows on surfaces and in volumetric fog,
+and decals (lit as the material of their colour, their box, alpha,
 surfaces that take none, one draw per picture, order); a
 custom-shader material must draw as the stock material.
 

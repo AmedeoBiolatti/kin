@@ -12,6 +12,7 @@ in float vDepth;
 in float vMix;
 in vec3 vLocalLight;
 in vec3 vWorld;
+flat in vec3 vCentre;
 uniform sampler2D uTexture;      // unit 0: the picture
 uniform highp sampler2D uDepth;  // unit 1: the view's depth (soft particles)
 uniform mat4 uToWorld;           // the view's inverse view-projection
@@ -20,7 +21,10 @@ uniform vec3 uTint;              // the light's tint (linear): mix(1, particle_l
 uniform vec4 uFlags;             // z: blend (0 alpha, 1 additive, 2 premultiplied), w: 1 with a texture
 uniform vec4 uDisc;              // x: the procedural disc's softness, y: its ring, z: the soft fade's distance (0: none)
 uniform bool uFogged;            // ParticleLook3D::fogged
-uniform vec3 uSunDirection, uSunColor;
+uniform vec3 uSunDirection, uSunColor, uFillDirection, uFillColor;
+uniform int uPointCount, uSpotCount; // (the vertex shader's lights, for received shadows)
+uniform vec4 uPoints[32];
+uniform vec4 uSpots[64];
 uniform bool uLinear;            // an HDR view's float picture: linear light, not encoded
 uniform bool uCast;              // into a shadow map: only the alpha test (native particle_cast.frag)
 uniform float uCutoff;           // ParticleLook3D::shadow_cutoff
@@ -80,9 +84,40 @@ void main() {
     }
     float k = vColour.a * shape * fade;
     vec3 tint = uTint + vLocalLight;
-    // Received shadows (native particle_shadow_tint): the sun's half of the tint through its cascades at this
-    // fragment, pushed toward the sun (a volume has no normal). The browser has no other shadow maps.
-    if (uReceive > 0.0) tint += 0.5 * uReceive * uSunColor * (sunlight_at(vWorld, uSunDirection) - 1.0);
+    // Received shadows (native particle_shadow_tint): the sun's and the moon's halves of the tint through their maps
+    // at this fragment, pushed toward the light (a volume has no normal); the local lights' at the centre (vLocalLight),
+    // here through their maps at this fragment.
+    if (uReceive > 0.0) {
+        tint = uTint + 0.5 * uReceive *
+                           (uSunColor * (sunlight_at(vWorld, uSunDirection) - 1.0) +
+                            uFillColor * (moonlight_at(vWorld, uFillDirection, 9) - 1.0));
+        for (int i = 0; i < uPointCount; ++i) {
+            vec4 at = uPoints[2 * i], c = uPoints[2 * i + 1];
+            vec3 to = at.xyz - vCentre;
+            float d2 = dot(to, to), r2 = d2 / (at.w * at.w);
+            float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
+            if (window <= 0.0) continue;
+            vec3 shadow_to = at.xyz - vWorld;
+            float distance = length(shadow_to);
+            vec3 toward = shadow_to / max(distance, 1e-4);
+            float seen = point_shadow_at(point_shadow_layer(i), vWorld, toward, toward, distance, 9);
+            tint += 0.5 * uReceive * c.rgb * (window * window * seen / max(d2, c.w));
+        }
+        for (int i = 0; i < uSpotCount; ++i) {
+            vec4 at = uSpots[4 * i], c = uSpots[4 * i + 1], axis = uSpots[4 * i + 2], more = uSpots[4 * i + 3];
+            vec3 to = at.xyz - vCentre;
+            float d2 = dot(to, to), r2 = d2 / (at.w * at.w);
+            float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
+            vec3 toward = to * inversesqrt(max(d2, 1e-8));
+            float cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
+            if (window <= 0.0 || cone <= 0.0) continue;
+            vec3 shadow_to = at.xyz - vWorld;
+            float distance = length(shadow_to);
+            vec3 shadow_toward = shadow_to / max(distance, 1e-4);
+            float seen = more.y < 0.0 ? 1.0 : local_shadow_at(int(more.y), vWorld, shadow_toward, shadow_toward, distance, 9);
+            tint += 0.5 * uReceive * c.rgb * (window * window * cone * cone * seen / max(d2, c.w));
+        }
+    }
     vec3 colour = tex.rgb * vColour.rgb * max(tint, vec3(0.0));
     float alpha = tex.a * k;
     if (uFlags.z > 1.5) {
