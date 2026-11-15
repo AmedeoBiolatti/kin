@@ -134,6 +134,22 @@ struct HdrTargets {
     f32 exposure_time = 0;
     std::chrono::steady_clock::time_point exposure_wall{};
 };
+// Fog3D::volumetric's volume of a view: the lit cells and their sums along the rays (RGBA16F 3D textures).
+struct FogVolume {
+    GLuint lit = 0, sum = 0, framebuffer = 0;
+    std::array<u32, 3> cells{};
+    std::shared_ptr<bool> alive;
+    FogVolume() = default;
+    FogVolume(const FogVolume&) = delete;
+    FogVolume& operator=(const FogVolume&) = delete;
+    ~FogVolume() {
+        if (alive && *alive) {
+            glDeleteFramebuffers(1, &framebuffer);
+            glDeleteTextures(1, &lit);
+            glDeleteTextures(1, &sum);
+        }
+    }
+};
 struct PreparedInstances;
 struct View final : IViewBackend3D {
     Texture color;
@@ -144,6 +160,7 @@ struct View final : IViewBackend3D {
     sky_model::AmbientLight3D ambient, overlay_ambient;
     std::vector<std::shared_ptr<PreparedInstances>> prepared, overlay_prepared;
     std::shared_ptr<HdrTargets> hdr; // null: an SDR view, drawn straight into `color`
+    std::shared_ptr<FogVolume> fog;  // Fog3D::volumetric's, while it is on
     Texture texture() const override { return color; }
     Vec2i size() const override { return color.size(); }
     u32 samples() const override { return 1; }
@@ -353,7 +370,7 @@ constexpr std::array<const char*, 18> omitted_text{
     "Camera3D::clip_plane is not supported; the view draws everything",
     "only the 16 most important point lights and 16 spot lights in view are drawn",
     "the night sky has no stars",
-    "volumetric fog (Fog3D::volumetric) is off",
+    "volumetric fog (Fog3D::volumetric) needs EXT_color_buffer_float and a perspective camera: off",
     "surface shaders and material graphs (Material3D::surface) draw as kin's stock material",
     "weather (rain, snow, wet surfaces) is not drawn",
 };
@@ -386,7 +403,7 @@ struct MeshProgram {
         glUseProgram(handle);
         // Sampler units belong to the linked program, not individual draws.
         constexpr std::array names{"uTexture", "uNormal",   "uMetalRough", "uOcclusion", "uEmission",
-                                   "uJoints",  "uFogTable", "uShadow",     "uGraphMaps"};
+                                   "uJoints",  "uFogTable", "uShadow",     "uGraphMaps", "uFogVolume"};
         for (u32 unit = 0; unit < names.size(); ++unit)
             glUniform1i(location(names[unit]), GLint(unit));
         draw = {location("uShadowPass"),
@@ -421,7 +438,7 @@ struct MeshProgram {
         return locations.emplace(name, glGetUniformLocation(handle, name)).first->second;
     }
 };
-constexpr GLuint graph_maps_unit = 8;
+constexpr GLuint graph_maps_unit = 8, fog_volume_unit = 9;
 // A surface shader made by this renderer (create_surface_source): its program.
 struct SurfaceProgram final : ISurfaceShaderBackend3D {
     std::shared_ptr<MeshProgram> program;
@@ -454,14 +471,21 @@ struct WebGLRenderer3D::Impl {
     MeshProgram* current = nullptr;                          // the mesh program in use (null: another, or none)
     std::string mesh_vertex, mesh_fragment, graph_functions; // the sources surface programs are made from
     GLuint instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0, post_program = 0,
-           graph_maps_dummy = 0;
+           graph_maps_dummy = 0, fog_program = 0, fog_volume_dummy = 0;
+    // The fog volume this pass's mesh and sky programs read (environment): its depth (0: none), whether it holds the
+    // sun's in-scattering, the target's size.
+    struct {
+        f32 depth = 0;
+        bool sun = false;
+        Vec2i size{1, 1};
+    } fog_state;
     bool float_targets = false; // EXT_color_buffer_float: HDR views can be drawn
     bool linear_output = false; // this render draws an HDR view's float picture
     Texture white;
     RendererCapabilities3D caps{};
     u32 omitted_told = 0; // the Omitted bits already warned about
     bool hdr_refused_told = false, pick_told = false;
-    std::unordered_map<std::string_view, GLint> sky_uniforms, post_uniforms;
+    std::unordered_map<std::string_view, GLint> sky_uniforms, post_uniforms, fog_uniforms;
     // What a pass sets on every mesh program it draws with (apply), once per program: `serial` names the pass.
     struct Pass {
         u64 serial = 0;
@@ -557,6 +581,21 @@ struct WebGLRenderer3D::Impl {
         glUniform1i(glGetUniformLocation(post_program, "uState"), 2);
         float_targets =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "EXT_color_buffer_float");
+        fog_program =
+            WebGLDevice::program(sky_vertex.c_str(), WebGLDevice::shader_source("fog_volume.frag.glsl").c_str());
+        glUseProgram(fog_program);
+        glUniform1i(glGetUniformLocation(fog_program, "uLit"), 0);
+        glUniform1i(glGetUniformLocation(fog_program, "uShadow"), 7);
+        glUseProgram(sky_program);
+        glUniform1i(glGetUniformLocation(sky_program, "uFogTable"), 6);
+        glUniform1i(glGetUniformLocation(sky_program, "uFogVolume"), GLint(fog_volume_unit));
+        glGenTextures(1, &fog_volume_dummy);
+        glActiveTexture(GL_TEXTURE0 + fog_volume_unit);
+        glBindTexture(GL_TEXTURE_3D, fog_volume_dummy);
+        const std::array<u8, 4> clear{0, 0, 0, 255};
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, clear.data());
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glGenVertexArrays(1, &sky_vao);
         glGenTextures(1, &shadow_dummy);
         glActiveTexture(GL_TEXTURE7);
@@ -617,6 +656,8 @@ struct WebGLRenderer3D::Impl {
         glDeleteTextures(1, &fog_texture);
         glDeleteProgram(sky_program);
         glDeleteProgram(post_program);
+        glDeleteProgram(fog_program);
+        glDeleteTextures(1, &fog_volume_dummy);
         glDeleteVertexArrays(1, &sky_vao);
         glDeleteTextures(1, &shadow_dummy);
         glDeleteTextures(1, &graph_maps_dummy);
@@ -624,7 +665,7 @@ struct WebGLRenderer3D::Impl {
     GLint location(GLuint handle, const char* name) {
         if (current && handle == current->handle)
             return current->location(name);
-        auto& cache = handle == sky_program ? sky_uniforms : post_uniforms;
+        auto& cache = handle == sky_program ? sky_uniforms : handle == fog_program ? fog_uniforms : post_uniforms;
         const auto found = cache.find(name);
         if (found != cache.end())
             return found->second;
@@ -717,6 +758,8 @@ struct WebGLRenderer3D::Impl {
         set("uFog.view", {scene.camera.projection == Projection3D::Orthographic ? 1.0f : 0.0f, 0, 0, 0});
         glUniform1i(loc("uFogEnabled"), fog.enabled);
         glUniform1i(loc("uLinear"), linear_output);
+        glUniform4f(loc("uFogVolumeAt"), fog_state.depth, fog_state.sun ? 1.0f : 0.0f, 1.0f / f32(fog_state.size.x),
+                    1.0f / f32(fog_state.size.y));
         vector("uEye", scene.camera.position);
         vector("uForward", scene.camera.forward());
         glActiveTexture(GL_TEXTURE6);
@@ -728,9 +771,12 @@ struct WebGLRenderer3D::Impl {
         glUniform1i(loc("uFogTable"), 6);
     }
     void sky(const Scene3D& scene, Vec2i size, RenderDebugStats3D& stats) {
-        if (!scene.sky.enabled)
+        // Without a sky, the fog volume's light still shows where nothing is drawn (added over the background).
+        const bool volume_only = !scene.sky.enabled && fog_state.depth > 0;
+        if (!scene.sky.enabled && !volume_only)
             return;
         environment(sky_program, scene);
+        glUniform1i(location(sky_program, "uVolumeOnly"), volume_only);
         const auto loc = [&](const char* name) { return location(sky_program, name); };
         const Mat4f inverse = scene.camera.view_projection(f32(size.x) / size.y).inverse();
         glUniformMatrix4fv(loc("uInverseViewProjection"), 1, GL_FALSE, inverse.m);
@@ -743,13 +789,19 @@ struct WebGLRenderer3D::Impl {
         glUniform3f(loc("uSunColor"), scene.lights.sun.color.r, scene.lights.sun.color.g, scene.lights.sun.color.b);
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
-        glDisable(GL_BLEND);
+        if (volume_only) {
+            glEnable(GL_BLEND);
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_ONE, GL_ONE);
+        } else
+            glDisable(GL_BLEND);
         glDisable(GL_CULL_FACE);
         glBindVertexArray(sky_vao);
         glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
         glDepthMask(GL_TRUE);
-        stats.sky_drawn = true;
+        stats.sky_drawn = stats.sky_drawn || !volume_only;
     }
     void rgb(const char* name, LinearRgb value) { glUniform3f(uniform(name), value.r, value.g, value.b); }
     void direction(const char* name, Vec3f value) {
@@ -886,7 +938,10 @@ struct WebGLRenderer3D::Impl {
         bits |= scene.camera.clipped() ? omit_clip : 0;
         bits |= l.points.size() > 16 || l.spots.size() > max_spot_lights ? omit_light_count : 0;
         bits |= scene.sky.enabled && scene.sky.stars ? omit_stars : 0;
-        bits |= scene.fog.enabled && scene.fog.volumetric.enabled ? omit_volumetric : 0;
+        bits |= scene.fog.enabled && scene.fog.volumetric.enabled &&
+                        (!float_targets || scene.camera.projection == Projection3D::Orthographic)
+                    ? omit_volumetric
+                    : 0;
         bits |= scene.weather.active() ? omit_weather : 0;
         if (const auto* overlay = scene.overlay_if_any())
             bits |= omitted(*overlay);
@@ -1157,6 +1212,200 @@ struct WebGLRenderer3D::Impl {
             view.surface->framebuffer, view.size(), 4, t.scene->texture,
             {bloom ? options.bloom : 0.0f, options.exposure, metered ? 1.0f : 0.0f, scene.sky.enabled ? 1.0f : 0.0f},
             stats);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+    }
+    // Fog3D::volumetric (native fog_volume.comp and fog_volume_integrate.comp, as fragment passes): the view's volume
+    // lit and summed along its rays, for this render's mesh and sky programs to add (fog_state). Needs float targets
+    // and a perspective camera; the sun's cascades must be drawn (shadows) first.
+    void fog_volume(View& view, const Scene3D& scene, RenderDebugStats3D& stats) {
+        fog_state = {};
+        const Fog3D& fog = scene.fog;
+        const VolumetricFog3D& settings = fog.volumetric;
+        if (!fog.enabled || !settings.enabled || !float_targets ||
+            scene.camera.projection == Projection3D::Orthographic) {
+            view.fog.reset();
+            return;
+        }
+        const Lights3D& lights = scene.lights;
+        const Vec2i size = view.size();
+        const Mat4f vp = scene.camera.view_projection(f32(size.x) / size.y);
+        const Vec3f eye = scene.camera.position;
+        // The lights the main pass chose, their colour times the fog's intensity and each one's own `volumetric`.
+        const f32 intensity = std::max(settings.intensity, 0.0f);
+        std::array<f32, 128> points{};
+        std::array<f32, 16 * max_spot_lights> spots{};
+        u32 point_count = 0, spot_count = 0;
+        for (const u32 i : chosen_lights(std::span{lights.points}, 16, vp, eye,
+                                         [](const PointLightSource3D& p, Vec3f& centre, f32& radius) {
+                                             centre = p.position;
+                                             radius = p.radius;
+                                         })) {
+            const auto& l = lights.points[i];
+            const f32 k = intensity * std::max(l.volumetric, 0.0f);
+            if (k <= 0)
+                continue;
+            const f32 r = std::max(l.size, 0.01f);
+            const std::array<f32, 8> packed{l.position.x,  l.position.y,  l.position.z,  std::max(0.01f, l.radius),
+                                            l.color.r * k, l.color.g * k, l.color.b * k, r * r};
+            std::copy(packed.begin(), packed.end(), points.data() + 8 * point_count++);
+        }
+        for (const u32 i : chosen_lights(std::span{lights.spots}, max_spot_lights, vp, eye, spot_bounding_sphere)) {
+            const auto& l = lights.spots[i];
+            const f32 k = intensity * std::max(l.volumetric, 0.0f);
+            if (k <= 0)
+                continue;
+            const SpotCone3D cone = spot_cone(l);
+            const f32 r = std::max(l.size, 0.01f);
+            const std::array<f32, 16> packed{l.position.x,
+                                             l.position.y,
+                                             l.position.z,
+                                             std::max(0.01f, l.radius),
+                                             l.color.r * k,
+                                             l.color.g * k,
+                                             l.color.b * k,
+                                             r * r,
+                                             cone.axis.x,
+                                             cone.axis.y,
+                                             cone.axis.z,
+                                             cone.cos_outer,
+                                             cone.scale,
+                                             0,
+                                             0,
+                                             0};
+            std::copy(packed.begin(), packed.end(), spots.data() + 16 * spot_count++);
+        }
+        // The sun and the fill light (sun_and_moon), as the main pass's fog scatters the sun; the fill only where
+        // native's would be unshadowed too (the browser has no fill shadow).
+        const auto shines = [](const DirectionalLight3D& l) {
+            return l.color.r + l.color.g + l.color.b > 0.0f && length_squared(l.direction) > 0.0f;
+        };
+        const bool directional = settings.sun_and_moon && fog.sun_scatter > 0.0f;
+        const bool sun = directional && shines(lights.sun);
+        const bool fill = directional && shines(lights.fill) && !lights.fill_shadow.enabled;
+        if (!point_count && !spot_count && !sun && !fill) {
+            view.fog.reset();
+            return;
+        }
+        const u32 tile = settings.tile != 0 ? std::clamp(settings.tile, 4u, 64u)
+                                            : std::max(8u, u32(std::lround(f32(size.y) / 90.0f)));
+        GLint most = 256;
+        glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &most);
+        const std::array<u32, 3> cells{std::min((u32(size.x) + tile - 1) / tile, u32(most)),
+                                       std::min((u32(size.y) + tile - 1) / tile, u32(most)),
+                                       std::clamp(settings.slices, 8u, std::min(256u, u32(most)))};
+        if (!view.fog || view.fog->cells != cells) {
+            auto v = std::make_shared<FogVolume>();
+            v->alive = device.alive();
+            v->cells = cells;
+            for (GLuint* t : {&v->lit, &v->sum}) {
+                glGenTextures(1, t);
+                glBindTexture(GL_TEXTURE_3D, *t);
+                glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA16F, GLsizei(cells[0]), GLsizei(cells[1]), GLsizei(cells[2]));
+                glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                for (const GLenum axis : {GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TEXTURE_WRAP_R})
+                    glTexParameteri(GL_TEXTURE_3D, axis, GL_CLAMP_TO_EDGE);
+            }
+            glGenFramebuffers(1, &v->framebuffer);
+            view.fog = std::move(v);
+        }
+        const FogVolume& volume = *view.fog;
+        const f32 depth = std::max(settings.distance, 0.01f);
+        // The view's rays at view depth 1 (GL's rows up: the bottom-left corner's first).
+        const Mat4f to_world = vp.inverse();
+        const Vec3f forward = scene.camera.forward();
+        const auto ray = [&](f32 x, f32 y) {
+            const Vec4f p = to_world * Vec4f{x, y, 0.5f, 1.0f};
+            const Vec3f r = Vec3f{p.x / p.w, p.y / p.w, p.z / p.w} - eye;
+            return r * (1.0f / dot(r, forward));
+        };
+        const Vec3f ray00 = ray(-1, -1), ray_x = ray(1, -1) - ray00, ray_y = ray(-1, 1) - ray00;
+        glUseProgram(fog_program);
+        current = nullptr;
+        const auto loc = [&](const char* name) { return location(fog_program, name); };
+        const auto vec3 = [&](const char* name, Vec3f v) { glUniform3f(loc(name), v.x, v.y, v.z); };
+        glUniform4f(loc("uCells"), f32(cells[0]), f32(cells[1]), f32(cells[2]), depth);
+        vec3("uEye", eye);
+        vec3("uRay00", ray00);
+        vec3("uRayX", ray_x);
+        vec3("uRayY", ray_y);
+        glUniform4f(loc("uFog.colour"), fog.colour.r, fog.colour.g, fog.colour.b, 0);
+        glUniform4f(loc("uFog.density"), std::max(0.0f, fog.density), std::max(0.0f, fog.height_density),
+                    fog.height_falloff, fog.base_height);
+        glUniform4f(loc("uFog.limits"), std::max(0.0f, fog.start), std::clamp(fog.max_opacity, 0.0f, 1.0f),
+                    std::max(0.0f, fog.sun_scatter), std::clamp(fog.sun_anisotropy, -0.95f, 0.95f));
+        glUniform4f(loc("uFog.view"), 0, 0, 0, 0);
+        glUniform1f(loc("uAnisotropy"), std::clamp(settings.anisotropy, -0.9f, 0.9f));
+        glUniform1f(loc("uLeast"), 1.0f - std::clamp(fog.max_opacity, 0.0f, 1.0f));
+        glUniform1i(loc("uPointCount"), GLint(point_count));
+        if (point_count)
+            glUniform4fv(loc("uPoints[0]"), GLsizei(point_count * 2), points.data());
+        glUniform1i(loc("uSpotCount"), GLint(spot_count));
+        if (spot_count)
+            glUniform4fv(loc("uSpots[0]"), GLsizei(spot_count * 4), spots.data());
+        const Vec3f to_sun = normalize(lights.sun.direction), to_fill = normalize(lights.fill.direction);
+        glUniform4f(loc("uSun"), to_sun.x, to_sun.y, to_sun.z, std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
+        glUniform4f(loc("uSunLight"), sun ? lights.sun.color.r : 0, sun ? lights.sun.color.g : 0,
+                    sun ? lights.sun.color.b : 0, 0);
+        glUniform4f(loc("uFill"), to_fill.x, to_fill.y, to_fill.z, 0);
+        glUniform4f(loc("uFillLight"), fill ? lights.fill.color.r : 0, fill ? lights.fill.color.g : 0,
+                    fill ? lights.fill.color.b : 0, 0);
+        // The sun's cascades (drawn this render), as the mesh programs' shadow_uniforms have them.
+        const u32 cascades = view.shadow ? view.cascades.count : 0;
+        glUniform1i(loc("uShadowCount"), GLint(cascades));
+        if (cascades) {
+            std::array<Mat4f, 4> matrices;
+            std::array<f32, 4> ends{}, bias{};
+            for (u32 k = 0; k < cascades; ++k) {
+                const auto& c = view.cascades.cascade[k];
+                matrices[k] = c.view_projection;
+                ends[k] = c.slice_far;
+                bias[k] = std::max(0.0f, lights.shadow_bias) * c.texel_world / std::max(1e-6f, c.depth_range);
+            }
+            glUniformMatrix4fv(loc("uShadowMatrix[0]"), 4, GL_FALSE, matrices[0].m);
+            glUniform4fv(loc("uShadowEnds"), 1, ends.data());
+            glUniform4fv(loc("uShadowBias"), 1, bias.data());
+        }
+        glActiveTexture(GL_TEXTURE7);
+        glBindSampler(7, 0);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, view.shadow ? view.shadow->texture : shadow_dummy);
+        glActiveTexture(GL_TEXTURE0);
+        glBindSampler(0, 0);
+        material_bindings = {};
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_SCISSOR_TEST);
+        glBindVertexArray(sky_vao);
+        glBindFramebuffer(GL_FRAMEBUFFER, volume.framebuffer);
+        glViewport(0, 0, GLsizei(cells[0]), GLsizei(cells[1]));
+        // Four slices a draw: lit (mode 0), then summed front to back (mode 1, reading the lit cells).
+        for (int mode = 0; mode < 2; ++mode) {
+            const GLuint into = mode == 0 ? volume.lit : volume.sum;
+            glBindTexture(GL_TEXTURE_3D, mode == 0 ? 0 : volume.lit);
+            glUniform1i(loc("uMode"), mode);
+            for (u32 first = 0; first < cells[2]; first += 4) {
+                std::array<GLenum, 4> buffers{};
+                for (u32 i = 0; i < 4; ++i) {
+                    const bool used = first + i < cells[2];
+                    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, used ? into : 0, 0,
+                                              used ? GLint(first + i) : 0);
+                    buffers[i] = used ? GL_COLOR_ATTACHMENT0 + i : GL_NONE;
+                }
+                glDrawBuffers(4, buffers.data());
+                glUniform1i(loc("uFirst"), GLint(first));
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            }
+        }
+        const GLenum first_buffer = GL_COLOR_ATTACHMENT0;
+        glDrawBuffers(1, &first_buffer);
+        glActiveTexture(GL_TEXTURE0 + fog_volume_unit);
+        glBindTexture(GL_TEXTURE_3D, volume.sum);
+        fog_state = {depth, sun, size};
+        stats.fog_volume = true;
+        stats.fog_volume_lights = point_count + spot_count + (sun ? 1 : 0) + (fill ? 1 : 0);
         glEnable(GL_DEPTH_TEST);
         glDepthMask(GL_TRUE);
     }
@@ -1497,6 +1746,11 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     _impl->prepare(view->prepared, scene, stats);
     _impl->linear_output = bool(view->hdr);
     _impl->shadows(*view, scene, stats);
+    _impl->fog_volume(*view, scene, stats);
+    if (!view->fog) {
+        glActiveTexture(GL_TEXTURE0 + fog_volume_unit);
+        glBindTexture(GL_TEXTURE_3D, _impl->fog_volume_dummy);
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, view->hdr ? view->hdr->scene->framebuffer : view->surface->framebuffer);
     glViewport(0, 0, view->size().x, view->size().y);
     glDisable(GL_SCISSOR_TEST);
@@ -1519,6 +1773,7 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     _impl->scene(scene, scene.lights, view->size(), stats, view->ambient, view->prepared, view);
     if (const auto* overlay = scene.overlay_if_any()) {
         _impl->prepare(view->overlay_prepared, *overlay, stats);
+        _impl->fog_state = {}; // (the overlay's things are not in the scene's air)
         glDepthMask(GL_TRUE);
         glClear(GL_DEPTH_BUFFER_BIT);
         _impl->scene(*overlay, scene.lights, view->size(), stats, view->overlay_ambient, view->overlay_prepared,

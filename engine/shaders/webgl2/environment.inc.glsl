@@ -22,6 +22,17 @@ vec3 fog_sky(vec3 dir) {
     }
     return light+uSky.night.rgb;
 }
+// Fog3D::volumetric's light (fog_volume.frag's sums), in front of what is `to` away (`sky`: the whole volume's), as native
+// kin_fog_apply and fog_volume_apply.frag read it: rgb its light, a the share of the ray's fog inside the volume.
+uniform highp sampler3D uFogVolume;
+uniform vec4 uFogVolumeAt; // x: the volume's depth (0: none), y: 1 when it holds the sun's in-scattering, zw: 1 / size
+vec4 fog_volume(vec3 to,bool sky) {
+    float slices=float(textureSize(uFogVolume,0).z);
+    float w=sky ? 1.0 : min(sqrt(max(dot(to,uForward),0.0)/uFogVolumeAt.x),1.0);
+    float near=clamp(w*slices,0.0,1.0);
+    vec4 sum=textureLod(uFogVolume,vec3(gl_FragCoord.xy*uFogVolumeAt.zw,max(w-0.5/slices,0.5/slices)),0.0);
+    return vec4(sum.rgb*near,1.0-mix(1.0,sum.a,near));
+}
 vec3 fogged(vec3 color,vec3 world,vec3 sun_direction,vec3 sun_color,bool additive) {
     if (!uFogEnabled) return color;
     vec3 to=world-uEye;
@@ -31,5 +42,14 @@ vec3 fogged(vec3 color,vec3 world,vec3 sun_direction,vec3 sun_color,bool additiv
     float opacity=kin_fog_opacity(uFog,kin_fog_optical_depth(uFog,uEye,dir,dist,false));
     if (additive) return color*(1.0-opacity);
     vec3 tint=uFog.colour.w>0.5 ? fog_sky(dir) : uFog.colour.rgb;
-    return mix(color,kin_fog_sun(uFog,tint,dir,sun_direction,sun_color),opacity);
+    vec3 sun=kin_fog_sun_light(uFog,dir,sun_direction,sun_color);
+    // With the sun in the volume, its light in the air comes from there, and past the volume unshadowed.
+    bool sun_in_volume=uFogVolumeAt.x>0.0 && uFogVolumeAt.y>0.5;
+    vec3 result=mix(color,tint+(sun_in_volume ? vec3(0.0) : sun),opacity);
+    if (uFogVolumeAt.x>0.0) {
+        vec4 v=fog_volume(to,false);
+        result+=v.rgb;
+        if (sun_in_volume) result+=sun*max(opacity-v.a,0.0);
+    }
+    return result;
 }

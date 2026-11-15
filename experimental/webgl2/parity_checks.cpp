@@ -236,6 +236,77 @@ void check_material_graphs(Renderer2D& r, Renderer3D& r3d) {
     require(b.at(10, 10) != b.at(50, 50), "A noise graph must vary over the plane");
     std::cout << "web parity: material graphs (parameters, inputs, lighting, coat, noise) passed\n";
 }
+// Native fog_volume.comp (cells lit at their middles, no history) and fog_volume_integrate.comp on the CPU: the sum of
+// the light a point light's air sends along column (x, y) to the volume's far edge.
+f32 fog_column(const Scene3D& scene, std::array<u32, 3> cells, f32 x, f32 y) {
+    const auto& v = scene.fog.volumetric;
+    const auto& light = scene.lights.points[0];
+    const Mat4f to_world = scene.camera.view_projection(1.0f).inverse();
+    const Vec3f eye = scene.camera.position, forward = scene.camera.forward();
+    const auto ray = [&](f32 u, f32 w) { // GL rows up, as the browser's volume
+        const Vec4f p = to_world * Vec4f{u * 2 - 1, w * 2 - 1, 0.5f, 1.0f};
+        const Vec3f r = Vec3f{p.x / p.w, p.y / p.w, p.z / p.w} - eye;
+        return r * (1.0f / dot(r, forward));
+    };
+    const Vec3f r = ray((x + 0.5f) / cells[0], (y + 0.5f) / cells[1]);
+    const f32 stretch = length(r), sigma = scene.fog.density, g = v.anisotropy;
+    f32 sum = 0, through = 1, before = 0;
+    for (u32 z = 0; z < cells[2]; ++z) {
+        const f32 mid = (z + 0.5f) / cells[2], depth = v.distance * mid * mid;
+        const Vec3f p = eye + r * depth, to = light.position - p, dir = r * (1.0f / stretch);
+        const f32 d2 = dot(to, to), r2 = d2 / (light.radius * light.radius);
+        const f32 window = std::clamp(1 - r2 * r2, 0.0f, 1.0f);
+        const f32 k = window * window / std::max(d2, light.size * light.size);
+        const f32 mu = dot(dir, to * (1.0f / std::sqrt(d2))), x2 = std::max(1 + g * g - 2 * g * mu, 1e-4f);
+        const f32 lit = light.color.r * v.intensity * k * (1 - g * g) / (4 * 3.14159265f * x2 * std::sqrt(x2)) * sigma;
+        const f32 w = (z + 1.0f) / cells[2], after = v.distance * w * w, len = (after - before) * stretch;
+        before = after;
+        const f32 kept = std::exp(-sigma * len);
+        sum += through * lit * (1 - kept) / sigma;
+        through *= kept;
+    }
+    return sum;
+}
+
+void check_volumetric_fog(Renderer2D& r, Renderer3D& r3d) {
+    Bench b(r, r3d);
+    auto& scene = b.scene;
+    scene.camera = Camera3D::look_at({0, 0, 0}, {0, 0, -1});
+    scene.camera.fov = 60;
+    scene.fog.enabled = true;
+    scene.fog.density = 0.08f;
+    scene.fog.colour = {0, 0, 0};
+    scene.fog.volumetric = {
+        .enabled = true, .intensity = 1, .anisotropy = 0.4f, .distance = 20, .tile = 4, .slices = 64};
+    scene.lights.points.push_back({.position = {0.5f, 0.3f, -6}, .color = {3, 3, 3}, .radius = 8, .size = 0.6f});
+    b.render("Volumetric fog");
+    // Pixel (32, 32), its middle at the volume's (8.125, 7.875) in cells (rows up): between four columns' sums.
+    const std::array<u32, 3> cells{16, 16, 64};
+    const f32 fx = 32.5f / 64 * 16 - 0.5f, fy = (64 - 32.5f) / 64 * 16 - 0.5f;
+    const u32 x0 = u32(fx), y0 = u32(fy);
+    const f32 tx = fx - x0, ty = fy - y0;
+    const f32 expected =
+        (fog_column(scene, cells, x0, y0) * (1 - tx) + fog_column(scene, cells, x0 + 1, y0) * tx) * (1 - ty) +
+        (fog_column(scene, cells, x0, y0 + 1) * (1 - tx) + fog_column(scene, cells, x0 + 1, y0 + 1) * tx) * ty;
+    const f32 got = linear(b.at(32, 32)[0]);
+    if (std::abs(got - expected) > 0.04f * expected + 0.004f)
+        std::cerr << "volumetric fog: got " << got << " expected " << expected << '\n';
+    require(expected > 0.05f && expected < 0.9f, "The volumetric fog check's light must be visible and unclipped");
+    require(std::abs(got - expected) <= 0.04f * expected + 0.004f,
+            "The fog volume's light must be native's (cells lit at their middles, summed front to back)");
+    const auto lit = b.at(32, 32);
+    scene.fog.volumetric.enabled = false;
+    b.render("Fog without its volume");
+    near(b.at(32, 32), {0, 0, 0, 255}, 1, "Without the volume a light lights no air");
+    // A plane in front of the light: its pixels take the air's light in front of it only (less).
+    scene.fog.volumetric.enabled = true;
+    require(bool(scene.draw(b.plane, Mat4f::translation({0, 0, -4}), {.color = colors::black})),
+            "Parity submission failed");
+    b.render("Fog volume in front of a surface");
+    require(b.at(32, 32)[0] < lit[0] - 10 && b.at(32, 32)[0] > 0,
+            "A surface in front of a light takes only the air's light before it");
+    std::cout << "web parity: volumetric fog passed\n";
+}
 } // namespace
 
 void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
@@ -243,4 +314,5 @@ void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
     check_unrunnable_shaders(r, r3d);
     check_hdr_views(r, r3d);
     check_material_graphs(r, r3d);
+    check_volumetric_fog(r, r3d);
 }
