@@ -493,6 +493,12 @@ struct ParticleRecord {
     std::array<f32, 4> position_size, colour, axis_rotation, frame;
 };
 static_assert(sizeof(ParticleRecord) == 64);
+// A decal as decal.vert reads it (instanced attributes 0 to 10).
+struct DecalRecord {
+    Mat4f model, to_decal;
+    std::array<f32, 4> colour, surface, fade;
+};
+static_assert(sizeof(DecalRecord) == 44 * sizeof(f32));
 // A source of sprites: a Scene3D::draw_particles batch or a weather layer.
 struct ParticleSource {
     const ParticleLook3D* look = nullptr;
@@ -537,6 +543,8 @@ struct WebGLRenderer3D::Impl {
     std::vector<ParticleSprite3D> weather_sprites_now;
     std::vector<WeatherBatch3D> weather_batches_now;
     std::vector<ParticleRecord> particle_records, cast_records;
+    std::vector<DecalRecord> decal_records;
+    GLuint decal_buffer = 0, decal_vao = 0;
     struct ParticleCast {
         const ParticleLook3D* look;
         u32 first, count;
@@ -669,6 +677,8 @@ struct WebGLRenderer3D::Impl {
         glUniform1i(glGetUniformLocation(particle_program, "uFogVolume"), GLint(fog_volume_unit));
         glGenBuffers(1, &particle_buffer);
         glGenBuffers(1, &cast_buffer);
+        glGenBuffers(1, &decal_buffer);
+        glGenVertexArrays(1, &decal_vao);
         glGenVertexArrays(1, &particle_vao);
         fog_program =
             WebGLDevice::program(sky_vertex.c_str(), WebGLDevice::shader_source("fog_volume.frag.glsl").c_str());
@@ -750,6 +760,8 @@ struct WebGLRenderer3D::Impl {
         glDeleteProgram(particle_program);
         glDeleteBuffers(1, &particle_buffer);
         glDeleteBuffers(1, &cast_buffer);
+        glDeleteBuffers(1, &decal_buffer);
+        glDeleteVertexArrays(1, &decal_vao);
         glDeleteVertexArrays(1, &particle_vao);
         glDeleteTextures(1, &fog_volume_dummy);
         glDeleteVertexArrays(1, &sky_vao);
@@ -1509,12 +1521,46 @@ struct WebGLRenderer3D::Impl {
     }
     // Scene3D's decals (native decal.vert/decal.frag's): each box's back faces, through the view's colour alone, so
     // the fragment reads the depth and normals the opaque receivers left; lit and fogged as a material, blended over
-    // them. Lower `order` first; one decal a draw.
+    // them. Lower `order` first; within an order, the decals sharing their pictures (texture, normal map, wrap) are one
+    // instanced draw, in the order each picture first appears (native prepare_decals').
     void draw_decals(const Scene3D& scene, const SceneTargets& targets, Vec2i size, RenderDebugStats3D& stats) {
-        std::vector<const Decal3D*> order;
-        for (const auto& d : scene.decals())
-            order.push_back(&d);
-        std::stable_sort(order.begin(), order.end(), [](const auto* a, const auto* b) { return a->order < b->order; });
+        struct Run {
+            const Decal3D* picture; // the first of the run: its texture, normal map and wrap
+            i32 order;
+            std::vector<const Decal3D*> decals;
+        };
+        std::vector<Run> runs;
+        const auto same_picture = [](const Decal3D& a, const Decal3D& b) {
+            return a.texture == b.texture && a.normal == b.normal && a.wrap == b.wrap;
+        };
+        const Bounds3D box{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
+        for (const auto& d : scene.decals()) {
+            if (scene.cull && !visible(box, pass.view_projection * d.transform)) {
+                ++stats.decals_culled;
+                continue;
+            }
+            auto run = std::find_if(runs.begin(), runs.end(),
+                                    [&](const Run& r) { return r.order == d.order && same_picture(*r.picture, d); });
+            if (run == runs.end())
+                run = runs.insert(runs.end(), Run{&d, d.order, {}});
+            run->decals.push_back(&d);
+        }
+        std::stable_sort(runs.begin(), runs.end(), [](const Run& a, const Run& b) { return a.order < b.order; });
+        decal_records.clear();
+        for (const auto& run : runs)
+            for (const Decal3D* d : run.decals) {
+                const LinearColor c = to_linear(d->color);
+                DecalRecord r{.model = d->transform, .to_decal = d->transform.inverse()};
+                r.colour = {c.r, c.g, c.b, c.a};
+                r.surface = {d->roughness, d->metallic, d->normal ? d->normal_strength : 0.0f, d->emission};
+                r.fade = {d->normal_fade, d->depth_fade, 0, 0};
+                decal_records.push_back(r);
+            }
+        if (decal_records.empty())
+            return;
+        glBindBuffer(GL_ARRAY_BUFFER, decal_buffer);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(decal_records.size() * sizeof(DecalRecord)), decal_records.data(),
+                     GL_STREAM_DRAW);
         glBindFramebuffer(GL_FRAMEBUFFER, targets.plain);
         glActiveTexture(GL_TEXTURE0 + decal_depth_unit);
         glBindSampler(decal_depth_unit, 0);
@@ -1533,39 +1579,30 @@ struct WebGLRenderer3D::Impl {
         const Mat4f to_world = pass.view_projection.inverse();
         glUniformMatrix4fv(uniform("uToWorld"), 1, GL_FALSE, to_world.m);
         glUniform2f(uniform("uTargetInv"), 1.0f / f32(size.x), 1.0f / f32(size.y));
-        glBindVertexArray(sky_vao);
-        for (const Decal3D* d : order) {
-            const Mat4f& m = d->transform;
-            const Bounds3D box{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
-            if (scene.cull && !visible(box, pass.view_projection * m)) {
-                ++stats.decals_culled;
-                continue;
-            }
-            const Mat4f to_decal = m.inverse();
-            glUniformMatrix4fv(uniform("uModel"), 1, GL_FALSE, m.m);
-            glUniformMatrix4fv(uniform("uDecalToDecal"), 1, GL_FALSE, to_decal.m);
-            const LinearColor c = to_linear(d->color);
-            glUniform4f(uniform("uDecalColour"), c.r, c.g, c.b, c.a);
-            glUniform4f(uniform("uDecalSurface"), d->roughness, d->metallic, d->normal ? d->normal_strength : 0.0f,
-                        d->emission);
-            glUniform4f(uniform("uDecalFade"), d->normal_fade, d->depth_fade, 0, 0);
-            const auto axis = [&](const char* name, int column) {
-                const Vec3f v = normalize(Vec3f{m.at(0, column), m.at(1, column), m.at(2, column)});
-                glUniform3f(uniform(name), v.x, v.y, v.z);
-            };
-            axis("uDecalAxisX", 0);
-            axis("uDecalAxisY", 1);
-            axis("uDecalAxisZ", 2);
+        glBindVertexArray(decal_vao);
+        u32 first = 0;
+        for (const auto& run : runs) {
+            const Decal3D& d = *run.picture;
             for (const GLuint unit : {0u, 1u}) {
-                const Texture& image = unit == 0 ? d->texture : d->normal;
+                const Texture& image = unit == 0 ? d.texture : d.normal;
                 const auto* texture = device.texture(image ? image : white);
                 glActiveTexture(GL_TEXTURE0 + unit);
                 glBindTexture(GL_TEXTURE_2D, texture->handle);
-                glBindSampler(unit, sampler(d->wrap, d->wrap, texture->scale_mode));
+                glBindSampler(unit, sampler(d.wrap, d.wrap, texture->scale_mode));
             }
-            glDrawArrays(GL_TRIANGLES, 0, 36);
-            ++stats.decals_drawn;
+            // The run's records: two matrices (four columns each), colour, surface, fade.
+            const std::size_t at = std::size_t(first) * sizeof(DecalRecord);
+            for (GLuint a = 0; a < 11; ++a) {
+                glEnableVertexAttribArray(a);
+                glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, sizeof(DecalRecord),
+                                      reinterpret_cast<void*>(at + a * 16));
+                glVertexAttribDivisor(a, 1);
+            }
+            const u32 count = u32(run.decals.size());
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 36, GLsizei(count));
+            stats.decals_drawn += count;
             ++stats.decal_draws;
+            first += count;
         }
         material_bindings = {};
         glCullFace(GL_BACK);

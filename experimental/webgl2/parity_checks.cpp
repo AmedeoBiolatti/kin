@@ -449,7 +449,39 @@ void check_decals(Renderer2D& r, Renderer3D& r3d) {
     require(bool(scene.draw_decal({.transform = box, .color = red})), "Decal submission failed");
     b.render("Decal on a non-receiver");
     near(b.at(32, 32), grey, 1, "A surface that takes no decals must not show them");
-    std::cout << "web parity: decals (lighting, box, alpha, receivers) passed\n";
+    // Batches: three decals of one picture, each its own colour, are one draw; a decal of a higher order lies over a
+    // lower one whatever the submission order.
+    scene.clear();
+    scene.lights.ambient = {1, 1, 1};
+    require(bool(scene.draw(b.plane, {}, {.color = colors::black, .unlit = true})), "Parity submission failed");
+    const std::array<Color, 3> colours{Color::rgb(200, 0, 0), Color::rgb(0, 200, 0), Color::rgb(0, 0, 200)};
+    for (int i = 0; i < 3; ++i)
+        require(bool(scene.draw_decal(
+                    {.transform = Mat4f::translation({f32(i - 1), 0, 0}) * box * Mat4f::scaling({0.8f, 1, 0.8f}),
+                     .color = colours[u32(i)]})),
+                "Decal submission failed");
+    b.render("Decal batch");
+    require(r3d.debug_stats().decals_drawn == 3 && r3d.debug_stats().decal_draws == 1,
+            "Decals sharing a picture must be one draw");
+    for (int i = 0; i < 3; ++i) {
+        const auto at = b.at(32 + 16 * (i - 1), 32);
+        const int strongest = int(std::max_element(at.begin(), at.begin() + 3) - at.begin());
+        require(strongest == i && at[u32(i)] > 100, "Each decal of a batch must keep its own colour");
+    }
+    scene.clear();
+    require(bool(scene.draw(b.plane, {}, {.color = colors::black, .unlit = true})), "Parity submission failed");
+    const std::array<u8, 4> white_pixel{255, 255, 255, 255};
+    const Texture other = r.create_texture_from_rgba(white_pixel.data(), Vec2i{1, 1});
+    require(bool(scene.draw_decal({.transform = box, .color = Color::rgb(200, 0, 0), .order = 1})),
+            "Decal submission failed");
+    require(bool(scene.draw_decal({.transform = box, .texture = other, .color = Color::rgb(0, 200, 0), .order = 0})),
+            "Decal submission failed");
+    b.render("Decal order");
+    require(r3d.debug_stats().decal_draws == 2, "Decals of different pictures must be different draws");
+    // (Red over green: the green and blue left are the red decal's own ambient reflection, about 47 each.)
+    require(b.at(32, 32)[0] > 150 && b.at(32, 32)[1] < 80 && b.at(32, 32)[1] == b.at(32, 32)[2],
+            "A decal of a higher order must lie over a lower one");
+    std::cout << "web parity: decals (lighting, box, alpha, receivers, batches, order) passed\n";
 }
 } // namespace
 

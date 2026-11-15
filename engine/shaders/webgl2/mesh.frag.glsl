@@ -271,11 +271,18 @@ KinSurface kin_stock_surface() {
 #ifdef KIN_DECAL
 uniform highp sampler2D uDecalDepth; // the view's depth (reverse Z: 0 is the sky)
 uniform sampler2D uDecalNormals;     // and its surfaces' normals
-uniform mat4 uDecalToDecal, uToWorld;
-uniform vec4 uDecalColour;  // linear, straight alpha
-uniform vec4 uDecalSurface; // x roughness, y metallic, z normal map strength (0: none), w emission
-uniform vec4 uDecalFade;    // x normal fade, y depth fade
-uniform vec3 uDecalAxisX, uDecalAxisY, uDecalAxisZ;
+uniform mat4 uToWorld;
+// The decal's (decal.vert's instance): the world to its box, its colour, surface and fades, its box's axes.
+flat in mat4 dToDecal;
+flat in vec4 dColour, dSurface, dFade;
+flat in vec3 dAxisX, dAxisY, dAxisZ;
+#define uDecalToDecal dToDecal
+#define uDecalColour dColour
+#define uDecalSurface dSurface
+#define uDecalFade dFade
+#define uDecalAxisX dAxisX
+#define uDecalAxisY dAxisY
+#define uDecalAxisZ dAxisZ
 uniform vec2 uTargetInv;
 // The world position the view's depth holds at pixel `p`, and the depth.
 vec3 decal_world(ivec2 p, out float depth) {

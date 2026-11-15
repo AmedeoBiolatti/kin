@@ -209,13 +209,18 @@ do: the four facings, flipbooks, the procedural disc and ring, the three blends,
 `lit` (the scene's tint and the local lights at each sprite), fog, and soft
 particles, which read the view's depth texture. Each sprite is sorted back to
 front with transparent meshes (a look with `sort` off: once, at its mean depth).
-Particles neither cast nor receive shadows.
+Particles with `casts_shadow` are drawn into the sun's cascades (the
+camera-facing quad, cut by `shadow_cutoff`), and lit ones with `receives_shadow`
+lose the blocked share of the sun's half of their tint; the browser has no
+point, spot or moon maps, so those lights stay unshadowed for them as for meshes.
 
 Views draw into a colour, a depth texture and a normal target. Decals
 (`Scene3D::draw_decal`) are drawn after the opaque meshes that take them and
 before those that don't (`Material3D::receives_decals`), as native's: each box's
 back faces, reading the depth and normals under the pixel, lit and fogged as a
-material, blended over the surface, lower `order` first, one decal a draw.
+material, blended over the surface, lower `order` first. Within an order, the
+decals sharing a picture (texture, normal map, wrap) are one instanced draw, in
+the order each picture first appears, as native's.
 
 Views use one sample. A custom `Material3D::shader` or a wireframe material draws
 as the stock material; `Renderer3D::pick` finds nothing. Image environments,
@@ -270,8 +275,9 @@ falloff, HDR output with native's ACES and exposure, bloom, auto exposure's
 key, material graphs (parameters, built-in inputs, lighting equal to the stock
 material's, clear coat, noise), volumetric fog with a CPU twin of native's
 model, particles (discs, additive and encoded blending, sorting with blended
-meshes, depth, soft fades, flipbooks, the light tint, rain) and decals (lit as the
-material of their colour, their box, alpha, surfaces that take none); a
+meshes, depth, soft fades, flipbooks, the light tint, cast and received sun
+shadows, rain) and decals (lit as the material of their colour, their box, alpha,
+surfaces that take none, one draw per picture, order); a
 custom-shader material must draw as the stock material.
 
 Native `kin-platform` tests caller-driven frame accumulation, pause, overload

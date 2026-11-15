@@ -34,7 +34,8 @@ releases may change APIs.
   and ACES output (they were refused, so a scene asking for HDR drew no 3D); material graphs and surface shaders, from
   their GLSL (cooked graphs carry it from version 5; older ones still load); volumetric fog; spot lights; the 16 most
   important point and spot lights in view instead of the first 16; `Material3D::uv_scale`/`uv_offset`; particles
-  (soft ones too) and weather, sorted with transparent meshes; decals. A custom
+  (soft ones too, casting and receiving the sun's shadows) and weather, sorted with transparent meshes; decals, one draw
+  per picture. A custom
   `Material3D::shader` draws as the stock material instead of refusing the view, and each feature the browser leaves
   out is logged once. `IRendererBackend3D::create_surface_source` lets a backend make a surface from its source.
 
