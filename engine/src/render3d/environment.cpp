@@ -488,6 +488,8 @@ SurfaceShader3D Renderer3D::compile_surface_text_operation(const std::string& su
     SurfaceShader3D shader;
     if (!_backend) {
         why = "3D is not available";
+    } else if (auto own = _backend->create_surface_source(surface)) {
+        shader = SurfaceShader3D{std::move(own)}; // a backend that compiles the source itself (WebGL2)
     } else {
         // glslc compiles files: each variant's wrapped source goes to one (the main ones share theirs).
         static std::atomic<u32> counter{0};
@@ -562,6 +564,20 @@ Result3D<MaterialGraphShader3D> Renderer3D::compile_material_graph(const std::fi
 }
 
 Result3D<MaterialGraphShader3D> Renderer3D::create_material_graph(const CookedMaterialGraph3D& cooked) {
+    // A backend that compiles shaders itself (WebGL2) takes the graph's GLSL, which cooked graphs carry since
+    // version 5.
+    if (_backend && !cooked.graph.surface.empty()) {
+        if (auto own = _backend->create_surface_source(cooked.graph.surface)) {
+            _errors.clear();
+            return result3d(MaterialGraphShader3D{SurfaceShader3D{std::move(own), cooked.graph.traits}, cooked.graph},
+                            {});
+        }
+        if (cooked.spirv[0].empty()) { // nothing else to make it from
+            _errors.clear();
+            fail3d(_errors, "Renderer3D::create_material_graph", "the backend refused the surface's GLSL");
+            return result3d(MaterialGraphShader3D{}, _errors);
+        }
+    }
     std::array<std::span<const u8>, surface_variant_count3d> views;
     for (u32 i = 0; i < surface_variant_count3d; ++i)
         views[i] = cooked.spirv[i];

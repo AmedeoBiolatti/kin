@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -11,6 +12,7 @@
 #include <emscripten/html5.h>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/local_lights3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
 #include <numeric>
 #include <optional>
@@ -38,6 +40,8 @@ template <class T> struct CachedUniform {
             glUniform4f(location, next.r / 255.0f, next.g / 255.0f, next.b / 255.0f, next.a / 255.0f);
         else if constexpr (std::is_same_v<T, LinearRgb>)
             glUniform3f(location, next.r, next.g, next.b);
+        else if constexpr (std::is_same_v<T, std::array<GLfloat, 4>>)
+            glUniform4fv(location, 1, next.data());
         else {
             static_assert(std::is_same_v<T, std::array<GLint, 5>>);
             glUniform1iv(location, GLsizei(next.size()), next.data());
@@ -353,36 +357,126 @@ constexpr std::array<const char*, 18> omitted_text{
     "surface shaders and material graphs (Material3D::surface) draw as kin's stock material",
     "weather (rain, snow, wet surfaces) is not drawn",
 };
+// A draw's uniforms, cached per program (their values belong to the linked program).
+struct DrawUniforms {
+    CachedUniform<GLint> shadow_pass, receives_shadow;
+    CachedUniform<std::array<GLint, 5>> flip;
+    CachedUniform<GLint> skinned, has_normal, has_emission;
+    CachedUniform<GLfloat> metallic, roughness, normal_scale, occlusion_strength;
+    CachedUniform<Color> color;
+    CachedUniform<GLint> unlit;
+    CachedUniform<GLfloat> emissive;
+    CachedUniform<GLint> blend;
+    CachedUniform<GLfloat> alpha_cutoff;
+    CachedUniform<LinearRgb> emission_color;
+    CachedUniform<GLint> independent_emission;
+    CachedUniform<std::array<GLfloat, 4>> uv_transform;
+};
+// A linked mesh program: kin's stock one, or a surface shader's (mesh.frag.glsl with KIN_SURFACE), with its uniform
+// locations and cached values, and the pass whose scene uniforms it holds.
+struct MeshProgram {
+    GLuint handle = 0;
+    bool surface = false;
+    std::shared_ptr<bool> alive;
+    std::unordered_map<std::string_view, GLint> locations; // by name (string literals)
+    DrawUniforms draw{};
+    u64 serial = 0;
+    MeshProgram(GLuint program, bool is_surface, std::shared_ptr<bool> liveness)
+        : handle(program), surface(is_surface), alive(std::move(liveness)) {
+        glUseProgram(handle);
+        // Sampler units belong to the linked program, not individual draws.
+        constexpr std::array names{"uTexture", "uNormal",   "uMetalRough", "uOcclusion", "uEmission",
+                                   "uJoints",  "uFogTable", "uShadow",     "uGraphMaps"};
+        for (u32 unit = 0; unit < names.size(); ++unit)
+            glUniform1i(location(names[unit]), GLint(unit));
+        draw = {location("uShadowPass"),
+                location("uReceivesShadow"),
+                location("uFlip[0]"),
+                location("uSkinned"),
+                location("uHasNormal"),
+                location("uHasEmission"),
+                location("uMetallic"),
+                location("uRoughness"),
+                location("uNormalScale"),
+                location("uOcclusionStrength"),
+                location("uColor"),
+                location("uUnlit"),
+                location("uEmissive"),
+                location("uBlend"),
+                location("uAlphaCutoff"),
+                location("uEmissionColor"),
+                location("uIndependentEmission"),
+                location("uUvTransform")};
+    }
+    MeshProgram(const MeshProgram&) = delete;
+    MeshProgram& operator=(const MeshProgram&) = delete;
+    ~MeshProgram() {
+        if (alive && *alive)
+            glDeleteProgram(handle);
+    }
+    GLint location(const char* name) {
+        const auto found = locations.find(name);
+        if (found != locations.end())
+            return found->second;
+        return locations.emplace(name, glGetUniformLocation(handle, name)).first->second;
+    }
+};
+constexpr GLuint graph_maps_unit = 8;
+// A surface shader made by this renderer (create_surface_source): its program.
+struct SurfaceProgram final : ISurfaceShaderBackend3D {
+    std::shared_ptr<MeshProgram> program;
+    bool valid() const override { return program && program->alive && *program->alive; }
+};
+// GLSL ES 3.00 takes no `const` on a value that isn't a constant expression (native's GLSL 4.5 does): dropped from a
+// surface's source and the graph functions, which say it of locals.
+std::string without_const(std::string text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t i = 0; i < text.size();) {
+        const bool word_start = i == 0 || !(std::isalnum(u8(text[i - 1])) || text[i - 1] == '_');
+        if (word_start && text.compare(i, 6, "const ") == 0) {
+            i += 6;
+            continue;
+        }
+        out += text[i++];
+    }
+    return out;
+}
 } // namespace
 
 struct WebGLRenderer3D::Impl {
-    struct DrawUniforms {
-        CachedUniform<GLint> shadow_pass, receives_shadow;
-        CachedUniform<std::array<GLint, 5>> flip;
-        CachedUniform<GLint> skinned, has_normal, has_emission;
-        CachedUniform<GLfloat> metallic, roughness, normal_scale, occlusion_strength;
-        CachedUniform<Color> color;
-        CachedUniform<GLint> unlit;
-        CachedUniform<GLfloat> emissive;
-        CachedUniform<GLint> blend;
-        CachedUniform<GLfloat> alpha_cutoff;
-        CachedUniform<LinearRgb> emission_color;
-        CachedUniform<GLint> independent_emission;
-    } draw_uniforms{};
     struct MaterialBinding {
         GLuint texture = 0, sampler = 0;
     };
     WebGL2Renderer2DBackend& renderer;
     WebGLDevice& device;
-    GLuint program = 0, instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0,
-           post_program = 0;
+    std::shared_ptr<MeshProgram> stock;                      // kin's own mesh program
+    MeshProgram* current = nullptr;                          // the mesh program in use (null: another, or none)
+    std::string mesh_vertex, mesh_fragment, graph_functions; // the sources surface programs are made from
+    GLuint instances = 0, joints = 0, fog_texture = 0, sky_program = 0, sky_vao = 0, shadow_dummy = 0, post_program = 0,
+           graph_maps_dummy = 0;
     bool float_targets = false; // EXT_color_buffer_float: HDR views can be drawn
     bool linear_output = false; // this render draws an HDR view's float picture
     Texture white;
     RendererCapabilities3D caps{};
     u32 omitted_told = 0; // the Omitted bits already warned about
     bool hdr_refused_told = false, pick_told = false;
-    std::unordered_map<std::string_view, GLint> uniforms, sky_uniforms, post_uniforms;
+    std::unordered_map<std::string_view, GLint> sky_uniforms, post_uniforms;
+    // What a pass sets on every mesh program it draws with (apply), once per program: `serial` names the pass.
+    struct Pass {
+        u64 serial = 0;
+        const Scene3D* scene = nullptr;
+        const Lights3D* lights = nullptr;
+        const View* view = nullptr; // its sun shadows (null: none, as the overlay's)
+        bool shadow = false;        // a shadow cascade's: each layer sets its own uViewProjection
+        Vec2i size{};
+        Mat4f view_projection{};
+        std::array<f32, 128> points{};
+        std::array<f32, 16 * max_spot_lights> spots{};
+        u32 point_count = 0, spot_count = 0;
+        LinearRgb ambient{}, ground{};
+    } pass;
+    u64 serials = 0;
     sky_model::FogTable3D fog_table;
     // By wrap and filter, then the mipmapped ones' by anisotropy (2 to 16) and wrap; the mipmapped ones read with
     // `anisotropy`, this render's Scene3D::anisotropy, clamped.
@@ -448,9 +542,11 @@ struct WebGLRenderer3D::Impl {
         glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &attributes);
         if (attributes < 12)
             throw std::runtime_error("WebGL2 mesh renderer requires 12 vertex attributes");
-        const auto vertex = WebGLDevice::shader_source("mesh.vert.glsl");
-        const auto fragment = WebGLDevice::shader_source("mesh.frag.glsl");
-        program = WebGLDevice::program(vertex.c_str(), fragment.c_str());
+        mesh_vertex = WebGLDevice::shader_source("mesh.vert.glsl");
+        mesh_fragment = WebGLDevice::shader_source("mesh.frag.glsl");
+        graph_functions = without_const(WebGLDevice::shader_source("kin_graph.inc.glsl"));
+        stock = std::make_shared<MeshProgram>(WebGLDevice::program(mesh_vertex.c_str(), mesh_fragment.c_str()), false,
+                                              device.alive());
         const auto sky_vertex = WebGLDevice::shader_source("sky.vert.glsl");
         const auto sky_fragment = WebGLDevice::shader_source("sky.frag.glsl");
         sky_program = WebGLDevice::program(sky_vertex.c_str(), sky_fragment.c_str());
@@ -478,36 +574,6 @@ struct WebGLRenderer3D::Impl {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, sky_model::FogTable3D::rows, 0, GL_RGBA, GL_FLOAT,
                      fog_table.values.data());
-        for (const char* name : {"uViewProjection",
-                                 "uSunDirection",
-                                 "uSunColor",
-                                 "uFillDirection",
-                                 "uFillColor",
-                                 "uAmbient",
-                                 "uGround",
-                                 "uEye",
-                                 "uTexture",
-                                 "uNormal",
-                                 "uMetalRough",
-                                 "uOcclusion",
-                                 "uEmission",
-                                 "uFlip[0]",
-                                 "uColor",
-                                 "uUnlit",
-                                 "uEmissive",
-                                 "uBlend",
-                                 "uAlphaCutoff",
-                                 "uMetallic",
-                                 "uRoughness",
-                                 "uNormalScale",
-                                 "uOcclusionStrength",
-                                 "uHasNormal",
-                                 "uHasEmission",
-                                 "uPointCount",
-                                 "uPoints[0]",
-                                 "uSkinned",
-                                 "uJoints"})
-            uniforms.emplace(name, glGetUniformLocation(program, name));
         glGenTextures(1, &joints);
         glActiveTexture(GL_TEXTURE5);
         glBindTexture(GL_TEXTURE_2D, joints);
@@ -521,29 +587,12 @@ struct WebGLRenderer3D::Impl {
         glGenBuffers(1, &instances);
         const std::array<u8, 4> pixels{255, 255, 255, 255};
         white = device.create_texture(pixels.data(), {1, 1});
-        draw_uniforms = {uniform("uShadowPass"),
-                         uniform("uReceivesShadow"),
-                         uniform("uFlip[0]"),
-                         uniform("uSkinned"),
-                         uniform("uHasNormal"),
-                         uniform("uHasEmission"),
-                         uniform("uMetallic"),
-                         uniform("uRoughness"),
-                         uniform("uNormalScale"),
-                         uniform("uOcclusionStrength"),
-                         uniform("uColor"),
-                         uniform("uUnlit"),
-                         uniform("uEmissive"),
-                         uniform("uBlend"),
-                         uniform("uAlphaCutoff"),
-                         uniform("uEmissionColor"),
-                         uniform("uIndependentEmission")};
-        // Sampler units belong to the linked program, not individual draws.
-        glUseProgram(program);
-        constexpr std::array names{"uTexture",  "uNormal", "uMetalRough", "uOcclusion",
-                                   "uEmission", "uJoints", "uFogTable",   "uShadow"};
-        for (u32 unit = 0; unit < names.size(); ++unit)
-            glUniform1i(uniform(names[unit]), GLint(unit));
+        glGenTextures(1, &graph_maps_dummy);
+        glActiveTexture(GL_TEXTURE0 + graph_maps_unit);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, graph_maps_dummy);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         caps.depth_bits = 24;
         caps.morph_targets = true;
         caps.auto_exposure = float_targets;
@@ -570,16 +619,45 @@ struct WebGLRenderer3D::Impl {
         glDeleteProgram(post_program);
         glDeleteVertexArrays(1, &sky_vao);
         glDeleteTextures(1, &shadow_dummy);
-        glDeleteProgram(program);
+        glDeleteTextures(1, &graph_maps_dummy);
     }
     GLint location(GLuint handle, const char* name) {
-        auto& cache = handle == program ? uniforms : handle == sky_program ? sky_uniforms : post_uniforms;
+        if (current && handle == current->handle)
+            return current->location(name);
+        auto& cache = handle == sky_program ? sky_uniforms : post_uniforms;
         const auto found = cache.find(name);
         if (found != cache.end())
             return found->second;
         return cache.emplace(name, glGetUniformLocation(handle, name)).first->second;
     }
-    GLint uniform(const char* name) { return location(program, name); }
+    GLint uniform(const char* name) { return current->location(name); }
+    // A surface shader's program: mesh.frag with KIN_SURFACE, the surface's source in it (its graph functions
+    // included). Throws with the compiler's log when it doesn't compile.
+    std::shared_ptr<MeshProgram> surface_program(std::string_view surface) {
+        std::string source = without_const(std::string(surface));
+        const std::string include = "#include \"kin_graph.inc.glsl\"";
+        for (std::size_t at; (at = source.find(include)) != std::string::npos;)
+            source.replace(at, include.size(), graph_functions);
+        // Native's screen position runs down; GL's up (kin_screen turns it).
+        const std::string screen = "(gl_FragCoord.xy * frame.occlusion.zw)";
+        for (std::size_t at; (at = source.find(screen)) != std::string::npos;)
+            source.replace(at, screen.size(), "kin_screen()");
+        std::string fragment = mesh_fragment;
+        const std::string marker = "// KIN_SURFACE_SOURCE";
+        fragment.replace(fragment.find(marker), marker.size(), source);
+        fragment.insert(fragment.find('\n') + 1, "#define KIN_SURFACE\n");
+        current = nullptr;
+        return std::make_shared<MeshProgram>(WebGLDevice::program(mesh_vertex.c_str(), fragment.c_str()), true,
+                                             device.alive());
+    }
+    // The program a draw's material takes: its surface's where this renderer made it, else the stock one.
+    MeshProgram& program_for(const Material3D& material) {
+        if (material.surface)
+            if (const auto* own = dynamic_cast<const SurfaceProgram*>(material.surface.backend().get());
+                own && own->program && own->program->alive == device.alive())
+                return *own->program;
+        return *stock;
+    }
     GLuint sampler(Wrap3D u, Wrap3D v, ScaleMode mode, std::optional<TextureSampler3D> explicit_sampler = {}) {
         const auto s = explicit_sampler.value_or(legacy_sampler3d(mode, u, v));
         const u32 slant =
@@ -608,6 +686,8 @@ struct WebGLRenderer3D::Impl {
     }
     void environment(GLuint handle, const Scene3D& scene) {
         glUseProgram(handle);
+        if (current && current->handle != handle)
+            current = nullptr;
         const auto loc = [&](const char* name) { return location(handle, name); };
         const auto set = [&](const char* name, Vec4f value) {
             glUniform4f(loc(name), value.x, value.y, value.z, value.w);
@@ -711,6 +791,75 @@ struct WebGLRenderer3D::Impl {
             return false;
         return true;
     }
+    // Makes `program` the one in use, with this pass's scene uniforms.
+    void use(MeshProgram& program) {
+        if (current != &program) {
+            glUseProgram(program.handle);
+            current = &program;
+        }
+        if (program.serial != pass.serial)
+            apply(program);
+    }
+    // The pass's scene uniforms on the program in use (`current`).
+    void apply(MeshProgram& program) {
+        const Scene3D& scene = *pass.scene;
+        environment(program.handle, scene);
+        program.serial = pass.serial;
+        if (pass.shadow)
+            return; // (a cascade's matrix is set by each layer)
+        glUniform3f(uniform("uEye"), scene.camera.position.x, scene.camera.position.y, scene.camera.position.z);
+        glUniformMatrix4fv(uniform("uViewProjection"), 1, GL_FALSE, pass.view_projection.m);
+        glUniform1i(uniform("uPointCount"), GLint(pass.point_count));
+        if (pass.point_count)
+            glUniform4fv(uniform("uPoints[0]"), GLsizei(pass.point_count * 2), pass.points.data());
+        glUniform1i(uniform("uSpotCount"), GLint(pass.spot_count));
+        if (pass.spot_count)
+            glUniform4fv(uniform("uSpots[0]"), GLsizei(pass.spot_count * 4), pass.spots.data());
+        const Lights3D& lights = *pass.lights;
+        direction("uSunDirection", lights.sun.direction);
+        direction("uFillDirection", lights.fill.direction);
+        rgb("uSunColor", lights.sun.color);
+        rgb("uFillColor", lights.fill.color);
+        rgb("uAmbient", pass.ambient);
+        rgb("uGround", pass.ground);
+        glUniform1f(uniform("uSpecularAa"), std::clamp(scene.specular_aa, 0.0f, 1.0f));
+        glUniform1f(uniform("uSingleScatter"), scene.specular_multiscatter ? 0.0f : 1.0f);
+        shadow_uniforms(pass.view, lights);
+        if (program.surface) { // native's frame block, what a surface reads of it
+            const auto set = [&](const char* name, f32 x, f32 y, f32 z, f32 w) {
+                glUniform4f(uniform(name), x, y, z, w);
+            };
+            const Vec3f eye = scene.camera.position, forward = scene.camera.forward();
+            set("frame.time", scene.time, scene.specular_multiscatter ? 0.0f : 1.0f, 0, 0);
+            set("frame.eye", eye.x, eye.y, eye.z, 1);
+            set("frame.occlusion", 0, 0, 1.0f / f32(pass.size.x), 1.0f / f32(pass.size.y));
+            set("frame.cascade_forward", forward.x, forward.y, forward.z, 0);
+            set("frame.flags", 0, 1, 0, 0);
+            set("frame.environment", 1, 0, std::clamp(scene.specular_aa, 0.0f, 1.0f), 0);
+            set("frame.ambient", pass.ambient.r, pass.ambient.g, pass.ambient.b, 0);
+            set("frame.ground_ambient", pass.ground.r, pass.ground.g, pass.ground.b, 0);
+        }
+    }
+    // A surface program's material block (native's: what a surface's source reads) and its graph maps.
+    void surface_material(MeshProgram& program, const Material3D& m) {
+        const auto set = [&](const char* name, f32 x, f32 y, f32 z, f32 w) {
+            glUniform4f(program.location(name), x, y, z, w);
+        };
+        set("material.pbr", m.metallic, m.roughness, m.normal_scale, m.occlusion_strength);
+        set("material.emission", m.emission_color.r, m.emission_color.g, m.emission_color.b,
+            m.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f);
+        set("material.params", m.emissive, m.unlit ? 1.0f : 0.0f, m.receives_shadow ? 1.0f : 0.0f,
+            m.blend == Blend3D::Mask ? m.alpha_cutoff : 0.0f);
+        set("material.uv", m.uv_scale.x, m.uv_scale.y, m.uv_offset.x, m.uv_offset.y);
+        set("material.cutoff", 0, 0, pass.scene ? pass.scene->time : 0.0f, 0);
+        set("material.maps", m.normal ? 1.0f : 0.0f, m.emissive_texture ? 1.0f : 0.0f, 0, 0);
+        glUniform4fv(program.location("material.surface[0]"), GLsizei(m.shader_params.size() / 4),
+                     m.shader_params.data());
+        const auto* maps = m.graph_maps ? device.texture(m.graph_maps) : nullptr;
+        glActiveTexture(GL_TEXTURE0 + graph_maps_unit);
+        glBindSampler(graph_maps_unit, 0);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, maps && maps->layered ? maps->handle : graph_maps_dummy);
+    }
     // What `scene` (and its overlay) asks for that is left out: the Omitted bits.
     u32 omitted(const Scene3D& scene) const {
         u32 bits = 0;
@@ -718,7 +867,9 @@ struct WebGLRenderer3D::Impl {
         for (const auto& draw : scene.draws()) {
             bits |= draw.material.shader ? omit_shader : 0;
             bits |= draw.material.wireframe ? omit_wireframe : 0;
-            bits |= draw.material.surface ? omit_surface : 0;
+            bits |= draw.material.surface && !dynamic_cast<const SurfaceProgram*>(draw.material.surface.backend().get())
+                        ? omit_surface
+                        : 0;
         }
         bits |= scene.particle_draws().empty() ? 0 : omit_particles;
         bits |= scene.decals().empty() ? 0 : omit_decals;
@@ -795,7 +946,14 @@ struct WebGLRenderer3D::Impl {
                 stats.instance_upload_bytes += bytes;
         }
         const auto& material = draw.material;
-        auto& loc = draw_uniforms;
+        // Shadow cascades cut by the base map's alpha with kin's own program (as native's do without a cut-out
+        // variant).
+        MeshProgram& program = shadow_pass ? *stock : program_for(material);
+        use(program);
+        auto& loc = program.draw;
+        if (program.surface)
+            surface_material(program, material);
+        loc.uv_transform.set({material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y});
         loc.shadow_pass.set(shadow_pass);
         loc.receives_shadow.set(material.receives_shadow);
         const std::array<const Texture*, 5> images{&material.texture, &material.normal, &material.metallic_roughness,
@@ -943,6 +1101,7 @@ struct WebGLRenderer3D::Impl {
         glDisable(GL_BLEND);
         glDisable(GL_CULL_FACE);
         glUseProgram(post_program);
+        current = nullptr;
         glBindVertexArray(sky_vao);
         for (GLuint unit = 0; unit < 3; ++unit)
             glBindSampler(unit, 0);
@@ -1063,7 +1222,12 @@ struct WebGLRenderer3D::Impl {
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(-1, -1);
         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-        environment(program, scene);
+        pass = {};
+        pass.serial = ++serials;
+        pass.scene = &scene;
+        pass.lights = &scene.lights;
+        pass.shadow = true;
+        use(*stock);
         palette(scene);
         std::vector<u32> copies;
         for (u32 layer = 0; layer < view.cascades.count; ++layer) {
@@ -1093,15 +1257,13 @@ struct WebGLRenderer3D::Impl {
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         stats.shadow_cascades = view.cascades.count;
     }
-    void shadow_uniforms(const View& view, const Lights3D& lights) {
-        glUseProgram(program);
-        glActiveTexture(GL_TEXTURE7);
-        glBindSampler(7, 0);
-        glBindTexture(GL_TEXTURE_2D_ARRAY, view.shadow ? view.shadow->texture : shadow_dummy);
-        glUniform1i(uniform("uShadowCount"), GLint(view.cascades.count));
+    // The sun's cascades on the program in use (`view`'s; none for null: the overlay).
+    void shadow_uniforms(const View* shadowed, const Lights3D& lights) {
+        glUniform1i(uniform("uShadowCount"), shadowed && shadowed->shadow ? GLint(shadowed->cascades.count) : 0);
         glUniform1f(uniform("uShadowStrength"), std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
-        if (!view.shadow)
+        if (!shadowed || !shadowed->shadow)
             return;
+        const View& view = *shadowed;
         std::array<Mat4f, 4> matrices;
         std::array<f32, 4> ends{}, blends{}, bias{}, offset{};
         for (u32 k = 0; k < view.cascades.count; ++k) {
@@ -1120,13 +1282,13 @@ struct WebGLRenderer3D::Impl {
         glUniform1f(uniform("uShadowTexel"), 1.0f / view.shadow->resolution);
     }
     void scene(const Scene3D& scene, const Lights3D& lights, Vec2i size, RenderDebugStats3D& stats,
-               sky_model::AmbientLight3D& ambient, const std::vector<std::shared_ptr<PreparedInstances>>& prepared) {
-        environment(program, scene);
+               sky_model::AmbientLight3D& ambient, const std::vector<std::shared_ptr<PreparedInstances>>& prepared,
+               const View* shadowed) {
         stats.fog_applied = stats.fog_applied || scene.fog.enabled;
         palette(scene, &stats);
-        glUniform3f(uniform("uEye"), scene.camera.position.x, scene.camera.position.y, scene.camera.position.z);
         const Mat4f vp = scene.camera.view_projection(f32(size.x) / size.y);
-        std::array<f32, 128> points{};
+        pass = {};
+        auto& points = pass.points;
         const auto point_order = chosen_lights(std::span{lights.points}, 16, vp, scene.camera.position,
                                                [](const PointLightSource3D& p, Vec3f& centre, f32& radius) {
                                                    centre = p.position;
@@ -1145,10 +1307,8 @@ struct WebGLRenderer3D::Impl {
             at[6] = point.color.b;
             at[7] = std::max(0.0001f, point.size * point.size);
         }
-        glUniform1i(uniform("uPointCount"), GLint(count));
-        if (count)
-            glUniform4fv(uniform("uPoints[0]"), GLsizei(count * 2), points.data());
-        std::array<f32, 16 * max_spot_lights> spots{};
+        pass.point_count = count;
+        auto& spots = pass.spots;
         const auto spot_order =
             chosen_lights(std::span{lights.spots}, max_spot_lights, vp, scene.camera.position, spot_bounding_sphere);
         for (u32 i = 0; i < spot_order.size(); ++i) {
@@ -1173,24 +1333,24 @@ struct WebGLRenderer3D::Impl {
                                              0};
             std::copy(packed.begin(), packed.end(), at);
         }
-        glUniform1i(uniform("uSpotCount"), GLint(spot_order.size()));
-        if (!spot_order.empty())
-            glUniform4fv(uniform("uSpots[0]"), GLsizei(spot_order.size() * 4), spots.data());
+        pass.spot_count = u32(spot_order.size());
         stats.lights += count;
         stats.spots += u32(spot_order.size());
-        glUniformMatrix4fv(uniform("uViewProjection"), 1, GL_FALSE, vp.m);
-        direction("uSunDirection", lights.sun.direction);
-        direction("uFillDirection", lights.fill.direction);
-        rgb("uSunColor", lights.sun.color);
-        rgb("uFillColor", lights.fill.color);
         const bool sky_lighting = scene.sky.enabled && lights.sky_lights_scene;
         if (sky_lighting)
             ambient.update(scene.sky, lights.sun.direction);
-        rgb("uAmbient", sky_lighting ? ambient.ambient : lights.ambient);
-        glUniform1f(uniform("uSpecularAa"), std::clamp(scene.specular_aa, 0.0f, 1.0f));
-        glUniform1f(uniform("uSingleScatter"), scene.specular_multiscatter ? 0.0f : 1.0f);
-        rgb("uGround", sky_lighting ? ambient.ground
-                                    : (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient));
+        pass.ambient = sky_lighting ? ambient.ambient : lights.ambient;
+        pass.ground = sky_lighting ? ambient.ground
+                                   : (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient);
+        pass.serial = ++serials;
+        pass.scene = &scene;
+        pass.lights = &lights;
+        pass.view = shadowed;
+        pass.size = size;
+        pass.view_projection = vp;
+        glActiveTexture(GL_TEXTURE7);
+        glBindSampler(7, 0);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, shadowed && shadowed->shadow ? shadowed->shadow->texture : shadow_dummy);
         struct Transparent {
             const Scene3D::Draw* draw;
             PreparedInstances* prepared;
@@ -1329,14 +1489,14 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
         return false;
     _impl->tell_omitted(scene);
     _impl->renderer.before_3d();
-    // The 2D pass and texture uploads can change bindings between 3D renders.
+    // The 2D pass and texture uploads can change bindings (and the program) between 3D renders.
     _impl->material_bindings = {};
+    _impl->current = nullptr;
     // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy.
     _impl->anisotropy = std::clamp(scene.anisotropy, 1u, _impl->caps.max_anisotropy);
     _impl->prepare(view->prepared, scene, stats);
     _impl->linear_output = bool(view->hdr);
     _impl->shadows(*view, scene, stats);
-    _impl->shadow_uniforms(*view, scene.lights);
     glBindFramebuffer(GL_FRAMEBUFFER, view->hdr ? view->hdr->scene->framebuffer : view->surface->framebuffer);
     glViewport(0, 0, view->size().x, view->size().y);
     glDisable(GL_SCISSOR_TEST);
@@ -1356,14 +1516,13 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
         glClearColor(color.r / 255.0f * alpha, color.g / 255.0f * alpha, color.b / 255.0f * alpha, alpha);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     _impl->sky(scene, view->size(), stats);
-    _impl->scene(scene, scene.lights, view->size(), stats, view->ambient, view->prepared);
+    _impl->scene(scene, scene.lights, view->size(), stats, view->ambient, view->prepared, view);
     if (const auto* overlay = scene.overlay_if_any()) {
         _impl->prepare(view->overlay_prepared, *overlay, stats);
-        glUseProgram(_impl->program);
-        glUniform1i(_impl->uniform("uShadowCount"), 0);
         glDepthMask(GL_TRUE);
         glClear(GL_DEPTH_BUFFER_BIT);
-        _impl->scene(*overlay, scene.lights, view->size(), stats, view->overlay_ambient, view->overlay_prepared);
+        _impl->scene(*overlay, scene.lights, view->size(), stats, view->overlay_ambient, view->overlay_prepared,
+                     nullptr);
     } else
         view->overlay_prepared.clear();
     if (view->hdr)
@@ -1371,6 +1530,44 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     stats.retained_gpu_bytes = _impl->instance_budget->gpu_bytes;
     stats.samples = 1;
     return true;
+}
+std::shared_ptr<ISurfaceShaderBackend3D> WebGLRenderer3D::create_surface_source(std::string_view surface) {
+    _impl->renderer.before_3d();
+    try {
+        auto made = std::make_shared<SurfaceProgram>();
+        made->program = _impl->surface_program(surface);
+        if (surface_has_offset(surface))
+            KIN_LOG_WARN("render", "WebGL2: a surface's vertex offset (World Position Offset) is not drawn");
+        return made;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "WebGL2: surface shader not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+Texture WebGLRenderer3D::create_map_array(Vec2i size, std::span<const u8* const> layers) {
+    if (layers.empty() || size.x <= 0 || size.y <= 0 || size.x > _impl->device.max_texture_size() ||
+        size.y > _impl->device.max_texture_size())
+        return {};
+    _impl->renderer.before_3d();
+    auto value = std::make_shared<WebGLTexture>(size, _impl->device.alive());
+    value->layered = true;
+    value->mipmapped = true;
+    glGenTextures(1, &value->handle);
+    glActiveTexture(GL_TEXTURE0 + graph_maps_unit);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, value->handle);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    const auto levels = GLsizei(std::floor(std::log2(f32(std::max(size.x, size.y)))) + 1);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, levels, GL_RGBA8, size.x, size.y, GLsizei(layers.size()));
+    for (u32 i = 0; i < layers.size(); ++i)
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, GLint(i), size.x, size.y, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                        layers[i]);
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    _impl->material_bindings = {};
+    return Texture{std::move(value)};
 }
 Result3D<PickResult3D> WebGLRenderer3D::pick(IViewBackend3D&, Vec2i) {
     return {std::nullopt, {"WebGL2 picking is not implemented yet"}};

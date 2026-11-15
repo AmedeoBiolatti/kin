@@ -237,14 +237,20 @@ void cooked() {
     auto bytes = pack_cooked_material_graph3d(made);
     const auto unpacked = unpack_cooked_material_graph3d(bytes, &why);
     CHECK(unpacked && unpacked->graph.parameters.size() == 3 && unpacked->spirv[7] == made.spirv[7]);
+    CHECK(unpacked->graph.surface == g.surface && !g.surface.empty()); // version 5: the GLSL, for WebGL2
     auto cut = bytes;
     cut.resize(cut.size() / 2); // the data cut, not only zlib's trailing check
     CHECK(!unpack_cooked_material_graph3d(cut, &why) && contains(why, "cut short"));
     auto flipped = bytes;
     flipped[flipped.size() / 2] ^= 0x40; // a byte changed: the payload's hash refuses it
     CHECK(!unpack_cooked_material_graph3d(flipped, &why));
-    CHECK(bytes.size() < 400 && "the payload deflated (8 variants of 24 bytes and the layout)");
-    CHECK(bytes[8] == 4 && !unpacked->spirv[u32(SurfaceVariant3D::Material)].empty());
+    CHECK(bytes.size() < 900 && "the payload deflated (8 variants of 24 bytes, the layout and the GLSL)");
+    CHECK(bytes[8] == 5 && !unpacked->spirv[u32(SurfaceVariant3D::Material)].empty());
+    // Version 4 (no GLSL): the same, its surface empty.
+    auto four = bytes;
+    four[8] = 4;
+    const auto v4 = unpack_cooked_material_graph3d(four, &why);
+    CHECK(v4 && v4->spirv[7] == made.spirv[7] && v4->graph.surface.empty());
     // Version 3 (16 floats of parameters): its merged-draw variants left out (they read the table's old stride).
     auto old = bytes;
     old[8] = 3; // the hash covers the payload, not the header

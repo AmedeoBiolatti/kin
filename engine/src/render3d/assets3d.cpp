@@ -378,8 +378,16 @@ MaterialGraphShader3D Assets3D::load_material_graph_impl(const std::filesystem::
                             made.graph.errors.front().message);
             made.surface = SurfaceShader3D{std::make_shared<CpuSurfaceShader>(), made.graph.traits};
         } else if (!shader_compiler_available()) {
-            return fail(path.string() + ": not cooked (" + cooked_path.filename().string() +
-                        ": kin_material_graph cook, kin_cook_material_graph) and no glslc to compile it");
+            // A backend that compiles shaders itself (WebGL2) takes the graph's GLSL, compiled here on the CPU.
+            CookedMaterialGraph3D compiled{compile_material_graph3d(*text), {}};
+            if (!compiled.graph.ok())
+                return fail(path.string() + ": " + compiled.graph.errors.front().node + ": " +
+                            compiled.graph.errors.front().message);
+            auto r = d.renderer->create_material_graph(compiled);
+            if (!r)
+                return fail(path.string() + ": not cooked (" + cooked_path.filename().string() +
+                            ": kin_material_graph cook, kin_cook_material_graph) and no glslc to compile it");
+            made = std::move(*r);
         } else {
             auto r = d.renderer->compile_material_graph(path);
             if (!r)

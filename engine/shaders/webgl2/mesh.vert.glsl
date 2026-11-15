@@ -18,6 +18,8 @@ out vec3 vWorld;
 out vec3 vNormal;
 out vec2 vUV;
 out vec4 vColor;
+out vec3 vLocal;       // the point in the copy's own space (posed when skinned)
+flat out vec3 vObject; // the copy's origin in the world
 vec3 decode(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
 }
@@ -36,6 +38,8 @@ void main() {
         // Same normal approximation as native: rigid/uniformly scaled joints.
         normal = mat3(skin)*normal;
     }
+    vLocal = position.xyz;
+    vObject = aModel[3].xyz;
     vec4 world = aModel * position;
     gl_Position = uViewProjection * world;
     // Kin's reverse-Z projection maps depth to 0..1. WebGL clips -w..w.

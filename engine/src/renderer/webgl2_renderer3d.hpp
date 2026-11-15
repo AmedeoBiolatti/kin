@@ -18,6 +18,9 @@ public:
     bool update_mesh_vertices(IMeshBackend3D& mesh, std::span<const MeshVertex3D> vertices) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i, std::span<const f32>) override { return {}; }
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8>) override { return {}; }
+    // Surface shaders (material graphs) from their GLSL, compiled here as GLSL ES; their SPIR-V can't be used.
+    std::shared_ptr<ISurfaceShaderBackend3D> create_surface_source(std::string_view surface) override;
+    Texture create_map_array(Vec2i size, std::span<const u8* const> layers) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;

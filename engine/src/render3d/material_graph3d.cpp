@@ -1315,12 +1315,15 @@ std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked
         u32le(payload, u32(v.size()));
         payload.insert(payload.end(), v.begin(), v.end());
     }
+    // Version 5: the surface's GLSL after the variants, for a backend that compiles it itself (WebGL2's GLSL ES).
+    u32le(payload, u32(cooked.graph.surface.size()));
+    payload.insert(payload.end(), cooked.graph.surface.begin(), cooked.graph.surface.end());
     std::vector<u8> out{'K', 'I', 'N', 'G', 'R', 'A', 'P', 'H'};
     int size = 0;
     unsigned char* deflated = kin_zlib_deflate(payload.data(), int(payload.size()), &size);
     if (!deflated) // (only out of memory)
         return {};
-    u32le(out, 4);
+    u32le(out, 5);
     u32le(out, u32(payload.size()));
     u32le(out, fnv1a(payload));
     out.insert(out.end(), deflated, deflated + size);
@@ -1344,7 +1347,7 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
     std::span<const u8> payload;
     if (version == 1) {
         payload = bytes.subspan(12);
-    } else if (version >= 2 && version <= 4) {
+    } else if (version >= 2 && version <= 5) {
         if (bytes.size() < 20)
             return fail("a cooked material graph cut short");
         const u32 expected = u32_at(bytes, 12), hash = u32_at(bytes, 16);
@@ -1397,6 +1400,13 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
             return fail("a cooked material graph whose SPIR-V is cut short or not SPIR-V");
         v.assign(payload.begin() + std::ptrdiff_t(at), payload.begin() + std::ptrdiff_t(at + *n));
         at += *n;
+    }
+    if (version >= 5) {
+        const auto size = next();
+        if (!size || at + *size > payload.size())
+            return fail("a cooked material graph cut short");
+        cooked.graph.surface.assign(reinterpret_cast<const char*>(payload.data() + at), *size);
+        at += *size;
     }
     // Version 3's merged-draw variants read the parameter table at its old stride (16 floats a copy): left out, so
     // those draws go unmerged; its other variants read the start of today's blocks, as before.
