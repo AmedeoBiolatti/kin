@@ -515,7 +515,13 @@ if(KIN_EXPERIMENTAL_3D)
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/mesh.vert.glsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/mesh.frag.glsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/sky.vert.glsl"
-            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/sky.frag.glsl")
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/sky.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/post.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/fog_volume.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/particle.vert.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/particle.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/decal.vert.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/kin_graph.inc.glsl")
     endif()
     if(KIN_ENABLE_PHYSICS3D)
         target_sources(kin_engine PRIVATE

@@ -21,6 +21,7 @@ public:
     Vec2i dimensions;
     ScaleMode scale_mode = ScaleMode::Nearest;
     bool flip_v = false, mipmapped = false;
+    bool layered = false; // a 2D array (Renderer3D::create_map_array), not a 2D texture
     std::shared_ptr<bool> alive;
 };
 

@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace kin {
@@ -345,6 +346,9 @@ public:
     create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d>) {
         return {};
     }
+    // A surface shader from its source (`void kin_surface(inout KinSurface s)`: surface_shader_source's input), where
+    // the backend compiles its shaders itself (WebGL2's GLSL ES); null where it takes SPIR-V, or refuses the source.
+    virtual std::shared_ptr<ISurfaceShaderBackend3D> create_surface_source(std::string_view) { return {}; }
     // A mipmapped RGBA8 2D array of `layers` (RGBA8, one size, tightly packed): Material3D::graph_maps. None where
     // surface shaders aren't supported.
     virtual Texture create_map_array(Vec2i, std::span<const u8* const>) { return {}; }

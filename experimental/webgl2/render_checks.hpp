@@ -5,3 +5,4 @@
 void check_webgl_materials(kin::Renderer2D& renderer, kin::Renderer3D& renderer3d);
 void check_webgl_geometry2d(kin::Renderer2D& renderer);
 void check_webgl_instances(kin::Renderer2D& renderer, kin::Renderer3D& renderer3d);
+void check_webgl_parity(kin::Renderer2D& renderer, kin::Renderer3D& renderer3d);
