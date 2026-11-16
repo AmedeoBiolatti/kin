@@ -10522,3 +10522,61 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
 
 Measured with the 3D perf harness before and after (each effect off: no change), on Sponza Walk and the reference
 scenes; docs/rendering_3d.md gets each effect's section as it is built.
+
+## Subsurface scattering — plan (2026-11-16)
+
+Light that enters a translucent material (skin, wax, marble, jade, milk, leaves seen thick) spreads under the
+surface before it leaves: soft shading, light bleeding past shadow edges, a glow through thin parts. Kin has a thin
+surface's `backlight` (foliage) and a wrapped diffuse (`KinSurface::diffuse_wrap`), not the spread; the importers drop
+Unreal's Subsurface Profile, Unity HDRP's diffusion profiles and Godot's `subsurf_scatter`.
+
+Decisions (2026-11-16): native first; **disc-sampled Burley** (Unity HDRP's and Unreal 5's: an importance-sampled
+disc of Burley's normalised diffusion profile, turned per pixel and per frame), and the first slice includes light
+through thick parts. Branch `feat/subsurface`.
+
+**How it fits a forward renderer.** Kin shades in one forward main pass (opaque meshes, then the sky and the
+volumetric fog's light, then blended meshes), MSAA in HDR views, and its lit shaders have no sampler slot left. So
+the scattered light is made before the main pass and added inside it, without a second output in every lit variant:
+
+1. The depth pre-pass runs (as for ambient occlusion). A **subsurface pass** draws only the subsurface materials, with
+   the main pass's own pipelines and draw order, into a float target over the pre-pass's depth (its equal depths
+   pass the reverse-Z `GREATER_OR_EQUAL` test): each writes `subsurface` times its diffuse light (direct and ambient,
+   the fog's transmittance applied, no reflections, no emission) and, in alpha, its profile's number.
+2. A **scattering compute pass** spreads it: for each subsurface pixel, N samples (16 to 32 by quality) on a disc
+   whose radii are importance-sampled from Burley's profile of the widest channel (precomputed on the CPU), turned by
+   a per-pixel noise (per frame too under TAA), projected to pixels by the depth; each weighed per channel by the
+   profile at the samples' real 3D distance over its sampling density; samples off the material (another profile, no
+   subsurface, a depth gap) count nothing; normalised per channel (energy kept).
+3. The **main pass** draws subsurface materials without that share of their diffuse (`1 - subsurface`), and, after
+   the opaque meshes and before the sky, fog and blended meshes, a full-screen additive draw puts the scattered light
+   back where the profile mask says (so fog, transparency and MSAA apply to it as to the rest).
+
+A frame uniform says which part a lit shader writes (all, all but the scattered share, the scattered share only); a
+material uniform carries the strength and profile. Both appended at the end of their blocks, so cooked material
+graphs keep working; subsurface materials are not merged into multi-material draws (whose table layout cooked graphs
+share).
+
+**Profiles.** `Material3D::subsurface` (0 to 1, the share of the diffuse that scatters) and
+`subsurface_radius` (per channel, world units: how far red, green and blue spread; skin's red the widest), with
+presets (skin, marble, wax, jade, milk, leaf). Each frame's distinct radii make a table of up to 16 profiles (as
+HDRP's diffusion profile list).
+
+**Through thick parts.** `subsurface_transmission`: the light of the sun, spots and points on the far side reaches
+the near side through the thickness between them, by Burley's transmittance `0.25 (e^-t/d + 3 e^-t/3d)` per
+channel. The thickness comes from the shadow maps (their comparison samplers searched in a few steps for where the
+lit side is), else the material's `subsurface_thickness`. Added to the scattered share (it spreads too).
+
+- **SS1 — scattering.** Material fields and presets, the light split in the lit shaders, the subsurface pass, the
+  scattering pass, the combine; frame-graph pass `subsurface`; ECS/scene files/Lua; stats; GPU tests (energy kept on
+  a flat lit patch, the shadow edge softened over about the radius, red spreading farther than blue for skin, off =
+  the same bytes, MSAA and TAA views); docs.
+- **SS2 — transmission.** Thickness from the sun's cascades and the local lights' maps, the fallback thickness, tests
+  (a lit slab's far side glows by its thickness and fades with it).
+- **SS3 — authoring.** Material graph outputs (`subsurface`, `subsurface_radius`, `thickness`), material files, the
+  importers (Unreal Subsurface Profile / Subsurface Color, Unity HDRP diffusion profile and thickness, Godot
+  `subsurf_scatter` and transmittance, glTF `KHR_materials_volume` thickness and `KHR_materials_diffuse_transmission`).
+- **SS4 — checked against Cycles.** Snapshots write the subsurface (Principled BSDF random walk, the same radius);
+  `tools/cycles` compares the falloff across a lit/shadow edge on a slab and a head-sized sphere.
+
+Limits planned: needs a float picture (HDR or TAA views; else the wrapped diffuse stands in), the overlay (first-person
+hands) not scattered in the first slice (no pre-pass depth for it), what is off screen does not scatter in.
