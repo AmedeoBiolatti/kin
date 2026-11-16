@@ -3248,7 +3248,44 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
 before the 2D drawn over the view, so a HUD stays sharp. Off by default; off, the picture and its cost are those
 without it. Planar views (mirrors, portals) and reflection captures are rendered without them. The native renderer
 only; WebGL2 leaves them out (said once). The [plan](3d_plan.md#camera-effects-motion-blur-depth-of-field-lens-and-film--plan-2026-11-16)
-lists what comes next (lens and film).
+lists what comes next (bloom and lens flares).
+
+### Lens, film and grade
+
+The touches a camera and a colourist add, in the view's output pass (no pass of their own):
+
+```cpp
+auto& fx = scene.camera_effects; // authored: SceneEnvironment3D's "lens_*", "film_*", "grade_*"
+fx.lens.vignette = 0.4f;              // darker toward the corners (0 to 1)
+fx.lens.vignette_smoothness = 0.5f;   // how far in it starts (0.01 only the corners, 1 from the middle)
+fx.lens.vignette_roundness = 1.0f;    // 1 round, 0 the view's rectangle
+fx.lens.chromatic_aberration = 0.004f; // red outside, blue inside edges; the split at the corners (of the height, to 0.02)
+fx.film.grain = 0.15f;                // noise in the mid-tones, new each render (0 to 1); film.grain_size 1 to 4 pixels
+fx.grade.tone_curve = kin::ToneCurve3D::Agx; // Aces (default), Agx, Neutral (Khronos PBR Neutral)
+fx.grade.temperature = 0.15f;         // white balance: -1 cooler to 1 warmer (strong at the ends); grade.tint: green to magenta
+fx.grade.contrast = 1.1f;             // round mid-grey, in stops (0 to 2)
+fx.grade.saturation = 0.9f;           // 0 grey to 2
+fx.grade.lut = assets2d.color_lut("looks/teal.cube"); // a look (ColorLut), cross-faded to grade.lut_to by grade.lut_mix
+```
+
+- **Order.** The scene and its bloom are read with the chromatic aberration's split, then the vignette (in the light,
+  before the exposure, as a lens'), the exposure (manual and auto), white balance (Unity's temperature and tint: the
+  white they name adapted to D65 in LMS), contrast and saturation in linear light, the tone curve, the sRGB encode,
+  the look (a LUT strip read trilinearly, as `Renderer2D::set_color_output`'s), then the grain (strongest in the
+  mid-tones, none in black or white) and the dither, in the 8-bit steps. A partly covered pixel (an edge over a
+  transparent background) is graded as its own colour and given its coverage again.
+- **Off, unchanged.** With every value at its default the view's output is the plain one (`view_output.frag`), the
+  same bytes; with any on it is `view_output_effects.frag`, one full-screen draw as before, and
+  `debug_stats().camera_effect_draws` is 1. Its base steps match the plain output exactly (a neutral LUT through it
+  gives the plain picture).
+- **Cost.** About 0.03 to 0.05 ms more than the plain output at 1920 x 1080 with everything on (RTX 4080 Laptop,
+  Sponza, `kin_reference --taa --tone-curve agx --vignette 0.45 --aberration 0.004 --grain 0.15 --temperature 0.15`).
+- **Where.** A view that keeps a float picture: an HDR view or one with temporal anti-aliasing (an 8-bit TAA view has
+  no tone curve: the curve is skipped, the rest applies). With an HDR 2D pipeline (which tonemaps the whole frame)
+  the tone curve, the look and the grain are the 2D pipeline's (`Renderer2D::set_color_output`); the view keeps the
+  aberration, vignette, white balance, contrast and saturation. Native renderer only.
+- **LUTs.** Scene files cannot name one yet: set `grade.lut` from code (on the scene, or on the `SceneEnvironment3D`
+  component when a scene's settings drive the scene). Each LUT is uploaded once while it lives.
 
 ### Depth of field
 

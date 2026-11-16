@@ -6810,6 +6810,144 @@ void test_gpu_depth_of_field() {
     });
 }
 
+// The camera's lens, film and grade (CameraEffects3D::lens, film, grade) over a flat unlit wall (a colour, or a white
+// bar on black) filling an HDR view (exposed, tonemapped and encoded in its output) and an 8-bit temporally
+// anti-aliased one (encoded only). A neutral LUT takes the effects' output path and gives the plain one's picture to
+// within a level; a vignette darkens the corners and not the middle; chromatic aberration puts red outside and blue
+// inside a bar's edges; grain adds noise that changes each render; warm and cool white balance tilt the colour; no
+// saturation is grey; the three tone curves give three pictures; a LUT that swaps red and blue swaps them.
+void test_gpu_lens_film_grade() {
+    with_gpu("test_gpu_lens_film_grade", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D wall = make_box(r3d, {20.0f, 14.0f, 0.1f});
+        const kin::Mesh3D bar = make_box(r3d, {1.0f, 14.0f, 0.1f});
+        kin::Scene3D scene;
+        const auto neutral = std::make_shared<const kin::ColorLut>(kin::ColorLut::neutral(16));
+        // A LUT strip (16² x 16) that swaps red and blue.
+        std::vector<kin::u8> swapped_texels(16 * 16 * 16 * 4);
+        for (int g = 0; g < 16; ++g)
+            for (int b = 0; b < 16; ++b)
+                for (int r = 0; r < 16; ++r) {
+                    kin::u8* t = &swapped_texels[static_cast<std::size_t>((g * 256 + b * 16 + r) * 4)];
+                    t[0] = static_cast<kin::u8>(b * 17);
+                    t[1] = static_cast<kin::u8>(g * 17);
+                    t[2] = static_cast<kin::u8>(r * 17);
+                    t[3] = 255;
+                }
+        const auto swapped =
+            std::make_shared<const kin::ColorLut>(kin::ColorLut::from_image(swapped_texels, {256, 16}).value());
+        for (const bool taa : {false, true}) {
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = !taa})
+                    .value_or({});
+            scene.taa.enabled = taa;
+            const auto shoot = [&](Color colour, const kin::CameraEffects3D& effects, bool white_bar = false) {
+                Pixels p;
+                for (int f = 0; f < (taa ? 4 : 1); ++f) {
+                    scene.clear();
+                    scene.camera = flat_camera();
+                    scene.camera_effects = effects;
+                    if (white_bar)
+                        (void)scene.draw(bar, Mat4f::translation({5.0f, 0.0f, 0.0f}),
+                                         {.color = Color::rgb(255, 255, 255), .unlit = true});
+                    else
+                        (void)scene.draw(wall, Mat4f::identity(), {.color = colour, .unlit = true});
+                    p = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                }
+                return p;
+            };
+            const char* name = taa ? "8-bit, TAA" : "HDR";
+            const Color grey = Color::rgb(150, 150, 150), red = Color::rgb(200, 40, 30);
+            const Pixels plain = shoot(grey, {});
+            assert(r3d.debug_stats().camera_effect_draws == 0);
+            if (lacks(r3d.capabilities().temporal_aa || !taa, "temporal anti-aliasing"))
+                continue;
+            // The effects' path with a neutral look: the plain picture.
+            kin::CameraEffects3D look{};
+            look.grade.lut = neutral;
+            const Pixels through = shoot(grey, look);
+            if (r3d.debug_stats().camera_effect_draws == 0) {
+                std::cerr << "lens, film and grade: not available on this device, skipped\n";
+                return;
+            }
+            int most = 0;
+            for (std::size_t i = 0; i < plain.rgba.size(); ++i)
+                most = std::max(most, std::abs(int(plain.rgba[i]) - int(through.rgba[i])));
+            std::printf("    lens/film/grade (%s): neutral LUT within %d levels of the plain output\n", name, most);
+            assert(most <= 1);
+            // The vignette.
+            kin::CameraEffects3D vignette{};
+            vignette.lens.vignette = 0.6f;
+            const Pixels dark = shoot(grey, vignette);
+            assert(std::abs(level(dark.at(80, 60)) - level(plain.at(80, 60))) <= 1);
+            assert(level(dark.at(2, 2)) < level(plain.at(2, 2)) - 30 &&
+                   level(dark.at(157, 117)) < level(plain.at(157, 117)) - 30);
+            // Chromatic aberration round a white bar right of the middle (x 125 to 135): red outside (right), blue
+            // inside (left).
+            kin::CameraEffects3D split{};
+            split.lens.chromatic_aberration = 0.02f;
+            const Pixels fringe = shoot(Color{}, split, true);
+            int outer_red = 0, inner_blue = 0;
+            for (int x = 120; x < 142; ++x) {
+                const Color c = fringe.at(x, 60);
+                if (x > 130 && c.r > c.b + 40)
+                    ++outer_red;
+                if (x < 130 && c.b > c.r + 40)
+                    ++inner_blue;
+            }
+            std::printf("    lens/film/grade (%s): chromatic aberration fringes %d red outside, %d blue inside\n", name,
+                        outer_red, inner_blue);
+            assert(outer_red >= 1 && inner_blue >= 1);
+            // Grain: noise over the flat wall, a new pattern each render.
+            kin::CameraEffects3D grainy{};
+            grainy.film.grain = 1.0f;
+            const Pixels g1 = shoot(grey, grainy), g2 = shoot(grey, grainy);
+            long spread = 0, changed = 0;
+            for (int y = 20; y < 100; ++y)
+                for (int x = 20; x < 140; ++x) {
+                    spread += std::abs(level(g1.at(x, y)) - level(plain.at(x, y)));
+                    changed += level(g1.at(x, y)) != level(g2.at(x, y)) ? 1 : 0;
+                }
+            std::printf("    lens/film/grade (%s): grain mean change %.2f levels, %ld of 9600 pixels differ between "
+                        "renders\n",
+                        name, static_cast<double>(spread) / 9600.0, changed);
+            assert(spread > 9600 * 3 && changed > 9600 / 2);
+            // White balance, saturation.
+            kin::CameraEffects3D warm{}, cool{}, grey_out{};
+            warm.grade.temperature = 1.0f;
+            cool.grade.temperature = -1.0f;
+            grey_out.grade.saturation = 0.0f;
+            const Color w = shoot(grey, warm).at(80, 60), c = shoot(grey, cool).at(80, 60);
+            const Color unsaturated = shoot(red, grey_out).at(80, 60);
+            std::printf("    lens/film/grade (%s): warm %d,%d,%d cool %d,%d,%d unsaturated red %d,%d,%d\n", name, w.r,
+                        w.g, w.b, c.r, c.g, c.b, unsaturated.r, unsaturated.g, unsaturated.b);
+            assert(w.r > w.b + 10 && c.b > c.r + 10);
+            assert(std::abs(int(unsaturated.r) - int(unsaturated.b)) <= 2 &&
+                   std::abs(int(unsaturated.r) - int(unsaturated.g)) <= 2);
+            // The tone curves (an HDR view's: the 8-bit TAA view has none), and the swapping LUT.
+            if (!taa) {
+                const Color bright = Color::rgb(255, 120, 40);
+                kin::CameraEffects3D agx{}, neutral_curve{};
+                agx.grade.tone_curve = kin::ToneCurve3D::Agx;
+                neutral_curve.grade.tone_curve = kin::ToneCurve3D::Neutral;
+                const Color a = shoot(bright, {}).at(80, 60), b = shoot(bright, agx).at(80, 60),
+                            n = shoot(bright, neutral_curve).at(80, 60);
+                std::printf("    lens/film/grade: tone curves ACES %d,%d,%d AgX %d,%d,%d Neutral %d,%d,%d\n", a.r, a.g,
+                            a.b, b.r, b.g, b.b, n.r, n.g, n.b);
+                assert(a != b && a != n && b != n);
+            }
+            kin::CameraEffects3D swap{};
+            swap.grade.lut = swapped;
+            const Color s = shoot(red, swap).at(80, 60), r = shoot(red, {}).at(80, 60);
+            assert(std::abs(int(s.b) - int(r.r)) <= 3 && std::abs(int(s.r) - int(r.b)) <= 3);
+            swap.grade.lut_strength = 0.0f;
+            (void)shoot(red, swap);
+            assert(r3d.debug_stats().camera_effect_draws == 0); // a look at no strength is no effect
+        }
+    });
+}
+
 // Motion blur (CameraEffects3D::motion_blur) over a white block on black, 10 pixels a unit. Off, and on over a still
 // picture, the pictures are the same bytes. A block moving sideways a unit a frame is smeared sideways over about the
 // shutter's share of its motion (its left and right edges become ramps; its top and bottom stay sharp); panning the
@@ -24588,6 +24726,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_specular_aa());
     RUN(test_gpu_specular_multiscatter());
     RUN(test_gpu_motion_blur());
+    RUN(test_gpu_lens_film_grade());
     RUN(test_gpu_depth_of_field());
     RUN(test_gpu_taa_crowd());
     RUN(test_gpu_taa_overlay());

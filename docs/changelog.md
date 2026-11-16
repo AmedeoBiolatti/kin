@@ -9,6 +9,11 @@ releases may change APIs.
 
 ### Added
 
+- 3D lens, film and grade ([3D rendering](rendering_3d.md#lens-film-and-grade)): `Scene3D::camera_effects` gains a
+  vignette, chromatic aberration, film grain, a choice of tone curve (ACES, AgX, Khronos PBR Neutral), white balance,
+  contrast, saturation and a LUT look cross-faded between two, in the view's output pass; authored as
+  `SceneEnvironment3D`'s `lens_*`, `film_*` and `grade_*` (LUTs from code). With them all at their defaults the
+  output is unchanged, byte for byte. Native renderer only.
 - 3D depth of field ([3D rendering](rendering_3d.md#depth-of-field)): `Scene3D::camera_effects.depth_of_field`, a
   physical lens (focus distance, f-number, sensor height with the camera's fov) with round bokeh, the near blur
   spreading over what is in focus, and GPU autofocus on a point of the view; `kin::depth_of_field_radius` gives the

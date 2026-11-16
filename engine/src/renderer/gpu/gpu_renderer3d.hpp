@@ -464,6 +464,7 @@ private:
     f32 _dof_time = 0.0f;
     bool _dof_time_seen = false;
     std::chrono::steady_clock::time_point _dof_wall{}; // (when Scene3D::time does not move: the wall clock's step)
+    u32 _grain_frame = 0;                              // Film3D::grain's pattern, a new one each render
     GpuCopyHistory _taa_last, _taa_now;
     struct ParticleHistory {
         u64 source = 0, id = 0, look = 0;
@@ -800,8 +801,15 @@ private:
     // `dither`: the output shader with a dither of an 8-bit step (a view with a sky; falls back to the plain one
     // without it).
     // `time` is Scene3D::time (auto exposure's step between renders).
+    // `effects`: the scene's lens, film and grade (CameraEffects3D), through view_output_effects.frag when any is on.
     bool finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither,
-                     f32 time, RenderDebugStats3D&);
+                     f32 time, RenderDebugStats3D&, const CameraEffects3D* effects = nullptr);
+    // The output with the lens, film and grade on (finish_view's when any is).
+    bool record_output_effects(SDL_GPUCommandBuffer*, GpuView3D& view, const GpuTexture& source,
+                               const GpuTexture* bloom, const OutputOptions3D&, const CameraEffects3D& effects,
+                               SDL_GPUBuffer* exposure, RenderDebugStats3D&);
+    // A Grade3D LUT's strip as a texture, uploaded once while the LUT lives.
+    const GpuTexture* lut_texture(const std::shared_ptr<const ColorLut>& lut);
     // ViewOptions3D::auto_exposure: meters `source` into the view's exposure buffer and adapts it; false (the view is
     // output with its plain exposure) where it can't.
     bool meter_exposure(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, f32 time,
@@ -1270,8 +1278,20 @@ private:
     SDL_GPUComputePipeline* _dof_spread_pipeline = nullptr;
     SDL_GPUComputePipeline* _dof_gather_pipeline = nullptr;
     SDL_GPUComputePipeline* _dof_combine_pipeline = nullptr;
-    bool _dof_warned = false;       // asked for where it cannot run (the device)
-    bool _dof_float_warned = false; // asked for in a view that is neither HDR nor temporally anti-aliased
+    bool _dof_warned = false; // asked for where it cannot run (the device)
+    // CameraEffects3D's lens, film and grade: view_output_effects.frag, a storage buffer to bind where the view has no
+    // adapted exposure, the LUTs' textures (by the LUT they were made from), and whether it was asked for in vain.
+    GpuShader _output_effects_shader;
+    std::shared_ptr<GpuBuffer> _effects_no_exposure;
+    struct LutTexture {
+        std::weak_ptr<const ColorLut> source;
+        const ColorLut* key = nullptr;
+        Texture texture;
+    };
+    std::vector<LutTexture> _lut_textures;
+    bool _effects_warned = false;
+    bool _effects_float_warned = false; // camera effects asked for in a view that is neither HDR nor temporally
+                                        // anti-aliased (no float picture)
     // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.
     bool _taa_warned = false;
     bool _taa_prepass_warned = false;

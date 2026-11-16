@@ -142,7 +142,8 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
       {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"taa_enabled":true,"motion_blur":true,
         "motion_blur_shutter_angle":90,"motion_blur_samples":8,"motion_blur_camera_scale":0.5,
         "depth_of_field":true,"dof_focus_distance":3,"dof_aperture":1.4,"dof_autofocus":true,
-        "dof_focus_point":[0.25,0.75]}}}]})");
+        "dof_focus_point":[0.25,0.75],"lens_vignette":0.4,"lens_chromatic_aberration":0.005,"film_grain":0.2,
+        "grade_tone_curve":"agx","grade_temperature":0.3,"grade_contrast":1.2,"grade_saturation":0.8}}}]})");
     Assets3D assets{r3d, scratch.path};
     SceneSession3DOptions options;
     options.viewport = {160, 120};
@@ -157,13 +158,18 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
     check(dof.enabled && dof.focus_distance == 3 && dof.aperture == 1.4f && dof.autofocus &&
               dof.focus_point == Vec2f{0.25f, 0.75f},
           "depth of field settings were not applied");
+    const CameraEffects3D& effects = session.scene()->camera_effects;
+    check(effects.lens.vignette == 0.4f && effects.lens.chromatic_aberration == 0.005f && effects.film.grain == 0.2f &&
+              effects.grade.tone_curve == ToneCurve3D::Agx && effects.grade.temperature == 0.3f &&
+              effects.grade.contrast == 1.2f && effects.grade.saturation == 0.8f,
+          "lens, film and grade settings were not applied");
     const auto dispatches = [&] {
         check(session.render(), "motion blur render failed");
         renderer.present();
         return r3d.debug_stats().motion_blur_dispatches;
     };
     check(dispatches() == 0 && r3d.debug_stats().dof_dispatches == (r3d.capabilities().depth_of_field ? 6u : 0u) &&
-              dispatches() == 4,
+              r3d.debug_stats().camera_effect_draws == 1 && dispatches() == 4,
           "motion blur did not run from the second frame, or the depth of field from the first");
     if (r3d.capabilities().temporal_upscaling) {
         const auto environment = session.entity("environment");
@@ -180,6 +186,9 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
     write(scratch.path / "bad.kinscene", R"({"entities":[
       {"id":"environment","components":{"SceneEnvironment3D":{"dof_aperture":0.1}}}]})");
     check(!session.load("bad.kinscene"), "out-of-range depth of field aperture accepted");
+    write(scratch.path / "bad.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"grade_tone_curve":"filmic"}}}]})");
+    check(!session.load("bad.kinscene"), "an unknown tone curve accepted");
 }
 
 void gpu_live_edits(Renderer2D& renderer) {

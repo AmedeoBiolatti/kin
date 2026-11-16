@@ -10499,6 +10499,12 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
   tonemapper choice (ACES stays the default; AgX, Khronos PBR Neutral), white balance, contrast, saturation, and a
   `ColorLut` cross-fade as the 2D `ColorOutput` has. Tests: defaults are the same picture; each effect where it
   belongs (corners, edges, mid-tones).
+- **C3 as built (2026-11-16).** A second output shader, `view_output_effects.frag`, chosen only when an effect is on
+  (so a view without them keeps the exact plain output); the adapted exposure's buffer always bound (a dummy where
+  none). White balance as Unity's (temperature/tint to a CIE xy, von Kries in LMS, a 3 x 3 on the CPU, the identity
+  at 0). LUTs are uploaded once each (kept by weak pointer); scene files cannot name one yet (no asset access while
+  settings apply). Tested in an HDR view and an 8-bit TAA view: a neutral LUT gives the plain picture exactly,
+  aberration fringes, vignette, grain, balance, saturation, the three curves, a red/blue swapping LUT.
 - **C4 — bloom and flares.** A mip-chain, energy-conserving bloom (the current one stays, as a setting), a lens-dirt
   texture, screen-space ghosts and halo from the bloom's levels, optional anamorphic streaks.
 - **Later, on a game's request.** Lens distortion and Panini projection (they move picking's coordinates), motion blur

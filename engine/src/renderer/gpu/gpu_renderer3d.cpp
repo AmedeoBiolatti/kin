@@ -24,6 +24,7 @@
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -1674,6 +1675,16 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             KIN_LOG_INFO_F("render", "3D: particle shadows not available",
                            (LogFields{{.name = "reason", .value = e.what()}}));
         }
+    }
+    try {
+        // The camera's lens, film and grade (CameraEffects3D): the output's variant with them (two LUTs and the
+        // adapted exposure's buffer, always bound).
+        _output_effects_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output_effects.frag.spv",
+                                     /*uniform_buffers=*/1, /*samplers=*/4, /*storage_buffers=*/1);
+    } catch (const std::exception& e) {
+        KIN_LOG_INFO_F("render", "3D: the camera's lens, film and grade not available",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
     }
     try {
         _output_dither_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
@@ -4272,8 +4283,147 @@ bool GpuRenderer3D::record_output(SDL_GPUCommandBuffer* commands, const GpuTextu
     return true;
 }
 
+namespace {
+// Grade3D's white balance as a matrix on linear sRGB (rows), as Unity's: the white the temperature and tint name (a
+// CIE xy near the daylight locus, D65 at 0, 0), adapted to D65 in LMS (von Kries). Exactly the identity at 0, 0.
+std::array<std::array<f32, 3>, 3> white_balance(f32 temperature, f32 tint) {
+    std::array<std::array<f32, 3>, 3> m{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    if (temperature == 0.0f && tint == 0.0f)
+        return m;
+    const auto gains = [](f32 t, f32 n) {
+        const f32 t1 = std::clamp(t, -1.0f, 1.0f) * (100.0f / 65.0f),
+                  t2 = std::clamp(n, -1.0f, 1.0f) * (100.0f / 65.0f);
+        const f32 x = 0.31271f - t1 * (t1 < 0.0f ? 0.1f : 0.05f);
+        const f32 y = 2.87f * x - 3.0f * x * x - 0.27509507f + t2 * 0.05f;
+        const f32 X = x / y, Y = 1.0f, Z = (1.0f - x - y) / y;
+        const std::array<f32, 3> lms{0.7328f * X + 0.4296f * Y - 0.1624f * Z, -0.7036f * X + 1.6975f * Y + 0.0061f * Z,
+                                     0.0030f * X + 0.0136f * Y + 0.9834f * Z};
+        return lms;
+    };
+    const auto white = gains(temperature, tint), d65 = gains(0.0f, 0.0f);
+    static constexpr f32 to_lms[3][3] = {{3.90405e-1f, 5.49941e-1f, 8.92632e-3f},
+                                         {7.08416e-2f, 9.63172e-1f, 1.35775e-3f},
+                                         {2.31082e-2f, 1.28021e-1f, 9.36245e-1f}};
+    static constexpr f32 from_lms[3][3] = {{2.85847e+0f, -1.62879e+0f, -2.48910e-2f},
+                                           {-2.10182e-1f, 1.15820e+0f, 3.24281e-4f},
+                                           {-4.18120e-2f, -1.18169e-1f, 1.06867e+0f}};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) {
+            f32 sum = 0.0f;
+            for (int k = 0; k < 3; ++k)
+                sum += from_lms[r][k] * (d65[k] / white[k]) * to_lms[k][c];
+            m[r][c] = sum;
+        }
+    return m;
+}
+} // namespace
+
+const GpuTexture* GpuRenderer3D::lut_texture(const std::shared_ptr<const ColorLut>& lut) {
+    if (!lut || lut->size() < 2)
+        return nullptr;
+    std::erase_if(_lut_textures, [](const LutTexture& t) { return t.source.expired(); });
+    auto found = std::find_if(_lut_textures.begin(), _lut_textures.end(),
+                              [&](const LutTexture& t) { return t.key == lut.get(); });
+    if (found == _lut_textures.end()) {
+        const i32 n = lut->size();
+        Texture texture = _owner->create_texture({n * n, n}, TextureFormat::Rgba8, lut->strip().data());
+        if (!texture)
+            return nullptr;
+        _lut_textures.push_back({lut, lut.get(), std::move(texture)});
+        found = std::prev(_lut_textures.end());
+    }
+    const auto* backend = dynamic_cast<const GpuTextureBackend*>(found->texture.backend().get());
+    return backend && backend->texture() ? &backend->texture() : nullptr;
+}
+
+bool GpuRenderer3D::record_output_effects(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source,
+                                          const GpuTexture* bloom, const OutputOptions3D& options,
+                                          const CameraEffects3D& effects, SDL_GPUBuffer* exposure,
+                                          RenderDebugStats3D& stats) {
+    const GpuTexture& target = view._resolved->texture();
+    const auto output = target.format();
+    const bool plain = !options.tone_map_sdr;
+    const f32 mode = plain ? (output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 3.f : 2.f)
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM      ? 0.f
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.f
+                                                                           : 2.f;
+    const bool adapted = exposure != nullptr && !plain;
+    if (!exposure) {
+        if (!_effects_no_exposure) {
+            try {
+                _effects_no_exposure = std::make_shared<GpuBuffer>(
+                    _device->create_buffer(exposure_buffer_usage, nullptr, exposure_state_bytes));
+            } catch (const std::exception&) {
+                return false;
+            }
+        }
+        exposure = _effects_no_exposure->handle();
+    }
+    const Lens3D& lens = effects.lens;
+    const Film3D& film = effects.film;
+    const Grade3D& grade = effects.grade;
+    const bool look = grade.lut_strength > 0.0f;
+    const GpuTexture* lut_a = look ? lut_texture(grade.lut ? grade.lut : grade.lut_to) : nullptr;
+    const GpuTexture* lut_b = look && grade.lut ? lut_texture(grade.lut_to) : nullptr;
+    const auto& first = grade.lut ? grade.lut : grade.lut_to;
+    const auto balance = white_balance(grade.temperature, grade.tint);
+    struct {
+        f32 a[4], flags[4], lens[4], film[4], balance[3][4], grade[4], lut_size[4];
+    } u{};
+    const f32 a[4] = {bloom ? options.bloom_strength : 0.f, plain ? 1.f : options.exposure, mode, 0};
+    std::memcpy(u.a, a, sizeof(a));
+    u.flags[0] = adapted ? 1.0f : 0.0f;
+    u.flags[1] = options.dither ? 1.0f : 0.0f;
+    u.flags[2] = static_cast<f32>(static_cast<u32>(grade.tone_curve));
+    u.flags[3] = static_cast<f32>(view._grain_frame++ % 65536u);
+    u.lens[0] = std::clamp(lens.vignette, 0.0f, 1.0f);
+    u.lens[1] = std::clamp(lens.vignette_smoothness, 0.01f, 1.0f);
+    u.lens[2] = std::clamp(lens.vignette_roundness, 0.0f, 1.0f);
+    u.lens[3] = std::clamp(lens.chromatic_aberration, 0.0f, 0.02f);
+    u.film[0] = std::clamp(film.grain, 0.0f, 1.0f);
+    u.film[1] = std::clamp(film.grain_size, 1.0f, 4.0f);
+    u.film[2] = static_cast<f32>(target.width()) / static_cast<f32>(std::max(target.height(), 1u));
+    u.film[3] = lut_a ? (lut_b ? 2.0f : 1.0f) : 0.0f;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            u.balance[r][c] = balance[r][c];
+    u.grade[0] = std::clamp(grade.contrast, 0.0f, 2.0f);
+    u.grade[1] = std::clamp(grade.saturation, 0.0f, 2.0f);
+    u.grade[2] = std::clamp(grade.lut_strength, 0.0f, 1.0f);
+    u.grade[3] = std::clamp(grade.lut_mix, 0.0f, 1.0f);
+    u.lut_size[0] = first ? static_cast<f32>(first->size()) : 0.0f;
+    u.lut_size[1] = grade.lut && grade.lut_to ? static_cast<f32>(grade.lut_to->size()) : 0.0f;
+    auto* pipeline = fullscreen(_output_effects_shader.handle(), target.format());
+    if (!pipeline)
+        return false;
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = target.handle();
+    colour.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    auto* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
+    if (!pass)
+        return false;
+    set_viewport(pass, target.width(), target.height());
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    SDL_GPUSampler* linear = _owner->_sampler_linear;
+    const std::array<SDL_GPUTextureSamplerBinding, 4> bindings{
+        SDL_GPUTextureSamplerBinding{source.handle(), linear},
+        SDL_GPUTextureSamplerBinding{bloom ? bloom->handle() : source.handle(), linear},
+        SDL_GPUTextureSamplerBinding{lut_a ? lut_a->handle() : _owner->_white.handle(), linear},
+        SDL_GPUTextureSamplerBinding{lut_b ? lut_b->handle() : _owner->_white.handle(), linear}};
+    SDL_BindGPUFragmentSamplers(pass, 0, bindings.data(), static_cast<u32>(bindings.size()));
+    SDL_BindGPUFragmentStorageBuffers(pass, 0, &exposure, 1);
+    SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    ++stats.output_draws;
+    ++stats.camera_effect_draws;
+    return true;
+}
+
 bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
-                                bool dither, f32 time, RenderDebugStats3D& stats) {
+                                bool dither, f32 time, RenderDebugStats3D& stats, const CameraEffects3D* effects) {
     const bool bloom = !plain && view._options.bloom > 0 && view._bloom_a && view._bloom_b;
     if (bloom && !record_bloom(commands, source, view._bloom_a, view._bloom_b, view._options.bloom_threshold, stats))
         return false;
@@ -4282,6 +4432,16 @@ bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view,
     const bool tonemapped = !plain && view._output_format != hdr_format;
     const bool metered =
         view._options.auto_exposure.enabled && tonemapped && meter_exposure(commands, view, source, time, stats);
+    if (effects && effects->lens_film_or_grade()) {
+        if (_output_effects_shader)
+            return record_output_effects(commands, view, source, bloom ? &view._bloom_a : nullptr,
+                                         {.bloom_strength = bloom ? view._options.bloom : 0.f,
+                                          .exposure = view._options.exposure,
+                                          .tone_map_sdr = !plain,
+                                          .dither = dither},
+                                         *effects, metered ? view._exposure->handle() : nullptr, stats);
+        warn_once(_effects_warned, "3D: the camera's lens, film and grade asked for, but this device cannot: off");
+    }
     return record_output(commands, source, view._resolved->texture(), bloom ? &view._bloom_a : nullptr,
                          {.bloom_strength = bloom ? view._options.bloom : 0.f,
                           .exposure = view._options.exposure,
@@ -16748,9 +16908,9 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
              const GpuTexture* picture = ctx.taa ? ctx.shown : view->_hdr ? &view->_scene : nullptr;
              if (picture)
                  ctx.shown = depth_of_field(ctx, *picture);
-             else if (scene.camera_effects.depth_of_field.enabled)
-                 warn_once(_dof_float_warned,
-                           "3D: depth of field needs an HDR view or temporal anti-aliasing (a float picture): off");
+             else if (scene.camera_effects.depth_of_field.enabled || scene.camera_effects.lens_film_or_grade())
+                 warn_once(_effects_float_warned, "3D: depth of field, lens, film and grade need an HDR view or "
+                                                  "temporal anti-aliasing (a float picture): off");
              return true;
          },
          [&] {
@@ -16765,10 +16925,10 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
          [&] {
              if (ctx.taa)
                  return finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass, scene.time,
-                                    stats);
+                                    stats, &scene.camera_effects);
              else if (view->_hdr)
                  return finish_view(ctx.commands, *view, ctx.shown ? *ctx.shown : view->_scene, /*plain=*/false,
-                                    ctx.sky_pass, scene.time, stats);
+                                    ctx.sky_pass, scene.time, stats, &scene.camera_effects);
              return true;
          }}};
     static constexpr std::array<const char*, frame_graph_passes3d> markers{

@@ -30,6 +30,7 @@
 
 namespace kin {
 
+class ColorLut;
 class Model3D;
 class ModelBatch3D;
 
@@ -643,12 +644,69 @@ struct DepthOfField3D {
 // DepthOfField3D::max_blur, which the renderer then limits it to.
 f32 depth_of_field_radius(const DepthOfField3D& dof, const Camera3D& camera, f32 view_height, f32 distance);
 
+// The lens' own marks (CameraEffects3D::lens), in the view's light before its exposure.
+struct Lens3D {
+    // Darker toward the corners, as a lens' edges gather less light: how much at the corners (0 none to 1 black), how
+    // far in it starts (0.01: only the corners, 1: from the middle), and its shape (1 round, as wide as the view is
+    // high; 0 following the view's rectangle).
+    f32 vignette = 0.0f;
+    f32 vignette_smoothness = 0.5f;
+    f32 vignette_roundness = 1.0f;
+    // Red and blue pulled apart toward the edges, as a lens bends colours differently: the split at the corners, a
+    // fraction of the view's height (0 to 0.02); the bloom splits with the picture.
+    f32 chromatic_aberration = 0.0f;
+};
+
+// The film's own marks (CameraEffects3D::film), on the finished picture.
+struct Film3D {
+    // Noise in the brightness, strongest in the mid-tones and moving each render, as a film's grain (0 none to 1); its
+    // size in pixels (1 to 4).
+    f32 grain = 0.0f;
+    f32 grain_size = 1.0f;
+};
+
+// How the view's light becomes the picture's colours (CameraEffects3D::grade).
+enum class ToneCurve3D : u8 {
+    Aces,    // the ACES filmic fit (kin's default): contrasty, bright colours go toward white
+    Agx,     // AgX (Blender's): softer, keeps bright colours' hue as they go toward white
+    Neutral, // Khronos PBR Neutral: base colours as authored up to near white, then a gentle roll-off
+};
+struct Grade3D {
+    ToneCurve3D tone_curve = ToneCurve3D::Aces;
+    // White balance: -1 cooler (bluer) to 1 warmer (more orange); -1 greener to 1 more magenta.
+    f32 temperature = 0.0f;
+    f32 tint = 0.0f;
+    f32 contrast = 1.0f;   // round mid-grey, in stops (0 flat to 2)
+    f32 saturation = 1.0f; // 0 grey to 2
+    // Then a look from a lookup table (ColorLut: a .cube or a LUT image, as Renderer2D::set_color_output's; scene
+    // files cannot name one yet: set it from code, e.g. Assets2D::color_lut), cross-faded toward `lut_to` by
+    // `lut_mix` (day to night), applied at `lut_strength`.
+    std::shared_ptr<const ColorLut> lut;
+    std::shared_ptr<const ColorLut> lut_to;
+    f32 lut_mix = 0.0f;
+    f32 lut_strength = 1.0f;
+};
+
 // What the camera adds to the picture (lens and film), after the scene is rendered and before the 2D drawn over the
 // view: off by default; off, the picture and its cost are those without it. Planar views (mirrors, portals) and
 // reflection captures are rendered without them: they belong to the eye, not to a picture inside the scene.
 struct CameraEffects3D {
     DepthOfField3D depth_of_field{};
     MotionBlur3D motion_blur{};
+    // Lens, film and grade go into the view's output (no pass of their own), in a view that keeps a float picture (an
+    // HDR view or one with Scene3D::taa; else off, said once). With an HDR 2D pipeline (which tonemaps the frame
+    // itself) the tone curve, the look and the grain are the 2D pipeline's: the view keeps the rest.
+    Lens3D lens{};
+    Film3D film{};
+    Grade3D grade{};
+
+    // Whether any of the lens, film and grade changes the picture (else the view's output is the plain one).
+    bool lens_film_or_grade() const {
+        return lens.vignette > 0.0f || lens.chromatic_aberration > 0.0f || film.grain > 0.0f ||
+               grade.tone_curve != ToneCurve3D::Aces || grade.temperature != 0.0f || grade.tint != 0.0f ||
+               grade.contrast != 1.0f || grade.saturation != 1.0f ||
+               ((grade.lut || grade.lut_to) && grade.lut_strength > 0.0f);
+    }
 };
 
 // Levels of detail: each copy of a mesh made with levels (MeshOptions3D::levels)

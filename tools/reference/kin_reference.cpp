@@ -13,6 +13,7 @@
 //                 [--contact-thickness T]
 //                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N] [--motion-blur]
 //                 [--dof DISTANCE] [--dof-aperture N] [--dof-sensor MM] [--dof-autofocus]
+//                 [--tone-curve aces|agx|neutral] [--vignette V] [--aberration A] [--grain G] [--temperature T]
 //                 [--supersample N] [--samples N]
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
@@ -1901,6 +1902,9 @@ struct Overrides {
     double taa_blend = 0.0, taa_sharpness = -1.0;
     bool motion_blur = false;  // CameraEffects3D::motion_blur with its defaults (and --taa, whose velocity it reads)
     kin::DepthOfField3D dof{}; // CameraEffects3D::depth_of_field (--dof DISTANCE turns it on)
+    kin::Lens3D lens{};        // and the lens, film and grade (--vignette, --aberration, --grain, --tone-curve, ...)
+    kin::Film3D film{};
+    kin::Grade3D grade{};
     bool lod = false;
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
@@ -2618,6 +2622,19 @@ int main(int argc, char** argv) {
         } else if (a == "--dof-autofocus") {
             over.dof.enabled = true;
             over.dof.autofocus = true;
+        } else if (a == "--tone-curve") {
+            const std::string curve = next();
+            over.grade.tone_curve = curve == "agx"       ? kin::ToneCurve3D::Agx
+                                    : curve == "neutral" ? kin::ToneCurve3D::Neutral
+                                                         : kin::ToneCurve3D::Aces;
+        } else if (a == "--vignette") {
+            over.lens.vignette = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--aberration") {
+            over.lens.chromatic_aberration = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--grain") {
+            over.film.grain = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--temperature") {
+            over.grade.temperature = static_cast<float>(std::atof(next().c_str()));
         } else if (a == "--motion-blur") {
             over.taa = true;
             over.motion_blur = true;
@@ -3166,6 +3183,9 @@ int main(int argc, char** argv) {
             merge_taa(scene.taa, doc.find("taa"), over);
             scene.camera_effects.motion_blur.enabled = over.motion_blur;
             scene.camera_effects.depth_of_field = over.dof;
+            scene.camera_effects.lens = over.lens;
+            scene.camera_effects.film = over.film;
+            scene.camera_effects.grade = over.grade;
             scene.lod = {};
             merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
             scene.debug.gpu_pass_markers = over.gpu_pass_markers;

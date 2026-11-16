@@ -204,6 +204,39 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("dof_focus_point", camera_effects.depth_of_field.focus_point);
         SETTING("dof_focus_time", camera_effects.depth_of_field.focus_time);
         SETTING("motion_blur", camera_effects.motion_blur.enabled);
+        SETTING("lens_vignette", camera_effects.lens.vignette);
+        SETTING("lens_vignette_smoothness", camera_effects.lens.vignette_smoothness);
+        SETTING("lens_vignette_roundness", camera_effects.lens.vignette_roundness);
+        SETTING("lens_chromatic_aberration", camera_effects.lens.chromatic_aberration);
+        SETTING("film_grain", camera_effects.film.grain);
+        SETTING("film_grain_size", camera_effects.film.grain_size);
+        builder
+            .property<std::string>(
+                "grade_tone_curve",
+                [](const auto& v) {
+                    const ToneCurve3D curve = v.camera_effects.grade.tone_curve;
+                    return std::string(curve == ToneCurve3D::Agx       ? "agx"
+                                       : curve == ToneCurve3D::Neutral ? "neutral"
+                                                                       : "aces");
+                },
+                [](auto& v, const std::string& name) {
+                    if (name == "aces")
+                        v.camera_effects.grade.tone_curve = ToneCurve3D::Aces;
+                    else if (name == "agx")
+                        v.camera_effects.grade.tone_curve = ToneCurve3D::Agx;
+                    else if (name == "neutral")
+                        v.camera_effects.grade.tone_curve = ToneCurve3D::Neutral;
+                    else
+                        return false;
+                    return true;
+                })
+            .choices({"aces", "agx", "neutral"});
+        SETTING("grade_temperature", camera_effects.grade.temperature);
+        SETTING("grade_tint", camera_effects.grade.tint);
+        SETTING("grade_contrast", camera_effects.grade.contrast);
+        SETTING("grade_saturation", camera_effects.grade.saturation);
+        SETTING("grade_lut_mix", camera_effects.grade.lut_mix);
+        SETTING("grade_lut_strength", camera_effects.grade.lut_strength);
         SETTING("motion_blur_shutter_angle", camera_effects.motion_blur.shutter_angle);
         SETTING("motion_blur_max_length", camera_effects.motion_blur.max_length);
         SETTING("motion_blur_samples", camera_effects.motion_blur.samples);
@@ -402,6 +435,15 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
         valid &= blur.shutter_angle >= 0 && blur.shutter_angle <= 360 && blur.max_length >= 0 &&
                  blur.max_length <= .25f && blur.samples >= 4 && blur.samples <= 32 && blur.camera_scale >= 0 &&
                  blur.camera_scale <= 1 && blur.target_fps >= 0 && std::isfinite(blur.target_fps);
+        const Lens3D& lens = settings.camera_effects.lens;
+        const Film3D& film = settings.camera_effects.film;
+        const Grade3D& grade = settings.camera_effects.grade;
+        const auto within = [](f32 v, f32 low, f32 high) { return v >= low && v <= high; }; // (false for NaN)
+        valid &= within(lens.vignette, 0, 1) && within(lens.vignette_smoothness, .01f, 1) &&
+                 within(lens.vignette_roundness, 0, 1) && within(lens.chromatic_aberration, 0, .02f) &&
+                 within(film.grain, 0, 1) && within(film.grain_size, 1, 4) && within(grade.temperature, -1, 1) &&
+                 within(grade.tint, -1, 1) && within(grade.contrast, 0, 2) && within(grade.saturation, 0, 2) &&
+                 within(grade.lut_mix, 0, 1) && within(grade.lut_strength, 0, 1);
         const DepthOfField3D& dof = settings.camera_effects.depth_of_field;
         valid &= std::isfinite(dof.focus_distance) && dof.focus_distance > 0 && dof.aperture >= .7f &&
                  dof.aperture <= 64 && dof.sensor_height >= 1 && dof.sensor_height <= 100 && dof.max_blur >= 0 &&
