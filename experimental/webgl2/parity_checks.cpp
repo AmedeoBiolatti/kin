@@ -577,11 +577,12 @@ void check_clouds(Renderer2D& r, Renderer3D& r3d) {
     for (int frame = 0; frame < 3; ++frame)
         b.render("An overcast");
     const auto overcast = b.at(32, 32);
-    std::cerr << "clouds: clear " << clear[0] << ' ' << clear[1] << ' ' << clear[2] << ", overcast " << overcast[0]
-              << ' ' << overcast[1] << ' ' << overcast[2] << '\n';
     require(r3d.debug_stats().clouds && r3d.debug_stats().clouds_history && r3d.debug_stats().clouds_depth_bounded,
             "The clouds were walked (to the meshes' depth) and blended");
     require(clear[2] - clear[0] > 15, "The clouds check's clear sky must be blue");
+    if (overcast[2] - overcast[0] >= (clear[2] - clear[0]) / 2)
+        std::cerr << "clouds: clear " << clear[0] << ' ' << clear[1] << ' ' << clear[2] << ", overcast " << overcast[0]
+                  << ' ' << overcast[1] << ' ' << overcast[2] << '\n';
     require(overcast[2] - overcast[0] < (clear[2] - clear[0]) / 2, "An overcast greys the sky");
     const Vec3f at = scene.camera.position + scene.camera.forward() * 20.0f;
     const Mesh3D box = r3d.create_mesh(meshes::box({4, 4, 4})).value_or({});
