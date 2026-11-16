@@ -10625,3 +10625,63 @@ hands) not scattered in the first slice (no pre-pass depth for it), what is off 
   0.2 (kin's red at x 3 went from 11.0 to 15.5 px).
 
 Open: WebGL2 (draws without the spread).
+
+## Volumetric clouds — plan (2026-11-16)
+
+Unreal (Volumetric Cloud, Hillaire 2016/2020) and Unity HDRP (Volumetric Clouds) draw a layer of ray-marched clouds
+shaped as Schneider's Nubis (Horizon Zero Dawn): a coverage/type map, a height profile per type, a Perlin-Worley base
+noise worn by Worley detail; a walk toward the sun per sample, two-lobe phase with octaves of multiple scattering
+(Wrenninge), the sky's ambient, at a reduced resolution with temporal blending, and a cloud shadow map for the ground.
+kin had the pieces round it: the analytic atmosphere (`kin_sky.inc.glsl`), the fog volume's compute patterns, TAA and
+TAAU, the sky's environment rebuild.
+
+Decisions (2026-11-16, user: "go"): a procedural coverage map (a tiling noise; a user texture later as an option);
+hair is a separate later project (cards, then strands; their self-shadowing is where the clouds' density-volume
+transmittance march is reused, not the clouds' primary march). `feat/volumetric-clouds` in `kin/wt/clouds`.
+
+- **C1 — the layer, drawn (built 2026-11-16).** `Scene3D::clouds` (`Clouds3D`), the stock graph's `clouds` pass.
+  Noise made once on the GPU (`cloud_noise.comp`; the same arithmetic on the CPU,
+  `cloud_model::noise_texel`). The shell is the paraboloid `y = d^2 / 2R` under the camera (float-safe at planet
+  scale, within a metre of the sphere to 200 km). The walk (`clouds_trace.comp`) at `resolution` (0.5), its start moved
+  each frame (interleaved gradient noise), Hillaire's energy-conserving step; the blend (`clouds_resolve.comp`)
+  reprojects at the clouds' mean distance and clamps to the 3 x 3 neighbourhood. Lit by the sun at the cloud's height
+  through the procedural atmosphere (the horizon lowered by the height: red clouds after sunset), or by the moon when
+  the sun is off the layer; ambient from `AmbientLight3D`; the sky's air in front by `kin_scatter` cut at the cloud's
+  height (no aerial-perspective LUT); the fog as the sky takes it. Drawn in the main pass after the sky with
+  `gl_FragDepth` = the clouds' mean distance and the depth test against the meshes: no pre-pass needed, MSAA works,
+  and the main pass's velocity is the sky's (the camera's turn) under the clouds.
+- **C2 — shadows (built 2026-11-16).** A transmittance map of the layer along the sun (Unreal's cloud shadow map):
+  a square on the layer's middle plane round the camera's sun ray, 512^2 over 20 km, 32 samples a texel. The lit
+  shader variants have no sampler left (16 with graph maps), so the meshes take it in screen space as Unreal's
+  deferred lighting does: `cloud_shadow_screen.comp` after the pre-pass multiplies the contact shadows' share by the
+  map's at each pixel's world point, and the main pass reads that in `uContactShadow`'s slot (no variant changed).
+  The volumetric fog reads the map directly (`fog_volume.comp`, `fog_sun.comp`: a sampler more each). The graph's
+  `clouds` pass moved before `prepass` (which reads it). Not shadowed: blended meshes, particles, custom shaders,
+  the overlay, GI's sun.
+- **C3 — the sky's light (built 2026-11-16).** `clouds_env.frag` draws the clouds over `sky_env.frag`'s panorama
+  (premultiplied) before the filter: the march moved into `kin_clouds.inc.glsl`'s `kin_cloud_march`, shared with the
+  view's trace; the clouds' block is made once a render (`make_cloud_params`, also before the graph). The panorama's
+  key gains the clouds' settings, their drift in shares of a shape tile and the camera's place (so it is made again
+  every few seconds of wind, under the sky's threshold and interval). Left: the fog's colour from the sky (the fog
+  table is the clear sky's: far geometry under an overcast pales toward blue-white); the aerial-perspective LUT was not
+  needed.
+- **The fog's colour under them (built 2026-11-16).** `fog_under_clouds` (native) and `veil_fog` (WebGL2): the share
+  f of the sky they cover round the camera from the coverage map on the CPU (`cloud_model::cover_share`, the GPU's own
+  noise) veils the fog's sky toward the clouds' grey base light (`Sky3D::intensity` x (1 - f), `night_color` + f x
+  base) and its sun's glow (`sun_scatter` x (1 - f)), through the fields every fog variant already reads: no shader
+  changed. The volumetric passes, which have the shadow map, keep the scene's fog.
+- **C4 — authoring and reach (built 2026-11-16).** `SceneEnvironment3D::clouds` with flat `clouds_*` properties (scene
+  files, Lua, the studio's registry-driven inspector once it is pinned to a kin with them) and `clouds_weather`, a
+  coverage map by path (`Clouds3D::weather_map`: the default map is now a 2D texture, `cloud_weather.comp`, so a game's
+  picture replaces it); WebGL2 draws the clouds (noise into 3D-texture layers four a draw, trace and resolve into
+  RGBA16F + R32F, the composite after the opaque meshes), without their shadows or sky light.
+- **Geometry in the layer (built 2026-11-16).** The stock graph's clouds pass split in two (`clouds` before `prepass`:
+  noise, parameters, shadow map; `clouds_trace` before `main`: the walk and the blend):
+  each walk texel's ray stops at the farthest pre-pass surface of its footprint, and the composite keeps its depth
+  test (so the nearest surface still hides what is past it). In WebGL2 the walk runs inside the main pass after the
+  opaque meshes, reading their depth texture. Not done: quarter-resolution checkerboard walking (0.55 ms at 1080p
+  does not need it), orthographic cameras, smoother far edges at the horizon (grazing-angle streaks).
+
+Checks: the CPU tests (`test_cloud_layer_and_noise`: the layer's span, the noise tiles) and GPU tests (off is the same
+bytes, overcast greys the sky, a near box keeps its colour with and without MSAA, a red overcast a degree after
+sunset and a dark one after dusk, with and without TAA, the history kept, settled and dropped).

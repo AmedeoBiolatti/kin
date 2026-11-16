@@ -1,0 +1,106 @@
+{
+ "name": "clouds_day",
+ "purpose": "The valley on a June afternoon (15:00) under scattered heaps of volumetric cloud (Scene3D::clouds, coverage 0.5), with the sky's light: 'up' looks up into them, 'valley' along the valley to the far clouds paling into the horizon, 'sun' toward the sun (silver linings).",
+ "procedural": "landscape",
+ "trees": 2500,
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.35
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    1,
+    1,
+    1
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.2,
+   0.25
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 4,
+  "shadow_distance": 500,
+  "sky_lights_scene": true
+ },
+ "time_of_day": {
+  "hours": 15.0,
+  "day_of_year": 172,
+  "latitude": 45.0
+ },
+ "sky": {
+  "enabled": true,
+  "turbidity": 3.5,
+  "sun_disc": 30.0
+ },
+ "fog": {
+  "enabled": true,
+  "density": 0.0004,
+  "color_from_sky": true,
+  "sun_scatter": 0.25,
+  "sun_anisotropy": 0.7
+ },
+ "cameras": [
+  {
+   "name": "up",
+   "eye": [
+    0,
+    8,
+    60
+   ],
+   "target": [
+    200,
+    600,
+    -800
+   ],
+   "fov": 70,
+   "near": 0.1
+  },
+  {
+   "name": "valley",
+   "eye": [
+    0,
+    8,
+    60
+   ],
+   "target": [
+    0,
+    60,
+    -500
+   ],
+   "fov": 60,
+   "near": 0.1
+  },
+  {
+   "name": "sun",
+   "eye": [
+    0,
+    8,
+    60
+   ],
+   "at_sun": true,
+   "target_offset": [
+    0,
+    8,
+    0
+   ],
+   "fov": 70,
+   "near": 0.1
+  }
+ ],
+ "clouds": {
+  "enabled": true,
+  "coverage": 0.5,
+  "kind": 0.7
+ }
+}

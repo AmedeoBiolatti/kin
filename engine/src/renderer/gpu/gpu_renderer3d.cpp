@@ -466,8 +466,10 @@ struct FogSunUniforms {
     f32 shadow[4];    // cascades, the view depth the shadows reach, the walk's offset this frame, steps
     f32 sun[4];       // toward the sun (fog_sun_apply.frag's)
     f32 sun_light[4]; // its light
+    f32 cloud_map[4]; // the clouds' shadow (kin_cloud_shadow's map and toward; toward.w 0: none)
+    f32 cloud_toward[4];
 };
-static_assert(sizeof(FogSunUniforms) == 544);
+static_assert(sizeof(FogSunUniforms) == 576);
 // The stretches each ray of the fog's sunlit share is walked in (closer together near the camera).
 constexpr u32 fog_sun_steps = 16;
 // fog_volume.comp's Params (Fog3D::volumetric).
@@ -491,8 +493,10 @@ struct FogVolumeUniforms {
     f32 sun_end[4];
     f32 sun_bias[4];
     f32 sun_shadow[4]; // cascades (0: none), the view depth they reach
+    f32 cloud_map[4];  // the clouds' shadow (kin_cloud_shadow's map and toward; toward.w 0: none)
+    f32 cloud_toward[4];
 };
-static_assert(sizeof(FogVolumeUniforms) == 640);
+static_assert(sizeof(FogVolumeUniforms) == 672);
 // fog_volume_depth.comp's.
 struct FogReachUniforms {
     f32 unproject_zw[4];
@@ -523,6 +527,85 @@ struct FogVolumeApplyUniforms {
     FogParamUniforms fog;
 };
 static_assert(sizeof(FogVolumeApplyUniforms) == 256);
+// Scene3D::clouds: kin_clouds.inc.glsl's KinClouds (vec4s all).
+struct CloudParamUniforms {
+    f32 layer[4];         // the base, the top, 1 / 2R, the farthest distance
+    f32 scales[4];        // 1 / the shape's tile, the detail's, the coverage map's; erosion
+    f32 cover[4];         // coverage, kind, a full cloud's extinction, the most samples
+    f32 shape_offset[4];  // w: samples toward the light
+    f32 detail_offset[4]; // w: times the ambient light
+    f32 phase[4];         // forward g, backward g, the backward's share, each octave's share
+    f32 light[4];         // toward the light; w: 1 the sun through the atmosphere
+    f32 light_color[4];   // w: the walk toward it
+    f32 ambient_top[4];
+    f32 ambient_bottom[4]; // w: 1 with the atmosphere's air in front
+    f32 sun_light[4];      // w: 1 with the fog
+};
+static_assert(sizeof(CloudParamUniforms) == 176);
+// clouds_trace.comp's.
+struct CloudTraceUniforms {
+    f32 to_world[16];
+    f32 eye[4]; // w: the frame's number
+    f32 size[4];
+    CloudParamUniforms clouds;
+    AtmosphereUniforms atmosphere;
+    FogParamUniforms fog;
+    f32 unproject_xy[4]; // the pre-pass's depth to view space (gtao.comp's)
+    f32 unproject_zw[4];
+    f32 depth[4]; // the depth's size, 1 when it bounds the rays
+};
+static_assert(sizeof(CloudTraceUniforms) == 464);
+// clouds_resolve.comp's.
+struct CloudResolveUniforms {
+    f32 to_world[16];
+    f32 previous[16];
+    f32 eye[4];
+    f32 size[4]; // the texels, the history's share, 1 with a history
+};
+static_assert(sizeof(CloudResolveUniforms) == 160);
+// clouds_apply.frag's.
+struct CloudApplyUniforms {
+    f32 inverse_view_projection[16];
+    f32 view_projection[16];
+    f32 eye[4];
+    f32 target[4];
+};
+static_assert(sizeof(CloudApplyUniforms) == 160);
+// cloud_shadow.comp's.
+struct CloudShadowUniforms {
+    f32 map[4];    // kin_cloud_shadow's
+    f32 toward[4]; // w: samples
+    f32 size[4];
+    CloudParamUniforms clouds;
+};
+static_assert(sizeof(CloudShadowUniforms) == 224);
+// cloud_shadow_screen.comp's.
+struct CloudScreenUniforms {
+    f32 to_world[16];
+    f32 unproject_xy[4];
+    f32 unproject_zw[4];
+    f32 sizes[4];
+    f32 map[4];
+    f32 toward[4];
+};
+static_assert(sizeof(CloudScreenUniforms) == 144);
+// clouds_env.frag's.
+struct CloudEnvUniforms {
+    f32 eye[4];
+    f32 target[4];
+    CloudParamUniforms clouds;
+    AtmosphereUniforms atmosphere;
+    FogParamUniforms fog; // (not read)
+};
+static_assert(sizeof(CloudEnvUniforms) == 352);
+// Samples along the sun's ray through the layer for each texel of the clouds' shadow map.
+constexpr u32 cloud_shadow_steps = 32;
+
+// Whether Scene3D::clouds has anything to draw: on, some coverage and density, a layer, a perspective camera.
+bool clouds_possible(const Clouds3D& c, const Camera3D& camera) {
+    return c.enabled && c.coverage > 0.0f && c.density > 0.0f && std::isfinite(c.bottom) && std::isfinite(c.top) &&
+           c.top != c.bottom && camera.projection == Projection3D::Perspective;
+}
 // mesh_fog.frag's slot 2.
 struct FogBlockUniforms {
     FogParamUniforms fog;
@@ -1459,7 +1542,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             _fog_sun_apply_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                              "fog_sun_apply.frag.spv", /*uniform_buffers=*/1,
                                                              /*samplers=*/2);
-            _fog_sun_pipeline = make_compute(handle, "fog_sun.comp.spv", {.samplers = 2});
+            _fog_sun_pipeline = make_compute(handle, "fog_sun.comp.spv", {.samplers = 3});
         } catch (const std::exception& e) {
             KIN_LOG_INFO_F("render", "3D: the fog's shadowed sunlight not available",
                            (LogFields{{.name = "reason", .value = e.what()}}));
@@ -1476,7 +1559,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                                                 "fog_volume_apply.frag.spv", /*uniform_buffers=*/1,
                                                                 /*samplers=*/2);
             _fog_volume_pipeline = make_compute(handle, "fog_volume.comp.spv",
-                                                {.samplers = 5,
+                                                {.samplers = 6,
                                                  .readonly_buffers = 1,
                                                  .threads_x = 4,
                                                  .threads_y = 4,
@@ -1851,6 +1934,53 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _ssr_pyramid_pipeline = make_compute(handle, "ssr_pyramid.comp.spv",
                                              {.samplers = 1, .readwrite_buffers = 1, .readwrite_textures = 0});
     }
+    // Scene3D::clouds: RGBA8 noise volumes written by compute, the walk's RGBA16F and R32F storage pictures.
+    try {
+        constexpr SDL_GPUTextureUsageFlags usage =
+            SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+        if (!SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_3D,
+                                          usage) ||
+            !SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                          usage) ||
+            !SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R32_FLOAT, SDL_GPU_TEXTURETYPE_2D, usage)) {
+            throw std::runtime_error("no RGBA8 storage volume or RGBA16F/R32F storage texture");
+        }
+        _clouds_apply_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "clouds_apply.frag.spv",
+                                                        /*uniform_buffers=*/1, /*samplers=*/2);
+        _clouds_env_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "clouds_env.frag.spv",
+                                                      /*uniform_buffers=*/1, /*samplers=*/3);
+        _cloud_noise_pipeline =
+            make_compute(handle, "cloud_noise.comp.spv", {.threads_x = 4, .threads_y = 4, .threads_z = 4});
+        _cloud_weather_pipeline = make_compute(handle, "cloud_weather.comp.spv", {});
+        _clouds_trace_pipeline =
+            make_compute(handle, "clouds_trace.comp.spv", {.samplers = 4, .readwrite_textures = 2});
+        _clouds_resolve_pipeline =
+            make_compute(handle, "clouds_resolve.comp.spv", {.samplers = 4, .readwrite_textures = 2});
+        // Their shadow: the map, and its share on what the pre-pass drew (an R8 storage picture: where ambient
+        // occlusion's targets can be made).
+        _cloud_shadow_pipeline = make_compute(handle, "cloud_shadow.comp.spv", {.samplers = 3});
+        _cloud_screen_pipeline = make_compute(handle, "cloud_shadow_screen.comp.spv", {.samplers = 3});
+        SDL_GPUSamplerCreateInfo info{};
+        info.min_filter = info.mag_filter = SDL_GPU_FILTER_LINEAR;
+        info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        info.address_mode_u = info.address_mode_v = info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        _cloud_sampler = SDL_CreateGPUSampler(handle, &info);
+        if (!_cloud_noise_pipeline || !_cloud_weather_pipeline || !_clouds_trace_pipeline ||
+            !_clouds_resolve_pipeline || !_cloud_sampler) {
+            throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_INFO_F("render", "3D: volumetric clouds not available",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        for (SDL_GPUComputePipeline** p :
+             {&_cloud_noise_pipeline, &_clouds_trace_pipeline, &_clouds_resolve_pipeline, &_cloud_shadow_pipeline,
+              &_cloud_screen_pipeline, &_cloud_weather_pipeline}) {
+            if (*p) {
+                SDL_ReleaseGPUComputePipeline(handle, *p);
+                *p = nullptr;
+            }
+        }
+    }
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
         // Bilinear comparisons: each tap is itself four, softening the edge.
         SDL_GPUSamplerCreateInfo info{};
@@ -2006,10 +2136,15 @@ GpuRenderer3D::~GpuRenderer3D() {
         }
     }
     for (SDL_GPUComputePipeline* compute :
-         {_fog_volume_pipeline, _fog_volume_integrate_pipeline, _fog_volume_depth_pipeline}) {
+         {_fog_volume_pipeline, _fog_volume_integrate_pipeline, _fog_volume_depth_pipeline, _cloud_noise_pipeline,
+          _clouds_trace_pipeline, _clouds_resolve_pipeline, _cloud_shadow_pipeline, _cloud_screen_pipeline,
+          _cloud_weather_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
         }
+    }
+    if (_cloud_sampler) {
+        SDL_ReleaseGPUSampler(_device->handle(), _cloud_sampler);
     }
     if (_point_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _point_sampler);
@@ -4928,6 +5063,11 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     for (const std::vector<GpuTexture>* chain : {&view._glow_down, &view._glow_up})
         for (const GpuTexture& t : *chain)
             bytes += texture_bytes(t);
+    for (const GpuTexture* t :
+         {&view._clouds_raw, &view._clouds_raw_distance, &view._clouds[0], &view._clouds[1], &view._clouds_distance[0],
+          &view._clouds_distance[1], &view._cloud_shadow, &view._cloud_screen}) {
+        bytes += texture_bytes(*t);
+    }
     // The fog's volumes (Fog3D::volumetric): three of four halves a cell.
     if (view._fog_volume_sum) {
         bytes += 3ull * 8ull * view._fog_volume_cells[0] * view._fog_volume_cells[1] * view._fog_volume_cells[2];
@@ -5581,6 +5721,21 @@ struct GpuRenderer3D::FrameCtx {
     bool fog_volume_applied = false;   // in the main pass, before the blended draws (else after it)
     bool fog_volume_sun = false; // with the sun's in-scattering (the main pass, the sky and particles leave it out)
     FogVolumeApplyUniforms fog_volume_uniforms{};
+    bool clouds_ready = false; // their noise and shadow made (clouds): clouds_trace walks them after the pre-pass
+    bool clouds = false;       // Scene3D::clouds were walked this render: clouds_apply draws them in the main pass
+    CloudApplyUniforms clouds_uniforms{};
+    CloudParamUniforms cloud_params{};     // the clouds' block (make_cloud_params, once a render)
+    AtmosphereUniforms cloud_atmosphere{}; // and the atmosphere they are lit through
+    bool cloud_params_made = false;
+    // The fog as the clouds leave it (fog_under_clouds): the sky it takes its colour from, veiled toward the clouds'
+    // light by the share they cover, and its sun's in-scattering dimmed by it. The scene's own without clouds.
+    Sky3D fog_sky{};
+    Fog3D fog_look{};
+    bool cloud_shadow_wanted = false; // Clouds3D::shadows asks for the clouds' shadow (and the pre-pass)
+    bool cloud_map = false;           // its map was made this render (cloud_map_at, cloud_toward say where)
+    bool cloud_shadowed = false;      // and laid on what the pre-pass drew (view->_cloud_screen, for uContactShadow)
+    f32 cloud_map_at[4]{};
+    f32 cloud_toward[4]{};
     bool main_velocity = false;        // the main pass writes the velocity (taa with nothing else to need a pre-pass)
     const GpuTexture* shown = nullptr; // the picture after the temporal resolve
     std::array<LodView, 2> lod{};      // Scene3D::lod's choosing, for the scene and the overlay
@@ -7094,11 +7249,11 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     put(v.sun_direction, normalize(scene.lights.sun.direction), 0.0f);
     put_color(v.sun_light, scene.lights.sun.color, 0.0f);
     if (ctx.fog) {
-        fill_fog(v.fog, scene.fog, scene.sky, orthographic);
+        fill_fog(v.fog, ctx.fog_look, ctx.fog_sky, orthographic);
         v.fog.view[2] = ctx.fog_sun || ctx.fog_volume_sun ? 1.0f : 0.0f; // the sun's share added after the main pass
-        fill_atmosphere(v.sky, scene.sky, scene.lights.sun.direction);
+        fill_atmosphere(v.sky, ctx.fog_sky, scene.lights.sun.direction);
         if (v.fog.colour[3] > 0.5f)
-            _fog_table.update(scene.sky, scene.lights.sun.direction);
+            _fog_table.update(ctx.fog_sky, scene.lights.sun.direction);
     }
     SDL_PushGPUVertexUniformData(commands, 1, _fog_table.values.data(), sizeof(_fog_table.values));
     const SDL_GPUTextureFormat format = ctx.taa ? hdr_format : view->_format;
@@ -7369,6 +7524,11 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
                          scene.lights.sun_shadow_strength > 0.0f && scene.lights.shadow_area.size().x > 0.0f;
     // The lights' light in the fog (Fog3D::volumetric) is added at the depth the pre-pass drew.
     ctx.fog_volume_wanted = _fog_volume_pipeline && _fog_available && fog_volume_possible(asked_fog, scene.camera);
+    // The clouds' shadow, of a sun over the horizon: on the surfaces the pre-pass draws (which it needs).
+    ctx.cloud_shadow_wanted = !ctx.surface_only && _cloud_shadow_pipeline && _clouds_trace_pipeline &&
+                              clouds_possible(scene.clouds, scene.camera) && scene.clouds.shadows &&
+                              scene.clouds.shadow_strength > 0.0f && scene.lights.sun.direction.y > 0.0f &&
+                              scene.lights.sun.color.r + scene.lights.sun.color.g + scene.lights.sun.color.b > 0.0f;
     // A volume that holds the sun's in-scattering, through its shadow, does the walk's work.
     if (ctx.fog_volume_wanted && asked_fog.volumetric.sun_and_moon) {
         ctx.fog_sun_wanted = false;
@@ -7455,6 +7615,39 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
         warn_once(_fog_warned, "3D: fog asked for, but this device's shaders for it were not made: off");
         ctx.fog = false;
     }
+    fog_under_clouds(ctx);
+}
+
+void GpuRenderer3D::fog_under_clouds(FrameCtx& ctx) {
+    const Scene3D& scene = ctx.scene;
+    ctx.fog_sky = scene.sky;
+    ctx.fog_look = scene.fog;
+    if (!ctx.fog || ctx.surface_only || !_clouds_trace_pipeline || !clouds_possible(scene.clouds, scene.camera)) {
+        return;
+    }
+    // Under clouds covering a share f of the sky round the camera, the air is lit less by the sun and more by the
+    // clouds' own light: the sky's colour is (1 - f) of the clear sky's and f of the light the clouds' bases show (half
+    // the sky's from above and half the ground's: their ambient terms, in grey), and the sun's glow (1 - f) of its.
+    // The fog's passes that walk the sun through the clouds' shadow (fog_volume, fog_sun) keep the scene's.
+    // (A map of the game's: its texels are on the GPU only, so its share is taken as the coverage asked for.)
+    const f32 f = scene.clouds.weather_map ? std::clamp(scene.clouds.coverage, 0.0f, 1.0f)
+                                           : cloud_model::cover_share(scene.clouds, scene.camera.position, scene.time);
+    if (f <= 0.0f) {
+        return;
+    }
+    make_cloud_params(ctx);
+    const CloudParamUniforms& k = ctx.cloud_params;
+    // (Neutral: the clouds' droplets scatter the sky's and the sun's light many times without changing its hue, and
+    // under them it is mostly the sun's: their light's luminance in grey.)
+    const f32 a = 0.5f * k.detail_offset[3];
+    const f32 grey =
+        (0.2126f * (k.ambient_top[0] + k.ambient_bottom[0]) + 0.7152f * (k.ambient_top[1] + k.ambient_bottom[1]) +
+         0.0722f * (k.ambient_top[2] + k.ambient_bottom[2])) *
+        a;
+    const LinearRgb base{grey, grey, grey};
+    ctx.fog_sky.intensity *= 1.0f - f;
+    ctx.fog_sky.night_color = ctx.fog_sky.night_color + base * f;
+    ctx.fog_look.sun_scatter *= 1.0f - f;
 }
 
 void GpuRenderer3D::fit_sun_shadow(FrameCtx& ctx) {
@@ -13653,7 +13846,7 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     // The overlay is not occluded: it is not in the pre-pass (the world's
     // occlusion would darken a gun by what is behind it, not by its own creases).
     put(f.occlusion,
-        {ctx.occluded && s == 0 ? 1.0f : 0.0f, ctx.contacted && s == 0 ? 1.0f : 0.0f,
+        {ctx.occluded && s == 0 ? 1.0f : 0.0f, (ctx.contacted || ctx.cloud_shadowed) && s == 0 ? 1.0f : 0.0f,
          1.0f / static_cast<f32>(view->_size.x)},
         1.0f / static_cast<f32>(view->_size.y));
     if (ctx.cascades > 1) {
@@ -14129,6 +14322,38 @@ void GpuRenderer3D::sky_environment(FrameCtx& ctx) {
         // Relative to a light of 1 and above: the sun's intensity of 3 moving by a hundredth is a third of a percent.
         moved = std::max(moved, std::abs(key[i] - _sky_key[i]) / std::max(1.0f, std::abs(_sky_key[i])));
     }
+    // The clouds in it (Scene3D::clouds): what they are made of, how far the wind has taken them and where the camera
+    // is, in shares of their shapes' tile and of a kilometre: a drift of a fraction of a percent of a tile makes it
+    // again (every few seconds at the default wind), not every frame.
+    const Clouds3D& clouds = scene.clouds;
+    const bool with_clouds =
+        _clouds_env_shader && _clouds_trace_pipeline && _cloud_noise_pipeline && clouds_possible(clouds, scene.camera);
+    std::array<f32, 12> cloud_key{};
+    if (with_clouds) {
+        const f32 tile = 1.0f / std::max(clouds.shape_scale, 1.0f);
+        const Vec3f drift = clouds.wind * scene.time;
+        const Vec3f eye = scene.camera.position;
+        cloud_key = {1.0f,
+                     clouds.coverage,
+                     clouds.kind,
+                     clouds.bottom * 0.001f,
+                     clouds.top * 0.001f,
+                     clouds.density * 10.0f,
+                     clouds.erosion,
+                     drift.x * tile,
+                     drift.z * tile,
+                     eye.x * tile,
+                     eye.z * tile,
+                     eye.y * 0.001f};
+    }
+    for (std::size_t i = 0; i < cloud_key.size(); ++i) {
+        moved = std::max(moved, std::abs(cloud_key[i] - _sky_env_clouds[i]));
+    }
+    // (Another coverage map: made again.)
+    const void* weather = with_clouds ? clouds.weather_map.backend().get() : nullptr;
+    if (weather != _sky_env_weather) {
+        moved = std::max(moved, 1.0f);
+    }
     const bool have = _sky_env && _sky_env->filtered;
     const bool changed = !have || moved > sky.light_threshold;
     if (have && (!changed || _sky_env_age < sky.light_interval)) {
@@ -14148,6 +14373,8 @@ void GpuRenderer3D::sky_environment(FrameCtx& ctx) {
         return;
     }
     SDL_GPUCommandBuffer* commands = ctx.commands;
+    // The clouds' noise first (a compute pass: not inside the panorama's).
+    const bool draw_clouds = with_clouds && make_cloud_noise(commands, stats);
     SDL_GPUColorTargetInfo target{};
     target.texture = _sky_env->source.handle();
     target.load_op = SDL_GPU_LOADOP_DONT_CARE; // all of it is written
@@ -14165,11 +14392,39 @@ void GpuRenderer3D::sky_environment(FrameCtx& ctx) {
         u.atmosphere = atmosphere;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
         SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+        // The clouds over it, as the view sees them from the camera (without the fog: the panorama has none).
+        SDL_GPUGraphicsPipeline* over =
+            draw_clouds ? _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                                .fragment = _clouds_env_shader.handle(),
+                                                                .blend = GpuBlendMode::Premultiplied,
+                                                                .format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                                                .layout = GpuVertexLayout::None})
+                        : nullptr;
+        if (over) {
+            make_cloud_params(ctx);
+            CloudEnvUniforms cu{};
+            put(cu.eye, scene.camera.position, 0.0f);
+            put(cu.target, {static_cast<f32>(sky_env_width), static_cast<f32>(sky_env_height), 0.0f}, 0.0f);
+            cu.clouds = ctx.cloud_params;
+            cu.clouds.sun_light[3] = 0.0f;
+            cu.atmosphere = ctx.cloud_atmosphere;
+            const std::array<SDL_GPUTextureSamplerBinding, 3> noise{
+                SDL_GPUTextureSamplerBinding{_cloud_shape.handle(), _cloud_sampler},
+                SDL_GPUTextureSamplerBinding{_cloud_detail.handle(), _cloud_sampler},
+                SDL_GPUTextureSamplerBinding{cloud_weather(ctx.scene), _cloud_sampler}};
+            SDL_BindGPUGraphicsPipeline(pass, over);
+            SDL_BindGPUFragmentSamplers(pass, 0, noise.data(), static_cast<u32>(noise.size()));
+            SDL_PushGPUFragmentUniformData(commands, 0, &cu, sizeof(cu));
+            SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+            stats.clouds_in_sky_light = true;
+        }
         SDL_EndGPURenderPass(pass);
     }
     SDL_GenerateMipmapsForGPUTexture(commands, _sky_env->source.handle());
     filter_environment(commands, *_sky_env);
     _sky_key = key;
+    _sky_env_clouds = cloud_key;
+    _sky_env_weather = weather;
     _sky_env_age = 0;
     ++_sky_env_generations;
     stats.sky_env_generations = _sky_env_generations;
@@ -14214,7 +14469,7 @@ void GpuRenderer3D::draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode) {
     put_color(u.moon_color, sky.moon_color * (sky.moon_light * moon_disc_gain), moon ? 1.0f : 0.0f);
     fill_atmosphere(u.atmosphere, sky, scene.lights.sun.direction);
     if (ctx.fog) {
-        fill_fog(u.fog, scene.fog, sky, orthographic);
+        fill_fog(u.fog, ctx.fog_look, sky, orthographic);
         u.fog.view[2] = ctx.fog_sun || ctx.fog_volume_sun ? 1.0f : 0.0f;
     }
     if (mode != 2) {
@@ -15053,14 +15308,15 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
     ctx.main_velocity =
         ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles && !ctx.gi_lit &&
         !ctx.sss_wanted && !ctx.fog_sun_wanted && !ctx.fog_volume_wanted && !ctx.decals && !ctx.ssr_wanted &&
-        _particle_batches.empty() &&
+        !ctx.cloud_shadow_wanted && _particle_batches.empty() &&
         std::none_of(_refs.begin(), _refs.end(), [](const DrawRef& ref) { return ref.mesh->previous != nullptr; }) &&
         ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
         std::none_of(_refs.begin(), _refs.end(),
                      [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
     if (!ctx.main_velocity &&
         (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit || ctx.fog_sun_wanted ||
-         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted || ctx.dof_prepass || ctx.sss_wanted) &&
+         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted || ctx.dof_prepass || ctx.sss_wanted ||
+         ctx.cloud_shadow_wanted) &&
         _ao_available && (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
         SDL_GPUColorTargetInfo target{};
@@ -15162,6 +15418,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             }
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
+            ctx.cloud_shadowed = ctx.cloud_map && cloud_shadow_screen(ctx);
             ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, _gi_borrowed, scene, ctx.main_projection,
                                                        ctx.taa && !ctx.taa_reset, stats);
             // (A view borrowing another's GI has no area lights' light: theirs is that view's, on its own pixels.)
@@ -15317,11 +15574,11 @@ void GpuRenderer3D::draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass,
     auto custom = std::make_unique<CustomFogUniforms>();
     if (ctx.fog) {
         const bool orthographic = scene.camera.projection == Projection3D::Orthographic;
-        fill_fog(custom->fog.fog, scene.fog, scene.sky, orthographic);
+        fill_fog(custom->fog.fog, ctx.fog_look, ctx.fog_sky, orthographic);
         custom->fog.fog.view[2] = ctx.fog_sun ? 1.0f : 0.0f;
-        fill_atmosphere(custom->fog.sky, scene.sky, scene.lights.sun.direction);
+        fill_atmosphere(custom->fog.sky, ctx.fog_sky, scene.lights.sun.direction);
         if (custom->fog.fog.colour[3] > 0.5f) {
-            _fog_table.update(scene.sky, scene.lights.sun.direction);
+            _fog_table.update(ctx.fog_sky, scene.lights.sun.direction);
             std::memcpy(custom->fog.table, _fog_table.values.data(), sizeof(custom->fog.table));
         }
         custom->fog.fog.view[1] = 1.0f;
@@ -15470,12 +15727,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     std::array<FogBlockUniforms, 2> fog_blocks{};
     if (ctx.fog) {
         const bool orthographic = ctx.scene.camera.projection == Projection3D::Orthographic;
-        fill_fog(fog_blocks[0].fog, ctx.scene.fog, ctx.scene.sky, orthographic);
+        fill_fog(fog_blocks[0].fog, ctx.fog_look, ctx.fog_sky, orthographic);
         fog_blocks[0].fog.view[2] = ctx.fog_sun || ctx.fog_volume_sun ? 1.0f : 0.0f;
-        fill_atmosphere(fog_blocks[0].sky, ctx.scene.sky, ctx.scene.lights.sun.direction);
+        fill_atmosphere(fog_blocks[0].sky, ctx.fog_sky, ctx.scene.lights.sun.direction);
         if (fog_blocks[0].fog.colour[3] > 0.5f) {
             // The sky's colour, from the table (made again only when the sky or the sun's height has changed).
-            _fog_table.update(ctx.scene.sky, ctx.scene.lights.sun.direction);
+            _fog_table.update(ctx.fog_sky, ctx.scene.lights.sun.direction);
             std::memcpy(fog_blocks[0].table, _fog_table.values.data(), sizeof(fog_blocks[0].table));
         }
         stats.fog_applied = true;
@@ -15531,8 +15788,11 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         ctx.occluded ? (view->_ao_upsampled_ready ? view->_ao_upsampled.handle() : view->_ao_raw.handle())
                      : _owner->_white.handle(),
         _owner->_sampler_linear};
-    const SDL_GPUTextureSamplerBinding contact_binding{
-        ctx.contacted ? view->_contact_raw.handle() : _owner->_white.handle(), _owner->_sampler_linear};
+    // (The clouds' shadow, when laid, holds the contact shadows' share too.)
+    const SDL_GPUTextureSamplerBinding contact_binding{ctx.cloud_shadowed ? view->_cloud_screen.handle()
+                                                       : ctx.contacted    ? view->_contact_raw.handle()
+                                                                          : _owner->_white.handle(),
+                                                       _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding shadow_binding{ctx.shadows ? ctx.sun_depth->handle() : _no_shadow.handle(),
                                                       _compare_sampler};
     // The light variants' two more maps: the local array and the moon's (the dummy where there is none; never read
@@ -15570,7 +15830,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // and the texture cache remember is forgotten. Then the volume's fog light (Fog3D::volumetric), added over what is
     // drawn so far: a blended surface drawn after dims it by its own opacity as it dims what is behind it.
     const bool fog_in_pass = ctx.fog_volume && !ctx.main_velocity && !sss;
-    bool sky_done = sss || (!ctx.sky_pass && !fog_in_pass);
+    bool sky_done = sss || (!ctx.sky_pass && !fog_in_pass && !ctx.clouds);
     // The decals: after the scene's opaque meshes too, before the sky (which leaves the pixels they cover alone).
     bool decals_done = sss || !ctx.decals || !ctx.prepass_ran;
     // Subsurface scattering's spread light, added after the opaque meshes and their decals, before the sky, the fog's
@@ -15581,6 +15841,13 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         if (ctx.sky_pass) {
             draw_sky(ctx, pass, ctx.main_velocity ? 1u : 0u);
             stats.sky_drawn = true;
+        }
+        if (ctx.clouds) {
+            // Over the sky and what lies farther than them, before the volume's fog light (the air nearer) and the
+            // blended meshes.
+            clouds_apply(ctx, pass, main_depth.format(), ctx.taa ? hdr_format : view->_format,
+                         ctx.taa ? 1u : view->_samples, ctx.main_velocity);
+            fog_bound = false;
         }
         if (fog_in_pass) {
             // What is drawn after (blended and additive meshes) adds the air in front of it (kin_fog_apply): the fog
@@ -16050,15 +16317,21 @@ bool GpuRenderer3D::fog_sun(SDL_GPUCommandBuffer* commands, GpuView3D& view, Fra
     put(u.shadow, {static_cast<f32>(count), reach, offset}, static_cast<f32>(fog_sun_steps));
     put(u.sun, normalize(lights.sun.direction), 0.0f);
     put_color(u.sun_light, lights.sun.color, 0.0f);
+    if (ctx.cloud_map) {
+        std::memcpy(u.cloud_map, ctx.cloud_map_at, sizeof(u.cloud_map));
+        std::memcpy(u.cloud_toward, ctx.cloud_toward, sizeof(u.cloud_toward));
+    }
     ctx.fog_sun_uniforms = u;
     const SDL_GPUStorageTextureReadWriteBinding out{.texture = view._fog_sun.handle(), .cycle = true};
     SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
     if (!pass) {
         return false;
     }
-    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+    const std::array<SDL_GPUTextureSamplerBinding, 3> samplers{
         SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _point_sampler},
-        SDL_GPUTextureSamplerBinding{_shadow_map.handle(), _compare_sampler}};
+        SDL_GPUTextureSamplerBinding{_shadow_map.handle(), _compare_sampler},
+        SDL_GPUTextureSamplerBinding{ctx.cloud_map ? view._cloud_shadow.handle() : _owner->_white.handle(),
+                                     _owner->_sampler_linear}};
     SDL_BindGPUComputePipeline(pass, _fog_sun_pipeline);
     SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
     SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
@@ -16262,6 +16535,10 @@ bool GpuRenderer3D::fog_volume(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
         }
         put(u.sun_shadow, {static_cast<f32>(count), reach, 0.0f}, 0.0f);
     }
+    if (sun && ctx.cloud_map) {
+        std::memcpy(u.cloud_map, ctx.cloud_map_at, sizeof(u.cloud_map));
+        std::memcpy(u.cloud_toward, ctx.cloud_toward, sizeof(u.cloud_toward));
+    }
     // The local and moon blocks as the main pass's (the moon's cascades only where its map was made).
     const bool moon_map = fill && ctx.moon_cascades > 0 && _moon_map;
     LocalLightUniforms locals_block = ctx.lu;
@@ -16315,13 +16592,15 @@ bool GpuRenderer3D::fog_volume(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
         if (!pass) {
             return false;
         }
-        const std::array<SDL_GPUTextureSamplerBinding, 5> samplers{
+        const std::array<SDL_GPUTextureSamplerBinding, 6> samplers{
             SDL_GPUTextureSamplerBinding{local_maps ? local_maps->handle() : _no_shadow.handle(), _compare_sampler},
             SDL_GPUTextureSamplerBinding{view._fog_volume[view._fog_volume_written].handle(), _owner->_sampler_linear},
             SDL_GPUTextureSamplerBinding{sun && ctx.shadows ? _shadow_map.handle() : _no_shadow.handle(),
                                          _compare_sampler},
             SDL_GPUTextureSamplerBinding{moon_map ? _moon_map.handle() : _no_shadow.handle(), _compare_sampler},
-            SDL_GPUTextureSamplerBinding{view._fog_volume_reach[1].handle(), _point_sampler}};
+            SDL_GPUTextureSamplerBinding{view._fog_volume_reach[1].handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{ctx.cloud_map ? view._cloud_shadow.handle() : _owner->_white.handle(),
+                                         _owner->_sampler_linear}};
         SDL_GPUBuffer* buffer = _fog_lights->handle();
         SDL_BindGPUComputePipeline(pass, _fog_volume_pipeline);
         SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
@@ -16436,6 +16715,429 @@ void GpuRenderer3D::fog_volume_apply(FrameCtx& ctx) {
     SDL_PushGPUFragmentUniformData(ctx.commands, 0, &ctx.fog_volume_uniforms, sizeof(ctx.fog_volume_uniforms));
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
+}
+
+void GpuRenderer3D::make_cloud_params(FrameCtx& ctx) {
+    if (ctx.cloud_params_made) {
+        return;
+    }
+    ctx.cloud_params_made = true;
+    const Scene3D& scene = ctx.scene;
+    const Clouds3D& c = scene.clouds;
+    const f32 bottom = std::min(c.bottom, c.top), top = std::max(c.bottom, c.top);
+    const f32 radius = std::max(c.planet_radius, 1000.0f);
+    // The light the clouds are lit by: the sun while it reaches the layer's top (under the procedural sky, at each
+    // cloud's height through the air above it), else the fill light (the moon) when it shines.
+    const Lights3D& lights = scene.lights;
+    const auto shines = [](const DirectionalLight3D& l) {
+        return l.color.r + l.color.g + l.color.b > 0.0f && length_squared(l.direction) > 0.0f;
+    };
+    const bool atmosphere = scene.sky.enabled && scene.sky.mode == SkyMode3D::Procedural;
+    const Vec3f sun = length_squared(lights.sun.direction) > 0.0f ? normalize(lights.sun.direction) : Vec3f{0, 1, 0};
+    const bool sun_lights =
+        atmosphere ? sun.y + std::sqrt(2.0f * std::max(top, 0.0f) / radius) > -0.01f : shines(lights.sun);
+    const bool by_sun = sun_lights || !shines(lights.fill);
+    const Vec3f toward = by_sun ? sun : normalize(lights.fill.direction);
+    const LinearRgb light_color = by_sun ? lights.sun.color : lights.fill.color;
+    LinearRgb above = lights.ambient,
+              below = lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient;
+    if (atmosphere) {
+        _cloud_ambient.update(scene.sky, sun);
+        above = _cloud_ambient.ambient;
+        below = _cloud_ambient.ground;
+    }
+
+    CloudParamUniforms& k = ctx.cloud_params;
+    put(k.layer, {bottom, top, 0.5f / radius}, std::max(c.distance, 0.0f));
+    put(k.scales,
+        {1.0f / std::max(c.shape_scale, 1.0f), 1.0f / std::max(c.detail_scale, 1.0f),
+         1.0f / std::max(c.weather_scale, 1.0f)},
+        std::clamp(c.erosion, 0.0f, 1.0f));
+    put(k.cover, {std::clamp(c.coverage, 0.0f, 1.0f), std::clamp(c.kind, 0.0f, 1.0f), c.density},
+        static_cast<f32>(std::clamp(c.steps, 16u, 256u)));
+    const f32 time = scene.time;
+    put(k.shape_offset, c.wind * -time, static_cast<f32>(std::clamp(c.light_steps, 2u, 16u)));
+    put(k.detail_offset, c.wind * (-1.4f * time), std::max(c.ambient, 0.0f));
+    k.phase[0] = std::clamp(c.forward, -0.95f, 0.95f);
+    k.phase[1] = std::clamp(c.backward, -0.95f, 0.95f);
+    k.phase[2] = std::clamp(c.backward_share, 0.0f, 1.0f);
+    k.phase[3] = std::clamp(c.multiple_scattering, 0.0f, 0.95f);
+    put(k.light, toward, by_sun && atmosphere ? 1.0f : 0.0f);
+    put_color(k.light_color, light_color, top - bottom);
+    put_color(k.ambient_top, above, 0.0f);
+    put_color(k.ambient_bottom, below, atmosphere ? 1.0f : 0.0f);
+    put_color(k.sun_light, lights.sun.color, ctx.fog ? 1.0f : 0.0f);
+    fill_atmosphere(ctx.cloud_atmosphere, scene.sky, sun);
+}
+
+SDL_GPUTexture* GpuRenderer3D::cloud_weather(const Scene3D& scene) const {
+    const auto* map = dynamic_cast<const GpuTextureBackend*>(scene.clouds.weather_map.backend().get());
+    return map && map->texture() ? map->texture().handle() : _cloud_weather.handle();
+}
+
+bool GpuRenderer3D::make_cloud_noise(SDL_GPUCommandBuffer* commands, RenderDebugStats3D& stats) {
+    if (_cloud_shape && _cloud_detail && _cloud_weather) {
+        return true;
+    }
+    using cloud_model::Noise;
+    constexpr SDL_GPUTextureUsageFlags usage =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+    constexpr SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    try {
+        _cloud_shape = _device->create_volume(cloud_model::shape_size, cloud_model::shape_size, cloud_model::shape_size,
+                                              format, usage);
+        _cloud_detail = _device->create_volume(cloud_model::detail_size, cloud_model::detail_size,
+                                               cloud_model::detail_size, format, usage);
+        _cloud_weather = _device->create_target(cloud_model::weather_size, cloud_model::weather_size, format, usage);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the clouds' noise could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        _cloud_shape = {};
+        _cloud_detail = {};
+        _cloud_weather = {};
+        return false;
+    }
+    const std::array<std::pair<const GpuTexture*, Noise>, 2> made{
+        {{&_cloud_shape, Noise::Shape}, {&_cloud_detail, Noise::Detail}}};
+    for (const auto& [texture, noise] : made) {
+        const u32 size = noise == Noise::Shape ? cloud_model::shape_size : cloud_model::detail_size;
+        const u32 deep = size;
+        const SDL_GPUStorageTextureReadWriteBinding out{.texture = texture->handle(), .cycle = false};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+        if (!pass) {
+            _cloud_shape = {};
+            return false;
+        }
+        const std::array<u32, 4> u{static_cast<u32>(noise), size, deep, 0u};
+        SDL_BindGPUComputePipeline(pass, _cloud_noise_pipeline);
+        SDL_PushGPUComputeUniformData(commands, 0, u.data(), sizeof(u));
+        SDL_DispatchGPUCompute(pass, (size + 3) / 4, (size + 3) / 4, (deep + 3) / 4);
+        SDL_EndGPUComputePass(pass);
+    }
+    // The default coverage map, a plane of noise (cloud_weather.comp).
+    {
+        const SDL_GPUStorageTextureReadWriteBinding out{.texture = _cloud_weather.handle(), .cycle = false};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+        if (!pass) {
+            _cloud_shape = {};
+            return false;
+        }
+        const std::array<u32, 4> u{cloud_model::weather_size, 0u, 0u, 0u};
+        SDL_BindGPUComputePipeline(pass, _cloud_weather_pipeline);
+        SDL_PushGPUComputeUniformData(commands, 0, u.data(), sizeof(u));
+        SDL_DispatchGPUCompute(pass, (cloud_model::weather_size + 7) / 8, (cloud_model::weather_size + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+    }
+    stats.clouds_noise_made = true;
+    return true;
+}
+
+bool GpuRenderer3D::clouds(FrameCtx& ctx) {
+    GpuView3D* view = ctx.view;
+    const Scene3D& scene = ctx.scene;
+    const Clouds3D& c = scene.clouds;
+    RenderDebugStats3D& stats = ctx.stats;
+    const Camera3D& camera = scene.camera;
+    const bool wanted = !ctx.surface_only && clouds_possible(c, camera);
+    if (!wanted || !_clouds_trace_pipeline || !_clouds_apply_shader) {
+        if (wanted) {
+            warn_once(_clouds_warned, "3D: volumetric clouds asked for, but this device cannot draw them: not drawn");
+        }
+        if (view->_clouds_raw) {
+            view->_clouds_raw = {};
+            view->_clouds_raw_distance = {};
+            view->_clouds = {};
+            view->_clouds_distance = {};
+        }
+        view->_cloud_shadow = {};
+        view->_cloud_screen = {};
+        view->_clouds_valid = false;
+        return false;
+    }
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    if (!make_cloud_noise(commands, stats)) {
+        return false;
+    }
+    // Their shadow, for the pre-pass's surfaces and the fog's sun (both in the pre-pass, after this).
+    make_cloud_params(ctx);
+    ctx.cloud_map = ctx.cloud_shadow_wanted && cloud_shadow_map(ctx, &ctx.cloud_params);
+    if (!ctx.cloud_map) {
+        view->_cloud_shadow = {};
+        view->_cloud_screen = {};
+    }
+    return true;
+}
+
+bool GpuRenderer3D::clouds_trace(FrameCtx& ctx) {
+    if (!ctx.clouds_ready) {
+        return false;
+    }
+    GpuView3D* view = ctx.view;
+    const Scene3D& scene = ctx.scene;
+    const Clouds3D& c = scene.clouds;
+    RenderDebugStats3D& stats = ctx.stats;
+    const Camera3D& camera = scene.camera;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+
+    // The walk's size: Clouds3D::resolution of the main pass's.
+    const Vec2i extent = view->extent();
+    const f32 scale = std::clamp(c.resolution, 0.25f, 1.0f);
+    const u32 w = static_cast<u32>(std::max(1L, std::lround(static_cast<f32>(extent.x) * scale)));
+    const u32 h = static_cast<u32>(std::max(1L, std::lround(static_cast<f32>(extent.y) * scale)));
+    try {
+        if (!view->_clouds_raw || view->_clouds_raw.width() != w || view->_clouds_raw.height() != h) {
+            constexpr SDL_GPUTextureUsageFlags usage =
+                SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+            view->_clouds_raw = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
+            view->_clouds_raw_distance = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R32_FLOAT, usage);
+            for (u32 k = 0; k < 2; ++k) {
+                view->_clouds[k] = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
+                view->_clouds_distance[k] = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R32_FLOAT, usage);
+            }
+            view->_clouds_valid = false;
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the clouds' pictures could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view->_clouds_raw = {};
+        view->_clouds_raw_distance = {};
+        view->_clouds = {};
+        view->_clouds_distance = {};
+        view->_clouds_valid = false;
+        return false;
+    }
+
+    // The rays, from the camera's matrices without the jitter of temporal anti-aliasing.
+    const Vec3f eye = camera.position, forward = camera.forward();
+    const Mat4f view_projection = camera.view_projection(ctx.aspect);
+    const Mat4f to_world = view_projection.inverse();
+    const f32 bottom = std::min(c.bottom, c.top);
+
+    // The history: the last frame's blend when made at this size (and not reset since), from about the same place (a
+    // jump of more than a twentieth of the way to the clouds, or a turn of more than 30 degrees, is a cut).
+    const f32 history = std::clamp(c.history, 0.0f, 0.98f);
+    const f32 to_clouds = std::max(std::abs(bottom - eye.y), 100.0f);
+    const bool cut =
+        length(eye - view->_clouds_eye) > 0.05f * to_clouds || dot(forward, view->_clouds_forward) < 0.866f;
+    const bool previous = view->_clouds_valid && history > 0.0f && !cut;
+
+    CloudTraceUniforms u{};
+    std::memcpy(u.to_world, to_world.m, sizeof(u.to_world));
+    put(u.eye, eye, static_cast<f32>(view->_clouds_frame++ % 4096u));
+    put(u.size, {static_cast<f32>(w), static_cast<f32>(h), 0.0f}, 0.0f);
+    u.clouds = ctx.cloud_params;
+    u.atmosphere = ctx.cloud_atmosphere;
+    if (ctx.fog) {
+        fill_fog(u.fog, scene.fog, scene.sky, false);
+    }
+    // Where the pre-pass drew, each ray stops at the farthest surface its texel covers (a mountain in the clouds, the
+    // plane flying through them): the clouds in front of it, none past it.
+    const bool depth = ctx.prepass_ran && view->_ao_depth && _point_sampler;
+    if (depth) {
+        const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+        std::memcpy(u.unproject_xy, unproject.xy, sizeof(unproject.xy));
+        std::memcpy(u.unproject_zw, unproject.zw, sizeof(unproject.zw));
+        put(u.depth, {static_cast<f32>(view->_ao_depth.width()), static_cast<f32>(view->_ao_depth.height()), 1.0f},
+            0.0f);
+    }
+    {
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> out{
+            SDL_GPUStorageTextureReadWriteBinding{.texture = view->_clouds_raw.handle(), .cycle = true},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = view->_clouds_raw_distance.handle(), .cycle = true}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, out.data(), 2, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        const std::array<SDL_GPUTextureSamplerBinding, 4> noise{
+            SDL_GPUTextureSamplerBinding{_cloud_shape.handle(), _cloud_sampler},
+            SDL_GPUTextureSamplerBinding{_cloud_detail.handle(), _cloud_sampler},
+            SDL_GPUTextureSamplerBinding{cloud_weather(ctx.scene), _cloud_sampler},
+            SDL_GPUTextureSamplerBinding{depth ? view->_ao_depth.handle() : _owner->_white.handle(),
+                                         depth ? _point_sampler : _owner->_sampler_linear}};
+        SDL_BindGPUComputePipeline(pass, _clouds_trace_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, noise.data(), static_cast<u32>(noise.size()));
+        SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+        SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+    }
+    const u32 written = view->_clouds_written ^ 1u;
+    {
+        CloudResolveUniforms r{};
+        std::memcpy(r.to_world, to_world.m, sizeof(r.to_world));
+        std::memcpy(r.previous, view->_clouds_previous.m, sizeof(r.previous));
+        put(r.eye, eye, 0.0f);
+        put(r.size, {static_cast<f32>(w), static_cast<f32>(h), history}, previous ? 1.0f : 0.0f);
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> out{
+            SDL_GPUStorageTextureReadWriteBinding{.texture = view->_clouds[written].handle(), .cycle = true},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = view->_clouds_distance[written].handle(), .cycle = true}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, out.data(), 2, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        SDL_GPUSampler* linear = _owner->_sampler_linear;
+        const u32 last = view->_clouds_written;
+        const std::array<SDL_GPUTextureSamplerBinding, 4> in{
+            SDL_GPUTextureSamplerBinding{view->_clouds_raw.handle(), linear},
+            SDL_GPUTextureSamplerBinding{view->_clouds_raw_distance.handle(), linear},
+            SDL_GPUTextureSamplerBinding{view->_clouds[last].handle(), linear},
+            SDL_GPUTextureSamplerBinding{view->_clouds_distance[last].handle(), linear}};
+        SDL_BindGPUComputePipeline(pass, _clouds_resolve_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, in.data(), static_cast<u32>(in.size()));
+        SDL_PushGPUComputeUniformData(commands, 0, &r, sizeof(r));
+        SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+    }
+    view->_clouds_written = written;
+    view->_clouds_valid = true;
+    view->_clouds_previous = view_projection;
+    view->_clouds_eye = eye;
+    view->_clouds_forward = forward;
+
+    // What clouds_apply draws them with: the main pass's (jittered) view-projection, as the meshes are drawn.
+    CloudApplyUniforms& a = ctx.clouds_uniforms;
+    a = {};
+    std::memcpy(a.inverse_view_projection, ctx.drawn[0].inverse().m, sizeof(a.inverse_view_projection));
+    std::memcpy(a.view_projection, ctx.drawn[0].m, sizeof(a.view_projection));
+    put(a.eye, eye, 0.0f);
+    const bool encode = !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // a gamma target
+    put(a.target, {static_cast<f32>(extent.x), static_cast<f32>(extent.y), encode ? 1.0f : 0.0f}, 0.0f);
+    stats.clouds = true;
+    stats.clouds_history = previous;
+    stats.clouds_texels = w * h;
+    stats.clouds_depth_bounded = depth;
+    return true;
+}
+
+bool GpuRenderer3D::cloud_shadow_map(FrameCtx& ctx, const void* clouds_block) {
+    GpuView3D* view = ctx.view;
+    const Scene3D& scene = ctx.scene;
+    const Clouds3D& c = scene.clouds;
+    const u32 n = std::clamp(c.shadow_resolution, 64u, 2048u);
+    try {
+        if (!view->_cloud_shadow || view->_cloud_shadow.width() != n) {
+            view->_cloud_shadow =
+                _device->create_target(n, n, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                       SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the clouds' shadow map could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view->_cloud_shadow = {};
+        return false;
+    }
+    // The square: on the plane at the layer's middle height, round where the camera's ray toward the sun crosses it
+    // (so that what is near the camera is near its middle). The sun's height at least 0.05 for the walk (a sun lower
+    // than three degrees lights the ground little).
+    const f32 bottom = std::min(c.bottom, c.top), top = std::max(c.bottom, c.top);
+    const f32 middle = 0.5f * (bottom + top);
+    Vec3f toward = normalize(scene.lights.sun.direction);
+    toward.y = std::max(toward.y, 0.05f);
+    const Vec3f eye = scene.camera.position;
+    const f32 along = (middle - eye.y) / toward.y;
+    const f32 extent = std::max(c.shadow_extent, 100.0f);
+    CloudShadowUniforms u{};
+    put(u.map, {eye.x + toward.x * along, eye.z + toward.z * along, 1.0f / extent}, middle);
+    put(u.toward, toward, static_cast<f32>(cloud_shadow_steps));
+    put(u.size, {static_cast<f32>(n), 0.0f, 0.0f}, 0.0f);
+    std::memcpy(&u.clouds, clouds_block, sizeof(u.clouds));
+    std::memcpy(ctx.cloud_map_at, u.map, sizeof(u.map));
+    put(ctx.cloud_toward, toward, std::clamp(c.shadow_strength, 0.0f, 1.0f));
+    const SDL_GPUStorageTextureReadWriteBinding out{.texture = view->_cloud_shadow.handle(), .cycle = true};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(ctx.commands, &out, 1, nullptr, 0);
+    if (!pass) {
+        return false;
+    }
+    const std::array<SDL_GPUTextureSamplerBinding, 3> noise{
+        SDL_GPUTextureSamplerBinding{_cloud_shape.handle(), _cloud_sampler},
+        SDL_GPUTextureSamplerBinding{_cloud_detail.handle(), _cloud_sampler},
+        SDL_GPUTextureSamplerBinding{cloud_weather(ctx.scene), _cloud_sampler}};
+    SDL_BindGPUComputePipeline(pass, _cloud_shadow_pipeline);
+    SDL_BindGPUComputeSamplers(pass, 0, noise.data(), static_cast<u32>(noise.size()));
+    SDL_PushGPUComputeUniformData(ctx.commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (n + 7) / 8, (n + 7) / 8, 1);
+    SDL_EndGPUComputePass(pass);
+    ctx.stats.clouds_shadow_map = true;
+    return true;
+}
+
+bool GpuRenderer3D::cloud_shadow_screen(FrameCtx& ctx) {
+    GpuView3D* view = ctx.view;
+    if (!_cloud_screen_pipeline || !view->_ao_depth || !_point_sampler) {
+        return false;
+    }
+    const u32 w = view->_ao_depth.width(), h = view->_ao_depth.height();
+    try {
+        if (!view->_cloud_screen || view->_cloud_screen.width() != w || view->_cloud_screen.height() != h) {
+            view->_cloud_screen = _device->create_target(
+                w, h, contact_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the clouds' shadow could not be laid",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view->_cloud_screen = {};
+        return false;
+    }
+    CloudScreenUniforms u{};
+    std::memcpy(u.to_world, ctx.scene.camera.view().inverse().m, sizeof(u.to_world));
+    const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+    std::memcpy(u.unproject_xy, unproject.xy, sizeof(unproject.xy));
+    std::memcpy(u.unproject_zw, unproject.zw, sizeof(unproject.zw));
+    put(u.sizes, {static_cast<f32>(w), static_cast<f32>(h), static_cast<f32>(w)}, static_cast<f32>(h));
+    std::memcpy(u.map, ctx.cloud_map_at, sizeof(u.map));
+    std::memcpy(u.toward, ctx.cloud_toward, sizeof(u.toward));
+    const SDL_GPUStorageTextureReadWriteBinding out{.texture = view->_cloud_screen.handle(), .cycle = true};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(ctx.commands, &out, 1, nullptr, 0);
+    if (!pass) {
+        return false;
+    }
+    const std::array<SDL_GPUTextureSamplerBinding, 3> in{
+        SDL_GPUTextureSamplerBinding{view->_ao_depth.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{view->_cloud_shadow.handle(), _owner->_sampler_linear},
+        SDL_GPUTextureSamplerBinding{ctx.contacted ? view->_contact_raw.handle() : _owner->_white.handle(),
+                                     _point_sampler}};
+    SDL_BindGPUComputePipeline(pass, _cloud_screen_pipeline);
+    SDL_BindGPUComputeSamplers(pass, 0, in.data(), static_cast<u32>(in.size()));
+    SDL_PushGPUComputeUniformData(ctx.commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
+    SDL_EndGPUComputePass(pass);
+    ctx.stats.clouds_shadowed = true;
+    return true;
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::clouds_pipeline(SDL_GPUTextureFormat depth, SDL_GPUTextureFormat format,
+                                                        u32 samples, bool velocity) const {
+    if (!_clouds_apply_shader) {
+        return nullptr;
+    }
+    // Premultiplied over what is drawn, tested (never written) against the meshes' depth at the clouds' own; the
+    // velocity target (the main pass's with TAA and no pre-pass) is left alone: the sky's velocity stands for them.
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                 .fragment = _clouds_apply_shader.handle(),
+                                                 .blend = GpuBlendMode::Premultiplied,
+                                                 .format = format,
+                                                 .layout = GpuVertexLayout::None,
+                                                 .depth_stencil = depth,
+                                                 .depth = GpuDepthTest::Test,
+                                                 .samples = sample_count(samples),
+                                                 .extra_format = velocity ? hdr_format : SDL_GPU_TEXTUREFORMAT_INVALID,
+                                                 .extra_write = false});
+}
+
+void GpuRenderer3D::clouds_apply(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
+                                 SDL_GPUTextureFormat format, u32 samples, bool velocity) {
+    GpuView3D* view = ctx.view;
+    SDL_GPUGraphicsPipeline* p = clouds_pipeline(depth_format, format, samples, velocity);
+    if (!p) {
+        return;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, p);
+    const u32 at = view->_clouds_written;
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{view->_clouds[at].handle(), _owner->_sampler_linear},
+        SDL_GPUTextureSamplerBinding{view->_clouds_distance[at].handle(), _owner->_sampler_linear}};
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), 2);
+    SDL_PushGPUFragmentUniformData(ctx.commands, 0, &ctx.clouds_uniforms, sizeof(ctx.clouds_uniforms));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
 }
 
 bool GpuRenderer3D::ensure_blur_targets(GpuView3D& view, u32 tile) {
@@ -17321,6 +18023,10 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
              return ok;
          },
          [&] {
+             ctx.clouds_ready = clouds(ctx);
+             return true;
+         },
+         [&] {
              prepass(ctx);
              stats.taa_main_velocity = ctx.main_velocity;
              return true;
@@ -17337,6 +18043,10 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
          [&] {
              // Subsurface scattering: its materials' scattered light, spread, before the main pass adds it back.
              ctx.sss_scattered = ctx.sss_wanted && subsurface_pass(ctx);
+             return true;
+         },
+         [&] {
+             ctx.clouds = clouds_trace(ctx);
              return true;
          },
          [&] {
@@ -17388,9 +18098,9 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
          }}};
     static constexpr std::array<const char*, frame_graph_passes3d> markers{
         {"kin3d.clusters", "kin3d.local_shadows", "kin3d.gi_scene", "kin3d.gi_probes", "kin3d.sun_shadow",
-         "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.subsurface", "kin3d.main",
-         "kin3d.fog_sun", "kin3d.temporal_resolve", "kin3d.depth_of_field", "kin3d.motion_blur", "kin3d.picking",
-         "kin3d.output"}};
+         "kin3d.clouds", "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.subsurface",
+         "kin3d.clouds_trace", "kin3d.main", "kin3d.fog_sun", "kin3d.temporal_resolve", "kin3d.depth_of_field",
+         "kin3d.motion_blur", "kin3d.picking", "kin3d.output"}};
     const auto record_start = std::chrono::steady_clock::now();
     for (u32 i = 0; i < plan.order.size(); ++i) {
         const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
@@ -17601,6 +18311,16 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
     }
     if (scene.lights.sky_lights_scene && _sky_env_shader) {
         fullscreen(_sky_env_shader.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
+    }
+    if (scene.clouds.enabled) {
+        clouds_pipeline(_depth_format, format, samples, main_velocity);
+        if (scene.lights.sky_lights_scene && _clouds_env_shader) {
+            _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                  .fragment = _clouds_env_shader.handle(),
+                                                  .blend = GpuBlendMode::Premultiplied,
+                                                  .format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                                  .layout = GpuVertexLayout::None});
+        }
     }
     // Particles and weather: the blend modes and soft variants the scene's batches use.
     if (_particles_available) {

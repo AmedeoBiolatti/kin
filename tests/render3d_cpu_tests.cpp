@@ -737,6 +737,86 @@ void test_sun_times_at_the_poles() {
     assert(!london.polar_day && !london.polar_night && london.sunrise > 3.5f && london.sunrise < 3.9f);
 }
 
+// Scene3D::clouds' layer (cloud_model::layer_span, kin_cloud_span's arithmetic): straight up from the ground it is the
+// layer's own heights; a little over the level, it is met where the ray reaches the curved base, and cut at
+// `distance`; level or down, never (the sky's ground); from inside, from the eye; from above, down to the base. And its
+// noise tiles: a texel on one edge is as like the opposite edge's as its own neighbours are like it.
+void test_cloud_layer_and_noise() {
+    using namespace kin;
+    Clouds3D clouds{.bottom = 1500.0f, .top = 4000.0f};
+    const auto near = [](f32 a, f32 b, f32 tolerance) { return std::abs(a - b) <= tolerance; };
+    auto s = cloud_model::layer_span(clouds, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    assert(near(s[0], 1499.0f, 0.05f) && near(s[1], 3999.0f, 0.05f));
+    // A ray a thousandth over the level: where y0 + t dy + t^2 (1 - dy^2) / 2R reaches the base.
+    const Vec3f low = normalize(Vec3f{1.0f, 0.001f, 0.0f});
+    s = cloud_model::layer_span(clouds, {0.0f, 1.0f, 0.0f}, low);
+    const double a = (1.0 - double(low.y) * low.y) / (2.0 * clouds.planet_radius);
+    const double level = (-double(low.y) + std::sqrt(double(low.y) * low.y + 4.0 * a * 1499.0)) / (2.0 * a);
+    assert(near(s[0], f32(level), f32(0.002 * level)) && near(s[1], clouds.distance, 1.0f));
+    clouds.distance = 100000.0f; // nearer than the base's crossing: nothing
+    s = cloud_model::layer_span(clouds, {0.0f, 1.0f, 0.0f}, low);
+    assert(s[0] > s[1]);
+    // Level or a hair under it, none (the sky's ground is there), though the curved shell would have some.
+    s = cloud_model::layer_span(clouds, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f, 0.0f});
+    assert(s[0] > s[1]);
+    clouds.distance = 150000.0f;
+    s = cloud_model::layer_span(clouds, {0.0f, 1.0f, 0.0f}, normalize(Vec3f{1.0f, -0.05f, 0.0f}));
+    assert(s[0] > s[1]);
+    s = cloud_model::layer_span(clouds, {0.0f, 2000.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    assert(s[0] == 0.0f && near(s[1], 2000.0f, 0.05f));
+    s = cloud_model::layer_span(clouds, {0.0f, 2000.0f, 0.0f}, {0.0f, -1.0f, 0.0f});
+    assert(s[0] == 0.0f && near(s[1], 500.0f, 0.05f));
+    s = cloud_model::layer_span(clouds, {30.0f, 5000.0f, 40.0f}, {0.0f, -1.0f, 0.0f});
+    assert(near(s[0], 1000.0f, 0.05f) && near(s[1], 3500.0f, 0.05f));
+    // An eye under the ground sees none; nor one above the layer looking up.
+    s = cloud_model::layer_span(clouds, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    assert(s[0] > s[1]);
+    s = cloud_model::layer_span(clouds, {0.0f, 5000.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    assert(s[0] > s[1]);
+
+    // How much of the sky they cover round a point: none without coverage, all of it overcast, some in between.
+    Clouds3D covering{.enabled = true, .coverage = 0.0f};
+    assert(cloud_model::cover_share(covering, {}, 0.0f) == 0.0f);
+    covering.coverage = 1.0f;
+    assert(cloud_model::cover_share(covering, {}, 0.0f) == 1.0f);
+    covering.coverage = 0.5f;
+    const f32 half = cloud_model::cover_share(covering, {}, 0.0f);
+    assert(half > 0.15f && half < 0.85f);
+
+    using cloud_model::Noise;
+    for (const Noise noise : {Noise::Shape, Noise::Detail, Noise::Weather}) {
+        const u32 size = noise == Noise::Shape    ? cloud_model::shape_size
+                         : noise == Noise::Detail ? cloud_model::detail_size
+                                                  : cloud_model::weather_size;
+        const u32 deep = noise == Noise::Weather ? 1u : size;
+        const u32 channels = noise == Noise::Weather ? 2u : 3u;
+        double across = 0.0, within = 0.0;
+        std::array<f32, 4> least{1, 1, 1, 1}, most{0, 0, 0, 0};
+        u32 count = 0;
+        for (u32 z = 0; z < deep; z += std::max(1u, deep / 8)) {
+            for (u32 y = 0; y < size; y += size / 16) {
+                const auto first = cloud_model::noise_texel(noise, 0, y, z);
+                const auto second = cloud_model::noise_texel(noise, 1, y, z);
+                const auto last = cloud_model::noise_texel(noise, size - 1, y, z);
+                for (u32 c = 0; c < 4; ++c) {
+                    assert(first[c] >= 0.0f && first[c] <= 1.0f && std::isfinite(first[c]));
+                    least[c] = std::min(least[c], first[c]);
+                    most[c] = std::max(most[c], first[c]);
+                }
+                for (u32 c = 0; c < channels; ++c) {
+                    across += std::abs(first[c] - last[c]);
+                    within += std::abs(first[c] - second[c]);
+                }
+                ++count;
+            }
+        }
+        assert(count > 0 && across < 1.6 * within + 0.01 * count);
+        for (u32 c = 0; c < channels; ++c) {
+            assert(most[c] - least[c] > 0.3f); // each channel spans much of its range
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -753,8 +833,10 @@ int main() {
     test_time_of_day_clock_exact();
     test_sun_times_at_the_poles();
     test_renderer_owned_sky_lighting();
-    std::cout << "render3d on the CPU: instance batch bounds exact after scattered, spanning and broken edits, a tight "
-                 "change history past 16 edits, "
-                 "particle wind within 1e-3 m/s of Wind3D::velocity, particle catch-up capped at 30 steps, the game "
-                 "clock exact over an hour of frames, polar day and night at the poles\n";
+    test_cloud_layer_and_noise();
+    std::cout
+        << "render3d on the CPU: instance batch bounds exact after scattered, spanning and broken edits, a tight "
+           "change history past 16 edits, "
+           "particle wind within 1e-3 m/s of Wind3D::velocity, particle catch-up capped at 30 steps, the game "
+           "clock exact over an hour of frames, polar day and night at the poles, the clouds' layer and tiling noise\n";
 }

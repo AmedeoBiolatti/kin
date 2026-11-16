@@ -75,6 +75,8 @@ void register_scene3d_settings(EcsWorld& world) {
             .description("A second look the grade cross-fades to by grade_lut_mix.");
         builder.field("glow_dirt", &SceneEnvironment3D::glow_dirt)
             .description("A picture of lens dirt the glow lights, by content path.");
+        builder.field("clouds_weather", &SceneEnvironment3D::clouds_weather)
+            .description("The clouds' coverage map (r coverage, g kind; a data image), by content path.");
         // These properties use exactly the same field codec/overrides as direct
         // members. Keep the authored names flat for ordinary inspector rows.
 #define SETTING(name, member)                                                                                          \
@@ -174,6 +176,32 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("fog_volumetric_slices", fog.volumetric.slices);
         SETTING("fog_volumetric_history", fog.volumetric.history);
         SETTING("fog_volumetric_sun_and_moon", fog.volumetric.sun_and_moon);
+        SETTING("clouds_enabled", clouds.enabled);
+        SETTING("clouds_coverage", clouds.coverage);
+        SETTING("clouds_kind", clouds.kind);
+        SETTING("clouds_bottom", clouds.bottom);
+        SETTING("clouds_top", clouds.top);
+        SETTING("clouds_density", clouds.density);
+        SETTING("clouds_shape_scale", clouds.shape_scale);
+        SETTING("clouds_detail_scale", clouds.detail_scale);
+        SETTING("clouds_erosion", clouds.erosion);
+        SETTING("clouds_weather_scale", clouds.weather_scale);
+        SETTING("clouds_wind", clouds.wind);
+        SETTING("clouds_forward", clouds.forward);
+        SETTING("clouds_backward", clouds.backward);
+        SETTING("clouds_backward_share", clouds.backward_share);
+        SETTING("clouds_multiple_scattering", clouds.multiple_scattering);
+        SETTING("clouds_ambient", clouds.ambient);
+        SETTING("clouds_planet_radius", clouds.planet_radius);
+        SETTING("clouds_distance", clouds.distance);
+        SETTING("clouds_steps", clouds.steps);
+        SETTING("clouds_light_steps", clouds.light_steps);
+        SETTING("clouds_resolution", clouds.resolution);
+        SETTING("clouds_history", clouds.history);
+        SETTING("clouds_shadows", clouds.shadows);
+        SETTING("clouds_shadow_strength", clouds.shadow_strength);
+        SETTING("clouds_shadow_extent", clouds.shadow_extent);
+        SETTING("clouds_shadow_resolution", clouds.shadow_resolution);
         SETTING("ao_enabled", ambient_occlusion.enabled);
         SETTING("ao_radius", ambient_occlusion.radius);
         SETTING("ao_intensity", ambient_occlusion.intensity);
@@ -475,6 +503,20 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  dof.focus_point.y >= 0 && dof.focus_point.y <= 1 && dof.focus_time >= 0 &&
                  std::isfinite(dof.focus_time) && (dof.blades == 0 || (dof.blades >= 3 && dof.blades <= 12)) &&
                  std::isfinite(dof.blade_rotation);
+        const Clouds3D& clouds = settings.clouds;
+        valid &= within(clouds.coverage, 0, 1) && within(clouds.kind, 0, 1) && std::isfinite(clouds.bottom) &&
+                 std::isfinite(clouds.top) && clouds.bottom < clouds.top && within(clouds.density, 0, 10) &&
+                 within(clouds.shape_scale, 1, 1e7f) && within(clouds.detail_scale, 1, 1e7f) &&
+                 within(clouds.erosion, 0, 1) && within(clouds.weather_scale, 1, 1e8f) &&
+                 std::isfinite(clouds.wind.x) && std::isfinite(clouds.wind.y) && std::isfinite(clouds.wind.z) &&
+                 within(clouds.forward, -.95f, .95f) && within(clouds.backward, -.95f, .95f) &&
+                 within(clouds.backward_share, 0, 1) && within(clouds.multiple_scattering, 0, .95f) &&
+                 within(clouds.ambient, 0, 10) && within(clouds.planet_radius, 1000, 1e9f) &&
+                 within(clouds.distance, 0, 1e7f) && clouds.steps >= 16 && clouds.steps <= 256 &&
+                 clouds.light_steps >= 2 && clouds.light_steps <= 16 && within(clouds.resolution, .25f, 1) &&
+                 within(clouds.history, 0, .98f) && within(clouds.shadow_strength, 0, 1) &&
+                 within(clouds.shadow_extent, 100, 1e7f) && clouds.shadow_resolution >= 64 &&
+                 clouds.shadow_resolution <= 2048;
         if (!valid)
             errors.push_back("SceneEnvironment3D entity '" + entity.name() + "': invalid environment/view settings");
         else {
@@ -486,6 +528,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.lights.spots = std::move(spots);
             scene.sky = settings.sky;
             scene.fog = settings.fog;
+            scene.clouds = settings.clouds;
             scene.ambient_occlusion = settings.ambient_occlusion;
             scene.contact_shadows = settings.contact_shadows;
             scene.taa = settings.taa;

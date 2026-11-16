@@ -207,6 +207,47 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
     check(!session.load("bad.kinscene"), "a missing look accepted");
 }
 
+// Volumetric clouds authored in a scene (SceneEnvironment3D's clouds_* and clouds_weather): applied to the scene with
+// the coverage map loaded as a data image, drawn; out-of-range values and a missing map are rejected.
+void gpu_cloud_settings(Renderer2D& renderer) {
+    Renderer3D r3d{renderer};
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "shared pixel.png", scratch.path / "cover.png");
+    write(scratch.path / "clouds.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"sky_enabled":true,"clouds_enabled":true,
+        "clouds_coverage":0.8,"clouds_kind":0.3,"clouds_bottom":1200,"clouds_top":3500,"clouds_density":0.08,
+        "clouds_wind":[4,0,-2],"clouds_shadows":false,"clouds_steps":48,"clouds_resolution":0.75,
+        "clouds_weather":"cover.png","clouds_weather_scale":20000}}},
+      {"id":"camera","components":{"Transform3D":{"position":[0,2,0]},"SceneCamera3D":{}}}]})");
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("clouds.kinscene"), "clouds scene failed");
+    const Clouds3D& clouds = session.scene()->clouds;
+    check(clouds.enabled && clouds.coverage == 0.8f && clouds.kind == 0.3f && clouds.bottom == 1200 &&
+              clouds.top == 3500 && clouds.density == 0.08f && clouds.wind == Vec3f{4, 0, -2} && !clouds.shadows &&
+              clouds.steps == 48 && clouds.resolution == 0.75f && clouds.weather_scale == 20000,
+          "cloud settings were not applied");
+    check(static_cast<bool>(clouds.weather_map), "the clouds' coverage map named in the scene was not loaded");
+    check(session.render(), "clouds render failed");
+    check(r3d.debug_stats().clouds, "the clouds were not drawn");
+    renderer.present();
+    for (const char* bad : {R"("clouds_coverage":1.5)", R"("clouds_bottom":4000,"clouds_top":3000)",
+                            R"("clouds_steps":8)", R"("clouds_resolution":0.1)", R"("clouds_forward":1)"}) {
+        write(scratch.path / "bad.kinscene", std::string(R"({"entities":[
+          {"id":"environment","components":{"SceneEnvironment3D":{)") +
+                                                 bad + "}}}]}");
+        const std::string what = std::string("out-of-range cloud setting accepted: ") + bad;
+        check(!session.load("bad.kinscene"), what.c_str());
+    }
+    write(scratch.path / "bad.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"clouds_weather":"missing.png"}}}]})");
+    check(!session.load("bad.kinscene"), "a missing coverage map accepted");
+}
+
 void gpu_live_edits(Renderer2D& renderer) {
     Scratch scratch;
     std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
@@ -1705,6 +1746,7 @@ int main(int argc, char** argv) {
         Renderer2D renderer{std::move(backend)};
         gpu_temporal_view_options(renderer);
         gpu_camera_effect_settings(renderer);
+        gpu_cloud_settings(renderer);
         gpu_live_edits(renderer);
         gpu_session(renderer);
         gpu_prepared_requests(renderer);

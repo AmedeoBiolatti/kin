@@ -459,8 +459,9 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
             entity.modified<Mirror3D>();
         }
     }
-    // The camera effects' pictures (SceneEnvironment3D's grade_lut, grade_lut_to, glow_dirt): loaded when their path
-    // changes; a failed load keeps the previous picture; an emptied path clears what a path had set.
+    // The camera effects' pictures (SceneEnvironment3D's grade_lut, grade_lut_to, glow_dirt) and the clouds' coverage
+    // map (clouds_weather): loaded when their path changes; a failed load keeps the previous picture; an emptied path
+    // clears what a path had set.
     {
         std::vector<EcsEntity> environments;
         if (selected.empty())
@@ -473,7 +474,7 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
         for (auto entity : environments) {
             const SceneEnvironment3D& was = *entity.get<SceneEnvironment3D>();
             if (was.grade_lut.id == was.bound_grade_lut && was.grade_lut_to.id == was.bound_grade_lut_to &&
-                was.glow_dirt.id == was.bound_glow_dirt)
+                was.glow_dirt.id == was.bound_glow_dirt && was.clouds_weather.id == was.bound_clouds_weather)
                 continue;
             SceneEnvironment3D settings = was;
             const auto fail = [&](const char* field, const std::string& path, const std::string& why) {
@@ -510,6 +511,17 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
                     settings.bound_glow_dirt = settings.glow_dirt.id;
                 } else {
                     fail("glow_dirt", settings.glow_dirt.id, diagnostics3d_text(assets.diagnostics()));
+                }
+            }
+            if (settings.clouds_weather.id != settings.bound_clouds_weather) {
+                if (settings.clouds_weather.id.empty()) {
+                    settings.clouds.weather_map = {};
+                    settings.bound_clouds_weather.clear();
+                } else if (Texture map = assets.load_texture(settings.clouds_weather.id, false, false).value_or({})) {
+                    settings.clouds.weather_map = std::move(map);
+                    settings.bound_clouds_weather = settings.clouds_weather.id;
+                } else {
+                    fail("clouds_weather", settings.clouds_weather.id, diagnostics3d_text(assets.diagnostics()));
                 }
             }
             entity.raw().set<SceneEnvironment3D>(std::move(settings));

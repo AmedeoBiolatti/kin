@@ -18,6 +18,7 @@
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/texture.hpp>
 
 namespace kin {
 
@@ -145,6 +146,96 @@ struct Fog3D {
     // The point and spot lights' light in the fog's air (VolumetricFog3D). Off by default.
     VolumetricFog3D volumetric{};
 };
+
+// A layer of volumetric clouds over the scene (as Unreal's Volumetric Cloud and Unity HDRP's Volumetric Clouds draw
+// them): a shell round the planet between `bottom` and `top` (world heights over y = 0, the ground's level, the shell
+// curving down with the distance as the planet does), filled where a coverage map says so with clouds shaped by tiling
+// noise (Perlin-Worley for their shape, Worley for the detail that wears their edges), drifting with the wind. Each
+// pixel's ray is walked through the layer at a reduced resolution (`resolution`), a different start along it every
+// frame, and the frames blended (`history`). The light: the sun's (or, under the horizon, the fill light's: the moon)
+// through the cloud toward it, scattered by a forward and a backward lobe, with octaves of fainter, wider lobes for the
+// light scattered many times; and the sky's ambient light from above and the ground's from below. The procedural sky
+// (Scene3D::sky enabled) lights them at their height (a cloud high up keeps the sun after sunset, red) and puts its own
+// air in front of them (far clouds pale into the horizon); the fog veils them as it veils the sky behind them. Drawn
+// in the main pass over the sky and over what lies farther than the clouds (each pixel's cloud at its mean distance,
+// tested against the depth: a near wall hides it, a far mountain is seen through it), before the blended meshes.
+// Their shadow (`shadows`): the sun's light through the layer, from a map round the camera along the sun, on the
+// surfaces the depth pre-pass draws (which it turns on) and in the volumetric fog's sunlight (Fog3D::volumetric's
+// sun_and_moon, Fog3D::sun_shadows): their shade drifts over the ground, and shafts come down through their gaps.
+// Off by default; needs a perspective camera (WebGL2: EXT_color_buffer_float, and no shadows or sky light there).
+// Authored as SceneEnvironment3D's clouds_*. docs/3d_plan.md, "Volumetric clouds".
+struct Clouds3D {
+    bool enabled = false;
+    // How much of the sky they cover: 0 none, 0.5 scattered clouds, 1 overcast. The coverage map (a tiling noise
+    // `weather_scale` across) varies round it.
+    f32 coverage = 0.45f;
+    // Their kind: 0 flat (stratus: low in the layer), 1 tall heaps (cumulus: to the layer's top). The map varies it.
+    f32 kind = 0.7f;
+    f32 bottom = 1500.0f; // the layer's base and top, world heights (units: kin's metres)
+    f32 top = 4000.0f;
+    // The light a full cloud takes out per unit of distance (its extinction; it scatters all of it). 0.1: a few tens
+    // of units of a dense cloud's air hide what is behind it, and the clouds' edges are crisp.
+    f32 density = 0.1f;
+    // The size of the noise's tiles: the clouds' shapes (`shape_scale`: a tile holds four or so heaps), the detail that
+    // wears their edges and how much it wears them (`erosion`, 0 to 1), the coverage map.
+    f32 shape_scale = 9000.0f;
+    f32 detail_scale = 900.0f;
+    f32 erosion = 0.6f;
+    f32 weather_scale = 40000.0f;
+    // A coverage map of the game's in place of the default noise (a data texture, linear: r the coverage, g the kind,
+    // 0 to 1, tiling `weather_scale` across, drifting with the wind): where it is r 0, no clouds at a `coverage` of
+    // 0.5; r 1, clouds. Empty: the default. (The fog's veil under the clouds then takes `coverage` as their share.)
+    Texture weather_map;
+    // Units per second over the ground (x and z): the clouds drift by it with Scene3D::time, their detail a little
+    // faster (they change as they go).
+    Vec3f wind{8.0f, 0.0f, 3.0f};
+    // The scattered light: the forward lobe's anisotropy (toward 1: a silver lining round a cloud before the sun), the
+    // backward one's (negative), the share of the backward one; then each further octave of the many-times scattered
+    // light (`multiple_scattering`: 0 none, 0.5 Unreal's default), and the ambient light's (times the sky's).
+    f32 forward = 0.75f;
+    f32 backward = -0.25f;
+    f32 backward_share = 0.3f;
+    f32 multiple_scattering = 0.5f;
+    f32 ambient = 1.0f;
+    f32 planet_radius = 6360000.0f; // the shell's curvature (units)
+    f32 distance = 150000.0f;       // how far from the camera clouds are drawn (units): they thin out over its last 20%
+    // The walk: the most samples a ray takes through the layer (16 to 256: a ray straight up takes a third), and the
+    // samples toward the light (2 to 16) at each one that holds cloud.
+    u32 steps = 64;
+    u32 light_steps = 6;
+    // The walk's resolution, a share of the view's (0.25 to 1), and the share of the frames before kept each frame
+    // (0 to 0.98; dropped after View3D::reset_history() and when the camera jumps).
+    f32 resolution = 0.5f;
+    f32 history = 0.9f;
+    // Their shadow on the sunlit world: on, its strength (0 none, 1 the light the layer lets through), the square round
+    // the camera it covers (units; it fades out over its last 15%) and its texels across (64 to 2048).
+    bool shadows = true;
+    f32 shadow_strength = 1.0f;
+    f32 shadow_extent = 20000.0f;
+    u32 shadow_resolution = 512;
+};
+
+namespace cloud_model {
+// The tiling noise the clouds are made of, made once on the GPU (cloud_noise.comp) with the same arithmetic as here
+// (the tests compare texels). `shape`: shape_size^3 texels, r a Perlin-Worley noise, g b a Worley noises of 4, 8 and
+// 16 cells across (each with two finer octaves). `detail`: detail_size^3, r g b Worley of 2, 4, 8 cells. `weather`:
+// weather_size^2 (a volume one texel deep), r the coverage, g the kind. Each in 0 to 1.
+constexpr u32 shape_size = 128;
+constexpr u32 detail_size = 32;
+constexpr u32 weather_size = 256;
+enum class Noise : u32 { Shape = 0, Detail = 1, Weather = 2 };
+// The texel at (x, y, z) of `noise`, rgba in 0 to 1 (before the 8-bit rounding).
+std::array<f32, 4> noise_texel(Noise noise, u32 x, u32 y, u32 z);
+// Where the unit ray from `eye` along `direction` is first in the layer, as distances along it (none: first > second):
+// the shell between heights `bottom` and `top` over a planet of `planet_radius` whose surface is y = 0 under the eye
+// (the paraboloid y = d^2 / 2R that matches the sphere within a metre to 200 km), cut where the ray meets the ground
+// first and at `distance`; from under the layer, none below the level (kin's sky has its flat ground there).
+std::array<f32, 2> layer_span(const Clouds3D& clouds, Vec3f eye, Vec3f direction);
+// How much of the sky round `eye` the clouds cover (0 to 1): the coverage map's local coverage (as the GPU's density
+// takes it from `coverage` and the map), averaged over a disc `radius` across under the layer, where the wind has taken
+// it at `time`. The renderer veils the fog's sky colour and its sun by it (Fog3D under the clouds).
+f32 cover_share(const Clouds3D& clouds, Vec3f eye, f32 time, f32 radius = 20000.0f);
+} // namespace cloud_model
 
 namespace sky_model {
 // The atmosphere's constants, shared with kin_sky.inc.glsl (change them together). Optical depths at the zenith at sea

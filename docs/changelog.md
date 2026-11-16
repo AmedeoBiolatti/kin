@@ -18,6 +18,19 @@ releases may change APIs.
   diffusion profiles, Godot's `subsurf_scatter_*` and glTF diffuse transmission through a volume. Checked against
   Cycles' Christensen-Burley (`tools/cycles/subsurface.py`, the `subsurface` reference scene). Native renderer only;
   HDR or TAA views.
+- 3D volumetric clouds ([3D rendering](rendering_3d.md#volumetric-clouds)): `Scene3D::clouds` (`Clouds3D`) draws a
+  layer of ray-marched clouds as Unreal's Volumetric Cloud and Unity's Volumetric Clouds do: a procedural coverage map,
+  Perlin-Worley shapes worn by Worley detail, drifting with the wind; lit by the sun through the procedural sky at
+  their height (red after sunset), two scattering lobes with multiple-scattering octaves and the sky's ambient; the
+  sky's air and the fog in front. Walked at half resolution and blended over frames; drawn over the sky and behind
+  nearer meshes. Their shadow (`Clouds3D::shadows`, on by default) darkens the sun on the meshes the depth pre-pass
+  draws (which it turns on) and in the volumetric fog, whose sun comes down through their gaps. With
+  `Lights3D::sky_lights_scene` they are in the sky's ambient light and reflections: an overcast greys and dims them.
+  The fog under them takes their colour (far hills fade into grey under an overcast). A game's coverage map
+  (`Clouds3D::weather_map`) replaces the default noise. Authored as `SceneEnvironment3D`'s `clouds_*` (the map as
+  `clouds_weather`, by path). WebGL2 draws them too (without their shadows or sky light). Geometry inside the layer
+  (a mountain in the clouds, a plane flying through them) takes the cloud in front of it: the walk stops at the depth
+  pre-pass's surfaces; the stock 3D frame graph's clouds work is two passes, `clouds` and `clouds_trace`.
 - 3D glow and lens flares ([3D rendering](rendering_3d.md#glow-and-lens-flares)): `Scene3D::camera_effects.glow`
   makes the view's bloom wide (an energy-conserving mip chain, as Unreal's and Unity's) and adds lens dirt, ghosts, a
   halo and anamorphic streaks; authored as `SceneEnvironment3D`'s `glow_*` (the dirt picture as `glow_dirt`, by path). With every
@@ -75,6 +88,12 @@ releases may change APIs.
   per picture; point, spot and moon shadows (on surfaces, particles and in volumetric fog). A custom
   `Material3D::shader` draws as the stock material instead of refusing the view, and each feature the browser leaves
   out is logged once. `IRendererBackend3D::create_surface_source` lets a backend make a surface from its source.
+
+### Fixed
+
+- Unlit 3D meshes were speckled with the background where the main pass starts from the depth pre-pass's depth
+  (ambient occlusion, contact shadows, the clouds' shadow): their vertex shader's position is now invariant, as the
+  lit ones' is.
 
 ## [0.3.0] — 2026-11-10
 

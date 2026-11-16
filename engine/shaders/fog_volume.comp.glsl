@@ -28,7 +28,8 @@ struct FogLight {
     vec4 axis;   // a spot's way and the cosine of its outer angle (a point light: w is -2)
     vec4 cone;   // x: 1 / (cos inner - cos outer), y: its shadow's layer (a point light's cube's first; -1: none)
 };
-layout(std430, set = 0, binding = 5) readonly buffer FogLights { FogLight lights[]; };
+layout(set = 0, binding = 5) uniform sampler2D uCloudShadow; // the clouds' shadow map (kin_cloud_shadow)
+layout(std430, set = 0, binding = 6) readonly buffer FogLights { FogLight lights[]; };
 
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D uOut; // rgb: the light scattered toward the camera
                                                                       // per unit of length, a: the air's extinction
@@ -57,7 +58,11 @@ layout(std140, set = 2, binding = 0) uniform Params {
     vec4 sun_end;    // the view depth where each cascade ends
     vec4 sun_bias;   // each cascade's depth bias
     vec4 sun_shadow; // x: cascades (0: no map), y: the view depth they reach
+    vec4 cloud_map;    // the clouds' shadow (kin_cloud_shadow's map and toward; toward.w 0: none)
+    vec4 cloud_toward;
 } params;
+
+#include "kin_cloud_shadow.inc.glsl"
 
 #define KIN_LIGHTS_SET 2
 #define KIN_LIGHTS_BINDING 1
@@ -120,7 +125,7 @@ float cascade_lit(sampler2DArrayShadow maps, mat4 m, int k, vec3 p, float bias) 
     return texture(maps, vec4(uv, float(k), ndc.z + bias));
 }
 
-float sunlit(vec3 p, float depth) {
+float sunlit_map(vec3 p, float depth) {
     const int count = int(params.sun_shadow.x);
     if (count < 1 || params.sun.w <= 0.0 || depth > params.sun_shadow.y) {
         return 1.0;
@@ -130,6 +135,11 @@ float sunlit(vec3 p, float depth) {
         k += depth > params.sun_end[i] ? 1 : 0;
     }
     return mix(1.0, cascade_lit(uSunShadow, params.sun_matrix[k], k, p, params.sun_bias[k]), params.sun.w);
+}
+
+// And through the clouds.
+float sunlit(vec3 p, float depth) {
+    return sunlit_map(p, depth) * kin_cloud_shadow(uCloudShadow, params.cloud_map, params.cloud_toward, p);
 }
 
 float moonlit(vec3 p, float depth) {

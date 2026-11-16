@@ -76,12 +76,14 @@
 // turbidity, sun_intensity, intensity, ground_color, sun_size, sun_disc, stars, star_brightness, moon: {enabled,
 // direction, size, light, color}, night_color, light_threshold, light_interval}`, `fog: {enabled, density,
 // height_density, height_falloff, base_height, start, max_opacity, color, color_from_sky, sun_scatter,
-// sun_anisotropy}`, `lights.sky_lights_scene`, and `time_of_day: {hours, day_of_year, latitude, axial_tilt,
-// moon_phase}` (applied to the sun, the moon's fill light, the ambient light, the moon of the sky and the fog's
-// colour); a camera may say `hours` (its own time of day: tod_sweep). `procedural: "landscape"` builds a 6 km valley: a
-// height-field, 2500 cone trees and six red pillars at 50 m to 4 km. --sky, --no-sky, --fog D, --no-fog, --sky-light
-// and --time H set or remove them for every scene. Spot lights and local shadows (P3b): `lights.spots: [{position,
-// direction | target, color, radius, size, inner, outer, shadow, attach}]`
+// sun_anisotropy, sun_shadows, volumetric: {enabled, intensity, anisotropy, distance, sun_and_moon}}`, `clouds:
+// {enabled, coverage, kind, bottom, top, density, ... every Clouds3D field}`, `lights.sky_lights_scene`, and
+// `time_of_day: {hours, day_of_year, latitude, axial_tilt, moon_phase}` (applied to the sun, the moon's fill light, the
+// ambient light, the moon of the sky and the fog's colour); a camera may say `hours` (its own time of day: tod_sweep).
+// `procedural: "landscape"` builds a 6 km valley: a height-field, 2500 cone trees and six red pillars at 50 m to 4 km.
+// --sky, --no-sky, --fog D, --no-fog, --sky-light and --time H set or remove them for every scene. Spot lights and
+// local shadows (P3b): `lights.spots: [{position, direction | target, color, radius, size, inner, outer, shadow,
+// attach}]`
 // (`shadow: true` or `{enabled, resolution, bias, normal_offset, near, distance, softness}`; `attach: {offset: [right,
 // up, forward], yaw, pitch}` carries the light with each camera: a flashlight), `lights.points[].shadow_enabled` and
 // `.size`, `lights.max_shadowed_spots`, `max_shadowed_points`, `local_shadow_resolution`, `fill_shadow: {enabled,
@@ -2111,6 +2113,38 @@ void merge_sky(kin::Sky3D& sky, const kin::JsonValue* doc, const Overrides& over
     }
 }
 
+// Volumetric clouds: the scene file's `clouds` (every Clouds3D field by name; `wind` an [x, y, z]).
+void merge_clouds(kin::Clouds3D& clouds, const kin::JsonValue* doc) {
+    if (!doc) {
+        return;
+    }
+    clouds.enabled = doc->bool_at("enabled", true);
+    const auto number = [&](const char* name, float& value) {
+        value = static_cast<float>(doc->number_at(name, value));
+    };
+    number("coverage", clouds.coverage);
+    number("kind", clouds.kind);
+    number("bottom", clouds.bottom);
+    number("top", clouds.top);
+    number("density", clouds.density);
+    number("shape_scale", clouds.shape_scale);
+    number("detail_scale", clouds.detail_scale);
+    number("erosion", clouds.erosion);
+    number("weather_scale", clouds.weather_scale);
+    number("forward", clouds.forward);
+    number("backward", clouds.backward);
+    number("backward_share", clouds.backward_share);
+    number("multiple_scattering", clouds.multiple_scattering);
+    number("ambient", clouds.ambient);
+    number("planet_radius", clouds.planet_radius);
+    number("distance", clouds.distance);
+    number("resolution", clouds.resolution);
+    number("history", clouds.history);
+    clouds.steps = static_cast<kin::u32>(doc->number_at("steps", clouds.steps));
+    clouds.light_steps = static_cast<kin::u32>(doc->number_at("light_steps", clouds.light_steps));
+    clouds.wind = vec3(doc->find("wind"), clouds.wind);
+}
+
 void merge_fog(kin::Fog3D& fog, const kin::JsonValue* doc, const Overrides& over) {
     if (doc) {
         fog.enabled = doc->bool_at("enabled", true);
@@ -2124,6 +2158,14 @@ void merge_fog(kin::Fog3D& fog, const kin::JsonValue* doc, const Overrides& over
         fog.colour_from_sky = doc->bool_at("color_from_sky", false);
         fog.sun_scatter = static_cast<float>(doc->number_at("sun_scatter", fog.sun_scatter));
         fog.sun_anisotropy = static_cast<float>(doc->number_at("sun_anisotropy", fog.sun_anisotropy));
+        fog.sun_shadows = doc->bool_at("sun_shadows", fog.sun_shadows);
+        if (const kin::JsonValue* v = doc->find("volumetric")) {
+            fog.volumetric.enabled = v->bool_at("enabled", true);
+            fog.volumetric.intensity = static_cast<float>(v->number_at("intensity", fog.volumetric.intensity));
+            fog.volumetric.anisotropy = static_cast<float>(v->number_at("anisotropy", fog.volumetric.anisotropy));
+            fog.volumetric.distance = static_cast<float>(v->number_at("distance", fog.volumetric.distance));
+            fog.volumetric.sun_and_moon = v->bool_at("sun_and_moon", fog.volumetric.sun_and_moon);
+        }
     }
     if (over.fog > 0.0) {
         fog.enabled = true;
@@ -3486,6 +3528,8 @@ int main(int argc, char** argv) {
             merge_sky(scene.sky, doc.find("sky"), over);
             scene.fog = {};
             merge_fog(scene.fog, doc.find("fog"), over);
+            scene.clouds = {};
+            merge_clouds(scene.clouds, doc.find("clouds"));
             scene.lights.sky_lights_scene = lights.bool_at("sky_lights_scene") || over.sky_light;
             kin::TimeOfDay3D day;
             if (merge_time_of_day(day, doc.find("time_of_day"), camera_hours >= 0.0 ? camera_hours : over.time_hours)) {

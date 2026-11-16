@@ -13,6 +13,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(set = 0, binding = 0) uniform sampler2D uDepth;               // the pre-pass's, reverse Z: 0 is nothing
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow uShadow;   // the sun's, a layer a cascade, compared
+layout(set = 0, binding = 2) uniform sampler2D uCloudShadow;         // the clouds' shadow map (kin_cloud_shadow)
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uShare; // x: the lit share, y: the opacity, z: the
                                                                         // distance along the ray (0: the sky)
 
@@ -31,12 +32,18 @@ layout(std140, set = 2, binding = 0) uniform Params {
     vec4 cascade_end;      // the view depth where each cascade ends
     vec4 cascade_bias;     // each cascade's depth bias
     vec4 shadow;           // x: cascades, y: the view depth the shadows reach, z: the walk's offset this frame, w: steps
+    vec4 sun;              // (fog_sun_apply.frag's)
+    vec4 sun_light;
+    vec4 cloud_map;        // the clouds' shadow (kin_cloud_shadow's map and toward; toward.w 0: none)
+    vec4 cloud_toward;
 } params;
+
+#include "kin_cloud_shadow.inc.glsl"
 
 #include "kin_depth.inc.glsl"
 
 // Whether the sun reaches `p` (view depth `depth`): the cascade whose slice holds it, one filtered comparison.
-float sunlit(vec3 p, float depth) {
+float sunlit_map(vec3 p, float depth) {
     const int count = int(params.shadow.x);
     int k = 0;
     for (int i = 0; i < count - 1; ++i) {
@@ -50,6 +57,11 @@ float sunlit(vec3 p, float depth) {
     }
     // (A shadow of strength below 1 lets that share of the sun through: Lights3D::sun_shadow_strength.)
     return mix(1.0, texture(uShadow, vec4(uv, float(k), ndc.z + params.cascade_bias[k])), params.forward.w);
+}
+
+// And through the clouds.
+float sunlit(vec3 p, float depth) {
+    return sunlit_map(p, depth) * kin_cloud_shadow(uCloudShadow, params.cloud_map, params.cloud_toward, p);
 }
 
 float opacity_at(KinFog f, vec3 dir, float t) {

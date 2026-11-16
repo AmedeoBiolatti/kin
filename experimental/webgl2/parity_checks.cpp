@@ -1,6 +1,6 @@
 // Pixel checks of what the browser renderer draws that native kin draws too (docs/web.md, First 3D view): spot
-// lights, materials whose shaders the browser can't run, surface shaders and material graphs, HDR views and
-// volumetric fog.
+// lights, materials whose shaders the browser can't run, surface shaders and material graphs, HDR views,
+// volumetric fog and volumetric clouds.
 #include "render_checks.hpp"
 
 #include <algorithm>
@@ -558,6 +558,40 @@ void check_local_shadows(Renderer2D& r, Renderer3D& r3d) {
 }
 } // namespace
 
+// Volumetric clouds: an overcast greys a clear blue sky (a camera on the ground looking up); a plane in front of them
+// keeps its colour (their depth test); the frames blend after the first; with no coverage the sky is as without them.
+void check_clouds(Renderer2D& r, Renderer3D& r3d) {
+    Bench b(r, r3d);
+    auto& scene = b.scene;
+    scene.camera = Camera3D::look_at({0, 2, 0}, {3, 7.77f, -10});
+    scene.camera.fov = 60;
+    const f32 e = 40.0f * 3.14159265f / 180.0f;
+    scene.lights.sun = {.direction = {0, std::sin(e), -std::cos(e)}, .color = {1, 1, 1}};
+    scene.sky = {.enabled = true, .turbidity = 3, .sun_intensity = 1, .sun_size = 0.01f};
+    b.render("A clear sky");
+    const auto clear = b.at(32, 32);
+    scene.clouds = {.enabled = true, .coverage = 0.0f, .shadows = false};
+    b.render("Clouds with no coverage");
+    near(b.at(32, 32), clear, 1, "Clouds with no coverage leave the sky as it was");
+    scene.clouds.coverage = 1.0f;
+    for (int frame = 0; frame < 3; ++frame)
+        b.render("An overcast");
+    const auto overcast = b.at(32, 32);
+    std::cerr << "clouds: clear " << clear[0] << ' ' << clear[1] << ' ' << clear[2] << ", overcast " << overcast[0]
+              << ' ' << overcast[1] << ' ' << overcast[2] << '\n';
+    require(r3d.debug_stats().clouds && r3d.debug_stats().clouds_history && r3d.debug_stats().clouds_depth_bounded,
+            "The clouds were walked (to the meshes' depth) and blended");
+    require(clear[2] - clear[0] > 15, "The clouds check's clear sky must be blue");
+    require(overcast[2] - overcast[0] < (clear[2] - clear[0]) / 2, "An overcast greys the sky");
+    const Vec3f at = scene.camera.position + scene.camera.forward() * 20.0f;
+    const Mesh3D box = r3d.create_mesh(meshes::box({4, 4, 4})).value_or({});
+    require(bool(box) &&
+                bool(scene.draw(box, Mat4f::translation(at), {.color = Color::rgb(200, 40, 40), .unlit = true})),
+            "Parity submission failed");
+    b.render("A plane in front of the clouds");
+    near(b.at(32, 32), {200, 40, 40, 255}, 2, "The clouds stay behind a plane in front of them");
+    std::cout << "web parity: volumetric clouds passed\n";
+}
 void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
     check_spot_lights(r, r3d);
     check_unrunnable_shaders(r, r3d);
@@ -567,4 +601,5 @@ void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {
     check_particles(r, r3d);
     check_decals(r, r3d);
     check_local_shadows(r, r3d);
+    check_clouds(r, r3d);
 }

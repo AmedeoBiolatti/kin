@@ -15796,6 +15796,426 @@ void test_gpu_fog_melts_into_the_sky() {
 // is reprojected by the camera's turn, not smeared: the disc stays a disc where the sun projects, and the whole picture
 // is within a few levels of the same frame drawn without temporal anti-aliasing. Both paths: the main pass writes the
 // velocity, and (with ambient occlusion) the pre-pass does, where the sky's turn is a pass of its own.
+// An unlit mesh where the main pass starts from the pre-pass's depth (ambient occlusion turns the pre-pass on): its
+// colour everywhere, not speckled with the background where the two passes' depths differed in the last bit (the
+// unlit vertex shader's position was not declared invariant).
+void test_gpu_unlit_over_prepass_depth() {
+    with_gpu("test_gpu_unlit_over_prepass_depth", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().ambient_occlusion, "the depth pre-pass")) {
+            return;
+        }
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 0.0f}, {3.0f, 7.77f, -10.0f}, 60.0f);
+        scene.ambient_occlusion.enabled = true;
+        const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
+        const Vec3f at = scene.camera.position + scene.camera.forward() * 20.0f;
+        (void)scene.draw(box, Mat4f::translation(at) * Mat4f::scaling({4.0f, 4.0f, 4.0f}), red);
+        const Pixels p = shoot_view(renderer, r3d, view, scene);
+        assert(r3d.debug_stats().main_depth_from_prepass);
+        for (int y = 52; y <= 68; ++y) {
+            for (int x = 72; x <= 88; ++x) {
+                expect(p.at(x, y), red.color, "the unlit box over the pre-pass's depth", 1);
+            }
+        }
+        renderer.present();
+    });
+}
+
+// Scene3D::clouds' scenes: a camera on the ground looking 30 degrees up toward the sun's side, a clear sky, the clouds
+// as asked (the procedural sky lights them). The sun's light stays under 1: an 8-bit view does not clip it.
+kin::Scene3D cloudy_scene(float sun_elevation_degrees = 40.0f, float coverage = 0.5f) {
+    const float e = sun_elevation_degrees * 3.14159265f / 180.0f;
+    const Vec3f sun{0.0f, std::sin(e), -std::cos(e)};
+    kin::Scene3D scene;
+    scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 0.0f}, {3.0f, 2.0f + 10.0f * 0.577f, -10.0f}, 60.0f);
+    scene.lights.sun = {.direction = sun, .color = {1.0f, 1.0f, 1.0f}};
+    scene.sky.enabled = true;
+    scene.sky.turbidity = 3.0f;
+    scene.sky.sun_intensity = 1.0f;
+    scene.sky.sun_size = 0.01f;
+    scene.clouds.enabled = true;
+    scene.clouds.coverage = coverage;
+    return scene;
+}
+
+// The mean of each channel over a picture's pixels.
+std::array<double, 3> mean_rgb(const Pixels& p) {
+    std::array<double, 3> sum{};
+    for (int y = 0; y < p.size.y; ++y) {
+        for (int x = 0; x < p.size.x; ++x) {
+            const Color c = p.at(x, y);
+            sum[0] += c.r;
+            sum[1] += c.g;
+            sum[2] += c.b;
+        }
+    }
+    const double n = static_cast<double>(p.size.x) * p.size.y;
+    return {sum[0] / n, sum[1] / n, sum[2] / n};
+}
+
+// Off is off: the clouds disabled (their settings set), or with no coverage, draw the picture a scene without them
+// draws, byte for byte, and walk nothing.
+void test_gpu_clouds_off_are_unchanged() {
+    with_gpu("test_gpu_clouds_off_are_unchanged", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene = cloudy_scene();
+        scene.clouds.enabled = false;
+        const Pixels off = shoot_view(renderer, r3d, view, scene);
+        assert(!r3d.debug_stats().clouds);
+        renderer.present();
+        scene.clouds.enabled = true;
+        scene.clouds.coverage = 0.0f;
+        const Pixels none = shoot_view(renderer, r3d, view, scene);
+        assert(!r3d.debug_stats().clouds && same_picture(off, none));
+        renderer.present();
+    });
+}
+
+// An overcast sky: the clouds walked at half the view's size and drawn over the whole sky, grey where it was blue (the
+// blue's lead over the red mostly gone) and the picture changed throughout; with the frames blended after the first.
+// Scattered clouds change part of it.
+void test_gpu_clouds_cover_the_sky() {
+    with_gpu("test_gpu_clouds_cover_the_sky", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene = cloudy_scene(40.0f, 1.0f);
+        scene.clouds.enabled = false;
+        const Pixels clear = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        scene.clouds.enabled = true;
+        Pixels overcast;
+        for (int frame = 0; frame < 4; ++frame) {
+            overcast = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const auto& stats = r3d.debug_stats();
+            assert(stats.clouds && stats.clouds_texels == 80u * 60u && stats.clouds_history == (frame > 0));
+            assert(stats.clouds_noise_made == (frame == 0));
+        }
+        const auto c = mean_rgb(clear), o = mean_rgb(overcast);
+        std::cerr << "clouds: clear sky " << c[0] << ' ' << c[1] << ' ' << c[2] << ", overcast " << o[0] << ' ' << o[1]
+                  << ' ' << o[2] << '\n';
+        assert(c[2] - c[0] > 15.0);                // the clear sky is blue
+        assert(o[2] - o[0] < 0.4 * (c[2] - c[0])); // the overcast one grey
+        int changed = 0;
+        for (int y = 0; y < 120; y += 4) {
+            for (int x = 0; x < 160; x += 4) {
+                changed += largest_difference(clear.at(x, y), overcast.at(x, y)) > 12 ? 1 : 0;
+            }
+        }
+        assert(changed > 40 * 30 * 9 / 10);
+        // Scattered clouds: some of the sky changed, some not.
+        scene.clouds.coverage = 0.45f;
+        view.reset_history();
+        Pixels scattered;
+        for (int frame = 0; frame < 4; ++frame) {
+            scattered = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+        }
+        int some = 0;
+        for (int y = 0; y < 120; y += 4) {
+            for (int x = 0; x < 160; x += 4) {
+                some += largest_difference(clear.at(x, y), scattered.at(x, y)) > 12 ? 1 : 0;
+            }
+        }
+        std::cerr << "clouds: " << changed << " of 1200 samples changed overcast, " << some << " scattered\n";
+        assert(some > 30 && some < changed);
+    });
+}
+
+// The clouds stay behind what is nearer: a box in front of them keeps its colour exactly, with and without
+// multisampling (the clouds are drawn at their own depth, tested against the meshes').
+void test_gpu_clouds_behind_geometry() {
+    with_gpu("test_gpu_clouds_behind_geometry", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        for (const kin::u32 samples : {1u, 4u}) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples}).value_or({});
+            kin::Scene3D scene = cloudy_scene(40.0f, 1.0f);
+            const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
+            const Vec3f at = scene.camera.position + scene.camera.forward() * 20.0f;
+            (void)scene.draw(box, Mat4f::translation(at) * Mat4f::scaling({4.0f, 4.0f, 4.0f}), red);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            assert(r3d.debug_stats().clouds);
+            for (int dy = -6; dy <= 6; dy += 3) {
+                for (int dx = -6; dx <= 6; dx += 3) {
+                    expect(p.at(80 + dx, 60 + dy), red.color, "the box in front of the clouds", 1);
+                }
+            }
+            renderer.present();
+        }
+    });
+}
+
+// Lit at their height through the procedural sky's air: a degree after sunset the overcast still has the sun (3 km
+// up, the horizon is lower), red; ten degrees after, it has not (nor much of the twilight's), and is far darker. With
+// temporal anti-aliasing (the main pass then writes the velocity too) as without.
+void test_gpu_clouds_at_sunset() {
+    with_gpu("test_gpu_clouds_at_sunset", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](float elevation, bool taa) {
+            kin::Scene3D scene = cloudy_scene(elevation, 1.0f);
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 0.0f}, {0.0f, 2.0f + 10.0f * 0.2f, -10.0f}, 60.0f);
+            scene.sky.sun_intensity = 3.0f;
+            scene.clouds.bottom = 3000.0f;
+            scene.clouds.top = 5000.0f;
+            scene.taa.enabled = taa;
+            view.reset_history();
+            Pixels p;
+            for (int frame = 0; frame < 4; ++frame) {
+                p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                assert(r3d.debug_stats().clouds);
+            }
+            return mean_rgb(p);
+        };
+        for (const bool taa : {false, true}) {
+            if (taa && !r3d.capabilities().temporal_aa) {
+                continue;
+            }
+            const auto lit = shoot(-1.0f, taa), dark = shoot(-10.0f, taa);
+            std::cerr << "clouds at sunset (taa " << taa << "): " << lit[0] << ' ' << lit[1] << ' ' << lit[2]
+                      << ", after dusk " << dark[0] << ' ' << dark[1] << ' ' << dark[2] << '\n';
+            assert(lit[0] > 1.3 * lit[2] && lit[0] > 20.0);
+            assert(dark[0] + dark[1] + dark[2] < 0.5 * (lit[0] + lit[1] + lit[2]));
+        }
+    });
+}
+
+// The frames blend: the history is dropped on the first frame, kept after, dropped again by View3D::reset_history()
+// and by a jump; a still camera's picture settles (the last frames differ less than the first two).
+void test_gpu_clouds_history() {
+    with_gpu("test_gpu_clouds_history", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene = cloudy_scene(40.0f, 0.5f);
+        std::vector<Pixels> frames;
+        for (int frame = 0; frame < 12; ++frame) {
+            frames.push_back(shoot_view(renderer, r3d, view, scene));
+            renderer.present();
+            assert(r3d.debug_stats().clouds_history == (frame > 0));
+        }
+        const Spread first = compare_pictures(frames[0], frames[1]);
+        const Spread last = compare_pictures(frames[10], frames[11]);
+        std::cerr << "clouds' history: frames 1-2 differ by " << first.mean << " (largest " << first.largest
+                  << "), 11-12 by " << last.mean << " (largest " << last.largest << ")\n";
+        assert(last.mean < first.mean && last.mean < 1.0);
+        view.reset_history();
+        (void)shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(!r3d.debug_stats().clouds_history);
+        (void)shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(r3d.debug_stats().clouds_history);
+        scene.camera.position = scene.camera.position + Vec3f{500.0f, 0.0f, 0.0f};
+        (void)shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(!r3d.debug_stats().clouds_history);
+    });
+}
+
+// The clouds' shadow (Clouds3D::shadows): a white floor under a high sun, seen from 1200 m up. Under scattered clouds
+// part of it is in their shade (darker than without the shadow) and part in the sun (as without), none brighter; under
+// an overcast nearly all of it is shaded; a strength of 0 is the picture without, byte for byte.
+void test_gpu_clouds_shadow_the_ground() {
+    with_gpu("test_gpu_clouds_shadow_the_ground", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().ambient_occlusion, "the depth pre-pass")) {
+            return;
+        }
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](float coverage, bool shadows, float strength) {
+            kin::Scene3D scene = cloudy_scene(60.0f, coverage);
+            scene.camera = kin::Camera3D::look_at({0.0f, 1200.0f, 0.0f}, {0.0f, 0.0f, -1200.0f}, 70.0f);
+            scene.sky.sun_intensity = 1.0f;
+            scene.lights.ambient = {0.1f, 0.1f, 0.1f};
+            scene.lights.sun.color = {0.8f, 0.8f, 0.8f};
+            scene.clouds.shadows = shadows;
+            scene.clouds.shadow_strength = strength;
+            (void)scene.draw(box, Mat4f::scaling({20000.0f, 1.0f, 20000.0f}) * Mat4f::translation({0.0f, -0.5f, 0.0f}),
+                             {.color = Color::rgb(230, 230, 230)});
+            view.reset_history();
+            Pixels p;
+            for (int frame = 0; frame < 2; ++frame) {
+                p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+            }
+            return p;
+        };
+        const auto shaded_share = [](const Pixels& lit, const Pixels& shaded, int& brighter) {
+            int darker = 0, count = 0;
+            brighter = 0;
+            for (int y = 40; y < 120; y += 2) { // the floor's rows
+                for (int x = 0; x < 160; x += 2) {
+                    const Color a = lit.at(x, y), b = shaded.at(x, y);
+                    darker += int(a.r) - int(b.r) > 20 ? 1 : 0;
+                    brighter += int(b.r) - int(a.r) > 2 ? 1 : 0;
+                    ++count;
+                }
+            }
+            return static_cast<double>(darker) / count;
+        };
+        const Pixels plain = shoot(0.55f, false, 1.0f);
+        assert(!r3d.debug_stats().clouds_shadow_map);
+        const Pixels none = shoot(0.55f, true, 0.0f);
+        assert(!r3d.debug_stats().clouds_shadow_map && same_picture(plain, none));
+        const Pixels scattered = shoot(0.55f, true, 1.0f);
+        assert(r3d.debug_stats().clouds_shadow_map && r3d.debug_stats().clouds_shadowed);
+        int brighter = 0;
+        const double some = shaded_share(plain, scattered, brighter);
+        assert(brighter == 0);
+        const Pixels overcast_plain = shoot(1.0f, false, 1.0f);
+        const Pixels overcast = shoot(1.0f, true, 1.0f);
+        const double most = shaded_share(overcast_plain, overcast, brighter);
+        std::cerr << "clouds' shadow: " << some * 100.0 << "% of the floor shaded under scattered clouds, "
+                  << most * 100.0 << "% under an overcast\n";
+        assert(brighter == 0 && some > 0.05 && some < 0.9 && most > 0.9);
+    });
+}
+
+// The clouds in the sky's light (Lights3D::sky_lights_scene): a white box lit by the sky's environment alone (the sun's
+// light on it 0) is blue-ish under a clear sky and grey under an overcast, whose panorama holds the clouds; the
+// panorama is not made again while nothing moves, and is once the wind has taken the clouds far enough.
+void test_gpu_clouds_in_the_sky_light() {
+    with_gpu("test_gpu_clouds_in_the_sky_light", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {2.0f, 1.0f, 2.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene = cloudy_scene(40.0f, 1.0f);
+        scene.camera = kin::Camera3D::look_at({0.0f, 3.0f, 4.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.sky_lights_scene = true;
+        scene.sky.light_interval = 0; // made again as soon as something moved
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(230, 230, 230)});
+        const auto top = scene.camera.project({0.0f, 0.5f, 0.0f}, screen);
+        assert(top);
+        scene.clouds.enabled = false;
+        const Color clear = shoot_view(renderer, r3d, view, scene).at(top->pos);
+        renderer.present();
+        scene.clouds.enabled = true;
+        Color overcast{};
+        for (int frame = 0; frame < 6; ++frame) {
+            overcast = shoot_view(renderer, r3d, view, scene).at(top->pos);
+            renderer.present();
+            const auto& stats = r3d.debug_stats();
+            // Made again on the first frame (the clouds came), not after: nothing moved.
+            assert(stats.sky_env_regenerated == (frame == 0) && stats.clouds_in_sky_light == (frame == 0));
+        }
+        std::cerr << "clouds in the sky's light: the box's top " << clear << " under a clear sky, " << overcast
+                  << " under an overcast\n";
+        assert(int(clear.b) - int(clear.r) > 10);
+        assert(int(overcast.b) - int(overcast.r) < (int(clear.b) - int(clear.r)) / 2);
+        // A minute of the wind: the clouds have moved; made again.
+        scene.time += 60.0f;
+        (void)shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(r3d.debug_stats().clouds_in_sky_light);
+    });
+}
+
+// The fog under the clouds: a box far in a fog that takes its colour from the sky shows that colour, blue-ish under a
+// clear sky and grey under an overcast (the air lit by the clouds, not the sun and the blue sky); clouds with no
+// coverage leave the fog as it was, byte for byte.
+void test_gpu_clouds_veil_the_fog() {
+    with_gpu("test_gpu_clouds_veil_the_fog", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](bool clouds, float coverage) {
+            kin::Scene3D scene = cloudy_scene(40.0f, coverage);
+            // (Away from the sun: its glow in the fog would whiten an 8-bit view toward it.)
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 0.0f}, {0.0f, 2.0f, 10.0f}, 60.0f);
+            scene.clouds.enabled = clouds;
+            scene.clouds.shadows = false; // (the fog's colour alone)
+            scene.fog = {.enabled = true, .density = 0.01f, .colour_from_sky = true, .sun_scatter = 0.3f};
+            (void)scene.draw(box, Mat4f::translation({0.0f, 2.0f, 300.0f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}),
+                             {.color = Color::rgb(90, 60, 40)});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels clear = shoot(false, 1.0f);
+        assert(same_picture(clear, shoot(true, 0.0f)));
+        const Color a = clear.at(80, 60), b = shoot(true, 1.0f).at(80, 60);
+        std::cerr << "the fog under the clouds: " << a << " clear, " << b << " overcast\n";
+        assert(int(a.b) - int(a.r) > 10);
+        assert(int(b.b) - int(b.r) < (int(a.b) - int(a.r)) / 2);
+    });
+}
+
+// The game's coverage map (Clouds3D::weather_map): black (no coverage anywhere) at a coverage of 0.5 draws no clouds,
+// the picture without them byte for byte; white covers the sky.
+void test_gpu_clouds_weather_map() {
+    with_gpu("test_gpu_clouds_weather_map", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto map = [&](kin::u8 value) {
+            const std::vector<kin::u8> pixels(4 * 4 * 4, value);
+            return renderer.create_texture_from_rgba(pixels.data(), {4, 4});
+        };
+        kin::Scene3D scene = cloudy_scene(40.0f, 0.5f);
+        scene.clouds.enabled = false;
+        const Pixels none = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        scene.clouds.enabled = true;
+        scene.clouds.weather_map = map(0);
+        const Pixels black = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(r3d.debug_stats().clouds && same_picture(none, black));
+        scene.clouds.weather_map = map(255);
+        Pixels white;
+        for (int frame = 0; frame < 3; ++frame) {
+            white = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+        }
+        int changed = 0;
+        for (int y = 0; y < 120; y += 4)
+            for (int x = 0; x < 160; x += 4)
+                changed += largest_difference(none.at(x, y), white.at(x, y)) > 12 ? 1 : 0;
+        std::cerr << "clouds' coverage map: white changed " << changed << " of 1200 samples\n";
+        assert(changed > 1000);
+    });
+}
+
+// Inside the layer (Clouds3D seen from within, geometry in the clouds): the walk stops at what the pre-pass drew, so a
+// box 30 units away is veiled by the little cloud in front of it and one 300 away by more, neither hidden whole nor
+// left bare (one depth a pixel would do either).
+void test_gpu_clouds_around_geometry() {
+    with_gpu("test_gpu_clouds_around_geometry", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().ambient_occlusion, "the depth pre-pass")) {
+            return;
+        }
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene = cloudy_scene(40.0f, 1.0f);
+        scene.camera = kin::Camera3D::look_at({0.0f, 2500.0f, 0.0f}, {0.0f, 2500.0f, -10.0f}, 60.0f);
+        scene.clouds.density = 0.004f; // thin: a few hundred units of it veil, not hide
+        const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
+        const Vec3f near_at{-3.0f, 2500.0f, -30.0f}, far_at{30.0f, 2500.0f, -300.0f};
+        (void)scene.draw(box, Mat4f::translation(near_at) * Mat4f::scaling({4.0f, 4.0f, 4.0f}), red);
+        (void)scene.draw(box, Mat4f::translation(far_at) * Mat4f::scaling({40.0f, 40.0f, 40.0f}), red);
+        Pixels p;
+        for (int frame = 0; frame < 4; ++frame) {
+            p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+        }
+        assert(r3d.debug_stats().clouds && r3d.debug_stats().clouds_depth_bounded);
+        const auto near_spot = scene.camera.project(near_at, screen), far_spot = scene.camera.project(far_at, screen);
+        assert(near_spot && far_spot);
+        const int near_veil = largest_difference(p.at(near_spot->pos), red.color);
+        const int far_veil = largest_difference(p.at(far_spot->pos), red.color);
+        std::cerr << "clouds around geometry: the box at 30 veiled by " << near_veil << ", at 300 by " << far_veil
+                  << " (of 255)\n";
+        assert(near_veil >= 2 && near_veil < 60 && far_veil > near_veil + 20 && far_veil < 200);
+    });
+}
+
 void test_gpu_sky_under_taa() {
     with_gpu("test_gpu_sky_under_taa", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -25183,6 +25603,17 @@ int main(int argc, char** argv) {
     RUN(test_gpu_fog_volumetric_sun_and_moon());
     RUN(test_gpu_fog_blended_and_custom());
     RUN(test_gpu_fog_melts_into_the_sky());
+    RUN(test_gpu_unlit_over_prepass_depth());
+    RUN(test_gpu_clouds_off_are_unchanged());
+    RUN(test_gpu_clouds_cover_the_sky());
+    RUN(test_gpu_clouds_behind_geometry());
+    RUN(test_gpu_clouds_at_sunset());
+    RUN(test_gpu_clouds_history());
+    RUN(test_gpu_clouds_shadow_the_ground());
+    RUN(test_gpu_clouds_in_the_sky_light());
+    RUN(test_gpu_clouds_veil_the_fog());
+    RUN(test_gpu_clouds_weather_map());
+    RUN(test_gpu_clouds_around_geometry());
     RUN(test_gpu_sky_under_taa());
     RUN(test_gpu_sky_sun_under_taa());
     RUN(test_gpu_sky_lights_the_scene());

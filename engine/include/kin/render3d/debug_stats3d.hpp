@@ -194,10 +194,18 @@ struct RenderDebugStats3D : RenderStats3D {
     // and the CPU time spent recording the last one.
     bool sky_drawn = false;
     bool fog_applied = false;
-    bool fog_sun_shadowed = false; // Fog3D::sun_shadows: the share of the fog's air the sun reaches was walked
-    bool fog_volume = false;       // Fog3D::volumetric: the lights' light in the fog's air was lit and added
-    u32 fog_volume_lights = 0;     // the lights it was lit by
-    u32 fog_volume_cells = 0;      // its cells (across x down x slices)
+    bool fog_sun_shadowed = false;     // Fog3D::sun_shadows: the share of the fog's air the sun reaches was walked
+    bool fog_volume = false;           // Fog3D::volumetric: the lights' light in the fog's air was lit and added
+    u32 fog_volume_lights = 0;         // the lights it was lit by
+    u32 fog_volume_cells = 0;          // its cells (across x down x slices)
+    bool clouds = false;               // Scene3D::clouds: the layer was walked and drawn
+    bool clouds_history = false;       // with the last frames' blend (not dropped: a jump, a reset, the first frame)
+    u32 clouds_texels = 0;             // the walk's rays (across x down)
+    bool clouds_noise_made = false;    // the clouds' noise was made this render (the first that drew them)
+    bool clouds_shadow_map = false;    // Clouds3D::shadows: their shadow map was made
+    bool clouds_shadowed = false;      // and laid on what the pre-pass drew
+    bool clouds_in_sky_light = false;  // Lights3D::sky_lights_scene: the sky's panorama was made again with the clouds
+    bool clouds_depth_bounded = false; // the walk stopped at the pre-pass's surfaces (it ran)
     bool sky_env_regenerated = false;
     u32 sky_env_generations = 0;
     f64 sky_env_cpu_ms = 0.0;

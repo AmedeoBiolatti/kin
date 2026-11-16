@@ -1512,6 +1512,124 @@ whether or not the sky is drawn. Without it the hemisphere ambient is used as be
 `time_of_day`, `lights.sky_lights_scene`, a camera's `hours`, `at_sun`, `at_moon`; `procedural: "landscape"`; scenes `sky_day`, `sky_dusk`,
 `sky_night`, `fog_valley`, `tod_sweep`. Sponza Walk's "Sky and fog (P3a)" section and `--preset sky|dusk|fog|night|day-night`.
 
+### Volumetric clouds
+
+`Scene3D::clouds` (`Clouds3D`, `kin/render3d/sky3d.hpp`) is a layer of 3D clouds over the scene, made, lit and drawn as
+Unreal's Volumetric Cloud and Unity HDRP's Volumetric Clouds draw theirs. Off by default; off (or with `coverage` 0),
+the picture is the same bytes and nothing is walked.
+
+```cpp
+scene.sky.enabled = true;                        // the procedural sky lights them (optional, see below)
+scene.clouds = {.enabled = true, .coverage = 0.5f, .kind = 0.7f, .bottom = 1500.0f, .top = 4000.0f};
+scene.clouds.wind = {12.0f, 0.0f, 4.0f};         // units a second; they drift with Scene3D::time
+```
+
+**The layer.** A shell between `bottom` and `top` (world heights over y = 0) that curves down with the distance as the
+planet does (`planet_radius`: a level ray meets a 1.5 km base about 140 km away), drawn out to `distance` (150 km),
+thinning over its last fifth.
+
+**The clouds in it.** A coverage map (a tiling noise `weather_scale` across) says where there are clouds and of which
+kind; `coverage` moves it (0 none, 0.5 scattered, 1 overcast) and `kind` moves the kinds (0 flat stratus low in the
+layer, 1 heaps to its top). Within it, a Perlin-Worley noise `shape_scale` across shapes the heaps and a Worley noise
+`detail_scale` across wears their edges (`erosion`), wispy at the base and billowy above (Schneider's model, as in
+Horizon Zero Dawn, Unreal and Unity). `density` (0.1) is a full cloud's extinction per unit. The noise is three RGBA8
+volumes (128^3, 32^3 and a 256^2 map, 8.7 MB) made on the GPU the first time clouds are drawn
+(`debug_stats().clouds_noise_made`); `kin::cloud_model::noise_texel` is the same noise on the CPU.
+
+**The light.** Each pixel's ray is walked through the layer (`steps`: at most 64 samples; a ray straight up takes 24).
+At each sample with cloud, `light_steps` (6) samples toward the light give the cloud's optical depth that way; the
+cloud scatters the light by a forward and a backward Henyey-Greenstein lobe (`forward`, `backward`, `backward_share`),
+plus two octaves of the light scattered many times, each fainter, less deep and wider (`multiple_scattering`, 0.5:
+Wrenninge's approximation, Unreal's default), and the sky's ambient light from above and the ground's from below
+(`ambient`). Under the procedural sky (`Scene3D::sky` enabled, `Procedural`), the sun reaches each cloud through the air
+above it, from a horizon lowered by its height, so high clouds keep a red sun for a few minutes after sunset; the
+ambient is the sky's own (`sky_model::AmbientLight3D`), and the sky's air is put in front of the clouds (`kin_scatter`'s
+integral cut at the cloud's height), so far clouds pale into the horizon. Without it, `Lights3D::sun.color` and
+`ambient` light them and no air is added. When the sun no longer reaches the layer's top, the fill light (the moon)
+lights them. The fog veils them as it veils the sky behind them.
+
+**The cost.** The walk runs at `resolution` of the view (0.5: a quarter of the pixels), its start moved along the ray
+each frame; `clouds_resolve.comp` blends each frame into the last (`history`, 0.9) where its clouds were then
+(reprojected at their distance), held within the frame's 3 x 3 neighbourhood. A jump or a turn of more than 30 degrees
+drops the history, as does `View3D::reset_history()` (`debug_stats().clouds_history`). It is a pass of the stock frame
+graph in two: `clouds` before `prepass` (the noise, the parameters, the shadow map, which the pre-pass reads) and
+`clouds_trace` before `main` (the walk and the blend, bounded by the pre-pass's depth). About 1.0 to 1.2 ms of GPU at 1920 x 1080 (RTX 4080 Laptop, `clouds_day`'s `up`
+camera: 0.8-1.0 ms without, 1.9-2.2 with); `resolution` 0.35 takes 0.4 ms off, `steps` 32 0.2 ms, `light_steps` 3
+0.1 ms. `debug_stats().clouds`, `clouds_texels`. Harness: `kin_reference` JSON `clouds: {...}` (every field by name),
+scenes `clouds_day`, `clouds_dusk`.
+
+**Drawing.** Where the depth pre-pass ran (the clouds' shadow turns it on), each ray of the walk stops at the farthest
+surface its texel covers (`debug_stats().clouds_depth_bounded`): a mountain reaching into the layer, or a plane flying
+through it, takes the cloud in front of it and none of the cloud behind. Then, in the main pass after the opaque
+meshes and the sky and before the blended meshes, each pixel's clouds are drawn over what is behind them at the depth
+of their mean distance along the ray, tested against the meshes': a wall in front hides them, a mountain behind them
+is seen through them. Without the pre-pass (`shadows` off and nothing else asking for it) the rays are not bounded:
+geometry inside the layer is either wholly in front of a pixel's clouds or wholly behind them. In the browser the walk
+runs after the opaque meshes and reads their depth the same way.
+
+**Their shadow** (`shadows`, on by default; `shadow_strength`, `shadow_extent` 20 km, `shadow_resolution` 512): each
+render, `cloud_shadow.comp` walks the layer along the sun for each texel of a square on the plane at the layer's
+middle height, round where the camera's ray toward the sun crosses it (32 samples a texel, e^-tau of what they hold;
+40 m texels by default; the shadow fades out over the square's last 15%). It then darkens:
+
+- the sun's light on what the depth pre-pass draws (opaque and cut-out meshes, decals): after the pre-pass,
+  `cloud_shadow_screen.comp` finds each pixel's world point, reads the map along the sun from it and multiplies the
+  contact shadows' share by it; the main pass reads that in the contact shadows' place, so every stock, surface and
+  graph shader variant takes it with no sampler more. The clouds' shadow turns the pre-pass on (with TAA, the main
+  pass no longer writes the velocity itself). In a scene with point or spot lights (the lights variant),
+  `Lights3D::sun_shadow_strength` fades it as it fades the contact shadows;
+- the volumetric fog's sun (`Fog3D::volumetric`'s `sun_and_moon`, and `Fog3D::sun_shadows`' walk): shafts come down
+  through the gaps.
+
+Blended meshes, particles, custom material shaders, the overlay and GI's sunlight are not shadowed by them; nor is
+the moon. `debug_stats().clouds_shadow_map`, `clouds_shadowed`. Cost: about 0.15 ms at 1920 x 1080 (RTX 4080
+Laptop, in-run A/B against clouds without shadows in a floor-and-boxes scene, the pre-pass they turn on included; the
+clouds themselves 0.55 ms there). Harness scene `clouds_shafts` (morning haze with the sun's volume through their
+shadow; `kin_reference` reads `fog.volumetric` and `fog.sun_shadows` now).
+
+**In the sky's light** (`Lights3D::sky_lights_scene`): the clouds are drawn over the sky's panorama before it is
+filtered into the scene's ambient light and reflections (`clouds_env.frag`, the view's march from the camera, without
+the fog), so an overcast greys and dims both. The panorama is made again, under the sky's own `light_threshold` and
+`light_interval`, when the clouds' settings change, when the wind has taken them a fraction of a percent of a shape
+tile (every few seconds at the default wind) or when the camera has moved (`debug_stats().clouds_in_sky_light`).
+Without `sky_lights_scene` the ambient light is `Lights3D::ambient`'s, as before.
+
+**The fog under them.** The air under clouds is lit less by the sun and more by the clouds: where they cover a share
+f of the sky round the camera (`kin::cloud_model::cover_share`: the coverage map over 20 km, as the GPU reads it; with a
+`weather_map` of the game's, `coverage` itself), the fog's colour from the sky is (1 - f) of the clear sky's and f of the
+light the clouds' bases show (their ambient terms, in grey), and its sun's in-scattering (`Fog3D::sun_scatter`) is
+(1 - f) of its, in the main pass, the sky pass's fog, the particles and custom shaders. The volumetric fog's passes,
+which walk the sun through the clouds' shadow, keep it whole. Under an overcast, far fogged hills fade into grey.
+
+**A coverage map of the game's** (`weather_map`): a data texture (linear), r the coverage and g the kind, tiling
+`weather_scale` across and drifting with the wind, in place of the default noise (black at a `coverage` of 0.5: no
+clouds; white: clouds). Paint where the weather is.
+
+**Authored** as `SceneEnvironment3D`'s `clouds_*` (`clouds_enabled`, `clouds_coverage`, `clouds_kind`,
+`clouds_bottom`, `clouds_top`, `clouds_density`, `clouds_shape_scale`, `clouds_detail_scale`, `clouds_erosion`,
+`clouds_weather_scale`, `clouds_wind`, `clouds_forward`, `clouds_backward`, `clouds_backward_share`,
+`clouds_multiple_scattering`, `clouds_ambient`, `clouds_planet_radius`, `clouds_distance`, `clouds_steps`,
+`clouds_light_steps`, `clouds_resolution`, `clouds_history`, `clouds_shadows`, `clouds_shadow_strength`,
+`clouds_shadow_extent`, `clouds_shadow_resolution`) and the map by content path, `clouds_weather` (loaded as a data
+image by `resolve_render3d_assets`); out-of-range values are refused. Lua and scene files read and write them as the
+environment's other fields:
+
+```json
+{"id": "environment", "components": {"SceneEnvironment3D": {
+    "sky_enabled": true, "clouds_enabled": true, "clouds_coverage": 0.6, "clouds_wind": [10, 0, 4],
+    "clouds_weather": "weather/storm_front.png", "clouds_weather_scale": 30000}}}
+```
+
+**In the browser** (WebGL2): the clouds are drawn (`clouds_noise.frag`, `clouds_trace.frag`, `clouds_resolve.frag`,
+`clouds_apply.frag`: the same march as fragments, the same composite; the shape noise at 64^3, made a slice a draw, so
+that a software rasterizer makes it in seconds), with their fog veil, where the browser has EXT_color_buffer_float;
+their shadows and their place in the sky's light are left out (said once). `experimental/webgl2`'s parity checks
+include them (`check_clouds`).
+
+The far deck at the horizon is seen at a grazing angle (a row's ray crosses tens of kilometres of it): at the walk's
+resolution it shows as streaks with stepped edges. Not supported: orthographic cameras (no clouds are drawn). docs/3d_plan.md "Volumetric clouds" has the
+plan.
+
 ### Spot lights and shadows from lights that are not the sun
 
 Off by default; off, the picture and the cost are those without them (the old shaders are not touched: the stock fragment shader has four

@@ -340,6 +340,7 @@ public:
         _occ_reset = true;
         _exposure_valid = false;
         _fog_volume_valid = false;
+        _clouds_valid = false;
     }
     Vec2i render_size() const override { return upscaled() ? size() : extent(); }
     Vec2i render_resolution() const override { return extent(); }
@@ -425,6 +426,20 @@ private:
     f32 _fog_volume_depth = 0.0f;
     std::array<u32, 3> _fog_volume_cells{}; // across, down, slices
     u32 _fog_volume_frame = 0;              // the point within each cell moves each render
+    // With Scene3D::clouds: this frame's walk through the cloud layer (clouds_trace.comp: RGBA16F light and share
+    // behind, R32F distance, at Clouds3D::resolution of the view) and the blend of the frames (clouds_resolve.comp,
+    // this render's and the last's, swapped each render); made by the first render that asks, dropped by the first
+    // that does not. What the last blend was made with, to read it where its clouds were then.
+    GpuTexture _clouds_raw, _clouds_raw_distance;
+    std::array<GpuTexture, 2> _clouds, _clouds_distance;
+    u32 _clouds_written = 0; // the one of _clouds the last render wrote
+    bool _clouds_valid = false;
+    Mat4f _clouds_previous{};
+    Vec3f _clouds_eye{}, _clouds_forward{};
+    u32 _clouds_frame = 0; // the walk's start moves each render
+    // Clouds3D::shadows: the map of the sun's light through the layer round the camera (cloud_shadow.comp, RGBA16F, r
+    // used), and its share on what the pre-pass drew with the contact shadows' (R8, the view's size).
+    GpuTexture _cloud_shadow, _cloud_screen;
     // With Scene3D::taa, made by the first render that asks and dropped by the
     // first that does not: one-sample depth for the main pass (the view's own
     // may be multisampled), the 8-bit view's float picture before the resolve
@@ -1002,6 +1017,25 @@ private:
     bool fog_volume(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats);
     // And the sums added to the main pass's picture, once a pixel at the pre-pass's depth (fog_volume_apply.frag).
     void fog_volume_apply(FrameCtx& ctx);
+    // Scene3D::clouds: the noise made on first use, then this frame's walk and its blend with the last (true when there
+    // are clouds to draw); and their drawing in the main pass, over the sky and what is farther (clouds_apply.frag).
+    bool clouds(FrameCtx& ctx);
+    bool clouds_trace(FrameCtx& ctx); // (after the pre-pass: its depth bounds the rays)
+    bool make_cloud_noise(SDL_GPUCommandBuffer* commands, RenderDebugStats3D& stats);
+    // The clouds' block and the atmosphere they are lit through, for this render (once; FrameCtx::cloud_params).
+    void make_cloud_params(FrameCtx& ctx);
+    // The clouds' coverage map: Clouds3D::weather_map's, else the default (made with the noise).
+    SDL_GPUTexture* cloud_weather(const Scene3D& scene) const;
+    // The fog as the clouds leave it (FrameCtx::fog_sky, fog_look), from setup_frame.
+    void fog_under_clouds(FrameCtx& ctx);
+    // Clouds3D::shadows: the map (in clouds(), from its uniforms) and its share on what the pre-pass drew, with the
+    // contact shadows' (after them in the pre-pass): true when laid.
+    bool cloud_shadow_map(FrameCtx& ctx, const void* clouds_block); // (the walk's CloudParamUniforms)
+    bool cloud_shadow_screen(FrameCtx& ctx);
+    void clouds_apply(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
+                      SDL_GPUTextureFormat format, u32 samples, bool velocity);
+    SDL_GPUGraphicsPipeline* clouds_pipeline(SDL_GPUTextureFormat depth, SDL_GPUTextureFormat format, u32 samples,
+                                             bool velocity) const;
     // The same inside the main pass (its targets' formats and samples), between the opaque draws and the blended ones.
     bool fog_volume_apply(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
                           SDL_GPUTextureFormat format, u32 samples);
@@ -1364,6 +1398,22 @@ private:
     GpuShader _fog_volume_apply_shader;                               // fog_volume_apply.frag
     std::shared_ptr<GpuBuffer> _fog_lights;                           // fog_volume.comp's FogLights
     GpuTexture _no_fog_volume; // 1 x 1 x 1: the fog variants' uFogVolume without a volume
+    // Scene3D::clouds': the noise (made once, on first use: cloud_noise.comp), the walk, the blend and the drawing.
+    SDL_GPUComputePipeline* _cloud_noise_pipeline = nullptr;    // cloud_noise.comp
+    SDL_GPUComputePipeline* _clouds_trace_pipeline = nullptr;   // clouds_trace.comp
+    SDL_GPUComputePipeline* _clouds_resolve_pipeline = nullptr; // clouds_resolve.comp
+    SDL_GPUComputePipeline* _cloud_shadow_pipeline = nullptr;   // cloud_shadow.comp
+    SDL_GPUComputePipeline* _cloud_screen_pipeline = nullptr;   // cloud_shadow_screen.comp
+    GpuShader _clouds_apply_shader;                             // clouds_apply.frag
+    GpuShader _clouds_env_shader;                               // clouds_env.frag (the clouds in the sky's light)
+    std::array<f32, 12> _sky_env_clouds{};                      // what the sky's panorama's clouds were made from
+    const void* _sky_env_weather = nullptr;                     // and their coverage map (the game's, or none)
+    GpuTexture _cloud_shape, _cloud_detail;                     // RGBA8 volumes (cloud_model's sizes)
+    GpuTexture _cloud_weather; // the default coverage map, RGBA8 (cloud_weather.comp: Clouds3D::weather_map unset)
+    SDL_GPUComputePipeline* _cloud_weather_pipeline = nullptr; // cloud_weather.comp
+    SDL_GPUSampler* _cloud_sampler = nullptr;                  // linear, repeating in all three directions
+    sky_model::AmbientLight3D _cloud_ambient;                  // the sky's light from above and below
+    bool _clouds_warned = false;
 
     bool _ao_available = false;
     bool _ao_warned = false;
