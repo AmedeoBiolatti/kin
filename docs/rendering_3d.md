@@ -3242,6 +3242,91 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
   ones (which fade to the probes). The stock lit shaders, material graphs and surfaces (the light variants: a scene
   with them draws with those); custom material shaders and WebGL2 have none.
 
+## Camera effects
+
+`scene.camera_effects` (`CameraEffects3D`) holds what the camera adds to the picture after the scene is rendered and
+before the 2D drawn over the view, so a HUD stays sharp. Off by default; off, the picture and its cost are those
+without it. Planar views (mirrors, portals) and reflection captures are rendered without them. The native renderer
+only; WebGL2 leaves them out (said once). The [plan](3d_plan.md#camera-effects-motion-blur-depth-of-field-lens-and-film--plan-2026-11-16)
+lists what comes next (lens and film).
+
+### Depth of field
+
+What is nearer or farther than the focus is blurred as a real lens blurs it: a disc as wide as the lens' circle of
+confusion there, bright lights becoming round bokeh, and a blurred thing in front spreading over what is sharp behind
+it.
+
+```cpp
+auto& dof = scene.camera_effects.depth_of_field; // authored: SceneEnvironment3D's "depth_of_field", "dof_*"
+dof.enabled = true;
+dof.focus_distance = 4.0f; // world units (metres) along the view that are sharp
+dof.aperture = 2.8f;       // the f-number (0.7 to 64): lower blurs more
+dof.sensor_height = 24.0f; // mm (1 to 100): with Camera3D::fov it makes the focal length
+dof.max_blur = 0.02f;      // the widest blur's radius, a fraction of the view's height (to 0.05)
+dof.quality = 1;           // 0, 1 or 2: samples in each disc
+dof.autofocus = true;      // follow what is at focus_point (0 to 1 across and down), eased over focus_time seconds
+float px = kin::depth_of_field_radius(dof, scene.camera, 1080.0f, 25.0f); // the blur's radius there, in pixels
+```
+
+- **A physical lens.** The radius at a distance z is `f^2 / (N (s - f)) * (z - s) / z` on the sensor, scaled to the
+  view's height, with f the focal length that `sensor_height` and the camera's fov give, N the aperture and s the
+  focus. As with a real camera, a wide view blurs little: at a 60 degree fov on a full-frame sensor, f/2.8 focused at
+  10 m blurs the horizon by about a third of a pixel at 1080p. For a shallow focus bring the focus closer, open the
+  aperture, narrow the fov (a longer lens) or take a larger sensor (a radius grows with `sensor_height`).
+- **How.** After the temporal resolve, before motion blur, bloom and the tonemap, in linear light. The picture is
+  halved (each texel its four pixels' mean weighed down by brightness, so a single bright pixel does not make a
+  sparkling disc, and the radius of its nearest pixel); tiles of 16 pixels keep the widest blur in front of the focus,
+  spread over the tiles it reaches; a gather on a golden-angle spiral (Gustafsson's single-pass bokeh) runs out to the
+  widest radius that can reach each texel, a sample counting as far as its own disc reaches; then each full pixel
+  mixes itself with the blur by how wide the blur reaching it is (sharp under about a pixel), reading the half-size
+  texels whose distance agrees with its own. Where nothing is blurred the gather is skipped.
+- **Depth.** With `scene.taa` it reads the main pass's depth (the overlay stays sharp); without, the depth pre-pass
+  runs for it (as for ambient occlusion), whose depth has no overlay: the overlay is blurred with what is behind it.
+- **Where it runs.** Perspective cameras, in a view that keeps a float picture: an HDR view or one with temporal
+  anti-aliasing (an 8-bit view without either: off, said once). `debug_stats().dof_dispatches` is 5 when it ran, 6
+  with autofocus. Autofocus measures the mean distance of 64 points round `focus_point` on the GPU (no read-back) and
+  eases the focus in its reciprocal; `focus_distance` is where it starts, and again after `View3D::reset_history()`.
+- **Cost.** About 0.2 to 0.4 ms of the GPU at 1920 x 1080 (RTX 4080 Laptop, Sponza through a strong lens, `kin_reference
+  --taa --dof 4 --dof-aperture 1 --dof-sensor 100`): more where large blurred things are near the camera, little where
+  the picture is in focus. `quality` 0 halves the gather's samples, 2 doubles them.
+- **Memory.** Four half-size targets and the full-size result, of four halves a pixel (about 16 bytes a pixel of the
+  view in all), and two small tile targets; made by the first render that asks, given back after 120 renders without.
+- **Limits.** Transparent surfaces and particles are not in the depth: they blur as what is behind them. Discs are
+  round (no aperture blades yet). A sharp edge against a blurred background keeps a step of the half-size grid.
+
+### Motion blur
+
+What moves across the picture while the shutter is open is smeared along its motion: the camera's own and each
+object's (skinned and morphing meshes, particles and the overlay included, as temporal anti-aliasing tracks them).
+
+```cpp
+scene.taa.enabled = true;                          // motion blur reads its velocity
+auto& blur = scene.camera_effects.motion_blur;     // authored: SceneEnvironment3D's "motion_blur", "motion_blur_*"
+blur.enabled = true;
+blur.shutter_angle = 180.0f; // degrees of each frame the shutter is open (0 to 360): 180 smears half its motion
+blur.max_length = 0.05f;     // the longest smear, a fraction of the view's height (to 0.25)
+blur.samples = 12;           // samples a pixel along its smear (4 to 32)
+blur.camera_scale = 1.0f;    // 0: a turning camera leaves still things sharp, only what moves in the world smears
+blur.target_fps = 0.0f;      // else the motion over 1 / target_fps s of Scene3D::time: the same smear at any frame rate
+```
+
+- **How.** After the temporal resolve, at the view's size and in linear light (a bright lamp streaks; bloom and
+  exposure follow). Four compute passes: each pixel's smear (half the velocity the resolve took there, times the
+  shutter, with the camera's part rebuilt from the depth and last frame's camera and scaled by `camera_scale`), the
+  longest smear in each tile (a tile as wide as the longest smear, at least 8 pixels), the longest round each tile,
+  then a gather of `samples` colours along the neighbourhood's longest smear and the pixel's own, weighed by which is
+  in front (McGuire et al. 2012, with Jimenez's 2014 second direction). Where nothing round a pixel moves half a pixel,
+  it is copied. `debug_stats().motion_blur_dispatches` is 4 when it ran.
+- **When it does not run.** Without `scene.taa` (said once), on the first frame after `View3D::reset_history()` (a
+  cut: no smear across it), with a shutter of 0 or a `max_length` under a pixel.
+- **Cost.** About 0.15 to 0.4 ms of the GPU at 1920 x 1080 (RTX 4080 Laptop, `kin_reference` on the `motion` scene
+  with `--taa` against `--motion-blur`), most of it in the gather where things move.
+- **Memory.** Two view-sized targets of four halves a pixel (8 bytes each) and two small tile targets, made by the
+  first render that asks and given back after 120 renders without (`stats().feature_bytes`).
+- **Limits.** The smear follows the nearest surface's motion round each pixel, so a thin thing in front of a moving
+  background smears a little wider. Transparent surfaces and particles smear with what is behind them where they do
+  not write the velocity. The sky smears with the camera's turning, not its moving.
+
 ## Views
 
 `Renderer3D::create_view(size, {.samples, .background, .hdr, .exposure, .auto_exposure,

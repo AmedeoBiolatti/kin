@@ -886,4 +886,18 @@ void Scene3D::clear() {
     }
 }
 
+f32 depth_of_field_radius(const DepthOfField3D& dof, const Camera3D& camera, f32 view_height, f32 distance) {
+    if (camera.projection != Projection3D::Perspective || !(distance > 0.0f) || !(view_height > 0.0f))
+        return 0.0f;
+    // A thin lens of focal length f, f-number N, focused at s: a point at z makes a circle of confusion
+    // f^2 / (N (s - f)) * (z - s) / z wide on the sensor, which the view's height spans.
+    const f32 sensor = std::clamp(dof.sensor_height, 1.0f, 100.0f) * 0.001f;
+    const f32 half_fov = std::clamp(camera.fov, 1.0f, 179.0f) * (3.14159265f / 360.0f);
+    const f32 focal = 0.5f * sensor / std::tan(half_fov);
+    const f32 focus = std::max(dof.focus_distance, 2.0f * focal);
+    const f32 aperture = std::clamp(dof.aperture, 0.7f, 64.0f);
+    const f32 far_radius = 0.5f * view_height * focal * focal / (aperture * (focus - focal) * sensor);
+    return far_radius * (1.0f - focus / distance);
+}
+
 } // namespace kin

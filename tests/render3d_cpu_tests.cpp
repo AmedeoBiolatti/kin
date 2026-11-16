@@ -37,6 +37,23 @@ Mesh3D test_mesh() {
     return Mesh3D{std::make_shared<Fake>(), 24, 36, {{-0.5f, -1.0f, -0.25f}, {0.5f, 1.0f, 0.25f}}};
 }
 
+// The depth of field's blur radius (kin::depth_of_field_radius) for a 50 mm lens on a full-frame sensor at f/2,
+// focused at 5 m, over 1000 pixels: f^2 / (N (s - f)) = 0.0025 / 9.9 m on the 24 mm sensor, so 5.26 pixels at
+// infinity, half that at 10 m, as much in front at 2.5 m, none at the focus or for an orthographic camera.
+void test_dof_radius() {
+    kin::Camera3D camera;
+    camera.fov = 2.0f * std::atan(12.0f / 50.0f) * (180.0f / 3.14159265f);
+    const kin::DepthOfField3D dof{.enabled = true, .focus_distance = 5.0f, .aperture = 2.0f, .sensor_height = 24.0f};
+    const auto near = [](float a, float b) { return std::abs(a - b) < 1e-3f * std::max(1.0f, std::abs(b)); };
+    const float infinity = 1000.0f * 0.05f * 0.05f / (2.0f * 2.0f * 4.95f * 0.024f);
+    assert(near(kin::depth_of_field_radius(dof, camera, 1000.0f, std::numeric_limits<float>::infinity()), infinity));
+    assert(near(kin::depth_of_field_radius(dof, camera, 1000.0f, 10.0f), infinity * 0.5f));
+    assert(near(kin::depth_of_field_radius(dof, camera, 1000.0f, 2.5f), -infinity));
+    assert(kin::depth_of_field_radius(dof, camera, 1000.0f, 5.0f) == 0.0f);
+    camera.projection = kin::Projection3D::Orthographic;
+    assert(kin::depth_of_field_radius(dof, camera, 1000.0f, 10.0f) == 0.0f);
+}
+
 void test_scene_instance_exposure() {
     const auto mesh = test_mesh();
     Scene3D scene;
@@ -724,6 +741,7 @@ void test_sun_times_at_the_poles() {
 
 int main() {
     test_unbounded_skin_pose();
+    test_dof_radius();
     test_scene_instance_exposure();
     test_affine_bounds();
     test_bounds_follow_edits();

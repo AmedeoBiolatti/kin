@@ -194,6 +194,21 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("ssr_max_distance", ssr.max_distance);
         SETTING("ssr_steps", ssr.steps);
         SETTING("ssr_intensity", ssr.intensity);
+        SETTING("depth_of_field", camera_effects.depth_of_field.enabled);
+        SETTING("dof_focus_distance", camera_effects.depth_of_field.focus_distance);
+        SETTING("dof_aperture", camera_effects.depth_of_field.aperture);
+        SETTING("dof_sensor_height", camera_effects.depth_of_field.sensor_height);
+        SETTING("dof_max_blur", camera_effects.depth_of_field.max_blur);
+        SETTING("dof_quality", camera_effects.depth_of_field.quality);
+        SETTING("dof_autofocus", camera_effects.depth_of_field.autofocus);
+        SETTING("dof_focus_point", camera_effects.depth_of_field.focus_point);
+        SETTING("dof_focus_time", camera_effects.depth_of_field.focus_time);
+        SETTING("motion_blur", camera_effects.motion_blur.enabled);
+        SETTING("motion_blur_shutter_angle", camera_effects.motion_blur.shutter_angle);
+        SETTING("motion_blur_max_length", camera_effects.motion_blur.max_length);
+        SETTING("motion_blur_samples", camera_effects.motion_blur.samples);
+        SETTING("motion_blur_camera_scale", camera_effects.motion_blur.camera_scale);
+        SETTING("motion_blur_target_fps", camera_effects.motion_blur.target_fps);
         SETTING("anisotropy", anisotropy);
         SETTING("texture_lod_bias", texture_lod_bias);
         SETTING("specular_aa", specular_aa);
@@ -383,6 +398,16 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                   settings.global_illumination.area_lights.interleave == 4) &&
                  (settings.view.samples == 1 || settings.view.samples == 2 || settings.view.samples == 4 ||
                   settings.view.samples == 8);
+        const MotionBlur3D& blur = settings.camera_effects.motion_blur;
+        valid &= blur.shutter_angle >= 0 && blur.shutter_angle <= 360 && blur.max_length >= 0 &&
+                 blur.max_length <= .25f && blur.samples >= 4 && blur.samples <= 32 && blur.camera_scale >= 0 &&
+                 blur.camera_scale <= 1 && blur.target_fps >= 0 && std::isfinite(blur.target_fps);
+        const DepthOfField3D& dof = settings.camera_effects.depth_of_field;
+        valid &= std::isfinite(dof.focus_distance) && dof.focus_distance > 0 && dof.aperture >= .7f &&
+                 dof.aperture <= 64 && dof.sensor_height >= 1 && dof.sensor_height <= 100 && dof.max_blur >= 0 &&
+                 dof.max_blur <= .05f && dof.quality <= 2 && dof.focus_point.x >= 0 && dof.focus_point.x <= 1 &&
+                 dof.focus_point.y >= 0 && dof.focus_point.y <= 1 && dof.focus_time >= 0 &&
+                 std::isfinite(dof.focus_time);
         if (!valid)
             errors.push_back("SceneEnvironment3D entity '" + entity.name() + "': invalid environment/view settings");
         else {
@@ -398,6 +423,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.contact_shadows = settings.contact_shadows;
             scene.taa = settings.taa;
             scene.ssr = settings.ssr;
+            scene.camera_effects = settings.camera_effects;
             scene.anisotropy = settings.anisotropy;
             scene.texture_lod_bias = settings.texture_lod_bias;
             scene.specular_aa = settings.specular_aa;

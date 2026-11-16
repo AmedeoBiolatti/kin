@@ -10475,6 +10475,10 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
   `camera_scale` can take it out and leave the objects'. No blur on the first frame after `reset_history()` (a cut).
   Tests: off is the same picture; a still camera and scene, no change; a camera pan blurs along the motion, by the
   shutter; `camera_scale` 0 leaves a panned static scene sharp and a moving object blurred.
+- **C1 as built (2026-11-16).** As planned; the smear comes from the resolve's dilated velocity (history-sized, so it
+  works under temporal upscaling too), tiles as wide as the longest smear (8 to 64 pixels). Shown sharp-to-smeared on
+  a moving block in 8-bit and HDR views (RTX 4080, the Intel iGPU, lavapipe); 0.15 to 0.4 ms at 1080p on the `motion`
+  scene. `kin_reference --motion-blur` turns it on.
 - **C2 — depth of field.** A physical lens: `focus_distance` (m), `aperture` (f-number), `sensor_height` (mm, 24 a
   full frame; the focal length follows from the camera's fov), `max_blur` (pixels), `quality`, `blades` (0 round).
   Circle of confusion from the pre-pass's depth (DOF turns the pre-pass on, as ambient occlusion does); half-size
@@ -10484,6 +10488,12 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
   and particles blur as the depth behind them (as in the other engines). Tests: the circle-of-confusion formula on the
   CPU; the focal plane stays sharp, near and far blur; checked against Cycles with the same lens
   (`tools/cycles`).
+- **C2 as built (2026-11-16).** A Gustafsson single-pass spiral gather at half size, bounded per texel by its own radius
+  and a 16-pixel tile's widest near blur spread as far as it reaches (in-focus areas skip it), then a depth-aware
+  upsample. The depth is TAA's main-pass depth, else the pre-pass's; it needs a float picture (HDR or TAA). No noise in
+  the spiral (nothing after it averages noise; a per-texel turn speckled edges in Sponza). Autofocus eases in 1 / z
+  on the GPU. 0.2 to 0.4 ms at 1080p on Sponza. Not yet: aperture blades, the Cycles check. A physical lens blurs little at game fovs: the test uses a
+  100 mm sensor at f/0.7 to blur a 160 x 120 view by several pixels.
 - **C3 — lens, film and grade.** In the view output shader, no new pass: vignette (intensity, smoothness, roundness),
   chromatic aberration (radial, the bloom too), film grain (by luminance, moving each frame, before the encode),
   tonemapper choice (ACES stays the default; AgX, Khronos PBR Neutral), white balance, contrast, saturation, and a

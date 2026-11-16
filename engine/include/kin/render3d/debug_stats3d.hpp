@@ -102,6 +102,12 @@ struct RenderDebugStats3D : RenderStats3D {
                             // not in ao_dispatches), else 0
     u32 taa_dispatches =
         0; // compute dispatches of the temporal anti-aliasing (the resolve, and the sharpen): 0 when off
+    // Compute dispatches of the motion blur (CameraEffects3D::motion_blur): 4 when it ran, 0 when off or skipped (no
+    // velocity this frame, the first after a reset, a shutter of 0).
+    u32 motion_blur_dispatches = 0;
+    // Compute dispatches of the depth of field (CameraEffects3D::depth_of_field): 5 when it ran (6 with autofocus), 0
+    // when off or without a depth to read.
+    u32 dof_dispatches = 0;
     bool taa_reset = false; // its history was not used this render: the first, after a resize or reset_history(), or
                             // the camera changed kind
     Vec2f taa_jitter{};     // this render's offset in pixels (0, 0 when off)

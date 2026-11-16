@@ -130,6 +130,58 @@ void gpu_temporal_view_options(Renderer2D& renderer) {
     }
 }
 
+// Motion blur and depth of field authored in a scene (SceneEnvironment3D's motion_blur* and depth_of_field, dof_*):
+// applied to the scene; the blur runs from the second frame (the first has no history), also over a view shading at a
+// lower resolution, the depth of field from the first; out-of-range values are rejected.
+void gpu_camera_effect_settings(Renderer2D& renderer) {
+    Renderer3D r3d{renderer};
+    if (!r3d.capabilities().motion_blur)
+        return;
+    Scratch scratch;
+    write(scratch.path / "blur.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"taa_enabled":true,"motion_blur":true,
+        "motion_blur_shutter_angle":90,"motion_blur_samples":8,"motion_blur_camera_scale":0.5,
+        "depth_of_field":true,"dof_focus_distance":3,"dof_aperture":1.4,"dof_autofocus":true,
+        "dof_focus_point":[0.25,0.75]}}}]})");
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("blur.kinscene"), "motion blur scene failed");
+    const MotionBlur3D& blur = session.scene()->camera_effects.motion_blur;
+    check(blur.enabled && blur.shutter_angle == 90 && blur.samples == 8 && blur.camera_scale == 0.5f,
+          "motion blur settings were not applied");
+    const DepthOfField3D& dof = session.scene()->camera_effects.depth_of_field;
+    check(dof.enabled && dof.focus_distance == 3 && dof.aperture == 1.4f && dof.autofocus &&
+              dof.focus_point == Vec2f{0.25f, 0.75f},
+          "depth of field settings were not applied");
+    const auto dispatches = [&] {
+        check(session.render(), "motion blur render failed");
+        renderer.present();
+        return r3d.debug_stats().motion_blur_dispatches;
+    };
+    check(dispatches() == 0 && r3d.debug_stats().dof_dispatches == (r3d.capabilities().depth_of_field ? 6u : 0u) &&
+              dispatches() == 4,
+          "motion blur did not run from the second frame, or the depth of field from the first");
+    if (r3d.capabilities().temporal_upscaling) {
+        const auto environment = session.entity("environment");
+        auto settings = *environment.get<SceneEnvironment3D>();
+        settings.view.render_scale = 2.f / 3.f;
+        settings.view.temporal_history_scale = 1.5f;
+        environment.raw().set<SceneEnvironment3D>(settings);
+        check(session.collect(), "scaled environment update failed");
+        check(dispatches() == 0 && dispatches() == 4, "motion blur did not run over a scaled view");
+    }
+    write(scratch.path / "bad.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"motion_blur_samples":64}}}]})");
+    check(!session.load("bad.kinscene"), "out-of-range motion blur samples accepted");
+    write(scratch.path / "bad.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"dof_aperture":0.1}}}]})");
+    check(!session.load("bad.kinscene"), "out-of-range depth of field aperture accepted");
+}
+
 void gpu_live_edits(Renderer2D& renderer) {
     Scratch scratch;
     std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
@@ -1627,6 +1679,7 @@ int main(int argc, char** argv) {
         ready = true;
         Renderer2D renderer{std::move(backend)};
         gpu_temporal_view_options(renderer);
+        gpu_camera_effect_settings(renderer);
         gpu_live_edits(renderer);
         gpu_session(renderer);
         gpu_prepared_requests(renderer);

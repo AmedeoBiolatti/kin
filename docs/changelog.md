@@ -9,6 +9,18 @@ releases may change APIs.
 
 ### Added
 
+- 3D depth of field ([3D rendering](rendering_3d.md#depth-of-field)): `Scene3D::camera_effects.depth_of_field`, a
+  physical lens (focus distance, f-number, sensor height with the camera's fov) with round bokeh, the near blur
+  spreading over what is in focus, and GPU autofocus on a point of the view; `kin::depth_of_field_radius` gives the
+  blur at a distance. Authored as `SceneEnvironment3D`'s `depth_of_field` and `dof_*`. Runs in HDR or temporally
+  anti-aliased views (without TAA it turns the depth pre-pass on); native renderer only. The stock 3D frame graph
+  gains a `depth_of_field` pass.
+- 3D motion blur ([3D rendering](rendering_3d.md#motion-blur)): `Scene3D::camera_effects.motion_blur` smears what
+  moves across the picture, the camera's motion and each object's, after the temporal resolve and before bloom
+  (shutter angle, longest smear, samples, how much of the camera's own motion, a frame-rate-independent mode); authored
+  as `SceneEnvironment3D`'s `motion_blur*`. Needs temporal anti-aliasing; native renderer only (WebGL2 says once it is
+  off). Mirrors, portals and reflection captures render without it. The stock 3D frame graph gains a `motion_blur`
+  pass (`frame_graph_passes3d` is 15 with depth of field's).
 - Experimental native temporal upscaling ([3D rendering](rendering_3d.md#temporal-upscaling)):
   `ViewOptions3D::render_scale` shades at a lower resolution while retaining display-size output, picking and LOD;
   `View3D::render_resolution()` reports the shading size. Requires temporal AA and backend support.

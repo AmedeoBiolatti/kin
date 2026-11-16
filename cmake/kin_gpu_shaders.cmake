@@ -28,7 +28,9 @@ set(_kin_gpu_shader_names_3D
     gi_light.comp gi_probe_place.comp gi_probe_trace.comp gi_probe_update.comp gi_resolve.comp gi_surface.comp gi_area.comp gi_area_fill.comp fog_sun.comp fog_sun_apply.frag
     exposure_histogram.comp exposure_adapt.comp view_output_auto.frag view_output_dither_auto.frag decal.vert decal.frag morph_blend.comp
     prepass_velocity_morph.vert prepass_velocity_morph_skinned.vert
-    fog_volume.comp fog_volume_integrate.comp fog_volume_apply.frag fog_volume_depth.comp)
+    fog_volume.comp fog_volume_integrate.comp fog_volume_apply.frag fog_volume_depth.comp
+    motion_blur_prepare.comp motion_blur_tiles.comp motion_blur_neighbours.comp motion_blur.comp
+    dof_focus.comp dof_prepare.comp dof_tiles.comp dof_spread.comp dof_gather.comp dof_combine.comp)
 
 set(_kin_gpu_shader_names ${_kin_gpu_shader_names_2D})
 if(KIN_EXPERIMENTAL_3D)

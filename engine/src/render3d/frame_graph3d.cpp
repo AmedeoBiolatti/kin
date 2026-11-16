@@ -11,7 +11,7 @@ const ResourceGraphDesc& stock_frame_graph3d() {
         ResourceGraphDesc graph;
         for (const auto* name : {"geometry", "clusters", "local_shadows", "gi_attributes", "gi_probes", "sun_shadow",
                                  "prepass", "occlusion", "overlay_velocity", "colour", "fog_colour", "resolved", "pick",
-                                 "output", "portal_sun_shadow"})
+                                 "output", "portal_sun_shadow", "camera_effects", "focused"})
             graph.resources.push_back({.name = name});
         graph.resources[0].imported = true;
         graph.resources[13].exported = true;
@@ -26,8 +26,10 @@ const ResourceGraphDesc& stock_frame_graph3d() {
                         {.name = "main", .reads = {1, 2, 4, 5, 6, 7, 8, 14}, .writes = {9}},
                         {.name = "fog_sun", .reads = {9, 5}, .writes = {10}},
                         {.name = "temporal_resolve", .reads = {10, 8}, .writes = {11}},
-                        {.name = "picking", .reads = {0, 1}, .writes = {12}, .after = {"temporal_resolve"}},
-                        {.name = "output", .reads = {11, 12}, .writes = {13}}};
+                        {.name = "depth_of_field", .reads = {11}, .writes = {16}},
+                        {.name = "motion_blur", .reads = {16}, .writes = {15}},
+                        {.name = "picking", .reads = {0, 1}, .writes = {12}, .after = {"motion_blur"}},
+                        {.name = "output", .reads = {15, 12}, .writes = {13}}};
         return graph;
     }();
     return recipe;

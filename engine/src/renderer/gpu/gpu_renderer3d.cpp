@@ -1561,6 +1561,27 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     if (_taau_pipeline)
         _taau_output_pipeline = make_compute(handle, "taau_output.comp.spv", {.samplers = 2, .readwrite_textures = 1});
     _capabilities.temporal_upscaling = _taau_pipeline && _taau_output_pipeline;
+    // Motion blur (CameraEffects3D::motion_blur) reads the temporal resolve's velocity: four small compute passes into
+    // four-half targets (which TAA's history already needs).
+    if (_taa_available) {
+        _blur_prepare_pipeline = make_compute(handle, "motion_blur_prepare.comp.spv", {.samplers = 2});
+        _blur_tiles_pipeline = make_compute(handle, "motion_blur_tiles.comp.spv", {.samplers = 1});
+        _blur_neighbours_pipeline = make_compute(handle, "motion_blur_neighbours.comp.spv", {.samplers = 1});
+        _blur_gather_pipeline = make_compute(handle, "motion_blur.comp.spv", {.samplers = 3});
+    }
+    _capabilities.motion_blur =
+        _blur_prepare_pipeline && _blur_tiles_pipeline && _blur_neighbours_pipeline && _blur_gather_pipeline;
+    // Depth of field: six compute passes over four-half targets, reading a sampled depth.
+    if (_taa_available) {
+        _dof_focus_pipeline = make_compute(handle, "dof_focus.comp.spv", {.samplers = 2});
+        _dof_prepare_pipeline = make_compute(handle, "dof_prepare.comp.spv", {.samplers = 3, .readwrite_textures = 2});
+        _dof_tiles_pipeline = make_compute(handle, "dof_tiles.comp.spv", {.samplers = 1, .uniform_buffers = 0});
+        _dof_spread_pipeline = make_compute(handle, "dof_spread.comp.spv", {.samplers = 1});
+        _dof_gather_pipeline = make_compute(handle, "dof_gather.comp.spv", {.samplers = 3, .readwrite_textures = 2});
+        _dof_combine_pipeline = make_compute(handle, "dof_combine.comp.spv", {.samplers = 5});
+    }
+    _capabilities.depth_of_field = _dof_focus_pipeline && _dof_prepare_pipeline && _dof_tiles_pipeline &&
+                                   _dof_spread_pipeline && _dof_gather_pipeline && _dof_combine_pipeline;
     // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
     make_gi();
     // Fog and the sky (P3a): the fog variants of the stock mesh shaders (one more uniform block, in the slot custom
@@ -1918,6 +1939,16 @@ GpuRenderer3D::~GpuRenderer3D() {
                                             _taa_pipeline,
                                             _taau_pipeline,
                                             _taau_output_pipeline,
+                                            _blur_prepare_pipeline,
+                                            _blur_tiles_pipeline,
+                                            _blur_neighbours_pipeline,
+                                            _blur_gather_pipeline,
+                                            _dof_focus_pipeline,
+                                            _dof_prepare_pipeline,
+                                            _dof_tiles_pipeline,
+                                            _dof_spread_pipeline,
+                                            _dof_gather_pipeline,
+                                            _dof_combine_pipeline,
                                             _gc_cull,
                                             _gc_scan,
                                             _gc_args,
@@ -3569,11 +3600,13 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
     const Camera3D camera = scene.camera;
     const bool overlay = scene.show_overlay;
     const bool taa = scene.taa.enabled;
+    const CameraEffects3D effects = scene.camera_effects; // the eye's, not a probe's
     const bool gi = scene.global_illumination.enabled;
     const auto* lit_by = dynamic_cast<const GpuView3D*>(lighting);
     const bool borrow = gi && lit_by && lit_by != view && lit_by->_gi.lit && lit_by->_gi.irradiance;
     scene.show_overlay = false;
     scene.taa.enabled = false;
+    scene.camera_effects = {};
     scene.global_illumination.enabled = borrow;
     _gi_borrowed = borrow ? lit_by : nullptr;
     struct Face {
@@ -3622,6 +3655,7 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
     scene.camera = camera;
     scene.show_overlay = overlay;
     scene.taa.enabled = taa;
+    scene.camera_effects = effects;
     scene.global_illumination.enabled = gi;
     _gi_borrowed = nullptr;
     if (borrow)
@@ -4485,6 +4519,19 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
                                 &view._taa_dilated[1],
                                 &view._taa_confidence[0],
                                 &view._taa_confidence[1],
+                                &view._blur_prepared,
+                                &view._blur_result,
+                                &view._blur_tiles[0],
+                                &view._blur_tiles[1],
+                                &view._dof_half,
+                                &view._dof_half_blur,
+                                &view._dof_blurred,
+                                &view._dof_reach,
+                                &view._dof_result,
+                                &view._dof_tiles[0],
+                                &view._dof_tiles[1],
+                                &view._dof_focus[0],
+                                &view._dof_focus[1],
                                 &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
@@ -5162,6 +5209,17 @@ struct GpuRenderer3D::FrameCtx {
     bool gi = false;          // the view has a GI scene for this render (Scene3D::global_illumination)
     bool gi_lit = false;      // and its probes light the scene (the light variants read them)
     bool gi_resolved = false; // and their light on what the pre-pass drew was read (gi_resolve)
+    // For the motion blur: last frame's camera (world to clip, no jitter), and whether this frame's resolve had a
+    // velocity and a history to go with it (not the first frame, nor after a reset); whether it ran this render.
+    Mat4f blur_before{};
+    bool blur_velocity = false;
+    bool blurred = false;
+    // Depth of field: asked for and possible (a perspective camera, a float picture, a depth to read); whether the
+    // pre-pass runs for its depth (no temporal anti-aliasing, whose main-pass depth it reads otherwise); whether it
+    // ran.
+    bool dof_wanted = false;
+    bool dof_prepass = false;
+    bool focused = false;
 };
 
 bool GpuRenderer3D::preparation_live(u64 frame) const {
@@ -5839,6 +5897,23 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             v._occ_reset = true;
         });
     age(v._idle_gi, ctx.gi, static_cast<bool>(v._gi.distance), [&] { release_gi(v); });
+    age(v._idle_dof, ctx.focused, v._dof_half || v._dof_result || v._dof_focus[0], [&] {
+        v._dof_half = {};
+        v._dof_half_blur = {};
+        v._dof_blurred = {};
+        v._dof_reach = {};
+        v._dof_result = {};
+        v._dof_tiles = {};
+        v._dof_focus = {};
+        v._dof_focus_valid = false;
+        v._dof_time_seen = false;
+    });
+    age(v._idle_blur, ctx.blurred, v._blur_prepared || v._blur_result || v._blur_tiles[0], [&] {
+        v._blur_prepared = {};
+        v._blur_result = {};
+        v._blur_tiles = {};
+        v._blur_time_seen = false;
+    });
     // The renderer's second gathered buffer (occlusion culling's 12 bytes a triangle of the room) goes when no view has
     // used it.
     const bool second_held = _gcb[1].indices || _gcb[1].scan || _gc_job_history;
@@ -6904,6 +6979,12 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     if (!ctx.taa) {
         suspend_taa(*view);
     }
+    // Depth of field reads the main pass's depth under temporal anti-aliasing, else the pre-pass's.
+    const DepthOfField3D& dof = scene.camera_effects.depth_of_field;
+    ctx.dof_wanted = dof.enabled && _capabilities.depth_of_field &&
+                     scene.camera.projection == Projection3D::Perspective && (ctx.taa || view->_hdr) &&
+                     (ctx.taa ? _taa_depth_sampled : _ao_available);
+    ctx.dof_prepass = ctx.dof_wanted && !ctx.taa;
     ctx.drawn = ctx.view_projections;
     if (ctx.taa) {
         const f32 phases = view->upscaled() ? 1.0f / (view->_options.render_scale * view->_options.render_scale) : 1.f;
@@ -14541,7 +14622,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                      [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
     if (!ctx.main_velocity &&
         (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit || ctx.fog_sun_wanted ||
-         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted) &&
+         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted || ctx.dof_prepass) &&
         _ao_available && (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
         SDL_GPUColorTargetInfo target{};
@@ -15869,6 +15950,304 @@ void GpuRenderer3D::fog_volume_apply(FrameCtx& ctx) {
     SDL_EndGPURenderPass(pass);
 }
 
+bool GpuRenderer3D::ensure_blur_targets(GpuView3D& view, u32 tile) {
+    const u32 w = static_cast<u32>(view.size().x), h = static_cast<u32>(view.size().y);
+    const u32 tw = (w + tile - 1) / tile, th = (h + tile - 1) / tile;
+    const auto sized = [](const GpuTexture& t, u32 x, u32 y) { return t && t.width() == x && t.height() == y; };
+    constexpr SDL_GPUTextureUsageFlags stored =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+    try {
+        if (!sized(view._blur_prepared, w, h))
+            view._blur_prepared = _device->create_target(w, h, hdr_format, stored);
+        if (!sized(view._blur_result, w, h))
+            view._blur_result = _device->create_target(w, h, hdr_format, stored);
+        for (GpuTexture& tiles : view._blur_tiles)
+            if (!sized(tiles, tw, th))
+                tiles = _device->create_target(tw, th, hdr_format, stored);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: motion blur targets not made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view._blur_prepared = {};
+        view._blur_result = {};
+        view._blur_tiles = {};
+        return false;
+    }
+    return true;
+}
+
+namespace {
+// MotionBlur3D's numbers for a view `height` pixels high: the radius (pixels) of a smear of one UV a frame along an
+// axis' pixels, the longest radius, and the tile that holds it (at least 8 pixels; the gather reaches one tile round).
+struct BlurShape {
+    f32 scale = 0.0f, longest = 0.0f;
+    u32 tile = 8;
+};
+BlurShape blur_shape(const MotionBlur3D& blur, f32 height, f32 frame_step) {
+    BlurShape shape;
+    const f32 shutter = std::clamp(blur.shutter_angle, 0.0f, 360.0f) / 360.0f;
+    // The motion over 1 / target_fps seconds instead of the frame's: the frame's motion times their ratio.
+    const f32 rate = blur.target_fps > 0.0f && frame_step > 0.0f
+                         ? std::clamp(1.0f / (blur.target_fps * frame_step), 0.0f, 8.0f)
+                         : 1.0f;
+    shape.scale = 0.5f * shutter * rate; // half: the pixel is in the middle of its smear
+    shape.longest = 0.5f * std::clamp(blur.max_length, 0.0f, 0.25f) * height;
+    shape.tile = std::clamp(static_cast<u32>(std::ceil(shape.longest)), 8u, 64u);
+    shape.longest = std::min(shape.longest, static_cast<f32>(shape.tile));
+    return shape;
+}
+} // namespace
+
+const GpuTexture* GpuRenderer3D::motion_blur(FrameCtx& ctx, const GpuTexture& source) {
+    const MotionBlur3D& blur = ctx.scene.camera_effects.motion_blur;
+    if (!blur.enabled)
+        return &source;
+    GpuView3D& view = *ctx.view;
+    if (!_capabilities.motion_blur) {
+        warn_once(_motion_blur_warned, "3D: motion blur asked for, but this device cannot do it: off");
+        return &source;
+    }
+    if (!ctx.taa) {
+        warn_once(_motion_blur_taa_warned, "3D: motion blur needs temporal anti-aliasing (Scene3D::taa): off");
+        return &source;
+    }
+    // The step since the last blurred render, in Scene3D::time (MotionBlur3D::target_fps); 0 when unknown.
+    const f32 time = ctx.scene.time;
+    const f32 step = view._blur_time_seen && time > view._blur_time && time - view._blur_time <= 1.0f
+                         ? time - view._blur_time
+                         : 0.0f;
+    view._blur_time = time;
+    view._blur_time_seen = true;
+    const BlurShape shape = blur_shape(blur, static_cast<f32>(view.size().y), step);
+    ctx.blurred = true; // its targets stay while it is asked for, even on a frame it skips
+    if (!ctx.blur_velocity || shape.scale <= 0.0f || shape.longest < 0.5f)
+        return &source;
+    if (!ensure_blur_targets(view, shape.tile))
+        return &source;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const f32 w = static_cast<f32>(view.size().x), h = static_cast<f32>(view.size().y);
+    // 1. Each pixel's smear and distance.
+    {
+        const bool depth = _taa_depth_sampled && view._taa_depth;
+        const bool separate = depth && blur.camera_scale < 1.0f;
+        struct {
+            f32 inverse_now[16], before[16];
+            f32 size[4], shape[4], depth[4], unproject_zw[4];
+        } u{};
+        const Mat4f inverse_now = ctx.view_projections[0].inverse();
+        std::memcpy(u.inverse_now, inverse_now.m, sizeof(u.inverse_now));
+        std::memcpy(u.before, ctx.blur_before.m, sizeof(u.before));
+        const f32 size[4] = {w, h, 1.0f / w, 1.0f / h};
+        std::memcpy(u.size, size, sizeof(size));
+        u.shape[0] = shape.scale;
+        u.shape[1] = shape.longest;
+        u.shape[2] = std::clamp(blur.camera_scale, 0.0f, 1.0f);
+        u.shape[3] = separate ? 1.0f : 0.0f;
+        u.depth[0] = depth ? 1.0f : 0.0f;
+        u.depth[1] = ctx.overlaid ? overlay_split : 2.0f;
+        const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+        std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
+        const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{depth ? view._taa_depth.handle() : _owner->_white.handle(), _point_sampler}};
+        if (!compute_pass(commands, _blur_prepare_pipeline, view._blur_prepared, inputs, &u, sizeof(u)))
+            return &source;
+    }
+    // 2. The longest smear a tile: a work group a tile.
+    {
+        const f32 params[4] = {static_cast<f32>(shape.tile), w, h, 0.0f};
+        const SDL_GPUStorageTextureReadWriteBinding output{.texture = view._blur_tiles[0].handle()};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+        if (!pass)
+            return &source;
+        const SDL_GPUTextureSamplerBinding input{view._blur_prepared.handle(), _point_sampler};
+        SDL_BindGPUComputePipeline(pass, _blur_tiles_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, &input, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, view._blur_tiles[0].width(), view._blur_tiles[0].height(), 1);
+        SDL_EndGPUComputePass(pass);
+    }
+    // 3. The longest round each tile.
+    {
+        const f32 params[4] = {static_cast<f32>(view._blur_tiles[0].width()),
+                               static_cast<f32>(view._blur_tiles[0].height()), 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding input{view._blur_tiles[0].handle(), _point_sampler};
+        if (!compute_pass(commands, _blur_neighbours_pipeline, view._blur_tiles[1], std::span{&input, 1}, params,
+                          sizeof(params)))
+            return &source;
+    }
+    // 4. The gather.
+    {
+        const u32 samples = std::clamp(blur.samples, 4u, 32u) & ~1u; // even: the samples alternate two directions
+        struct {
+            f32 size[4], shape[4];
+        } params{{w, h, 1.0f / w, 1.0f / h}, {static_cast<f32>(shape.tile), static_cast<f32>(samples), 0.0f, 0.0f}};
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{source.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._blur_prepared.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._blur_tiles[1].handle(), _point_sampler}};
+        if (!compute_pass(commands, _blur_gather_pipeline, view._blur_result, inputs, &params, sizeof(params)))
+            return &source;
+    }
+    ctx.stats.motion_blur_dispatches += 4;
+    return &view._blur_result;
+}
+
+bool GpuRenderer3D::ensure_dof_targets(GpuView3D& view, bool autofocus) {
+    const u32 w = static_cast<u32>(view.size().x), h = static_cast<u32>(view.size().y);
+    const u32 hw = (w + 1) / 2, hh = (h + 1) / 2;
+    const u32 tw = (hw + 7) / 8, th = (hh + 7) / 8;
+    const auto sized = [](const GpuTexture& t, u32 x, u32 y) { return t && t.width() == x && t.height() == y; };
+    constexpr SDL_GPUTextureUsageFlags stored =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+    try {
+        for (GpuTexture* t : {&view._dof_half, &view._dof_half_blur, &view._dof_blurred, &view._dof_reach})
+            if (!sized(*t, hw, hh))
+                *t = _device->create_target(hw, hh, hdr_format, stored);
+        if (!sized(view._dof_result, w, h))
+            view._dof_result = _device->create_target(w, h, hdr_format, stored);
+        for (GpuTexture& tiles : view._dof_tiles)
+            if (!sized(tiles, tw, th))
+                tiles = _device->create_target(tw, th, hdr_format, stored);
+        if (autofocus)
+            for (GpuTexture& focus : view._dof_focus)
+                if (!focus) {
+                    focus = _device->create_target(1, 1, hdr_format, stored);
+                    view._dof_focus_valid = false;
+                }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: depth of field targets not made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        for (GpuTexture* t :
+             {&view._dof_half, &view._dof_half_blur, &view._dof_blurred, &view._dof_reach, &view._dof_result})
+            *t = {};
+        view._dof_tiles = {};
+        view._dof_focus = {};
+        return false;
+    }
+    return true;
+}
+
+const GpuTexture* GpuRenderer3D::depth_of_field(FrameCtx& ctx, const GpuTexture& source) {
+    const DepthOfField3D& dof = ctx.scene.camera_effects.depth_of_field;
+    if (!dof.enabled)
+        return &source;
+    if (!_capabilities.depth_of_field) {
+        warn_once(_dof_warned, "3D: depth of field asked for, but this device cannot do it: off");
+        return &source;
+    }
+    GpuView3D& view = *ctx.view;
+    if (!ctx.dof_wanted)
+        return &source; // an orthographic camera, or no depth this device can sample
+    // Under temporal anti-aliasing the main pass's depth (the overlay in its slice), else the pre-pass's (no overlay).
+    const GpuTexture* depth = ctx.taa ? &view._taa_depth : ctx.prepass_ran ? &view._ao_depth : nullptr;
+    ctx.focused = true; // its targets stay while it is asked for
+    if (!depth || !*depth || !ensure_dof_targets(view, dof.autofocus))
+        return &source;
+    // The easing's step: Scene3D::time's when it moves forward (at most a second), else the wall clock's (at most a
+    // quarter of a second), as auto exposure's.
+    const auto now = std::chrono::steady_clock::now();
+    f32 step = 0.0f;
+    if (view._dof_time_seen) {
+        const f32 moved = ctx.scene.time - view._dof_time;
+        step = moved > 0.0f && moved <= 1.0f
+                   ? moved
+                   : std::min(0.25f, std::chrono::duration<f32>(now - view._dof_wall).count());
+    }
+    view._dof_time = ctx.scene.time;
+    view._dof_time_seen = true;
+    view._dof_wall = now;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const f32 w = static_cast<f32>(view.size().x), h = static_cast<f32>(view.size().y);
+    const f32 widest = std::clamp(dof.max_blur, 0.0f, 0.05f) * h;
+    struct {
+        f32 size[4], lens[4], depth[4], unproject_zw[4], extra[4];
+    } u{};
+    const f32 size[4] = {w, h, 1.0f / w, 1.0f / h};
+    std::memcpy(u.size, size, sizeof(size));
+    u.lens[0] = depth_of_field_radius(dof, ctx.scene.camera, h, std::numeric_limits<f32>::infinity());
+    u.lens[1] = std::max(dof.focus_distance, 1e-3f);
+    u.lens[2] = widest;
+    u.lens[3] = dof.autofocus ? 1.0f : 0.0f;
+    u.depth[0] = 1.0f;
+    u.depth[1] = ctx.taa && ctx.overlaid ? overlay_split : 2.0f;
+    const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+    std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
+    const SDL_GPUTextureSamplerBinding depth_input{depth->handle(), _point_sampler};
+    u32 dispatches = 0;
+    // 0. Autofocus: this render's focus from the last render's, toward what is at the focus point.
+    const GpuTexture* focus = &_owner->_white;
+    if (dof.autofocus) {
+        const u32 write = 1 - view._dof_focus_read;
+        u.extra[0] = std::clamp(dof.focus_point.x, 0.0f, 1.0f);
+        u.extra[1] = std::clamp(dof.focus_point.y, 0.0f, 1.0f);
+        u.extra[2] = dof.focus_time > 0.0f ? 1.0f - std::exp(-step / dof.focus_time) : 1.0f;
+        u.extra[3] = view._dof_focus_valid ? 0.0f : 1.0f;
+        const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+            depth_input, SDL_GPUTextureSamplerBinding{view._dof_focus[view._dof_focus_read].handle(), _point_sampler}};
+        if (!compute_pass(commands, _dof_focus_pipeline, view._dof_focus[write], inputs, &u, sizeof(u)))
+            return &source;
+        ++dispatches;
+        view._dof_focus_read = write;
+        view._dof_focus_valid = true;
+        focus = &view._dof_focus[write];
+        u.extra[0] = u.extra[1] = u.extra[2] = u.extra[3] = 0.0f;
+    }
+    const SDL_GPUTextureSamplerBinding focus_input{focus->handle(), _point_sampler};
+    // 1. The half-size picture, each texel's radius and distance.
+    {
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{source.handle(), _point_sampler}, depth_input, focus_input};
+        if (!compute_pass_two(commands, _dof_prepare_pipeline, view._dof_half, view._dof_half_blur, inputs, &u,
+                              sizeof(u)))
+            return &source;
+        ++dispatches;
+    }
+    // 2. The widest blurs a tile (a work group a tile of 8 x 8 half texels), then the near ones spread as far as they
+    // reach.
+    {
+        const SDL_GPUStorageTextureReadWriteBinding output{.texture = view._dof_tiles[0].handle()};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+        if (!pass)
+            return &source;
+        const SDL_GPUTextureSamplerBinding input{view._dof_half_blur.handle(), _point_sampler};
+        SDL_BindGPUComputePipeline(pass, _dof_tiles_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, &input, 1);
+        SDL_DispatchGPUCompute(pass, view._dof_tiles[0].width(), view._dof_tiles[0].height(), 1);
+        SDL_EndGPUComputePass(pass);
+        const f32 reach[4] = {std::ceil(widest / 16.0f), 0.0f, 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding tiles{view._dof_tiles[0].handle(), _point_sampler};
+        if (!compute_pass(commands, _dof_spread_pipeline, view._dof_tiles[1], std::span{&tiles, 1}, reach,
+                          sizeof(reach)))
+            return &source;
+        dispatches += 2;
+    }
+    // 3. The gather, at half size: the spiral's step by quality (half texels; about r^2 / (2 step) samples out to r).
+    {
+        static constexpr f32 steps[3] = {2.0f, 1.0f, 0.5f};
+        const f32 shape[4] = {steps[std::min(dof.quality, 2u)], widest, 0.0f, 0.0f};
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{view._dof_half.handle(), _owner->_sampler_linear},
+            SDL_GPUTextureSamplerBinding{view._dof_half_blur.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._dof_tiles[1].handle(), _point_sampler}};
+        if (!compute_pass_two(commands, _dof_gather_pipeline, view._dof_blurred, view._dof_reach, inputs, shape,
+                              sizeof(shape)))
+            return &source;
+        ++dispatches;
+    }
+    // 4. Each full pixel between itself and the blur.
+    {
+        const std::array<SDL_GPUTextureSamplerBinding, 5> inputs{
+            SDL_GPUTextureSamplerBinding{source.handle(), _point_sampler}, depth_input, focus_input,
+            SDL_GPUTextureSamplerBinding{view._dof_blurred.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._dof_reach.handle(), _point_sampler}};
+        if (!compute_pass(commands, _dof_combine_pipeline, view._dof_result, inputs, &u, sizeof(u)))
+            return &source;
+        ++dispatches;
+    }
+    ctx.stats.dof_dispatches += dispatches;
+    return &view._dof_result;
+}
+
 void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     RenderDebugStats3D& stats = ctx.stats;
@@ -15888,6 +16267,8 @@ void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
         // The main pass's depth (the overlay's in front, in its slice of the range): the resolve takes the velocity
         // of the nearest surface round each pixel at an edge.
         const bool depth = _taa_depth_sampled && view->_taa_depth;
+        ctx.blur_before = view->_taa_prior[0];
+        ctx.blur_velocity = ctx.velocity_drawn && !ctx.taa_reset && view->_taa_valid;
         ctx.shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings,
                                 ctx.taa_reset || !ctx.velocity_drawn, ctx.jitter, ctx.taa_reactive,
                                 ctx.coverage_key != view->_taa_coverage_key, ctx.scene.debug.freeze_jitter,
@@ -16363,6 +16744,21 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
              return true;
          },
          [&] {
+             // The float picture (the resolve's, or an HDR view's own), through the camera's effects.
+             const GpuTexture* picture = ctx.taa ? ctx.shown : view->_hdr ? &view->_scene : nullptr;
+             if (picture)
+                 ctx.shown = depth_of_field(ctx, *picture);
+             else if (scene.camera_effects.depth_of_field.enabled)
+                 warn_once(_dof_float_warned,
+                           "3D: depth of field needs an HDR view or temporal anti-aliasing (a float picture): off");
+             return true;
+         },
+         [&] {
+             if (ctx.taa && ctx.shown)
+                 ctx.shown = motion_blur(ctx, *ctx.shown);
+             return true;
+         },
+         [&] {
              pick_pass(ctx);
              return true;
          },
@@ -16371,14 +16767,14 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
                  return finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass, scene.time,
                                     stats);
              else if (view->_hdr)
-                 return finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass, scene.time,
-                                    stats);
+                 return finish_view(ctx.commands, *view, ctx.shown ? *ctx.shown : view->_scene, /*plain=*/false,
+                                    ctx.sky_pass, scene.time, stats);
              return true;
          }}};
     static constexpr std::array<const char*, frame_graph_passes3d> markers{
         {"kin3d.clusters", "kin3d.local_shadows", "kin3d.gi_scene", "kin3d.gi_probes", "kin3d.sun_shadow",
          "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.main", "kin3d.fog_sun",
-         "kin3d.temporal_resolve", "kin3d.picking", "kin3d.output"}};
+         "kin3d.temporal_resolve", "kin3d.depth_of_field", "kin3d.motion_blur", "kin3d.picking", "kin3d.output"}};
     const auto record_start = std::chrono::steady_clock::now();
     for (u32 i = 0; i < plan.order.size(); ++i) {
         const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
@@ -16455,6 +16851,9 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
         }
     }
     bool taa = scene.taa.enabled && _taa_available;
+    // Depth of field without temporal anti-aliasing reads the pre-pass's depth (in an HDR view).
+    const bool dof_prepass = !taa && scene.camera_effects.depth_of_field.enabled && _capabilities.depth_of_field &&
+                             view->_hdr && _ao_available && scene.camera.projection == Projection3D::Perspective;
     const bool soft = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
     const bool particles = _particles_available && (!scene.particle_draws().empty() || scene.weather.active());
     const bool gi_wanted =
@@ -16470,9 +16869,16 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
               (needs_prepass || custom_shader || particles
                    ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/true)
                    : ensure_velocity_target(*view));
-    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted || fog_volume_wanted) {
+        if (taa && scene.camera_effects.depth_of_field.enabled && _capabilities.depth_of_field)
+            (void)ensure_dof_targets(*view, scene.camera_effects.depth_of_field.autofocus);
+        if (taa && scene.camera_effects.motion_blur.enabled && _capabilities.motion_blur)
+            (void)ensure_blur_targets(*view,
+                                      blur_shape(scene.camera_effects.motion_blur, f32(view->size().y), 0.0f).tile);
+    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted || fog_volume_wanted || dof_prepass) {
         ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/false);
     }
+    if (!taa && dof_prepass)
+        (void)ensure_dof_targets(*view, scene.camera_effects.depth_of_field.autofocus);
     if (shadows) {
         ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades);
     }

@@ -11,7 +11,8 @@
 //                 [--ao] [--ao-radius R] [--ao-intensity I] [--ao-half]
 //                 [--contact-shadows] [--contact-distance D] [--contact-steps N]
 //                 [--contact-thickness T]
-//                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
+//                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N] [--motion-blur]
+//                 [--dof DISTANCE] [--dof-aperture N] [--dof-sensor MM] [--dof-autofocus]
 //                 [--supersample N] [--samples N]
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
@@ -1898,6 +1899,8 @@ struct Overrides {
     bool graph_reference = false;
     bool taa = false;
     double taa_blend = 0.0, taa_sharpness = -1.0;
+    bool motion_blur = false;  // CameraEffects3D::motion_blur with its defaults (and --taa, whose velocity it reads)
+    kin::DepthOfField3D dof{}; // CameraEffects3D::depth_of_field (--dof DISTANCE turns it on)
     bool lod = false;
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
@@ -2605,6 +2608,19 @@ int main(int argc, char** argv) {
             over.graph_reference = true;
         } else if (a == "--taa") {
             over.taa = true;
+        } else if (a == "--dof") {
+            over.dof.enabled = true;
+            over.dof.focus_distance = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--dof-aperture") {
+            over.dof.aperture = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--dof-sensor") {
+            over.dof.sensor_height = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--dof-autofocus") {
+            over.dof.enabled = true;
+            over.dof.autofocus = true;
+        } else if (a == "--motion-blur") {
+            over.taa = true;
+            over.motion_blur = true;
         } else if (a == "--taa-blend") {
             over.taa = true;
             over.taa_blend = std::atof(next().c_str());
@@ -3148,6 +3164,8 @@ int main(int argc, char** argv) {
             merge_contact_shadows(scene.contact_shadows, doc.find("contact_shadows"), over);
             scene.taa = {};
             merge_taa(scene.taa, doc.find("taa"), over);
+            scene.camera_effects.motion_blur.enabled = over.motion_blur;
+            scene.camera_effects.depth_of_field = over.dof;
             scene.lod = {};
             merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
             scene.debug.gpu_pass_markers = over.gpu_pass_markers;

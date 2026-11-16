@@ -592,6 +592,65 @@ struct TemporalAA3D {
     u32 jitter_samples = 8; // frames before the jitter sequence repeats (1 to 16)
 };
 
+// Motion blur (CameraEffects3D::motion_blur): what moves across the picture while the shutter is open is smeared along
+// its motion, the camera's own and each object's, as a film camera shows it. After the temporal resolve, at the view's
+// size, in linear light (so a bright light streaks), before bloom and the tonemap; the HUD drawn over the view stays
+// sharp. It reads the temporal anti-aliasing's velocity, so it needs Scene3D::taa (without it, off, said once). The
+// first frame after View3D::reset_history() (a cut) is not blurred. Native renderer only (WebGL2: off, said once).
+struct MotionBlur3D {
+    bool enabled = false;
+    // How long the shutter is open, in degrees of the frame (0 to 360): 180, half of each frame's motion (a film
+    // camera's usual); 360 the whole of it; 0 none.
+    f32 shutter_angle = 180.0f;
+    f32 max_length = 0.05f; // the longest smear, a fraction of the view's height (0 to 0.25)
+    u32 samples = 12;       // colour samples a pixel along its smear (4 to 32): fewer is faster, grainier
+    // How much of the camera's own motion smears (0 to 1): 0 leaves a turning or moving camera's view of still things
+    // sharp and blurs only what moves in the world (the overlay keeps its own motion).
+    f32 camera_scale = 1.0f;
+    // 0: each frame's motion, as rendered. Else the motion over 1 / target_fps seconds of Scene3D::time, so the smear
+    // is the same length at any frame rate (Scene3D::time must move forward between renders; else as 0).
+    f32 target_fps = 0.0f;
+};
+
+// Depth of field (CameraEffects3D::depth_of_field): what is nearer or farther than the focus is blurred, as a real
+// lens of the camera's field of view blurs it: a disc as wide as the lens' circle of confusion there (bright lights
+// become round bokeh), the near blur spreading over what is in focus behind it. A physical lens: the focal length
+// follows from Camera3D::fov and `sensor_height` (a full-frame camera's 24 mm; a wide view blurs little, as a wide lens
+// does: bring the focus closer, open the aperture or use a longer lens, a narrower fov, for a shallow focus).
+// Perspective cameras only. It runs where the view keeps its picture in floating point: an HDR view, or one with
+// Scene3D::taa (else off, said once). Without temporal anti-aliasing it turns the depth pre-pass on (as ambient
+// occlusion does), whose depth has no overlay: the overlay is then blurred with what is behind it. Native renderer
+// only.
+struct DepthOfField3D {
+    bool enabled = false;
+    f32 focus_distance = 10.0f; // world units (metres) from the camera, along its view, that are sharp
+    f32 aperture = 2.8f;        // the f-number: lower blurs more (0.7 to 64)
+    f32 sensor_height = 24.0f;  // millimetres (1 to 100)
+    // The widest blur, as a radius and a fraction of the view's height (0 to 0.05): what is far from the focus stops
+    // blurring more there.
+    f32 max_blur = 0.02f;
+    u32 quality = 1; // 0 (fewer samples), 1 or 2 (more: smoother discs, slower)
+    // The focus follows what is at `focus_point` (0 to 1 across and down the view; the middle by default), measured on
+    // the GPU each render, eased toward over `focus_time` seconds of Scene3D::time (0: at once); focus_distance is then
+    // where it starts (and after View3D::reset_history()).
+    bool autofocus = false;
+    Vec2f focus_point{0.5f, 0.5f};
+    f32 focus_time = 0.25f;
+};
+
+// The blur's radius in pixels of a view `view_height` pixels high at `distance` along the view from `camera`, as
+// `dof` puts it: negative in front of the focus, positive behind it, 0 at it (and for an orthographic camera). Before
+// DepthOfField3D::max_blur, which the renderer then limits it to.
+f32 depth_of_field_radius(const DepthOfField3D& dof, const Camera3D& camera, f32 view_height, f32 distance);
+
+// What the camera adds to the picture (lens and film), after the scene is rendered and before the 2D drawn over the
+// view: off by default; off, the picture and its cost are those without it. Planar views (mirrors, portals) and
+// reflection captures are rendered without them: they belong to the eye, not to a picture inside the scene.
+struct CameraEffects3D {
+    DepthOfField3D depth_of_field{};
+    MotionBlur3D motion_blur{};
+};
+
 // Levels of detail: each copy of a mesh made with levels (MeshOptions3D::levels)
 // is drawn with the simplest level whose error, projected onto the screen at
 // the copy's distance from the camera, is under `error_pixels` / `bias`. One
@@ -828,6 +887,7 @@ public:
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
     ScreenSpaceReflections3D ssr{};
+    CameraEffects3D camera_effects{};
     // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
     // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
     f32 time = 0.0f;
