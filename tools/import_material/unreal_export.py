@@ -493,6 +493,35 @@ class Exporter:
                 pass
         doc.update({"blend_mode": enum_name(blend), "shading_model": enum_name(model), "two_sided": bool(two_sided),
                     "opacity_mask_clip_value": float(clip)})
+        # A Subsurface Profile material's profile (an instance's own, else its base's; none: Unreal's default skin), its
+        # settings as Unreal loaded them (upgraded to Burley's mean free path).
+        if enum_name(model) == "MSM_SUBSURFACE_PROFILE":
+            profile = base.get_editor_property("subsurface_profile")
+            if isinstance(asset, unreal.MaterialInstance):
+                try:
+                    if asset.get_editor_property("override_subsurface_profile"):
+                        profile = asset.get_editor_property("subsurface_profile")
+                except Exception:
+                    pass
+            if profile is not None:
+                s = profile.get_editor_property("settings")
+                entry = {"name": profile.get_name()}
+                for key in ("surface_albedo", "mean_free_path_color", "tint", "transmission_tint_color"):
+                    try:
+                        entry[key] = colour(s.get_editor_property(key))
+                    except Exception:
+                        pass
+                for key in ("mean_free_path_distance", "world_unit_scale", "extinction_scale"):
+                    try:
+                        entry[key] = float(s.get_editor_property(key))
+                    except Exception:
+                        pass
+                for key in ("enable_burley", "enable_mean_free_path"):
+                    try:
+                        entry[key] = bool(s.get_editor_property(key))
+                    except Exception:
+                        pass
+                doc["subsurface_profile"] = entry
         try:  # a surface's (MD_SURFACE), a post process's, a volume's, ...
             doc["material_domain"] = enum_name(base.get_editor_property("material_domain"))
         except Exception:

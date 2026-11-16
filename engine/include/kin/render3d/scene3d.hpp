@@ -169,6 +169,9 @@ struct SurfaceTraits3D {
     // would neither hold nor keep up with (each frame's parameters a new one; its maps may be pictures of the view); or
     // none, for one the GI should see through (water: else a dark lid over the pool, and the light round it wrong).
     SurfaceGi3D gi = SurfaceGi3D::StandIn;
+    // It writes KinSurface::subsurface (a material graph's subsurface output, not a constant 0): its material scatters
+    // under the surface (Material3D::subsurface_radius) where it says, even with Material3D::subsurface 0.
+    bool subsurface = false;
 
     friend bool operator==(const SurfaceTraits3D&, const SurfaceTraits3D&) = default;
 };
@@ -293,6 +296,21 @@ struct Material3D {
 
     LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
     EmissionMode3D emission_mode = EmissionMode3D::BaseRelative;
+    // Subsurface scattering (docs/rendering_3d.md, Subsurface scattering): light that enters the material spreads
+    // under its surface before it leaves (skin, wax, marble, jade, milk). `subsurface` is the share of its diffuse
+    // light that spreads (0 none to 1); `subsurface_radius` how far red, green and blue spread, in world units
+    // (Burley's d a channel, his profile's (e^(-r/d) + e^(-r/3d)) / (8 pi d r), as HDRP's scattering distance:
+    // subsurface_radius3d's presets; skin's by default). With `subsurface_transmission` the light on
+    // its far side also comes through its thick parts (an ear, a finger, a candle), across the thickness the shadow
+    // maps see, else `subsurface_thickness` world units (0: only where a shadow map says). kin's stock lit material or
+    // a surface shader (whose KinSurface::subsurface and subsurface_thickness say it a pixel: a mask, a thickness map;
+    // one whose traits say it writes the share scatters with `subsurface` 0 too), opaque or cut out (not a custom
+    // shader), in a view with a float picture (HDR or temporal anti-aliasing): elsewhere drawn without the spread.
+    // Native renderer only.
+    f32 subsurface = 0.0f;
+    LinearRgb subsurface_radius{0.00106f, 0.00040f, 0.00020f};
+    bool subsurface_transmission = false;
+    f32 subsurface_thickness = 0.0f;
     // Independent of the image. Omitted entries inherit wrap_u/v and the Texture's legacy scale mode.
     std::array<std::optional<TextureSampler3D>, u32(MaterialMap3D::Count)> texture_samplers{};
     // A surface of its own (SurfaceShader3D: docs/rendering_3d.md, Surface shaders): a function that changes what
@@ -613,6 +631,11 @@ struct MotionBlur3D {
     // is the same length at any frame rate (Scene3D::time must move forward between renders; else as 0).
     f32 target_fps = 0.0f;
 };
+
+// Material3D::subsurface_radius for common materials, in metres (Burley's d in red, green and blue: Jensen et al.'s
+// measured diffuse mean free paths over 3.5, rounded): human skin, marble, candle wax, jade, whole milk, a leaf.
+enum class SubsurfacePreset3D : u8 { Skin, Marble, Wax, Jade, Milk, Leaf };
+LinearRgb subsurface_radius3d(SubsurfacePreset3D preset);
 
 // Depth of field (CameraEffects3D::depth_of_field): what is nearer or farther than the focus is blurred, as a real
 // lens of the camera's field of view blurs it: a disc as wide as the lens' circle of confusion there (bright lights

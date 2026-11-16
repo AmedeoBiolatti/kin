@@ -9,6 +9,15 @@ releases may change APIs.
 
 ### Added
 
+- 3D subsurface scattering ([3D rendering](rendering_3d.md#subsurface-scattering)): `Material3D::subsurface`,
+  `subsurface_radius` (presets for skin, marble, wax, jade, milk, leaf) and light through thick parts
+  (`subsurface_transmission`, thickness from the shadow maps or `subsurface_thickness`); disc-sampled Burley as Unity
+  HDRP and Unreal 5, fitted to kin's forward renderer (a subsurface pass, a compute spread, an add-back inside the
+  main pass). Material files: `subsurface*`; surface shaders and material graphs (`subsurface`,
+  `subsurface_thickness` outputs: a mask, a thickness map); imported from Unreal's Subsurface Profile, Unity HDRP's
+  diffusion profiles, Godot's `subsurf_scatter_*` and glTF diffuse transmission through a volume. Checked against
+  Cycles' Christensen-Burley (`tools/cycles/subsurface.py`, the `subsurface` reference scene). Native renderer only;
+  HDR or TAA views.
 - 3D glow and lens flares ([3D rendering](rendering_3d.md#glow-and-lens-flares)): `Scene3D::camera_effects.glow`
   makes the view's bloom wide (an energy-conserving mip chain, as Unreal's and Unity's) and adds lens dirt, ghosts, a
   halo and anamorphic streaks; authored as `SceneEnvironment3D`'s `glow_*` (the dirt picture as `glow_dirt`, by path). With every

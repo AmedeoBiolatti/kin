@@ -35,7 +35,7 @@ void main() {
     }
     vec3 c = material.params.y > 0.5
                  ? s.base_color + s.emission
-                 : kin_lit_surface(s) + s.emission;
+                 : kin_lit_surface(s) + s.emission * kin_subsurface_keep(s.subsurface).y; // (as below)
     if (frame.time.z > 0.5) {
         c = kin_surface_channel(int(frame.time.z + 0.5), s.base_color, s.normal, s.occlusion, s.roughness, s.metallic,
                                 s.emission, material.params.y > 0.5, alpha);
@@ -61,7 +61,9 @@ void main() {
                 : color.rgb + kin_emissive(color.rgb);
     } else {
         const vec2 mr = kin_metallic_roughness();
-        c = kin_lit(color.rgb, kin_normal(), mr.x, mr.y, kin_occlusion()) + kin_emissive(color.rgb);
+        // (The subsurface pass leaves the emission out: kin_subsurface_keep's y.)
+        c = kin_lit(color.rgb, kin_normal(), mr.x, mr.y, kin_occlusion()) +
+            kin_emissive(color.rgb) * kin_subsurface_keep(kin_subsurface_share).y;
     }
     if (frame.time.z > 0.5) {
         const vec2 mr = kin_metallic_roughness();

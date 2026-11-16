@@ -46,4 +46,8 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     mat4 ssr_previous;  // world to the previous frame's clip space (unjittered)
     vec4 portal_sun; // count, shadow texel (uv), sun shadow strength
     KinPortalSun portal[8];
+    // Subsurface scattering's split of the light (kin_subsurface_keep): x 0 all of it; 1 the main pass (all but the
+    // subsurface materials' scattered share, which the scattering pass puts back); 2 the subsurface pass (that share
+    // alone, the fog's transmittance applied, its profile's number + 1 in alpha).
+    vec4 subsurface;
 } frame;

@@ -31,7 +31,8 @@ set(_kin_gpu_shader_names_3D
     fog_volume.comp fog_volume_integrate.comp fog_volume_apply.frag fog_volume_depth.comp
     motion_blur_prepare.comp motion_blur_tiles.comp motion_blur_neighbours.comp motion_blur.comp
     dof_focus.comp dof_prepare.comp dof_tiles.comp dof_spread.comp dof_gather.comp dof_combine.comp
-    view_output_effects.frag glow_down.comp glow_up.comp glow_flare.comp glow_streak.comp glow_compose.comp)
+    view_output_effects.frag glow_down.comp glow_up.comp glow_flare.comp glow_streak.comp glow_compose.comp
+    subsurface_scatter.comp subsurface_combine.frag)
 
 set(_kin_gpu_shader_names ${_kin_gpu_shader_names_2D})
 if(KIN_EXPERIMENTAL_3D)

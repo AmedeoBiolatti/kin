@@ -41,5 +41,11 @@ layout(set = 3, binding = 1) uniform Material {
 #ifdef KIN_SURFACE
     vec4 surface[16]; // a surface shader's: Material3D::shader_params (kin_surface_param; surface_param_count3d)
 #endif
+    // Subsurface scattering (Material3D::subsurface; kin's stock material and surface shaders): x the share of the
+    // diffuse light that scatters (0: none), y its profile's number in the frame's table, z the thickness light goes
+    // through where no shadow map says (world units; 0: none), w 1 with light through thick parts; rgb how far each
+    // colour spreads. (A surface's block without them, made before, does not scatter: the renderer sees its size.)
+    vec4 subsurface;
+    vec4 subsurface_radius;
 } material;
 #endif

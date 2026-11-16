@@ -573,6 +573,10 @@ Result3D<SnapshotStats3D> write_scene_snapshot(Renderer3D& renderer, const Scene
           << ", \"casts_shadow\": " << (m.casts_shadow ? "true" : "false");
         if (c.kind == Kind::Water)
             j << ", \"transmission\": " << number(std::clamp(c.draw->material.shader_params[36], 0.0f, 1.0f));
+        // Subsurface scattering (Material3D::subsurface): the share and Burley's d a channel (world units).
+        if (m.subsurface > 0.0f && !m.unlit)
+            j << ", \"subsurface\": " << number(std::clamp(m.subsurface, 0.0f, 1.0f))
+              << ", \"subsurface_radius\": " << rgb(m.subsurface_radius);
         j << "}";
         ++stats.objects;
     }

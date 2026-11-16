@@ -127,6 +127,7 @@ vec3 lighting(Lit L) {
     s.coat_alpha = coat_roughness * coat_roughness;
     s.dielectric = f0_dielectric;
     s.wrap = L.wrap;
+    s.keep = vec2(1.0); // (no subsurface scattering in the browser)
     // The local lights' and the moon's shadows push off along the mesh's own normal, not a normal map's (native
     // shadow_offset_normal); a back-lit thin surface's from its other side.
     vec3 g = geometric_normal();
@@ -259,6 +260,8 @@ struct KinSurface {
     float specular;
     float diffuse_wrap;
     vec4 reflection;
+    float subsurface;           // (no subsurface scattering in the browser: kept for surfaces that write them)
+    float subsurface_thickness;
 };
 KinSurface kin_stock_surface() {
     KinSurface s;
@@ -277,6 +280,8 @@ KinSurface kin_stock_surface() {
     s.specular = 0.5;
     s.diffuse_wrap = 0.0;
     s.reflection = vec4(0.0);
+    s.subsurface = 0.0;
+    s.subsurface_thickness = 0.0;
     return s;
 }
 // KIN_SURFACE_SOURCE

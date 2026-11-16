@@ -24,7 +24,10 @@
 // colour a thin surface, a leaf, lets light through in from behind: KinSurface::backlight; 0 by default), clearcoat
 // and clearcoat_roughness (a clear coat over it, glTF's KHR_materials_clearcoat; 0 by default), specular (a
 // dielectric's reflectance head on, 0.08 times it; 0.5 by default: 4%), diffuse_wrap (how far the diffuse light wraps
-// round, 0 by default: Lambert's) and offset.
+// round, 0 by default: Lambert's), subsurface (the share of the diffuse light that scatters under the surface, a mask:
+// Material3D::subsurface by default; only where the material scatters, by its subsurface_radius) and
+// subsurface_thickness (the thickness light goes through where no shadow map says; Material3D::subsurface_thickness by
+// default), and offset.
 // Outputs not given keep what kin's material makes (the stock surface). Types are float,
 // vec2, vec3, vec4: a float widens to any; a vector narrows to its first components, or widens with 0 (and 1 for the
 // fourth). material_graph_nodes3d() lists the node types.

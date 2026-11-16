@@ -10580,3 +10580,48 @@ lit side is), else the material's `subsurface_thickness`. Added to the scattered
 
 Limits planned: needs a float picture (HDR or TAA views; else the wrapped diffuse stands in), the overlay (first-person
 hands) not scattered in the first slice (no pre-pass depth for it), what is off screen does not scatter in.
+
+**SS1 and SS2 as built (2026-11-16).** As planned, with these differences:
+
+- The scattering pass draws its samples' radii from the widest channel's profile and weighs each by the profile at
+  `sqrt(r^2 + dz^2)` (`r` the radius drawn, `dz` the depth gap), not by the distance between the pixels it lands on:
+  that one is 0 for a sample rounded onto the pixel itself, where the profile's `1 / r` has no bound. Samples
+  per pixel follow the spread's width on screen (4 up to 16 under TAA, 32 without).
+- Scene files, the ECS and Lua take the new fields through material files (`subsurface`, `subsurface_radius` as a
+  preset name or three numbers, `subsurface_transmission`, `subsurface_thickness`); no new bindings were needed.
+- Thickness for transmission: a bisection over the sun's cascade and the spot/point shadow maps with their
+  comparison samplers, up to 6 times the widest radius; else `subsurface_thickness`. Transmission is only added
+  where the material scatters (`subsurface > 0`).
+- Cost (`spheres`, 1080p, TAA, every surface scattering, RTX 4080 Laptop GPU at 77-82 C, three order-alternated
+  rounds): 0.36 ms without, 0.93 ms with; transmission within the noise (under 0.05 ms). Again after SS4's preset and
+  reach changes (skin x 15 now a third as wide; two clean rounds of three, 80-83 C): 0.35-0.40 ms without, 0.70-0.81
+  with, transmission 0.71-0.85.
+- Tests: the shadow edge spread (HDR: red 23 px since the reach went to 0.2, blue 8 px against a sharp 0; MSAA; 8-bit TAA; 8-bit without TAA
+  the same bytes as off), transmission by thickness (1 cm, 5 cm, fallback, none), material-file parsing. Pass on
+  NVIDIA, Intel and lavapipe.
+
+**SS3 and SS4 as built (2026-11-16).**
+
+- Surface shaders scatter too: `KinSurface::subsurface` (the share a pixel, a mask) and `subsurface_thickness`, the
+  graph outputs of those names; the radius stays the material's (one profile a material, as HDRP's and Unreal's). A
+  graph writing a non-zero `subsurface` (`SurfaceTraits3D::subsurface`) scatters with the material's own share 0.
+  Surface SPIR-V made before (its material block 32 bytes shorter, seen by reflection) draws without the spread; no
+  old cooked graph was at hand to test that path.
+- Importers: Unreal Subsurface Profile (`unreal_export.py` writes the profile's settings; d = mfp x world unit scale /
+  (0.6 x the perpendicular scaling factor), from Unreal's own shaders), Opacity as the graph's share; Unity HDRP Lit
+  (diffusion profile by the GUID in `_DiffusionProfileAsset`, d = scattering distance x multiplier / world scale, mm;
+  `_SubsurfaceMask`, `_Thickness` remapped, Shader Graph's Subsurface Mask and Thickness blocks); Godot (blur width =
+  strength x `subsurface_scattering_scale` as the widest d, approximate); glTF diffuse transmission through a volume
+  (the pinned cgltf does not parse `KHR_materials_diffuse_transmission`: read from its raw JSON).
+- The radius is Burley's d (as HDRP's scattering distance and what the importers compute). The presets were Jensen's
+  diffuse mean free paths used as d (about 3.5x too wide): now those over 3.5 (skin 1.06, 0.40, 0.20 mm; HDRP's
+  default skin 0.76, 0.32, 0.20).
+- Cycles (`tests/reference/scenes/subsurface.json`, `tools/cycles/subsurface.py`: Burley's line spread fitted to the
+  edge, each renderer against its own unscattered picture; Christensen-Burley with radius = d x 4 pi x s(A)): at skin
+  x 1.5 (d 5.6, 2.1, 1.05 mm; 6.9, 2.6, 1.3 px) kin 6.75, 2.25, 1.0 px, Cycles 7.75, 2.5, 1.25 px; at skin x 3 kin 15.5,
+  5.25, 2.5 px for 13.9, 5.2, 2.6 asked, Cycles 18.5, 5.5, 2.5. A 10 cm ball's terminator: green and blue within 3-4
+  levels of Cycles, red darker past the terminator (5 levels at x 1.5, 15 at x 3; Cycles' red is wider than asked on
+  the flat edge too). The fit found the scattering pass's reach (0.1 of the picture's height) cutting red's tail: now
+  0.2 (kin's red at x 3 went from 11.0 to 15.5 px).
+
+Open: WebGL2 (draws without the spread).

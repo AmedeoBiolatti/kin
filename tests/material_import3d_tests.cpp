@@ -364,6 +364,81 @@ void unity_materials() {
     CHECK(!import_unity_material(project / "Assets/NotOne.mat", options).ok());
 }
 
+// Godot's subsurface scattering: kin's, its widest radius the strength times the project's scale (0.1 here), skin's
+// colours in skin mode, grey's else; transmittance as kin's light through thin parts; without either, none.
+void godot_subsurface() {
+    Scratch scratch;
+    const fs::path project = scratch.path / "game", content = scratch.path;
+    write(project / "project.godot",
+          "[rendering]\nenvironment/subsurface_scattering/subsurface_scattering_scale=0.1\n");
+    const auto import = [&](const char* name, const std::string& body) {
+        write(project / (std::string(name) + ".tres"),
+              "[gd_resource type=\"StandardMaterial3D\" format=3]\n[resource]\n" + body);
+        auto m = import_godot_material(project / (std::string(name) + ".tres"),
+                                       {.project = project, .content = content, .out = content / "kin"});
+        CHECK(m.ok());
+        return m;
+    };
+    const auto skin =
+        import("skin", "subsurf_scatter_enabled = true\nsubsurf_scatter_strength = 0.5\n"
+                       "subsurf_scatter_skin_mode = true\nsubsurf_scatter_transmittance_enabled = true\n");
+    const auto& p = skin->asset.base.material;
+    const LinearRgb s = subsurface_radius3d(SubsurfacePreset3D::Skin);
+    CHECK(p.subsurface && *p.subsurface == 1.0f && *p.subsurface_transmission);
+    CHECK(std::abs(p.subsurface_radius->r - 0.05f) < 1e-7f &&
+          std::abs(p.subsurface_radius->b - 0.05f * s.b / s.r) < 1e-7f);
+    CHECK(!has_note(*skin, "not shown") && has_note(*skin, "subsurface scattering: Godot's blur"));
+    const auto wax = import("wax", "subsurf_scatter_enabled = true\nsubsurf_scatter_strength = 0.2\n");
+    const auto& q = wax->asset.base.material;
+    CHECK(std::abs(q.subsurface_radius->g - 0.02f) < 1e-7f && !*q.subsurface_transmission);
+    const auto off = import("off", "subsurf_scatter_strength = 0.5\n");
+    CHECK(!off->asset.base.material.subsurface);
+}
+
+// HDRP's subsurface scattering: Material Type Subsurface Scattering (_MaterialID 0) as kin's scattering, its Subsurface
+// Mask the share, its diffusion profile (found by the GUID _DiffusionProfileAsset keeps as four floats' bits) the
+// radius (scattering distance x multiplier, millimetres, over the world scale's metres a unit) and the thickness
+// (remapped, millimetres); transmission on. Without the profile: kin's skin, noted. A Standard material: none.
+void unity_hdrp_subsurface() {
+    Scratch scratch;
+    const fs::path project = scratch.path / "unity", content = scratch.path;
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    write(project / "Assets/Skin.asset",
+          "%YAML 1.1\n--- !u!114 &11400000\nMonoBehaviour:\n  m_Name: Skin\n  m_Version: 1\n  profile:\n"
+          "    name: Skin\n    scatteringDistance: {r: 0.75, g: 0.3, b: 0.2, a: 1}\n"
+          "    scatteringDistanceMultiplier: 2\n    transmissionMode: 0\n    thicknessRemap: {x: 1, y: 9}\n"
+          "    worldScale: 0.5\n    ior: 1.4\n");
+    // The GUID's 16 bytes as the floats 1, 2, 3, 4 (little-endian), as HDRP writes them.
+    unity_asset(project / "Assets/Skin.asset", "0000803f000000400000404000008040");
+    const auto import = [&](const char* name, const char* id, bool profiled) {
+        write(project / "Assets" / (std::string(name) + ".mat"),
+              unity_mat(name, "{fileID: 4800000, guid: 6e4ae4064600d784cac1e41a9e6f2e59, type: 3}", "",
+                        std::string("    - _MaterialID: ") + id +
+                            "\n    - _SubsurfaceMask: 0.8\n    - _Thickness: 0.5\n    - _TransmissionEnable: 1\n",
+                        std::string("    - _BaseColor: {r: 1, g: 1, b: 1, a: 1}\n") +
+                            (profiled ? "    - _DiffusionProfileAsset: {r: 1, g: 2, b: 3, a: 4}\n" : ""),
+                        "_MATERIAL_FEATURE_SUBSURFACE_SCATTERING _MATERIAL_FEATURE_TRANSMISSION"));
+        auto m = import_unity_material(project / "Assets" / (std::string(name) + ".mat"), options);
+        CHECK(m.ok());
+        return m;
+    };
+    const auto skin = import("Skin", "0", true);
+    const auto& p = skin->asset.base.material;
+    CHECK(p.subsurface && std::abs(*p.subsurface - 0.8f) < 1e-6f && *p.subsurface_transmission);
+    CHECK(p.subsurface_radius && std::abs(p.subsurface_radius->r - 0.003f) < 1e-7f &&
+          std::abs(p.subsurface_radius->g - 0.0012f) < 1e-7f && std::abs(p.subsurface_radius->b - 0.0008f) < 1e-7f);
+    CHECK(p.subsurface_thickness && std::abs(*p.subsurface_thickness - 0.01f) < 1e-7f); // (1 + 0.5 x 8) mm / 500
+    CHECK(!has_note(*skin, "keyword") && !has_note(*skin, "diffusion profile"));
+    const auto lost = import("Lost", "0", false);
+    CHECK(*lost->asset.base.material.subsurface_radius == subsurface_radius3d(SubsurfacePreset3D::Skin));
+    CHECK(has_note(*lost, "no diffusion profile"));
+    write(project / "Assets/Plain.mat",
+          unity_mat("Plain", "{fileID: 4800000, guid: 6e4ae4064600d784cac1e41a9e6f2e59, type: 3}", "",
+                    "    - _MaterialID: 1\n", "    - _BaseColor: {r: 1, g: 1, b: 1, a: 1}\n"));
+    const auto plain = import_unity_material(project / "Assets/Plain.mat", options);
+    CHECK(plain.ok() && !plain->asset.base.material.subsurface);
+}
+
 // TIFF (made by PIL: LZW with the horizontal predictor, Deflate, PackBits, uncompressed, 16-bit grey) and PSD (made
 // here) as 8-bit RGBA.
 extern "C" {
@@ -1369,6 +1444,53 @@ void unreal_clear_coat() {
     CHECK(!contains_text(lit_surface, "clearcoat"));
 }
 
+// Subsurface Profile: kin's subsurface scattering, its radius Burley's d from the profile (mean free path x world unit
+// scale / (0.6 x the perpendicular scaling factor of the albedo), in metres), its light through thin parts on, its
+// Opacity the graph's subsurface output (the share that scatters); no profile: kin's skin, noted. Another model's
+// Opacity is not a share.
+void unreal_subsurface_profile() {
+    Scratch scratch;
+    const fs::path project = scratch.path, content = scratch.path / "content";
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto import = [&](const char* model, const char* profile) {
+        const std::string doc =
+            std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Skin", "blend_mode": "BLEND_OPAQUE",
+          "shading_model": ")") +
+            model + R"(", )" + profile + R"("parameters": {}, "inputs": {}, "textures": {},
+          "graph": {"nodes": {"Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.625}, "inputs": {}}},
+                    "outputs": {"Opacity": {"node": "Half", "output": ""}}}})";
+        write(content / "M_Skin.json", doc);
+        auto m = import_unreal_graph(content / "M_Skin.json", options);
+        CHECK(m && !m->graph.empty());
+        std::ifstream in(m->graph);
+        const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+        const auto g = compile_material_graph3d(text);
+        for (const auto& e : g.errors)
+            std::cerr << e.node << ": " << e.message << '\n';
+        CHECK(g.ok());
+        return std::make_pair(std::move(m), g);
+    };
+    const auto [skin, graph] = import("MSM_SUBSURFACE_PROFILE",
+                                      R"("subsurface_profile": {"name": "SP_Test", "surface_albedo": [0.9, 0.5, 0.3, 1],
+          "mean_free_path_color": [1, 0.5, 0.25, 1], "mean_free_path_distance": 2, "world_unit_scale": 0.5,
+          "enable_burley": true, "enable_mean_free_path": true}, )");
+    const auto& p = skin->asset.base.material;
+    // d = 2 cm x (1, 0.5, 0.25) x 0.5 / (0.6 x (1.85 - a + 7 |a - 0.8|^3)), a = 0.9, 0.5, 0.3.
+    CHECK(p.subsurface && *p.subsurface == 1.0f && p.subsurface_transmission && *p.subsurface_transmission);
+    CHECK(p.subsurface_radius && std::abs(p.subsurface_radius->r - 0.0174155f) < 1e-5f &&
+          std::abs(p.subsurface_radius->g - 0.0054148f) < 1e-5f &&
+          std::abs(p.subsurface_radius->b - 0.0017182f) < 1e-5f);
+    CHECK(contains_text(graph.surface, "s.subsurface = clamp(") && graph.traits.subsurface);
+    CHECK(!contains_text(graph.surface, "s.alpha") && !has_note(*skin, "shading model ") &&
+          !has_note(*skin, "Opacity"));
+    const auto [unprofiled, unprofiled_graph] = import("MSM_SUBSURFACE_PROFILE", "");
+    const auto& q = unprofiled->asset.base.material;
+    CHECK(q.subsurface_radius && *q.subsurface_radius == subsurface_radius3d(SubsurfacePreset3D::Skin));
+    CHECK(has_note(*unprofiled, "no subsurface profile"));
+    const auto [lit, lit_graph] = import("MSM_DEFAULT_LIT", "");
+    CHECK(!lit->asset.base.material.subsurface && !contains_text(lit_graph.surface, "subsurface"));
+}
+
 // Specular as kin's (0.08 times it a dielectric's reflectance); a translucency lit from Unreal's light volume: diffuse
 // alone, wrapped (0.5 directional, 1 not), its Specular 0; a surface-lit one, or an opaque one, as it is.
 void unreal_specular_and_volume_lighting() {
@@ -1421,7 +1543,9 @@ int main() {
     RUN(standard_material);
     RUN(orm_and_refusals);
     RUN(writer_round_trip);
+    RUN(godot_subsurface);
     RUN(unity_materials);
+    RUN(unity_hdrp_subsurface);
     RUN(pictures);
     RUN(unreal_materials);
     RUN(safe_names);
@@ -1433,6 +1557,7 @@ int main() {
     RUN(unreal_object_space);
     RUN(unreal_foliage);
     RUN(unreal_clear_coat);
+    RUN(unreal_subsurface_profile);
     RUN(unreal_specular_and_volume_lighting);
     RUN(unity_graphs);
     RUN(godot_graphs);
