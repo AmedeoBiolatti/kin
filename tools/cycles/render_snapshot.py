@@ -326,11 +326,21 @@ def main():
     cam = doc["camera"]
     data = bpy.data.cameras.new("camera")
     data.sensor_fit = "VERTICAL"
+    dof = cam.get("dof")
+    if dof:
+        # kin's DepthOfField3D: the same thin lens (the sensor first, so the fov below sets the focal length from it).
+        data.sensor_height = dof["sensor_height"]
     if cam["orthographic"]:
         data.type = "ORTHO"
         data.ortho_scale = cam["height"] * max(1.0, width / height)
     else:
         data.angle = math.radians(cam["fov"])
+        if dof:
+            data.dof.use_dof = True
+            data.dof.focus_distance = dof["focus_distance"]
+            data.dof.aperture_fstop = dof["aperture"]
+            data.dof.aperture_blades = dof["blades"]
+            data.dof.aperture_rotation = math.radians(dof["blade_rotation"])
     data.clip_start = cam["near"]
     data.clip_end = min(cam["far"], 1e5)
     obj = bpy.data.objects.new("camera", data)

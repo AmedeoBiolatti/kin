@@ -333,6 +333,7 @@ public:
     u32 samples() const override { return _samples; }
     void reset_history() override {
         _taa_reset_asked = true;
+        _dof_focus_valid = false;
         _occ_reset = true;
         _exposure_valid = false;
         _fog_volume_valid = false;
@@ -444,6 +445,32 @@ private:
     bool _taa_reset_asked = false;     // View3D::reset_history()
     bool _taa_ortho = false;           // the camera's kind when it was made
     std::array<Mat4f, 2> _taa_prior{}; // the scene's and the overlay's view-projections last frame (no jitter)
+    // With MotionBlur3D (made by the first render that asks): each pixel's smear and distance, the longest smear a tile
+    // and round each tile (two tile-sized targets), and the blurred picture; all RGBA16F. Scene3D::time at the last
+    // blurred render (MotionBlur3D::target_fps' step).
+    GpuTexture _blur_prepared, _blur_result;
+    std::array<GpuTexture, 2> _blur_tiles;
+    f32 _blur_time = 0.0f;
+    bool _blur_time_seen = false;
+    // With DepthOfField3D (made by the first render that asks): the half-size picture with each texel's blur radius and
+    // distance, the gather's result with how wide the blur reaching each texel was, the widest near blur a tile and as
+    // spread round, and the full-size result (all RGBA16F); with autofocus the focus (1 x 1: this render's and the
+    // last, swapped), whether it holds one, and Scene3D::time at the last render (the easing's step).
+    GpuTexture _dof_half, _dof_half_blur, _dof_blurred, _dof_reach, _dof_result;
+    std::array<GpuTexture, 2> _dof_tiles;
+    std::array<GpuTexture, 2> _dof_focus;
+    u32 _dof_focus_read = 0;
+    bool _dof_focus_valid = false;
+    f32 _dof_time = 0.0f;
+    bool _dof_time_seen = false;
+    std::chrono::steady_clock::time_point _dof_wall{}; // (when Scene3D::time does not move: the wall clock's step)
+    u32 _grain_frame = 0;                              // Film3D::grain's pattern, a new one each render
+    // With Glow3D (made by the first render that asks): the chain's levels down (half the view's size, then each half
+    // the one before) and up, the ghosts and halo and the streaks (the second level's size), and the glow the output
+    // reads (half the view's size); all RGBA16F. Whether this render used them (for age_targets).
+    std::vector<GpuTexture> _glow_down, _glow_up;
+    GpuTexture _glow_flare, _glow_streak, _glow_final;
+    bool _glow_used = false;
     GpuCopyHistory _taa_last, _taa_now;
     struct ParticleHistory {
         u64 source = 0, id = 0, look = 0;
@@ -588,7 +615,7 @@ private:
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
     u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0,
-        _idle_gi = 0;
+        _idle_gi = 0, _idle_blur = 0, _idle_dof = 0, _idle_glow = 0;
 };
 
 class GpuRenderer3D final : public IRendererBackend3D {
@@ -780,8 +807,19 @@ private:
     // `dither`: the output shader with a dither of an 8-bit step (a view with a sky; falls back to the plain one
     // without it).
     // `time` is Scene3D::time (auto exposure's step between renders).
+    // `effects`: the scene's lens, film and grade (CameraEffects3D), through view_output_effects.frag when any is on.
     bool finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither,
-                     f32 time, RenderDebugStats3D&);
+                     f32 time, RenderDebugStats3D&, const CameraEffects3D* effects = nullptr);
+    // The output with the lens, film and grade on (finish_view's when any is).
+    bool record_output_effects(SDL_GPUCommandBuffer*, GpuView3D& view, const GpuTexture& source,
+                               const GpuTexture* bloom, const OutputOptions3D&, const CameraEffects3D& effects,
+                               SDL_GPUBuffer* exposure, RenderDebugStats3D&);
+    // Glow3D over `source`: the glow the output reads (half size), or null where it cannot (kin's own bloom then).
+    // `base` is kin's own bloom, already recorded, when the glow is not wide.
+    const GpuTexture* record_glow(SDL_GPUCommandBuffer*, GpuView3D& view, const GpuTexture& source, const Glow3D& glow,
+                                  const GpuTexture* base, f32 threshold, RenderDebugStats3D&);
+    // A Grade3D LUT's strip as a texture, uploaded once while the LUT lives.
+    const GpuTexture* lut_texture(const std::shared_ptr<const ColorLut>& lut);
     // ViewOptions3D::auto_exposure: meters `source` into the view's exposure buffer and adapts it; false (the view is
     // output with its plain exposure) where it can't.
     bool meter_exposure(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, f32 time,
@@ -824,6 +862,15 @@ private:
     // pass in the middle of the frame is followed by resume_2d().
     struct FrameCtx;
     struct DrawRef;
+    // CameraEffects3D::motion_blur over `source` (the resolved picture): the blurred picture, or `source` itself where
+    // the scene has none (or this frame cannot: no velocity, a reset).
+    const GpuTexture* motion_blur(FrameCtx& ctx, const GpuTexture& source);
+    // Its targets for an output of the view's size and tiles of `tile` pixels, made or kept; false if they can't be.
+    bool ensure_blur_targets(GpuView3D& view, u32 tile);
+    // CameraEffects3D::depth_of_field over `source`: the result, or `source` itself where the scene has none (or this
+    // render cannot: no depth).
+    const GpuTexture* depth_of_field(FrameCtx& ctx, const GpuTexture& source);
+    bool ensure_dof_targets(GpuView3D& view, bool autofocus);
     void setup_frame(FrameCtx& ctx);    // cameras, temporal anti-aliasing and its jitter
     void fit_sun_shadow(FrameCtx& ctx); // the shadow map and its cascades or box
     bool portal_sun_pass(FrameCtx& ctx);
@@ -1227,6 +1274,41 @@ private:
     // The main pass's one-sample depth (_taa_depth) can be sampled: kept for the resolve, which takes the velocity of
     // the nearest surface at an edge (the overlay's in front, as its slice of the depth range puts it).
     bool _taa_depth_sampled = false;
+    // MotionBlur3D: motion_blur_prepare/_tiles/_neighbours.comp and motion_blur.comp (the gather).
+    SDL_GPUComputePipeline* _blur_prepare_pipeline = nullptr;
+    SDL_GPUComputePipeline* _blur_tiles_pipeline = nullptr;
+    SDL_GPUComputePipeline* _blur_neighbours_pipeline = nullptr;
+    SDL_GPUComputePipeline* _blur_gather_pipeline = nullptr;
+    bool _motion_blur_warned = false;     // asked for where it cannot run (the device)
+    bool _motion_blur_taa_warned = false; // asked for without Scene3D::taa
+    // DepthOfField3D: dof_focus/_prepare/_tiles/_spread/_gather/_combine.comp.
+    SDL_GPUComputePipeline* _dof_focus_pipeline = nullptr;
+    SDL_GPUComputePipeline* _dof_prepare_pipeline = nullptr;
+    SDL_GPUComputePipeline* _dof_tiles_pipeline = nullptr;
+    SDL_GPUComputePipeline* _dof_spread_pipeline = nullptr;
+    SDL_GPUComputePipeline* _dof_gather_pipeline = nullptr;
+    SDL_GPUComputePipeline* _dof_combine_pipeline = nullptr;
+    bool _dof_warned = false; // asked for where it cannot run (the device)
+    // CameraEffects3D's lens, film and grade: view_output_effects.frag, a storage buffer to bind where the view has no
+    // adapted exposure, the LUTs' textures (by the LUT they were made from), and whether it was asked for in vain.
+    GpuShader _output_effects_shader;
+    std::shared_ptr<GpuBuffer> _effects_no_exposure;
+    struct LutTexture {
+        std::weak_ptr<const ColorLut> source;
+        const ColorLut* key = nullptr;
+        Texture texture;
+    };
+    std::vector<LutTexture> _lut_textures;
+    bool _effects_warned = false;
+    // Glow3D: glow_down/_up/_flare/_streak/_compose.comp.
+    SDL_GPUComputePipeline* _glow_down_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_up_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_flare_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_streak_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_compose_pipeline = nullptr;
+    bool _glow_warned = false;
+    bool _effects_float_warned = false; // camera effects asked for in a view that is neither HDR nor temporally
+                                        // anti-aliased (no float picture)
     // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.
     bool _taa_warned = false;
     bool _taa_prepass_warned = false;

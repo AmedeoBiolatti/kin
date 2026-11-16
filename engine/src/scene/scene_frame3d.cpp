@@ -167,6 +167,7 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         scene.contact_shadows = {};
         scene.taa = {};
         scene.ssr = {};
+        scene.camera_effects = {};
         scene.anisotropy = 1;
         scene.texture_lod_bias = 0.0f;
         scene.specular_aa = 0.0f;

@@ -24,6 +24,7 @@
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -1561,6 +1562,37 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     if (_taau_pipeline)
         _taau_output_pipeline = make_compute(handle, "taau_output.comp.spv", {.samplers = 2, .readwrite_textures = 1});
     _capabilities.temporal_upscaling = _taau_pipeline && _taau_output_pipeline;
+    // Motion blur (CameraEffects3D::motion_blur) reads the temporal resolve's velocity: four small compute passes into
+    // four-half targets (which TAA's history already needs).
+    if (_taa_available) {
+        _blur_prepare_pipeline = make_compute(handle, "motion_blur_prepare.comp.spv", {.samplers = 2});
+        _blur_tiles_pipeline = make_compute(handle, "motion_blur_tiles.comp.spv", {.samplers = 1});
+        _blur_neighbours_pipeline = make_compute(handle, "motion_blur_neighbours.comp.spv", {.samplers = 1});
+        _blur_gather_pipeline = make_compute(handle, "motion_blur.comp.spv", {.samplers = 3});
+    }
+    _capabilities.motion_blur =
+        _blur_prepare_pipeline && _blur_tiles_pipeline && _blur_neighbours_pipeline && _blur_gather_pipeline;
+    // Depth of field: six compute passes over four-half targets, reading a sampled depth.
+    if (_taa_available) {
+        _dof_focus_pipeline = make_compute(handle, "dof_focus.comp.spv", {.samplers = 2});
+        _dof_prepare_pipeline = make_compute(handle, "dof_prepare.comp.spv", {.samplers = 3, .readwrite_textures = 2});
+        _dof_tiles_pipeline = make_compute(handle, "dof_tiles.comp.spv", {.samplers = 1, .uniform_buffers = 0});
+        _dof_spread_pipeline = make_compute(handle, "dof_spread.comp.spv", {.samplers = 1});
+        _dof_gather_pipeline = make_compute(handle, "dof_gather.comp.spv", {.samplers = 3, .readwrite_textures = 2});
+        _dof_combine_pipeline = make_compute(handle, "dof_combine.comp.spv", {.samplers = 5});
+    }
+    // The glow's chain and the lens' flares (Glow3D).
+    if (_taa_available) {
+        _glow_down_pipeline = make_compute(handle, "glow_down.comp.spv", {.samplers = 1});
+        _glow_up_pipeline = make_compute(handle, "glow_up.comp.spv", {.samplers = 2});
+        _glow_flare_pipeline = make_compute(handle, "glow_flare.comp.spv", {.samplers = 1});
+        _glow_streak_pipeline = make_compute(handle, "glow_streak.comp.spv", {.samplers = 1});
+        _glow_compose_pipeline = make_compute(handle, "glow_compose.comp.spv", {.samplers = 5});
+    }
+    _capabilities.glow = _glow_down_pipeline && _glow_up_pipeline && _glow_flare_pipeline && _glow_streak_pipeline &&
+                         _glow_compose_pipeline;
+    _capabilities.depth_of_field = _dof_focus_pipeline && _dof_prepare_pipeline && _dof_tiles_pipeline &&
+                                   _dof_spread_pipeline && _dof_gather_pipeline && _dof_combine_pipeline;
     // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
     make_gi();
     // Fog and the sky (P3a): the fog variants of the stock mesh shaders (one more uniform block, in the slot custom
@@ -1653,6 +1685,16 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             KIN_LOG_INFO_F("render", "3D: particle shadows not available",
                            (LogFields{{.name = "reason", .value = e.what()}}));
         }
+    }
+    try {
+        // The camera's lens, film and grade (CameraEffects3D): the output's variant with them (two LUTs and the
+        // adapted exposure's buffer, always bound).
+        _output_effects_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output_effects.frag.spv",
+                                     /*uniform_buffers=*/1, /*samplers=*/4, /*storage_buffers=*/1);
+    } catch (const std::exception& e) {
+        KIN_LOG_INFO_F("render", "3D: the camera's lens, film and grade not available",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
     }
     try {
         _output_dither_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
@@ -1918,6 +1960,21 @@ GpuRenderer3D::~GpuRenderer3D() {
                                             _taa_pipeline,
                                             _taau_pipeline,
                                             _taau_output_pipeline,
+                                            _blur_prepare_pipeline,
+                                            _blur_tiles_pipeline,
+                                            _blur_neighbours_pipeline,
+                                            _blur_gather_pipeline,
+                                            _dof_focus_pipeline,
+                                            _dof_prepare_pipeline,
+                                            _dof_tiles_pipeline,
+                                            _dof_spread_pipeline,
+                                            _dof_gather_pipeline,
+                                            _dof_combine_pipeline,
+                                            _glow_down_pipeline,
+                                            _glow_up_pipeline,
+                                            _glow_flare_pipeline,
+                                            _glow_streak_pipeline,
+                                            _glow_compose_pipeline,
                                             _gc_cull,
                                             _gc_scan,
                                             _gc_args,
@@ -3569,11 +3626,13 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
     const Camera3D camera = scene.camera;
     const bool overlay = scene.show_overlay;
     const bool taa = scene.taa.enabled;
+    const CameraEffects3D effects = scene.camera_effects; // the eye's, not a probe's
     const bool gi = scene.global_illumination.enabled;
     const auto* lit_by = dynamic_cast<const GpuView3D*>(lighting);
     const bool borrow = gi && lit_by && lit_by != view && lit_by->_gi.lit && lit_by->_gi.irradiance;
     scene.show_overlay = false;
     scene.taa.enabled = false;
+    scene.camera_effects = {};
     scene.global_illumination.enabled = borrow;
     _gi_borrowed = borrow ? lit_by : nullptr;
     struct Face {
@@ -3622,6 +3681,7 @@ bool GpuRenderer3D::capture_reflection(IReflectionCaptureBackend3D& base, Scene3
     scene.camera = camera;
     scene.show_overlay = overlay;
     scene.taa.enabled = taa;
+    scene.camera_effects = effects;
     scene.global_illumination.enabled = gi;
     _gi_borrowed = nullptr;
     if (borrow)
@@ -3793,7 +3853,8 @@ bool GpuRenderer3D::renders_part(const IViewBackend3D& base, const Scene3D& scen
     const Scene3D* overlay = scene.overlay_if_any();
     // (A GI of its own builds windows round the view's whole picture; one borrowed is resolved over the part.)
     const bool gi = scene.global_illumination.enabled && (!lit_by || lit_by == &base);
-    return !scene.taa.enabled && !gi && !(scene.fog.enabled && scene.fog.sun_shadows) && !scene.lod.occlusion.enabled &&
+    return !scene.taa.enabled && !scene.camera_effects.motion_blur.enabled && !gi &&
+           !(scene.fog.enabled && scene.fog.sun_shadows) && !scene.lod.occlusion.enabled &&
            !scene.contact_shadows.enabled && !(overlay && !overlay->draws().empty());
 }
 
@@ -4192,6 +4253,125 @@ bool GpuRenderer3D::post_pass(SDL_GPUCommandBuffer* commands, const GpuTexture& 
     return true;
 }
 
+const GpuTexture* GpuRenderer3D::record_glow(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source,
+                                             const Glow3D& glow, const GpuTexture* base, f32 threshold,
+                                             RenderDebugStats3D& stats) {
+    view._glow_used = true;
+    const u32 w = source.width(), h = source.height();
+    // The levels: half the picture, then each half the one before while both sides stay 8 or more (at most 8); only
+    // as many as needed when the glow is not wide (the flares read the third, the dirt's light the fourth).
+    u32 levels = 0;
+    for (u32 lw = (w + 1) / 2, lh = (h + 1) / 2; levels < 8 && lw >= 8 && lh >= 8; lw = (lw + 1) / 2, lh = (lh + 1) / 2)
+        ++levels;
+    const bool dirt_on = glow.dirt && glow.dirt_intensity > 0.0f;
+    if (!glow.wide)
+        levels = std::min(levels, dirt_on ? 4u : 3u);
+    if (levels < 2)
+        return nullptr;
+    constexpr SDL_GPUTextureUsageFlags stored =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+    const auto sized = [](const GpuTexture& t, u32 x, u32 y) { return t && t.width() == x && t.height() == y; };
+    try {
+        view._glow_down.resize(levels);
+        view._glow_up.resize(glow.wide ? levels - 1 : 0);
+        u32 lw = (w + 1) / 2, lh = (h + 1) / 2;
+        for (u32 l = 0; l < levels; ++l, lw = (lw + 1) / 2, lh = (lh + 1) / 2) {
+            if (!sized(view._glow_down[l], lw, lh))
+                view._glow_down[l] = _device->create_target(lw, lh, hdr_format, stored);
+            if (glow.wide && l + 1 < levels && !sized(view._glow_up[l], lw, lh))
+                view._glow_up[l] = _device->create_target(lw, lh, hdr_format, stored);
+        }
+        const GpuTexture& second = view._glow_down[1];
+        if (!sized(view._glow_flare, second.width(), second.height()))
+            view._glow_flare = _device->create_target(second.width(), second.height(), hdr_format, stored);
+        if (!sized(view._glow_streak, second.width(), second.height()))
+            view._glow_streak = _device->create_target(second.width(), second.height(), hdr_format, stored);
+        if (!sized(view._glow_final, (w + 1) / 2, (h + 1) / 2))
+            view._glow_final = _device->create_target((w + 1) / 2, (h + 1) / 2, hdr_format, stored);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: glow targets not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        view._glow_down.clear();
+        view._glow_up.clear();
+        view._glow_flare = {};
+        view._glow_streak = {};
+        view._glow_final = {};
+        return nullptr;
+    }
+    SDL_GPUSampler* linear = _owner->_sampler_linear;
+    u32 dispatches = 0;
+    // Down: the first level from the picture (Karis, threshold), the rest from the one before.
+    for (u32 l = 0; l < levels; ++l) {
+        const f32 params[4] = {l == 0 ? 1.0f : 0.0f, std::max(threshold, 0.0f), 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding input{(l == 0 ? source : view._glow_down[l - 1]).handle(), linear};
+        if (!compute_pass(commands, _glow_down_pipeline, view._glow_down[l], std::span{&input, 1}, params,
+                          sizeof(params)))
+            return nullptr;
+        ++dispatches;
+    }
+    // Up (wide): each level mixed with the one below it, from the smallest (whose own light is its "up").
+    if (glow.wide) {
+        for (u32 l = levels - 1; l-- > 0;) {
+            const GpuTexture& below = l + 2 == levels ? view._glow_down[l + 1] : view._glow_up[l + 1];
+            const f32 params[4] = {std::clamp(glow.radius, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f};
+            const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+                SDL_GPUTextureSamplerBinding{view._glow_down[l].handle(), linear},
+                SDL_GPUTextureSamplerBinding{below.handle(), linear}};
+            if (!compute_pass(commands, _glow_up_pipeline, view._glow_up[l], inputs, params, sizeof(params)))
+                return nullptr;
+            ++dispatches;
+        }
+    }
+    // The ghosts and halo (from the third level where there is one: softer), and the streaks (from the second).
+    const bool flares = glow.ghosts > 0.0f || glow.halo > 0.0f;
+    if (flares) {
+        const GpuTexture& bright = view._glow_down[std::min(2u, levels - 1)];
+        const f32 params[8] = {
+            std::clamp(glow.ghosts, 0.0f, 10.0f),       static_cast<f32>(std::clamp(glow.ghost_count, 1u, 8u)),
+            std::clamp(glow.ghost_spacing, 0.0f, 1.0f), 0.0f,
+            std::clamp(glow.halo, 0.0f, 10.0f),         std::clamp(glow.halo_width, 0.0f, 1.0f),
+            static_cast<f32>(w) / static_cast<f32>(h),  0.0f};
+        const SDL_GPUTextureSamplerBinding input{bright.handle(), linear};
+        if (!compute_pass(commands, _glow_flare_pipeline, view._glow_flare, std::span{&input, 1}, params,
+                          sizeof(params)))
+            return nullptr;
+        ++dispatches;
+    }
+    const f32 streaks = std::clamp(glow.streaks, 0.0f, 20.0f);
+    if (streaks > 0.0f) {
+        const f32 params[4] = {std::clamp(glow.streak_length, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding input{view._glow_down[1].handle(), linear};
+        if (!compute_pass(commands, _glow_streak_pipeline, view._glow_streak, std::span{&input, 1}, params,
+                          sizeof(params)))
+            return nullptr;
+        ++dispatches;
+    }
+    // Together, with the lens dirt lit by a wide level (the fourth: about a sixteenth of the view across).
+    const auto* dirt_backend = dirt_on ? dynamic_cast<const GpuTextureBackend*>(glow.dirt.backend().get()) : nullptr;
+    const bool dirt = dirt_backend && dirt_backend->texture();
+    const GpuTexture& dirt_light =
+        glow.wide ? view._glow_up[std::min(3u, levels - 2)] : view._glow_down[std::min(3u, levels - 1)];
+    const GpuTexture& glowing = glow.wide ? view._glow_up[0] : *base;
+    const f32 params[8] = {flares ? 1.0f : 0.0f,
+                           dirt ? std::clamp(glow.dirt_intensity, 0.0f, 10.0f) : 0.0f,
+                           0.0f,
+                           0.0f,
+                           glow.streak_tint.r * streaks,
+                           glow.streak_tint.g * streaks,
+                           glow.streak_tint.b * streaks,
+                           0.0f};
+    const std::array<SDL_GPUTextureSamplerBinding, 5> inputs{
+        SDL_GPUTextureSamplerBinding{glowing.handle(), linear},
+        SDL_GPUTextureSamplerBinding{view._glow_flare.handle(), linear},
+        SDL_GPUTextureSamplerBinding{view._glow_streak.handle(), linear},
+        SDL_GPUTextureSamplerBinding{dirt_light.handle(), linear},
+        SDL_GPUTextureSamplerBinding{dirt ? dirt_backend->texture().handle() : _owner->_white.handle(), linear}};
+    if (!compute_pass(commands, _glow_compose_pipeline, view._glow_final, inputs, params, sizeof(params)))
+        return nullptr;
+    ++dispatches;
+    stats.glow_dispatches += dispatches;
+    return &view._glow_final;
+}
+
 bool GpuRenderer3D::record_bloom(SDL_GPUCommandBuffer* commands, const GpuTexture& source, const GpuTexture& result,
                                  const GpuTexture& scratch, f32 threshold, RenderDebugStats3D& stats) {
     const auto pass = [&](const GpuTexture& target, const GpuTexture& from, const std::array<f32, 4>& params) {
@@ -4238,17 +4418,187 @@ bool GpuRenderer3D::record_output(SDL_GPUCommandBuffer* commands, const GpuTextu
     return true;
 }
 
-bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
-                                bool dither, f32 time, RenderDebugStats3D& stats) {
-    const bool bloom = !plain && view._options.bloom > 0 && view._bloom_a && view._bloom_b;
-    if (bloom && !record_bloom(commands, source, view._bloom_a, view._bloom_b, view._options.bloom_threshold, stats))
+namespace {
+// Whether `scene` asks for motion blur without temporal anti-aliasing (the view then runs TAA's passes for the velocity
+// alone). Not in a view shading at a lower resolution (`render_scale` under 1), which needs real TAA.
+bool blur_without_taa(const Scene3D& scene, f32 render_scale) {
+    return scene.camera_effects.motion_blur.enabled && !scene.taa.enabled && render_scale >= 1.0f;
+}
+} // namespace
+
+namespace {
+// Grade3D's white balance as a matrix on linear sRGB (rows), as Unity's: the white the temperature and tint name (a
+// CIE xy near the daylight locus, D65 at 0, 0), adapted to D65 in LMS (von Kries). Exactly the identity at 0, 0.
+std::array<std::array<f32, 3>, 3> white_balance(f32 temperature, f32 tint) {
+    std::array<std::array<f32, 3>, 3> m{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    if (temperature == 0.0f && tint == 0.0f)
+        return m;
+    const auto gains = [](f32 t, f32 n) {
+        const f32 t1 = std::clamp(t, -1.0f, 1.0f) * (100.0f / 65.0f),
+                  t2 = std::clamp(n, -1.0f, 1.0f) * (100.0f / 65.0f);
+        const f32 x = 0.31271f - t1 * (t1 < 0.0f ? 0.1f : 0.05f);
+        const f32 y = 2.87f * x - 3.0f * x * x - 0.27509507f + t2 * 0.05f;
+        const f32 X = x / y, Y = 1.0f, Z = (1.0f - x - y) / y;
+        const std::array<f32, 3> lms{0.7328f * X + 0.4296f * Y - 0.1624f * Z, -0.7036f * X + 1.6975f * Y + 0.0061f * Z,
+                                     0.0030f * X + 0.0136f * Y + 0.9834f * Z};
+        return lms;
+    };
+    const auto white = gains(temperature, tint), d65 = gains(0.0f, 0.0f);
+    static constexpr f32 to_lms[3][3] = {{3.90405e-1f, 5.49941e-1f, 8.92632e-3f},
+                                         {7.08416e-2f, 9.63172e-1f, 1.35775e-3f},
+                                         {2.31082e-2f, 1.28021e-1f, 9.36245e-1f}};
+    static constexpr f32 from_lms[3][3] = {{2.85847e+0f, -1.62879e+0f, -2.48910e-2f},
+                                           {-2.10182e-1f, 1.15820e+0f, 3.24281e-4f},
+                                           {-4.18120e-2f, -1.18169e-1f, 1.06867e+0f}};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) {
+            f32 sum = 0.0f;
+            for (int k = 0; k < 3; ++k)
+                sum += from_lms[r][k] * (d65[k] / white[k]) * to_lms[k][c];
+            m[r][c] = sum;
+        }
+    return m;
+}
+} // namespace
+
+const GpuTexture* GpuRenderer3D::lut_texture(const std::shared_ptr<const ColorLut>& lut) {
+    if (!lut || lut->size() < 2)
+        return nullptr;
+    std::erase_if(_lut_textures, [](const LutTexture& t) { return t.source.expired(); });
+    auto found = std::find_if(_lut_textures.begin(), _lut_textures.end(),
+                              [&](const LutTexture& t) { return t.key == lut.get(); });
+    if (found == _lut_textures.end()) {
+        const i32 n = lut->size();
+        Texture texture = _owner->create_texture({n * n, n}, TextureFormat::Rgba8, lut->strip().data());
+        if (!texture)
+            return nullptr;
+        _lut_textures.push_back({lut, lut.get(), std::move(texture)});
+        found = std::prev(_lut_textures.end());
+    }
+    const auto* backend = dynamic_cast<const GpuTextureBackend*>(found->texture.backend().get());
+    return backend && backend->texture() ? &backend->texture() : nullptr;
+}
+
+bool GpuRenderer3D::record_output_effects(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source,
+                                          const GpuTexture* bloom, const OutputOptions3D& options,
+                                          const CameraEffects3D& effects, SDL_GPUBuffer* exposure,
+                                          RenderDebugStats3D& stats) {
+    const GpuTexture& target = view._resolved->texture();
+    const auto output = target.format();
+    const bool plain = !options.tone_map_sdr;
+    const f32 mode = plain ? (output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 3.f : 2.f)
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM      ? 0.f
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.f
+                                                                           : 2.f;
+    const bool adapted = exposure != nullptr && !plain;
+    if (!exposure) {
+        if (!_effects_no_exposure) {
+            try {
+                _effects_no_exposure = std::make_shared<GpuBuffer>(
+                    _device->create_buffer(exposure_buffer_usage, nullptr, exposure_state_bytes));
+            } catch (const std::exception&) {
+                return false;
+            }
+        }
+        exposure = _effects_no_exposure->handle();
+    }
+    const Lens3D& lens = effects.lens;
+    const Film3D& film = effects.film;
+    const Grade3D& grade = effects.grade;
+    const bool look = grade.lut_strength > 0.0f;
+    const GpuTexture* lut_a = look ? lut_texture(grade.lut ? grade.lut : grade.lut_to) : nullptr;
+    const GpuTexture* lut_b = look && grade.lut ? lut_texture(grade.lut_to) : nullptr;
+    const auto& first = grade.lut ? grade.lut : grade.lut_to;
+    const auto balance = white_balance(grade.temperature, grade.tint);
+    struct {
+        f32 a[4], flags[4], lens[4], film[4], balance[3][4], grade[4], lut_size[4];
+    } u{};
+    const f32 a[4] = {bloom ? options.bloom_strength : 0.f, plain ? 1.f : options.exposure, mode, 0};
+    std::memcpy(u.a, a, sizeof(a));
+    u.flags[0] = adapted ? 1.0f : 0.0f;
+    u.flags[1] = options.dither ? 1.0f : 0.0f;
+    u.flags[2] = static_cast<f32>(static_cast<u32>(grade.tone_curve));
+    u.flags[3] = static_cast<f32>(view._grain_frame++ % 65536u);
+    u.lens[0] = std::clamp(lens.vignette, 0.0f, 1.0f);
+    u.lens[1] = std::clamp(lens.vignette_smoothness, 0.01f, 1.0f);
+    u.lens[2] = std::clamp(lens.vignette_roundness, 0.0f, 1.0f);
+    u.lens[3] = std::clamp(lens.chromatic_aberration, 0.0f, 0.02f);
+    u.film[0] = std::clamp(film.grain, 0.0f, 1.0f);
+    u.film[1] = std::clamp(film.grain_size, 1.0f, 4.0f);
+    u.film[2] = static_cast<f32>(target.width()) / static_cast<f32>(std::max(target.height(), 1u));
+    u.film[3] = lut_a ? (lut_b ? 2.0f : 1.0f) : 0.0f;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            u.balance[r][c] = balance[r][c];
+    u.grade[0] = std::clamp(grade.contrast, 0.0f, 2.0f);
+    u.grade[1] = std::clamp(grade.saturation, 0.0f, 2.0f);
+    u.grade[2] = std::clamp(grade.lut_strength, 0.0f, 1.0f);
+    u.grade[3] = std::clamp(grade.lut_mix, 0.0f, 1.0f);
+    u.lut_size[0] = first ? static_cast<f32>(first->size()) : 0.0f;
+    u.lut_size[1] = grade.lut && grade.lut_to ? static_cast<f32>(grade.lut_to->size()) : 0.0f;
+    auto* pipeline = fullscreen(_output_effects_shader.handle(), target.format());
+    if (!pipeline)
         return false;
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = target.handle();
+    colour.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    auto* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
+    if (!pass)
+        return false;
+    set_viewport(pass, target.width(), target.height());
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    SDL_GPUSampler* linear = _owner->_sampler_linear;
+    const std::array<SDL_GPUTextureSamplerBinding, 4> bindings{
+        SDL_GPUTextureSamplerBinding{source.handle(), linear},
+        SDL_GPUTextureSamplerBinding{bloom ? bloom->handle() : source.handle(), linear},
+        SDL_GPUTextureSamplerBinding{lut_a ? lut_a->handle() : _owner->_white.handle(), linear},
+        SDL_GPUTextureSamplerBinding{lut_b ? lut_b->handle() : _owner->_white.handle(), linear}};
+    SDL_BindGPUFragmentSamplers(pass, 0, bindings.data(), static_cast<u32>(bindings.size()));
+    SDL_BindGPUFragmentStorageBuffers(pass, 0, &exposure, 1);
+    SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    ++stats.output_draws;
+    ++stats.camera_effect_draws;
+    return true;
+}
+
+bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
+                                bool dither, f32 time, RenderDebugStats3D& stats, const CameraEffects3D* effects) {
+    const bool bloom = !plain && view._options.bloom > 0 && view._bloom_a && view._bloom_b;
+    // Glow3D shapes the glow (and needs it); else kin's own bloom, as ever.
+    const Glow3D* glow = bloom && effects && effects->glow.shapes_glow() ? &effects->glow : nullptr;
+    if (glow && !_capabilities.glow) {
+        warn_once(_glow_warned, "3D: the glow's shape and the lens' flares asked for, but this device cannot: off");
+        glow = nullptr;
+    }
+    const GpuTexture* glowing = nullptr;
+    if (glow && glow->wide)
+        glowing = record_glow(commands, view, source, *glow, nullptr, view._options.bloom_threshold, stats);
+    if (bloom && !glowing &&
+        !record_bloom(commands, source, view._bloom_a, view._bloom_b, view._options.bloom_threshold, stats))
+        return false;
+    if (glow && !glow->wide)
+        glowing = record_glow(commands, view, source, *glow, &view._bloom_a, view._options.bloom_threshold, stats);
+    const GpuTexture* bloom_texture = !bloom ? nullptr : glowing ? glowing : &view._bloom_a;
     // Auto exposure meters the picture before the bloom is added (the glow follows the exposure as the scene does).
     // An HDR 2D pipeline (mode 2) tonemaps itself: there is nothing to expose here.
     const bool tonemapped = !plain && view._output_format != hdr_format;
     const bool metered =
         view._options.auto_exposure.enabled && tonemapped && meter_exposure(commands, view, source, time, stats);
-    return record_output(commands, source, view._resolved->texture(), bloom ? &view._bloom_a : nullptr,
+    if (effects && effects->lens_film_or_grade()) {
+        if (_output_effects_shader)
+            return record_output_effects(commands, view, source, bloom_texture,
+                                         {.bloom_strength = bloom ? view._options.bloom : 0.f,
+                                          .exposure = view._options.exposure,
+                                          .tone_map_sdr = !plain,
+                                          .dither = dither},
+                                         *effects, metered ? view._exposure->handle() : nullptr, stats);
+        warn_once(_effects_warned, "3D: the camera's lens, film and grade asked for, but this device cannot: off");
+    }
+    return record_output(commands, source, view._resolved->texture(), bloom_texture,
                          {.bloom_strength = bloom ? view._options.bloom : 0.f,
                           .exposure = view._options.exposure,
                           .tone_map_sdr = !plain,
@@ -4485,12 +4835,31 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
                                 &view._taa_dilated[1],
                                 &view._taa_confidence[0],
                                 &view._taa_confidence[1],
+                                &view._blur_prepared,
+                                &view._blur_result,
+                                &view._blur_tiles[0],
+                                &view._blur_tiles[1],
+                                &view._dof_half,
+                                &view._dof_half_blur,
+                                &view._dof_blurred,
+                                &view._dof_reach,
+                                &view._dof_result,
+                                &view._dof_tiles[0],
+                                &view._dof_tiles[1],
+                                &view._dof_focus[0],
+                                &view._dof_focus[1],
+                                &view._glow_flare,
+                                &view._glow_streak,
+                                &view._glow_final,
                                 &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
         bytes += texture_bytes(t);
     }
+    for (const std::vector<GpuTexture>* chain : {&view._glow_down, &view._glow_up})
+        for (const GpuTexture& t : *chain)
+            bytes += texture_bytes(t);
     // The fog's volumes (Fog3D::volumetric): three of four halves a cell.
     if (view._fog_volume_sum) {
         bytes += 3ull * 8ull * view._fog_volume_cells[0] * view._fog_volume_cells[1] * view._fog_volume_cells[2];
@@ -5162,6 +5531,20 @@ struct GpuRenderer3D::FrameCtx {
     bool gi = false;          // the view has a GI scene for this render (Scene3D::global_illumination)
     bool gi_lit = false;      // and its probes light the scene (the light variants read them)
     bool gi_resolved = false; // and their light on what the pre-pass drew was read (gi_resolve)
+    // For the motion blur: last frame's camera (world to clip, no jitter), and whether this frame's resolve had a
+    // velocity and a history to go with it (not the first frame, nor after a reset); whether it ran this render.
+    Mat4f blur_before{};
+    bool blur_velocity = false;
+    bool blurred = false;
+    // The temporal anti-aliasing this frame runs with: the scene's, or (motion blur without it) one with no jitter and
+    // no history, only for the velocity.
+    TemporalAA3D taa_settings{};
+    // Depth of field: asked for and possible (a perspective camera, a float picture, a depth to read); whether the
+    // pre-pass runs for its depth (no temporal anti-aliasing, whose main-pass depth it reads otherwise); whether it
+    // ran.
+    bool dof_wanted = false;
+    bool dof_prepass = false;
+    bool focused = false;
 };
 
 bool GpuRenderer3D::preparation_live(u64 frame) const {
@@ -5839,6 +6222,31 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             v._occ_reset = true;
         });
     age(v._idle_gi, ctx.gi, static_cast<bool>(v._gi.distance), [&] { release_gi(v); });
+    age(v._idle_glow, v._glow_used, !v._glow_down.empty() || static_cast<bool>(v._glow_final), [&] {
+        v._glow_down.clear();
+        v._glow_up.clear();
+        v._glow_flare = {};
+        v._glow_streak = {};
+        v._glow_final = {};
+    });
+    v._glow_used = false;
+    age(v._idle_dof, ctx.focused, v._dof_half || v._dof_result || v._dof_focus[0], [&] {
+        v._dof_half = {};
+        v._dof_half_blur = {};
+        v._dof_blurred = {};
+        v._dof_reach = {};
+        v._dof_result = {};
+        v._dof_tiles = {};
+        v._dof_focus = {};
+        v._dof_focus_valid = false;
+        v._dof_time_seen = false;
+    });
+    age(v._idle_blur, ctx.blurred, v._blur_prepared || v._blur_result || v._blur_tiles[0], [&] {
+        v._blur_prepared = {};
+        v._blur_result = {};
+        v._blur_tiles = {};
+        v._blur_time_seen = false;
+    });
     // The renderer's second gathered buffer (occlusion culling's 12 bytes a triangle of the room) goes when no view has
     // used it.
     const bool second_held = _gcb[1].indices || _gcb[1].scan || _gc_job_history;
@@ -6841,7 +7249,17 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     // exact. It replaces MSAA, and the sums that need the main pass's own
     // depth (the occlusion's, the contact shadows') are given the jittered
     // projection, so that they unproject what the pre-pass drew.
-    const TemporalAA3D& taa_settings = scene.taa;
+    // Motion blur without temporal anti-aliasing takes its velocity from the same passes, with no jitter and no
+    // history (the resolve passes this frame through): one sample, as under TAA.
+    ctx.taa_settings = scene.taa;
+    if (_capabilities.motion_blur && blur_without_taa(scene, view->_options.render_scale))
+        ctx.taa_settings = {.enabled = true,
+                            .blend = 0.0f,
+                            .still_blend = 0.0f,
+                            .sharpness = 0.0f,
+                            .jitter_scale = 0.0f,
+                            .jitter_samples = 1};
+    const TemporalAA3D& taa_settings = ctx.taa_settings;
     ctx.taa = taa_settings.enabled;
     if (ctx.taa && !_taa_available) {
         warn_once(_taa_warned, "3D: temporal anti-aliasing asked for, but this device cannot do it: off");
@@ -6904,6 +7322,12 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     if (!ctx.taa) {
         suspend_taa(*view);
     }
+    // Depth of field reads the main pass's depth under temporal anti-aliasing, else the pre-pass's.
+    const DepthOfField3D& dof = scene.camera_effects.depth_of_field;
+    ctx.dof_wanted = dof.enabled && _capabilities.depth_of_field &&
+                     scene.camera.projection == Projection3D::Perspective && (ctx.taa || view->_hdr) &&
+                     (ctx.taa ? _taa_depth_sampled : _ao_available);
+    ctx.dof_prepass = ctx.dof_wanted && !ctx.taa;
     ctx.drawn = ctx.view_projections;
     if (ctx.taa) {
         const f32 phases = view->upscaled() ? 1.0f / (view->_options.render_scale * view->_options.render_scale) : 1.f;
@@ -14541,7 +14965,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                      [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
     if (!ctx.main_velocity &&
         (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit || ctx.fog_sun_wanted ||
-         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted) &&
+         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted || ctx.dof_prepass) &&
         _ao_available && (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
         SDL_GPUColorTargetInfo target{};
@@ -15869,11 +16293,312 @@ void GpuRenderer3D::fog_volume_apply(FrameCtx& ctx) {
     SDL_EndGPURenderPass(pass);
 }
 
+bool GpuRenderer3D::ensure_blur_targets(GpuView3D& view, u32 tile) {
+    const u32 w = static_cast<u32>(view.size().x), h = static_cast<u32>(view.size().y);
+    const u32 tw = (w + tile - 1) / tile, th = (h + tile - 1) / tile;
+    const auto sized = [](const GpuTexture& t, u32 x, u32 y) { return t && t.width() == x && t.height() == y; };
+    constexpr SDL_GPUTextureUsageFlags stored =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+    try {
+        if (!sized(view._blur_prepared, w, h))
+            view._blur_prepared = _device->create_target(w, h, hdr_format, stored);
+        if (!sized(view._blur_result, w, h))
+            view._blur_result = _device->create_target(w, h, hdr_format, stored);
+        for (GpuTexture& tiles : view._blur_tiles)
+            if (!sized(tiles, tw, th))
+                tiles = _device->create_target(tw, th, hdr_format, stored);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: motion blur targets not made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view._blur_prepared = {};
+        view._blur_result = {};
+        view._blur_tiles = {};
+        return false;
+    }
+    return true;
+}
+
+namespace {
+// MotionBlur3D's numbers for a view `height` pixels high: the radius (pixels) of a smear of one UV a frame along an
+// axis' pixels, the longest radius, and the tile that holds it (at least 8 pixels; the gather reaches one tile round).
+struct BlurShape {
+    f32 scale = 0.0f, longest = 0.0f;
+    u32 tile = 8;
+};
+BlurShape blur_shape(const MotionBlur3D& blur, f32 height, f32 frame_step) {
+    BlurShape shape;
+    const f32 shutter = std::clamp(blur.shutter_angle, 0.0f, 360.0f) / 360.0f;
+    // The motion over 1 / target_fps seconds instead of the frame's: the frame's motion times their ratio.
+    const f32 rate = blur.target_fps > 0.0f && frame_step > 0.0f
+                         ? std::clamp(1.0f / (blur.target_fps * frame_step), 0.0f, 8.0f)
+                         : 1.0f;
+    shape.scale = 0.5f * shutter * rate; // half: the pixel is in the middle of its smear
+    shape.longest = 0.5f * std::clamp(blur.max_length, 0.0f, 0.25f) * height;
+    shape.tile = std::clamp(static_cast<u32>(std::ceil(shape.longest)), 8u, 64u);
+    shape.longest = std::min(shape.longest, static_cast<f32>(shape.tile));
+    return shape;
+}
+} // namespace
+
+const GpuTexture* GpuRenderer3D::motion_blur(FrameCtx& ctx, const GpuTexture& source) {
+    const MotionBlur3D& blur = ctx.scene.camera_effects.motion_blur;
+    if (!blur.enabled)
+        return &source;
+    GpuView3D& view = *ctx.view;
+    if (!_capabilities.motion_blur) {
+        warn_once(_motion_blur_warned, "3D: motion blur asked for, but this device cannot do it: off");
+        return &source;
+    }
+    if (!ctx.taa) {
+        warn_once(_motion_blur_taa_warned,
+                  "3D: motion blur needs temporal anti-aliasing's passes (for its velocity), which did not run: off");
+        return &source;
+    }
+    // The step since the last blurred render, in Scene3D::time (MotionBlur3D::target_fps); 0 when unknown.
+    const f32 time = ctx.scene.time;
+    const f32 step = view._blur_time_seen && time > view._blur_time && time - view._blur_time <= 1.0f
+                         ? time - view._blur_time
+                         : 0.0f;
+    view._blur_time = time;
+    view._blur_time_seen = true;
+    const BlurShape shape = blur_shape(blur, static_cast<f32>(view.size().y), step);
+    ctx.blurred = true; // its targets stay while it is asked for, even on a frame it skips
+    if (!ctx.blur_velocity || shape.scale <= 0.0f || shape.longest < 0.5f)
+        return &source;
+    if (!ensure_blur_targets(view, shape.tile))
+        return &source;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const f32 w = static_cast<f32>(view.size().x), h = static_cast<f32>(view.size().y);
+    // 1. Each pixel's smear and distance.
+    {
+        const bool depth = _taa_depth_sampled && view._taa_depth;
+        const bool separate = depth && blur.camera_scale < 1.0f;
+        struct {
+            f32 inverse_now[16], before[16];
+            f32 size[4], shape[4], depth[4], unproject_zw[4];
+        } u{};
+        const Mat4f inverse_now = ctx.view_projections[0].inverse();
+        std::memcpy(u.inverse_now, inverse_now.m, sizeof(u.inverse_now));
+        std::memcpy(u.before, ctx.blur_before.m, sizeof(u.before));
+        const f32 size[4] = {w, h, 1.0f / w, 1.0f / h};
+        std::memcpy(u.size, size, sizeof(size));
+        u.shape[0] = shape.scale;
+        u.shape[1] = shape.longest;
+        u.shape[2] = std::clamp(blur.camera_scale, 0.0f, 1.0f);
+        u.shape[3] = separate ? 1.0f : 0.0f;
+        u.depth[0] = depth ? 1.0f : 0.0f;
+        u.depth[1] = ctx.overlaid ? overlay_split : 2.0f;
+        const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+        std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
+        const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{depth ? view._taa_depth.handle() : _owner->_white.handle(), _point_sampler}};
+        if (!compute_pass(commands, _blur_prepare_pipeline, view._blur_prepared, inputs, &u, sizeof(u)))
+            return &source;
+    }
+    // 2. The longest smear a tile: a work group a tile.
+    {
+        const f32 params[4] = {static_cast<f32>(shape.tile), w, h, 0.0f};
+        const SDL_GPUStorageTextureReadWriteBinding output{.texture = view._blur_tiles[0].handle()};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+        if (!pass)
+            return &source;
+        const SDL_GPUTextureSamplerBinding input{view._blur_prepared.handle(), _point_sampler};
+        SDL_BindGPUComputePipeline(pass, _blur_tiles_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, &input, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, view._blur_tiles[0].width(), view._blur_tiles[0].height(), 1);
+        SDL_EndGPUComputePass(pass);
+    }
+    // 3. The longest round each tile.
+    {
+        const f32 params[4] = {static_cast<f32>(view._blur_tiles[0].width()),
+                               static_cast<f32>(view._blur_tiles[0].height()), 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding input{view._blur_tiles[0].handle(), _point_sampler};
+        if (!compute_pass(commands, _blur_neighbours_pipeline, view._blur_tiles[1], std::span{&input, 1}, params,
+                          sizeof(params)))
+            return &source;
+    }
+    // 4. The gather.
+    {
+        const u32 samples = std::clamp(blur.samples, 4u, 32u) & ~1u; // even: the samples alternate two directions
+        struct {
+            f32 size[4], shape[4];
+        } params{{w, h, 1.0f / w, 1.0f / h}, {static_cast<f32>(shape.tile), static_cast<f32>(samples), 0.0f, 0.0f}};
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{source.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._blur_prepared.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._blur_tiles[1].handle(), _point_sampler}};
+        if (!compute_pass(commands, _blur_gather_pipeline, view._blur_result, inputs, &params, sizeof(params)))
+            return &source;
+    }
+    ctx.stats.motion_blur_dispatches += 4;
+    return &view._blur_result;
+}
+
+bool GpuRenderer3D::ensure_dof_targets(GpuView3D& view, bool autofocus) {
+    const u32 w = static_cast<u32>(view.size().x), h = static_cast<u32>(view.size().y);
+    const u32 hw = (w + 1) / 2, hh = (h + 1) / 2;
+    const u32 tw = (hw + 7) / 8, th = (hh + 7) / 8;
+    const auto sized = [](const GpuTexture& t, u32 x, u32 y) { return t && t.width() == x && t.height() == y; };
+    constexpr SDL_GPUTextureUsageFlags stored =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+    try {
+        for (GpuTexture* t : {&view._dof_half, &view._dof_half_blur, &view._dof_blurred, &view._dof_reach})
+            if (!sized(*t, hw, hh))
+                *t = _device->create_target(hw, hh, hdr_format, stored);
+        if (!sized(view._dof_result, w, h))
+            view._dof_result = _device->create_target(w, h, hdr_format, stored);
+        for (GpuTexture& tiles : view._dof_tiles)
+            if (!sized(tiles, tw, th))
+                tiles = _device->create_target(tw, th, hdr_format, stored);
+        if (autofocus)
+            for (GpuTexture& focus : view._dof_focus)
+                if (!focus) {
+                    focus = _device->create_target(1, 1, hdr_format, stored);
+                    view._dof_focus_valid = false;
+                }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: depth of field targets not made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        for (GpuTexture* t :
+             {&view._dof_half, &view._dof_half_blur, &view._dof_blurred, &view._dof_reach, &view._dof_result})
+            *t = {};
+        view._dof_tiles = {};
+        view._dof_focus = {};
+        return false;
+    }
+    return true;
+}
+
+const GpuTexture* GpuRenderer3D::depth_of_field(FrameCtx& ctx, const GpuTexture& source) {
+    const DepthOfField3D& dof = ctx.scene.camera_effects.depth_of_field;
+    if (!dof.enabled)
+        return &source;
+    if (!_capabilities.depth_of_field) {
+        warn_once(_dof_warned, "3D: depth of field asked for, but this device cannot do it: off");
+        return &source;
+    }
+    GpuView3D& view = *ctx.view;
+    if (!ctx.dof_wanted)
+        return &source; // an orthographic camera, or no depth this device can sample
+    // Under temporal anti-aliasing the main pass's depth (the overlay in its slice), else the pre-pass's (no overlay).
+    const GpuTexture* depth = ctx.taa ? &view._taa_depth : ctx.prepass_ran ? &view._ao_depth : nullptr;
+    ctx.focused = true; // its targets stay while it is asked for
+    if (!depth || !*depth || !ensure_dof_targets(view, dof.autofocus))
+        return &source;
+    // The easing's step: Scene3D::time's when it moves forward (at most a second), else the wall clock's (at most a
+    // quarter of a second), as auto exposure's.
+    const auto now = std::chrono::steady_clock::now();
+    f32 step = 0.0f;
+    if (view._dof_time_seen) {
+        const f32 moved = ctx.scene.time - view._dof_time;
+        step = moved > 0.0f && moved <= 1.0f
+                   ? moved
+                   : std::min(0.25f, std::chrono::duration<f32>(now - view._dof_wall).count());
+    }
+    view._dof_time = ctx.scene.time;
+    view._dof_time_seen = true;
+    view._dof_wall = now;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    const f32 w = static_cast<f32>(view.size().x), h = static_cast<f32>(view.size().y);
+    const f32 widest = std::clamp(dof.max_blur, 0.0f, 0.05f) * h;
+    struct {
+        f32 size[4], lens[4], depth[4], unproject_zw[4], extra[4];
+    } u{};
+    const f32 size[4] = {w, h, 1.0f / w, 1.0f / h};
+    std::memcpy(u.size, size, sizeof(size));
+    u.lens[0] = depth_of_field_radius(dof, ctx.scene.camera, h, std::numeric_limits<f32>::infinity());
+    u.lens[1] = std::max(dof.focus_distance, 1e-3f);
+    u.lens[2] = widest;
+    u.lens[3] = dof.autofocus ? 1.0f : 0.0f;
+    u.depth[0] = 1.0f;
+    u.depth[1] = ctx.taa && ctx.overlaid ? overlay_split : 2.0f;
+    const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+    std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
+    const SDL_GPUTextureSamplerBinding depth_input{depth->handle(), _point_sampler};
+    u32 dispatches = 0;
+    // 0. Autofocus: this render's focus from the last render's, toward what is at the focus point.
+    const GpuTexture* focus = &_owner->_white;
+    if (dof.autofocus) {
+        const u32 write = 1 - view._dof_focus_read;
+        u.extra[0] = std::clamp(dof.focus_point.x, 0.0f, 1.0f);
+        u.extra[1] = std::clamp(dof.focus_point.y, 0.0f, 1.0f);
+        u.extra[2] = dof.focus_time > 0.0f ? 1.0f - std::exp(-step / dof.focus_time) : 1.0f;
+        u.extra[3] = view._dof_focus_valid ? 0.0f : 1.0f;
+        const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+            depth_input, SDL_GPUTextureSamplerBinding{view._dof_focus[view._dof_focus_read].handle(), _point_sampler}};
+        if (!compute_pass(commands, _dof_focus_pipeline, view._dof_focus[write], inputs, &u, sizeof(u)))
+            return &source;
+        ++dispatches;
+        view._dof_focus_read = write;
+        view._dof_focus_valid = true;
+        focus = &view._dof_focus[write];
+        u.extra[0] = u.extra[1] = u.extra[2] = u.extra[3] = 0.0f;
+    }
+    const SDL_GPUTextureSamplerBinding focus_input{focus->handle(), _point_sampler};
+    // 1. The half-size picture, each texel's radius and distance.
+    {
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{source.handle(), _point_sampler}, depth_input, focus_input};
+        if (!compute_pass_two(commands, _dof_prepare_pipeline, view._dof_half, view._dof_half_blur, inputs, &u,
+                              sizeof(u)))
+            return &source;
+        ++dispatches;
+    }
+    // 2. The widest blurs a tile (a work group a tile of 8 x 8 half texels), then the near ones spread as far as they
+    // reach.
+    {
+        const SDL_GPUStorageTextureReadWriteBinding output{.texture = view._dof_tiles[0].handle()};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+        if (!pass)
+            return &source;
+        const SDL_GPUTextureSamplerBinding input{view._dof_half_blur.handle(), _point_sampler};
+        SDL_BindGPUComputePipeline(pass, _dof_tiles_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, &input, 1);
+        SDL_DispatchGPUCompute(pass, view._dof_tiles[0].width(), view._dof_tiles[0].height(), 1);
+        SDL_EndGPUComputePass(pass);
+        const f32 reach[4] = {std::ceil(widest / 16.0f), 0.0f, 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding tiles{view._dof_tiles[0].handle(), _point_sampler};
+        if (!compute_pass(commands, _dof_spread_pipeline, view._dof_tiles[1], std::span{&tiles, 1}, reach,
+                          sizeof(reach)))
+            return &source;
+        dispatches += 2;
+    }
+    // 3. The gather, at half size: the spiral's step by quality (half texels; about r^2 / (2 step) samples out to r).
+    {
+        static constexpr f32 steps[3] = {2.0f, 1.0f, 0.5f};
+        const u32 blades = dof.blades >= 3 ? std::min(dof.blades, 12u) : 0u;
+        const f32 shape[4] = {steps[std::min(dof.quality, 2u)], widest, static_cast<f32>(blades),
+                              dof.blade_rotation * (3.14159265f / 180.0f)};
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{view._dof_half.handle(), _owner->_sampler_linear},
+            SDL_GPUTextureSamplerBinding{view._dof_half_blur.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._dof_tiles[1].handle(), _point_sampler}};
+        if (!compute_pass_two(commands, _dof_gather_pipeline, view._dof_blurred, view._dof_reach, inputs, shape,
+                              sizeof(shape)))
+            return &source;
+        ++dispatches;
+    }
+    // 4. Each full pixel between itself and the blur.
+    {
+        const std::array<SDL_GPUTextureSamplerBinding, 5> inputs{
+            SDL_GPUTextureSamplerBinding{source.handle(), _point_sampler}, depth_input, focus_input,
+            SDL_GPUTextureSamplerBinding{view._dof_blurred.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._dof_reach.handle(), _point_sampler}};
+        if (!compute_pass(commands, _dof_combine_pipeline, view._dof_result, inputs, &u, sizeof(u)))
+            return &source;
+        ++dispatches;
+    }
+    ctx.stats.dof_dispatches += dispatches;
+    return &view._dof_result;
+}
+
 void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     RenderDebugStats3D& stats = ctx.stats;
     SDL_GPUCommandBuffer* commands = ctx.commands;
-    const TemporalAA3D& taa_settings = ctx.scene.taa;
+    const TemporalAA3D& taa_settings = ctx.taa_settings;
     ctx.shown = nullptr;
     // The resolve: this frame into the history, before bloom and the tonemap,
     // which see the finished picture. The next frame finds the cameras and the
@@ -15888,6 +16613,8 @@ void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
         // The main pass's depth (the overlay's in front, in its slice of the range): the resolve takes the velocity
         // of the nearest surface round each pixel at an edge.
         const bool depth = _taa_depth_sampled && view->_taa_depth;
+        ctx.blur_before = view->_taa_prior[0];
+        ctx.blur_velocity = ctx.velocity_drawn && !ctx.taa_reset && view->_taa_valid;
         ctx.shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings,
                                 ctx.taa_reset || !ctx.velocity_drawn, ctx.jitter, ctx.taa_reactive,
                                 ctx.coverage_key != view->_taa_coverage_key, ctx.scene.debug.freeze_jitter,
@@ -16363,22 +17090,37 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
              return true;
          },
          [&] {
+             // The float picture (the resolve's, or an HDR view's own), through the camera's effects.
+             const GpuTexture* picture = ctx.taa ? ctx.shown : view->_hdr ? &view->_scene : nullptr;
+             if (picture)
+                 ctx.shown = depth_of_field(ctx, *picture);
+             else if (scene.camera_effects.depth_of_field.enabled || scene.camera_effects.lens_film_or_grade())
+                 warn_once(_effects_float_warned, "3D: depth of field, lens, film and grade need an HDR view or "
+                                                  "temporal anti-aliasing (a float picture): off");
+             return true;
+         },
+         [&] {
+             if (ctx.taa && ctx.shown)
+                 ctx.shown = motion_blur(ctx, *ctx.shown);
+             return true;
+         },
+         [&] {
              pick_pass(ctx);
              return true;
          },
          [&] {
              if (ctx.taa)
                  return finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass, scene.time,
-                                    stats);
+                                    stats, &scene.camera_effects);
              else if (view->_hdr)
-                 return finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass, scene.time,
-                                    stats);
+                 return finish_view(ctx.commands, *view, ctx.shown ? *ctx.shown : view->_scene, /*plain=*/false,
+                                    ctx.sky_pass, scene.time, stats, &scene.camera_effects);
              return true;
          }}};
     static constexpr std::array<const char*, frame_graph_passes3d> markers{
         {"kin3d.clusters", "kin3d.local_shadows", "kin3d.gi_scene", "kin3d.gi_probes", "kin3d.sun_shadow",
          "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.main", "kin3d.fog_sun",
-         "kin3d.temporal_resolve", "kin3d.picking", "kin3d.output"}};
+         "kin3d.temporal_resolve", "kin3d.depth_of_field", "kin3d.motion_blur", "kin3d.picking", "kin3d.output"}};
     const auto record_start = std::chrono::steady_clock::now();
     for (u32 i = 0; i < plan.order.size(); ++i) {
         const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
@@ -16454,7 +17196,12 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
             custom_shader = custom_shader || custom_of(draw.material);
         }
     }
-    bool taa = scene.taa.enabled && _taa_available;
+    bool taa =
+        (scene.taa.enabled || (_capabilities.motion_blur && blur_without_taa(scene, view->_options.render_scale))) &&
+        _taa_available;
+    // Depth of field without temporal anti-aliasing reads the pre-pass's depth (in an HDR view).
+    const bool dof_prepass = !taa && scene.camera_effects.depth_of_field.enabled && _capabilities.depth_of_field &&
+                             view->_hdr && _ao_available && scene.camera.projection == Projection3D::Perspective;
     const bool soft = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
     const bool particles = _particles_available && (!scene.particle_draws().empty() || scene.weather.active());
     const bool gi_wanted =
@@ -16470,9 +17217,16 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
               (needs_prepass || custom_shader || particles
                    ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/true)
                    : ensure_velocity_target(*view));
-    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted || fog_volume_wanted) {
+        if (taa && scene.camera_effects.depth_of_field.enabled && _capabilities.depth_of_field)
+            (void)ensure_dof_targets(*view, scene.camera_effects.depth_of_field.autofocus);
+        if (taa && scene.camera_effects.motion_blur.enabled && _capabilities.motion_blur)
+            (void)ensure_blur_targets(*view,
+                                      blur_shape(scene.camera_effects.motion_blur, f32(view->size().y), 0.0f).tile);
+    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted || fog_volume_wanted || dof_prepass) {
         ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/false);
     }
+    if (!taa && dof_prepass)
+        (void)ensure_dof_targets(*view, scene.camera_effects.depth_of_field.autofocus);
     if (shadows) {
         ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades);
     }

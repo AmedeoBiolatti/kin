@@ -69,6 +69,12 @@ void register_scene3d_settings(EcsWorld& world) {
     if (!registry.find("SceneEnvironment3D")) {
         auto builder = registry.native<SceneEnvironment3D>("SceneEnvironment3D");
         builder.field("enabled", &SceneEnvironment3D::enabled).field("priority", &SceneEnvironment3D::priority);
+        builder.field("grade_lut", &SceneEnvironment3D::grade_lut)
+            .description("A look for the grade (a .cube or a LUT image), by content path.");
+        builder.field("grade_lut_to", &SceneEnvironment3D::grade_lut_to)
+            .description("A second look the grade cross-fades to by grade_lut_mix.");
+        builder.field("glow_dirt", &SceneEnvironment3D::glow_dirt)
+            .description("A picture of lens dirt the glow lights, by content path.");
         // These properties use exactly the same field codec/overrides as direct
         // members. Keep the authored names flat for ordinary inspector rows.
 #define SETTING(name, member)                                                                                          \
@@ -194,6 +200,67 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("ssr_max_distance", ssr.max_distance);
         SETTING("ssr_steps", ssr.steps);
         SETTING("ssr_intensity", ssr.intensity);
+        SETTING("depth_of_field", camera_effects.depth_of_field.enabled);
+        SETTING("dof_focus_distance", camera_effects.depth_of_field.focus_distance);
+        SETTING("dof_aperture", camera_effects.depth_of_field.aperture);
+        SETTING("dof_sensor_height", camera_effects.depth_of_field.sensor_height);
+        SETTING("dof_max_blur", camera_effects.depth_of_field.max_blur);
+        SETTING("dof_quality", camera_effects.depth_of_field.quality);
+        SETTING("dof_autofocus", camera_effects.depth_of_field.autofocus);
+        SETTING("dof_focus_point", camera_effects.depth_of_field.focus_point);
+        SETTING("dof_focus_time", camera_effects.depth_of_field.focus_time);
+        SETTING("dof_blades", camera_effects.depth_of_field.blades);
+        SETTING("dof_blade_rotation", camera_effects.depth_of_field.blade_rotation);
+        SETTING("motion_blur", camera_effects.motion_blur.enabled);
+        SETTING("lens_vignette", camera_effects.lens.vignette);
+        SETTING("lens_vignette_smoothness", camera_effects.lens.vignette_smoothness);
+        SETTING("lens_vignette_roundness", camera_effects.lens.vignette_roundness);
+        SETTING("lens_chromatic_aberration", camera_effects.lens.chromatic_aberration);
+        SETTING("film_grain", camera_effects.film.grain);
+        SETTING("film_grain_size", camera_effects.film.grain_size);
+        builder
+            .property<std::string>(
+                "grade_tone_curve",
+                [](const auto& v) {
+                    const ToneCurve3D curve = v.camera_effects.grade.tone_curve;
+                    return std::string(curve == ToneCurve3D::Agx       ? "agx"
+                                       : curve == ToneCurve3D::Neutral ? "neutral"
+                                                                       : "aces");
+                },
+                [](auto& v, const std::string& name) {
+                    if (name == "aces")
+                        v.camera_effects.grade.tone_curve = ToneCurve3D::Aces;
+                    else if (name == "agx")
+                        v.camera_effects.grade.tone_curve = ToneCurve3D::Agx;
+                    else if (name == "neutral")
+                        v.camera_effects.grade.tone_curve = ToneCurve3D::Neutral;
+                    else
+                        return false;
+                    return true;
+                })
+            .choices({"aces", "agx", "neutral"});
+        SETTING("glow_wide", camera_effects.glow.wide);
+        SETTING("glow_radius", camera_effects.glow.radius);
+        SETTING("glow_dirt_intensity", camera_effects.glow.dirt_intensity);
+        SETTING("glow_ghosts", camera_effects.glow.ghosts);
+        SETTING("glow_ghost_count", camera_effects.glow.ghost_count);
+        SETTING("glow_ghost_spacing", camera_effects.glow.ghost_spacing);
+        SETTING("glow_halo", camera_effects.glow.halo);
+        SETTING("glow_halo_width", camera_effects.glow.halo_width);
+        SETTING("glow_streaks", camera_effects.glow.streaks);
+        SETTING("glow_streak_length", camera_effects.glow.streak_length);
+        RGB_SETTING("glow_streak_tint", camera_effects.glow.streak_tint);
+        SETTING("grade_temperature", camera_effects.grade.temperature);
+        SETTING("grade_tint", camera_effects.grade.tint);
+        SETTING("grade_contrast", camera_effects.grade.contrast);
+        SETTING("grade_saturation", camera_effects.grade.saturation);
+        SETTING("grade_lut_mix", camera_effects.grade.lut_mix);
+        SETTING("grade_lut_strength", camera_effects.grade.lut_strength);
+        SETTING("motion_blur_shutter_angle", camera_effects.motion_blur.shutter_angle);
+        SETTING("motion_blur_max_length", camera_effects.motion_blur.max_length);
+        SETTING("motion_blur_samples", camera_effects.motion_blur.samples);
+        SETTING("motion_blur_camera_scale", camera_effects.motion_blur.camera_scale);
+        SETTING("motion_blur_target_fps", camera_effects.motion_blur.target_fps);
         SETTING("anisotropy", anisotropy);
         SETTING("texture_lod_bias", texture_lod_bias);
         SETTING("specular_aa", specular_aa);
@@ -383,6 +450,31 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                   settings.global_illumination.area_lights.interleave == 4) &&
                  (settings.view.samples == 1 || settings.view.samples == 2 || settings.view.samples == 4 ||
                   settings.view.samples == 8);
+        const MotionBlur3D& blur = settings.camera_effects.motion_blur;
+        valid &= blur.shutter_angle >= 0 && blur.shutter_angle <= 360 && blur.max_length >= 0 &&
+                 blur.max_length <= .25f && blur.samples >= 4 && blur.samples <= 32 && blur.camera_scale >= 0 &&
+                 blur.camera_scale <= 1 && blur.target_fps >= 0 && std::isfinite(blur.target_fps);
+        const Lens3D& lens = settings.camera_effects.lens;
+        const Film3D& film = settings.camera_effects.film;
+        const Grade3D& grade = settings.camera_effects.grade;
+        const auto within = [](f32 v, f32 low, f32 high) { return v >= low && v <= high; }; // (false for NaN)
+        valid &= within(lens.vignette, 0, 1) && within(lens.vignette_smoothness, .01f, 1) &&
+                 within(lens.vignette_roundness, 0, 1) && within(lens.chromatic_aberration, 0, .02f) &&
+                 within(film.grain, 0, 1) && within(film.grain_size, 1, 4) && within(grade.temperature, -1, 1) &&
+                 within(grade.tint, -1, 1) && within(grade.contrast, 0, 2) && within(grade.saturation, 0, 2) &&
+                 within(grade.lut_mix, 0, 1) && within(grade.lut_strength, 0, 1);
+        const Glow3D& glow = settings.camera_effects.glow;
+        valid &= within(glow.radius, 0, 1) && within(glow.dirt_intensity, 0, 10) && within(glow.ghosts, 0, 10) &&
+                 glow.ghost_count >= 1 && glow.ghost_count <= 8 && within(glow.ghost_spacing, 0, 1) &&
+                 within(glow.halo, 0, 10) && within(glow.halo_width, 0, 1) && within(glow.streaks, 0, 20) &&
+                 within(glow.streak_length, 0, 1);
+        const DepthOfField3D& dof = settings.camera_effects.depth_of_field;
+        valid &= std::isfinite(dof.focus_distance) && dof.focus_distance > 0 && dof.aperture >= .7f &&
+                 dof.aperture <= 64 && dof.sensor_height >= 1 && dof.sensor_height <= 100 && dof.max_blur >= 0 &&
+                 dof.max_blur <= .05f && dof.quality <= 2 && dof.focus_point.x >= 0 && dof.focus_point.x <= 1 &&
+                 dof.focus_point.y >= 0 && dof.focus_point.y <= 1 && dof.focus_time >= 0 &&
+                 std::isfinite(dof.focus_time) && (dof.blades == 0 || (dof.blades >= 3 && dof.blades <= 12)) &&
+                 std::isfinite(dof.blade_rotation);
         if (!valid)
             errors.push_back("SceneEnvironment3D entity '" + entity.name() + "': invalid environment/view settings");
         else {
@@ -398,6 +490,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.contact_shadows = settings.contact_shadows;
             scene.taa = settings.taa;
             scene.ssr = settings.ssr;
+            scene.camera_effects = settings.camera_effects;
             scene.anisotropy = settings.anisotropy;
             scene.texture_lod_bias = settings.texture_lod_bias;
             scene.specular_aa = settings.specular_aa;

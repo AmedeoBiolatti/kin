@@ -6696,6 +6696,484 @@ void test_gpu_taa_still_detail() {
     });
 }
 
+// Depth of field (CameraEffects3D::depth_of_field) over three checkered walls, near (0.7 m, left), at the focus (2 m,
+// middle) and far (20 m, right), each the same size on the screen, through a lens open enough to blur them over a few
+// of this small view's pixels (a large sensor, f/0.7): focused on the middle one, the near and far ones
+// lose most of their checker's contrast and the middle one keeps it; autofocus on the left wall swaps which is sharp.
+// Both ways it runs: an HDR view without temporal anti-aliasing (the pre-pass's depth) and an 8-bit one with it (the
+// main pass's). Off it is not run; nor for an orthographic camera or an 8-bit view without temporal anti-aliasing.
+void test_gpu_depth_of_field() {
+    with_gpu("test_gpu_depth_of_field", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().depth_of_field, "depth of field")) {
+            return;
+        }
+        std::vector<kin::u8> texels(64 * 64 * 4);
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                const kin::u8 v = ((x / 2 + y / 2) & 1) ? 255 : 0;
+                kin::u8* t = &texels[static_cast<std::size_t>(y * 64 + x) * 4];
+                t[0] = t[1] = t[2] = v;
+                t[3] = 255;
+            }
+        }
+        const kin::Texture checker = renderer.create_texture_from_rgba(texels.data(), {64, 64});
+        kin::MeshData3D quad;
+        quad.vertices = {{{-0.5f, -0.5f, 0}, {0, 0, 1}, {0, 1}},
+                         {{0.5f, -0.5f, 0}, {0, 0, 1}, {1, 1}},
+                         {{0.5f, 0.5f, 0}, {0, 0, 1}, {1, 0}},
+                         {{-0.5f, 0.5f, 0}, {0, 0, 1}, {0, 0}}};
+        quad.indices = {0, 1, 2, 0, 2, 3};
+        const kin::Mesh3D wall = r3d.create_mesh(quad).value_or({});
+        kin::Scene3D scene;
+        const float tan_half = std::tan(20.0f * 3.14159265f / 180.0f), aspect = 160.0f / 120.0f;
+        // Each wall half the view's width across a third of it (screen x -0.6, 0, 0.6), 0.8 of its height.
+        const auto draw = [&] {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0, 0, 0}, {0, 0, -1}, 40.0f);
+            scene.camera.z_near = 0.1f;
+            const std::array<std::pair<float, float>, 3> walls{{{0.7f, -0.6f}, {2.0f, 0.0f}, {20.0f, 0.6f}}};
+            for (const auto& [distance, x] : walls) {
+                const float across = 0.5f * distance * tan_half * aspect, down = 0.8f * distance * tan_half;
+                (void)scene.draw(wall,
+                                 Mat4f::translation({x * distance * tan_half * aspect, 0.0f, -distance}) *
+                                     Mat4f::scaling({across, down, 1.0f}),
+                                 {.unlit = true, .texture = checker});
+            }
+        };
+        // The checker's contrast on each wall: level changes between neighbours along rows 50 to 70 of its middle.
+        const auto contrast = [](const Pixels& p) {
+            std::array<long, 3> sums{};
+            const std::array<int, 3> from{20, 68, 116};
+            for (int w = 0; w < 3; ++w)
+                for (int y = 50; y < 70; ++y)
+                    for (int x = from[w]; x < from[w] + 24; ++x)
+                        sums[w] += std::abs(level(p.at(x + 1, y)) - level(p.at(x, y)));
+            return sums;
+        };
+        const kin::DepthOfField3D focused{
+            .enabled = true, .focus_distance = 2.0f, .aperture = 0.7f, .sensor_height = 100.0f, .max_blur = 0.05f};
+        // How wide the blur is on the near and far walls (pixels): wide enough to wash out a checker of 2 to 3 pixels.
+        draw();
+        const float near_radius = kin::depth_of_field_radius(focused, scene.camera, 120.0f, 0.7f);
+        const float far_radius = kin::depth_of_field_radius(focused, scene.camera, 120.0f, 20.0f);
+        std::printf("    depth of field: radius %.2f near, %.2f far (pixels)\n", near_radius, far_radius);
+        assert(near_radius < -2.0f && far_radius > 2.0f);
+        for (const bool taa : {false, true}) {
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = !taa})
+                    .value_or({});
+            scene.taa.enabled = taa;
+            const auto shoot = [&](const kin::DepthOfField3D& dof) {
+                Pixels p;
+                for (int f = 0; f < (taa ? 8 : 1); ++f) {
+                    draw();
+                    scene.camera_effects.depth_of_field = dof;
+                    p = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                }
+                return p;
+            };
+            const auto sharp = contrast(shoot({}));
+            assert(r3d.debug_stats().dof_dispatches == 0);
+            const auto blurred = contrast(shoot(focused));
+            assert(r3d.debug_stats().dof_dispatches == 5);
+            kin::DepthOfField3D on_left = focused;
+            on_left.autofocus = true;
+            on_left.focus_point = {20.0f / 160.0f + 0.08f, 0.5f};
+            on_left.focus_time = 0.0f;
+            const auto left = contrast(shoot(on_left));
+            assert(r3d.debug_stats().dof_dispatches == 6);
+            std::printf("    depth of field (%s): contrast near/middle/far %ld/%ld/%ld sharp, %ld/%ld/%ld focused on "
+                        "the middle, %ld/%ld/%ld autofocused on the near wall\n",
+                        taa ? "8-bit, TAA" : "HDR", sharp[0], sharp[1], sharp[2], blurred[0], blurred[1], blurred[2],
+                        left[0], left[1], left[2]);
+            assert(blurred[0] * 3 < sharp[0] && blurred[2] * 3 < sharp[2]);
+            assert(blurred[1] * 10 > sharp[1] * 8);
+            assert(left[0] * 10 > sharp[0] * 8 && left[1] * 2 < sharp[1]);
+        }
+        // Not run: an 8-bit view without temporal anti-aliasing, an orthographic camera.
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        scene.taa.enabled = false;
+        draw();
+        scene.camera_effects.depth_of_field = focused;
+        (void)shoot_view(renderer, r3d, plain, scene);
+        renderer.present();
+        assert(r3d.debug_stats().dof_dispatches == 0);
+        kin::View3D hdr = r3d.create_view({160, 120}, {.samples = 1, .hdr = true}).value_or({});
+        draw();
+        scene.camera = flat_camera();
+        scene.camera_effects.depth_of_field = focused;
+        (void)shoot_view(renderer, r3d, hdr, scene);
+        renderer.present();
+        assert(r3d.debug_stats().dof_dispatches == 0);
+    });
+}
+
+// The aperture's blades (DepthOfField3D::blades): a bright point far behind the focus becomes a disc of light (bokeh)
+// about 18 pixels across in a 480 x 360 HDR view; through three blades a triangle, about 0.41 of the round disc's area
+// (a triangle in a circle), and turned 60 degrees the other way up (most of its pixels not the first's).
+void test_gpu_dof_blades() {
+    with_gpu("test_gpu_dof_blades", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().depth_of_field, "depth of field")) {
+            return;
+        }
+        const kin::Mesh3D dot = make_box(r3d, {0.08f, 0.08f, 0.08f});
+        kin::View3D view =
+            r3d.create_view({480, 360}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = true}).value_or({});
+        kin::Scene3D scene;
+        const auto bokeh = [&](kin::u32 blades, float rotation) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0, 0, 0}, {0, 0, -1}, 40.0f);
+            scene.camera_effects.depth_of_field = {.enabled = true,
+                                                   .focus_distance = 1.0f,
+                                                   .aperture = 0.7f,
+                                                   .sensor_height = 100.0f,
+                                                   .max_blur = 0.05f,
+                                                   .quality = 2,
+                                                   .blades = blades,
+                                                   .blade_rotation = rotation};
+            (void)scene.draw(dot, Mat4f::translation({0, 0, -20}),
+                             {.color = Color::rgb(255, 255, 255), .emissive = 3000.0f, .unlit = true});
+            Pixels p = shoot_large(renderer, r3d, view, scene);
+            renderer.present();
+            std::vector<bool> lit(static_cast<std::size_t>(480 * 360));
+            for (int y = 0; y < 360; ++y)
+                for (int x = 0; x < 480; ++x)
+                    lit[static_cast<std::size_t>(y * 480 + x)] = level(p.at(x, y)) > 40;
+            return lit;
+        };
+        const auto area = [](const std::vector<bool>& lit) { return std::count(lit.begin(), lit.end(), true); };
+        const auto round = bokeh(0, 0.0f), triangle = bokeh(3, 0.0f), turned = bokeh(3, 60.0f);
+        long both = 0;
+        for (std::size_t i = 0; i < triangle.size(); ++i)
+            both += triangle[i] && turned[i] ? 1 : 0;
+        std::printf("    bokeh: round %ld pixels, triangle %ld, turned %ld (%ld in common)\n", long(area(round)),
+                    long(area(triangle)), long(area(turned)), both);
+        assert(area(round) > 400);
+        assert(area(triangle) < area(round) * 0.6 && area(triangle) > area(round) * 0.25);
+        assert(std::abs(area(turned) - area(triangle)) < area(triangle) / 5);
+        assert(both < area(triangle) * 0.8);
+    });
+}
+
+// The camera's lens, film and grade (CameraEffects3D::lens, film, grade) over a flat unlit wall (a colour, or a white
+// bar on black) filling an HDR view (exposed, tonemapped and encoded in its output) and an 8-bit temporally
+// anti-aliased one (encoded only). A neutral LUT takes the effects' output path and gives the plain one's picture to
+// within a level; a vignette darkens the corners and not the middle; chromatic aberration puts red outside and blue
+// inside a bar's edges; grain adds noise that changes each render; warm and cool white balance tilt the colour; no
+// saturation is grey; the three tone curves give three pictures; a LUT that swaps red and blue swaps them.
+void test_gpu_lens_film_grade() {
+    with_gpu("test_gpu_lens_film_grade", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D wall = make_box(r3d, {20.0f, 14.0f, 0.1f});
+        const kin::Mesh3D bar = make_box(r3d, {1.0f, 14.0f, 0.1f});
+        kin::Scene3D scene;
+        const auto neutral = std::make_shared<const kin::ColorLut>(kin::ColorLut::neutral(16));
+        // A LUT strip (16² x 16) that swaps red and blue.
+        std::vector<kin::u8> swapped_texels(16 * 16 * 16 * 4);
+        for (int g = 0; g < 16; ++g)
+            for (int b = 0; b < 16; ++b)
+                for (int r = 0; r < 16; ++r) {
+                    kin::u8* t = &swapped_texels[static_cast<std::size_t>((g * 256 + b * 16 + r) * 4)];
+                    t[0] = static_cast<kin::u8>(b * 17);
+                    t[1] = static_cast<kin::u8>(g * 17);
+                    t[2] = static_cast<kin::u8>(r * 17);
+                    t[3] = 255;
+                }
+        const auto swapped =
+            std::make_shared<const kin::ColorLut>(kin::ColorLut::from_image(swapped_texels, {256, 16}).value());
+        for (const bool taa : {false, true}) {
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = !taa})
+                    .value_or({});
+            scene.taa.enabled = taa;
+            const auto shoot = [&](Color colour, const kin::CameraEffects3D& effects, bool white_bar = false) {
+                Pixels p;
+                for (int f = 0; f < (taa ? 4 : 1); ++f) {
+                    scene.clear();
+                    scene.camera = flat_camera();
+                    scene.camera_effects = effects;
+                    if (white_bar)
+                        (void)scene.draw(bar, Mat4f::translation({5.0f, 0.0f, 0.0f}),
+                                         {.color = Color::rgb(255, 255, 255), .unlit = true});
+                    else
+                        (void)scene.draw(wall, Mat4f::identity(), {.color = colour, .unlit = true});
+                    p = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                }
+                return p;
+            };
+            const char* name = taa ? "8-bit, TAA" : "HDR";
+            const Color grey = Color::rgb(150, 150, 150), red = Color::rgb(200, 40, 30);
+            const Pixels plain = shoot(grey, {});
+            assert(r3d.debug_stats().camera_effect_draws == 0);
+            if (lacks(r3d.capabilities().temporal_aa || !taa, "temporal anti-aliasing"))
+                continue;
+            // The effects' path with a neutral look: the plain picture.
+            kin::CameraEffects3D look{};
+            look.grade.lut = neutral;
+            const Pixels through = shoot(grey, look);
+            if (r3d.debug_stats().camera_effect_draws == 0) {
+                std::cerr << "lens, film and grade: not available on this device, skipped\n";
+                return;
+            }
+            int most = 0;
+            for (std::size_t i = 0; i < plain.rgba.size(); ++i)
+                most = std::max(most, std::abs(int(plain.rgba[i]) - int(through.rgba[i])));
+            std::printf("    lens/film/grade (%s): neutral LUT within %d levels of the plain output\n", name, most);
+            assert(most <= 1);
+            // The vignette.
+            kin::CameraEffects3D vignette{};
+            vignette.lens.vignette = 0.6f;
+            const Pixels dark = shoot(grey, vignette);
+            assert(std::abs(level(dark.at(80, 60)) - level(plain.at(80, 60))) <= 1);
+            assert(level(dark.at(2, 2)) < level(plain.at(2, 2)) - 30 &&
+                   level(dark.at(157, 117)) < level(plain.at(157, 117)) - 30);
+            // Chromatic aberration round a white bar right of the middle (x 125 to 135): red outside (right), blue
+            // inside (left).
+            kin::CameraEffects3D split{};
+            split.lens.chromatic_aberration = 0.02f;
+            const Pixels fringe = shoot(Color{}, split, true);
+            int outer_red = 0, inner_blue = 0;
+            for (int x = 120; x < 142; ++x) {
+                const Color c = fringe.at(x, 60);
+                if (x > 130 && c.r > c.b + 40)
+                    ++outer_red;
+                if (x < 130 && c.b > c.r + 40)
+                    ++inner_blue;
+            }
+            std::printf("    lens/film/grade (%s): chromatic aberration fringes %d red outside, %d blue inside\n", name,
+                        outer_red, inner_blue);
+            assert(outer_red >= 1 && inner_blue >= 1);
+            // Grain: noise over the flat wall, a new pattern each render.
+            kin::CameraEffects3D grainy{};
+            grainy.film.grain = 1.0f;
+            const Pixels g1 = shoot(grey, grainy), g2 = shoot(grey, grainy);
+            long spread = 0, changed = 0;
+            for (int y = 20; y < 100; ++y)
+                for (int x = 20; x < 140; ++x) {
+                    spread += std::abs(level(g1.at(x, y)) - level(plain.at(x, y)));
+                    changed += level(g1.at(x, y)) != level(g2.at(x, y)) ? 1 : 0;
+                }
+            std::printf("    lens/film/grade (%s): grain mean change %.2f levels, %ld of 9600 pixels differ between "
+                        "renders\n",
+                        name, static_cast<double>(spread) / 9600.0, changed);
+            assert(spread > 9600 * 3 && changed > 9600 / 2);
+            // White balance, saturation.
+            kin::CameraEffects3D warm{}, cool{}, grey_out{};
+            warm.grade.temperature = 1.0f;
+            cool.grade.temperature = -1.0f;
+            grey_out.grade.saturation = 0.0f;
+            const Color w = shoot(grey, warm).at(80, 60), c = shoot(grey, cool).at(80, 60);
+            const Color unsaturated = shoot(red, grey_out).at(80, 60);
+            std::printf("    lens/film/grade (%s): warm %d,%d,%d cool %d,%d,%d unsaturated red %d,%d,%d\n", name, w.r,
+                        w.g, w.b, c.r, c.g, c.b, unsaturated.r, unsaturated.g, unsaturated.b);
+            assert(w.r > w.b + 10 && c.b > c.r + 10);
+            assert(std::abs(int(unsaturated.r) - int(unsaturated.b)) <= 2 &&
+                   std::abs(int(unsaturated.r) - int(unsaturated.g)) <= 2);
+            // The tone curves (an HDR view's: the 8-bit TAA view has none), and the swapping LUT.
+            if (!taa) {
+                const Color bright = Color::rgb(255, 120, 40);
+                kin::CameraEffects3D agx{}, neutral_curve{};
+                agx.grade.tone_curve = kin::ToneCurve3D::Agx;
+                neutral_curve.grade.tone_curve = kin::ToneCurve3D::Neutral;
+                const Color a = shoot(bright, {}).at(80, 60), b = shoot(bright, agx).at(80, 60),
+                            n = shoot(bright, neutral_curve).at(80, 60);
+                std::printf("    lens/film/grade: tone curves ACES %d,%d,%d AgX %d,%d,%d Neutral %d,%d,%d\n", a.r, a.g,
+                            a.b, b.r, b.g, b.b, n.r, n.g, n.b);
+                assert(a != b && a != n && b != n);
+            }
+            kin::CameraEffects3D swap{};
+            swap.grade.lut = swapped;
+            const Color s = shoot(red, swap).at(80, 60), r = shoot(red, {}).at(80, 60);
+            assert(std::abs(int(s.b) - int(r.r)) <= 3 && std::abs(int(s.r) - int(r.b)) <= 3);
+            swap.grade.lut_strength = 0.0f;
+            (void)shoot(red, swap);
+            assert(r3d.debug_stats().camera_effect_draws == 0); // a look at no strength is no effect
+        }
+    });
+}
+
+// The glow's shape and the lens' flares (CameraEffects3D::glow) round a small bright square up and left of the middle
+// of an HDR view with bloom (10 pixels a unit, the square at 40, 30): the wide glow reaches farther than kin's own;
+// ghosts put light mirrored through the middle (120, 90); streaks draw it out along its row and not its column; the
+// lens dirt tints the glow with its own colour. With none of it, kin's own bloom (no dispatches), and without bloom
+// nothing.
+void test_gpu_glow() {
+    with_gpu("test_gpu_glow", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().glow, "the glow's shape and the lens' flares")) {
+            return;
+        }
+        const kin::Mesh3D square = make_box(r3d, {0.6f, 0.6f, 0.1f});
+        const std::array<kin::u8, 16> red_texels{255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255};
+        const kin::Texture red_dirt = renderer.create_texture_from_rgba(red_texels.data(), {2, 2});
+        kin::Scene3D scene;
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0), .bloom = 1.0f}).value_or({});
+        const auto shoot = [&](const kin::Glow3D& glow, kin::View3D& target) {
+            scene.clear();
+            scene.camera = flat_camera();
+            scene.camera_effects.glow = glow;
+            (void)scene.draw(square, Mat4f::translation({-4.0f, 3.0f, 0.0f}),
+                             {.color = Color::rgb(255, 255, 255), .emissive = 12.0f, .unlit = true});
+            Pixels p = shoot_view(renderer, r3d, target, scene);
+            renderer.present();
+            return p;
+        };
+        // The brightness summed over a 9 x 9 square round (x, y).
+        const auto around = [](const Pixels& p, int x, int y) {
+            long sum = 0;
+            for (int dy = -4; dy <= 4; ++dy)
+                for (int dx = -4; dx <= 4; ++dx)
+                    sum += brightness(p.at(std::clamp(x + dx, 0, 159), std::clamp(y + dy, 0, 119)));
+            return sum;
+        };
+        const Pixels plain = shoot({}, view);
+        assert(r3d.debug_stats().glow_dispatches == 0);
+        const Pixels wide = shoot({.wide = true, .radius = 0.85f}, view);
+        assert(r3d.debug_stats().glow_dispatches > 0);
+        const Pixels ghosts = shoot({.ghosts = 4.0f, .ghost_count = 1}, view);
+        const Pixels streaks = shoot({.streaks = 12.0f, .streak_length = 0.5f}, view);
+        const Pixels dirty = shoot({.dirt = red_dirt, .dirt_intensity = 8.0f}, view);
+        std::printf("    glow: 30 px right %ld plain, %ld wide; mirrored %ld plain, %ld with ghosts; 40 px along the "
+                    "row %ld plain, %ld streaked, 40 px down %ld, %ld\n",
+                    around(plain, 70, 30), around(wide, 70, 30), around(plain, 120, 90), around(ghosts, 120, 90),
+                    around(plain, 80, 30), around(streaks, 80, 30), around(plain, 40, 70), around(streaks, 40, 70));
+        assert(around(wide, 70, 30) > around(plain, 70, 30) + 81 * 3);
+        assert(around(ghosts, 120, 90) > around(plain, 120, 90) + 81 * 3);
+        assert(around(streaks, 80, 30) > around(plain, 80, 30) + 81 * 3);
+        assert(std::abs(around(streaks, 40, 70) - around(plain, 40, 70)) <= 81);
+        const Color tinted = dirty.at(52, 30), untinted = plain.at(52, 30);
+        std::printf("    glow: lens dirt (red) by the square %d,%d,%d against %d,%d,%d\n", tinted.r, tinted.g, tinted.b,
+                    untinted.r, untinted.g, untinted.b);
+        assert(tinted.r > untinted.r + 10 && std::abs(int(tinted.g) - int(untinted.g)) <= 3);
+        // Without bloom there is no glow to shape.
+        kin::View3D unglowing =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = true}).value_or({});
+        (void)shoot({.wide = true, .ghosts = 1.0f}, unglowing);
+        assert(r3d.debug_stats().glow_dispatches == 0);
+    });
+}
+
+// Motion blur (CameraEffects3D::motion_blur) over a white block on black, 10 pixels a unit. Off, and on over a still
+// picture, the pictures are the same bytes. A block moving sideways a unit a frame is smeared sideways over about the
+// shutter's share of its motion (its left and right edges become ramps; its top and bottom stay sharp); panning the
+// camera over a still block smears it as much, unless camera_scale takes the camera's part out. Not on the first frame
+// after a reset, with a shutter of 0, or without temporal anti-aliasing (whose velocity it reads).
+void test_gpu_motion_blur() {
+    with_gpu("test_gpu_motion_blur", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D block = make_box(r3d, {3.0f, 3.0f, 0.5f});
+        const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
+        kin::Scene3D scene;
+        scene.taa = {.enabled = true};
+        if (lacks(r3d.capabilities().motion_blur, "motion blur")) {
+            return;
+        }
+        for (const bool hdr : {false, true}) {
+            const kin::ViewOptions3D options{.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = hdr};
+            kin::View3D off = r3d.create_view({160, 120}, options).value_or({});
+            kin::View3D on = r3d.create_view({160, 120}, options).value_or({});
+            // Renders frame `f` of a block moving `speed` units a frame under a camera panning `pan` a frame (both
+            // at the middle at frame 9), into `view` with `blur` (or none).
+            const auto frame = [&](kin::View3D& view, int f, float speed, float pan, const kin::MotionBlur3D* blur) {
+                const float from_last = static_cast<float>(f - 9);
+                scene.clear();
+                scene.camera = flat_camera(pan * from_last, 0.0f);
+                scene.camera_effects.motion_blur = blur ? *blur : kin::MotionBlur3D{};
+                (void)scene.draw(block, Mat4f::translation({speed * from_last, 0.0f, 0.0f}), white);
+                Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            // Pixels between dark and bright along a row (sideways ramps) and a column (up and down) through the
+            // block's middle.
+            const auto ramps = [](const Pixels& p, int x_middle) {
+                int bright = 0; // the block's level (an HDR view tonemaps white under 255)
+                for (int x = 0; x < 160; ++x)
+                    bright = std::max(bright, level(p.at(x, 60)));
+                const auto mid = [&](Color c) { return level(c) > 8 && level(c) < bright - 8; };
+                int across = 0, down = 0;
+                for (int x = 0; x < 160; ++x)
+                    across += mid(p.at(x, 60)) ? 1 : 0;
+                for (int y = 0; y < 120; ++y)
+                    down += mid(p.at(std::clamp(x_middle, 0, 159), y)) ? 1 : 0;
+                return std::pair{across, down};
+            };
+            const kin::MotionBlur3D blur{.enabled = true, .shutter_angle = 360.0f, .max_length = 0.25f};
+            // A still picture: the same bytes, the passes run (and copy).
+            off.reset_history();
+            on.reset_history();
+            for (int f = 0; f < 6; ++f) {
+                const Pixels a = frame(off, f, 0.0f, 0.0f, nullptr);
+                const Pixels b = frame(on, f, 0.0f, 0.0f, &blur);
+                assert(a.rgba == b.rgba);
+                assert(r3d.debug_stats().motion_blur_dispatches == (f == 0 ? 0u : 4u));
+            }
+            // A moving block, then a panning camera over a still one, then the same with the camera's part out.
+            struct Case {
+                float speed, pan;
+                kin::MotionBlur3D blur;
+            };
+            const kin::MotionBlur3D still_camera{
+                .enabled = true, .shutter_angle = 360.0f, .max_length = 0.25f, .camera_scale = 0.0f};
+            const std::array<Case, 3> cases{{{1.0f, 0.0f, blur}, {0.0f, 1.0f, blur}, {0.0f, 1.0f, still_camera}}};
+            std::array<std::pair<int, int>, 3> sharp{}, blurred{};
+            for (std::size_t c = 0; c < cases.size(); ++c) {
+                off.reset_history();
+                on.reset_history();
+                Pixels a, b;
+                for (int f = 0; f < 10; ++f) {
+                    a = frame(off, f, cases[c].speed, cases[c].pan, nullptr);
+                    b = frame(on, f, cases[c].speed, cases[c].pan, &cases[c].blur);
+                }
+                assert(r3d.debug_stats().motion_blur_dispatches == 4);
+                sharp[c] = ramps(a, 80);
+                blurred[c] = ramps(b, 80);
+                std::printf("    motion blur (%s) case %zu: ramps across/down %d/%d without, %d/%d with\n",
+                            hdr ? "hdr" : "8-bit", c, sharp[c].first, sharp[c].second, blurred[c].first,
+                            blurred[c].second);
+            }
+            for (std::size_t c = 0; c < cases.size(); ++c) {
+                assert(sharp[c].first <= 4 && sharp[c].second <= 4); // the resolve alone keeps edges sharp
+                assert(blurred[c].second <= 4);                      // nothing moves up or down
+            }
+            // A unit a frame with the shutter open all the frame: ten pixels a smear, a ramp of about that at each
+            // side (fewer of its pixels in between under ACES, which flattens the bright half); the camera's own
+            // motion as much; with camera_scale 0, a panned still block stays as sharp as without.
+            assert(blurred[0].first >= sharp[0].first + 6 && blurred[1].first >= sharp[1].first + 6);
+            assert(blurred[2].first <= sharp[2].first + 1);
+            // The first frame after a reset is not blurred; nor with a shutter of 0.
+            on.reset_history();
+            (void)frame(on, 0, 1.0f, 0.0f, &blur);
+            assert(r3d.debug_stats().motion_blur_dispatches == 0);
+            kin::MotionBlur3D closed = blur;
+            closed.shutter_angle = 0.0f;
+            (void)frame(on, 1, 1.0f, 0.0f, &closed);
+            assert(r3d.debug_stats().motion_blur_dispatches == 0);
+            // Without temporal anti-aliasing it runs TAA's passes for the velocity alone (no jitter, no history): the
+            // moving block smears as much, and with blur off the picture is the plain one, unmoved by any jitter.
+            scene.taa.enabled = false;
+            Pixels without, plain_frame;
+            on.reset_history();
+            off.reset_history();
+            for (int f = 0; f < 4; ++f) {
+                plain_frame = frame(off, f, 1.0f, 0.0f, nullptr);
+                without = frame(on, f, 1.0f, 0.0f, &blur);
+            }
+            assert(r3d.debug_stats().motion_blur_dispatches == 4);
+            const auto alone = ramps(without, 80), unblurred = ramps(plain_frame, 80);
+            std::printf("    motion blur (%s) without TAA: ramps across/down %d/%d (%d/%d unblurred)\n",
+                        hdr ? "hdr" : "8-bit", alone.first, alone.second, unblurred.first, unblurred.second);
+            assert(alone.first >= unblurred.first + 6 && alone.second <= 4);
+            scene.taa.enabled = true;
+        }
+    });
+}
+
 // A crowd of one mesh that loses a copy from the middle of its list (and gains
 // one at the front) while it moves: the places in the list no longer say which
 // copy is which, so the copies are matched by where they were. The pixels a
@@ -24369,6 +24847,11 @@ int main(int argc, char** argv) {
     RUN(test_gpu_taa_still_detail());
     RUN(test_gpu_specular_aa());
     RUN(test_gpu_specular_multiscatter());
+    RUN(test_gpu_motion_blur());
+    RUN(test_gpu_glow());
+    RUN(test_gpu_lens_film_grade());
+    RUN(test_gpu_depth_of_field());
+    RUN(test_gpu_dof_blades());
     RUN(test_gpu_taa_crowd());
     RUN(test_gpu_taa_overlay());
     RUN(test_gpu_taa_main_velocity());

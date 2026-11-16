@@ -30,6 +30,7 @@
 
 namespace kin {
 
+class ColorLut;
 class Model3D;
 class ModelBatch3D;
 
@@ -592,6 +593,161 @@ struct TemporalAA3D {
     u32 jitter_samples = 8; // frames before the jitter sequence repeats (1 to 16)
 };
 
+// Motion blur (CameraEffects3D::motion_blur): what moves across the picture while the shutter is open is smeared along
+// its motion, the camera's own and each object's, as a film camera shows it. After the temporal resolve, at the view's
+// size, in linear light (so a bright light streaks), before bloom and the tonemap; the HUD drawn over the view stays
+// sharp. It reads the temporal anti-aliasing's velocity: without Scene3D::taa the view runs TAA's passes for the
+// velocity alone (no jitter, no history), drawing with one sample as TAA does (no MSAA). The first frame after
+// View3D::reset_history() (a cut) is not blurred. Native renderer only (WebGL2: off, said once).
+struct MotionBlur3D {
+    bool enabled = false;
+    // How long the shutter is open, in degrees of the frame (0 to 360): 180, half of each frame's motion (a film
+    // camera's usual); 360 the whole of it; 0 none.
+    f32 shutter_angle = 180.0f;
+    f32 max_length = 0.05f; // the longest smear, a fraction of the view's height (0 to 0.25)
+    u32 samples = 12;       // colour samples a pixel along its smear (4 to 32): fewer is faster, grainier
+    // How much of the camera's own motion smears (0 to 1): 0 leaves a turning or moving camera's view of still things
+    // sharp and blurs only what moves in the world (the overlay keeps its own motion).
+    f32 camera_scale = 1.0f;
+    // 0: each frame's motion, as rendered. Else the motion over 1 / target_fps seconds of Scene3D::time, so the smear
+    // is the same length at any frame rate (Scene3D::time must move forward between renders; else as 0).
+    f32 target_fps = 0.0f;
+};
+
+// Depth of field (CameraEffects3D::depth_of_field): what is nearer or farther than the focus is blurred, as a real
+// lens of the camera's field of view blurs it: a disc as wide as the lens' circle of confusion there (bright lights
+// become round bokeh), the near blur spreading over what is in focus behind it. A physical lens: the focal length
+// follows from Camera3D::fov and `sensor_height` (a full-frame camera's 24 mm; a wide view blurs little, as a wide lens
+// does: bring the focus closer, open the aperture or use a longer lens, a narrower fov, for a shallow focus).
+// Perspective cameras only. It runs where the view keeps its picture in floating point: an HDR view, or one with
+// Scene3D::taa (else off, said once). Without temporal anti-aliasing it turns the depth pre-pass on (as ambient
+// occlusion does), whose depth has no overlay: the overlay is then blurred with what is behind it. Native renderer
+// only.
+struct DepthOfField3D {
+    bool enabled = false;
+    f32 focus_distance = 10.0f; // world units (metres) from the camera, along its view, that are sharp
+    f32 aperture = 2.8f;        // the f-number: lower blurs more (0.7 to 64)
+    f32 sensor_height = 24.0f;  // millimetres (1 to 100)
+    // The widest blur, as a radius and a fraction of the view's height (0 to 0.05): what is far from the focus stops
+    // blurring more there.
+    f32 max_blur = 0.02f;
+    u32 quality = 1; // 0 (fewer samples), 1 or 2 (more: smoother discs, slower)
+    // The aperture's blades: 0 a round opening (round bokeh), else 3 to 12 straight blades (polygonal bokeh, a
+    // hexagon with 6), turned `blade_rotation` degrees.
+    u32 blades = 0;
+    f32 blade_rotation = 0.0f;
+    // The focus follows what is at `focus_point` (0 to 1 across and down the view; the middle by default), measured on
+    // the GPU each render, eased toward over `focus_time` seconds of Scene3D::time (0: at once); focus_distance is then
+    // where it starts (and after View3D::reset_history()).
+    bool autofocus = false;
+    Vec2f focus_point{0.5f, 0.5f};
+    f32 focus_time = 0.25f;
+};
+
+// The blur's radius in pixels of a view `view_height` pixels high at `distance` along the view from `camera`, as
+// `dof` puts it: negative in front of the focus, positive behind it, 0 at it (and for an orthographic camera). Before
+// DepthOfField3D::max_blur, which the renderer then limits it to.
+f32 depth_of_field_radius(const DepthOfField3D& dof, const Camera3D& camera, f32 view_height, f32 distance);
+
+// The lens' own marks (CameraEffects3D::lens), in the view's light before its exposure.
+struct Lens3D {
+    // Darker toward the corners, as a lens' edges gather less light: how much at the corners (0 none to 1 black), how
+    // far in it starts (0.01: only the corners, 1: from the middle), and its shape (1 round, as wide as the view is
+    // high; 0 following the view's rectangle).
+    f32 vignette = 0.0f;
+    f32 vignette_smoothness = 0.5f;
+    f32 vignette_roundness = 1.0f;
+    // Red and blue pulled apart toward the edges, as a lens bends colours differently: the split at the corners, a
+    // fraction of the view's height (0 to 0.02); the bloom splits with the picture.
+    f32 chromatic_aberration = 0.0f;
+};
+
+// The film's own marks (CameraEffects3D::film), on the finished picture.
+struct Film3D {
+    // Noise in the brightness, strongest in the mid-tones and moving each render, as a film's grain (0 none to 1); its
+    // size in pixels (1 to 4).
+    f32 grain = 0.0f;
+    f32 grain_size = 1.0f;
+};
+
+// How the view's light becomes the picture's colours (CameraEffects3D::grade).
+enum class ToneCurve3D : u8 {
+    Aces,    // the ACES filmic fit (kin's default): contrasty, bright colours go toward white
+    Agx,     // AgX (Blender's): softer, keeps bright colours' hue as they go toward white
+    Neutral, // Khronos PBR Neutral: base colours as authored up to near white, then a gentle roll-off
+};
+struct Grade3D {
+    ToneCurve3D tone_curve = ToneCurve3D::Aces;
+    // White balance: -1 cooler (bluer) to 1 warmer (more orange); -1 greener to 1 more magenta.
+    f32 temperature = 0.0f;
+    f32 tint = 0.0f;
+    f32 contrast = 1.0f;   // round mid-grey, in stops (0 flat to 2)
+    f32 saturation = 1.0f; // 0 grey to 2
+    // Then a look from a lookup table (ColorLut: a .cube or a LUT image, as Renderer2D::set_color_output's; a scene
+    // file names it by SceneEnvironment3D's grade_lut), cross-faded toward `lut_to` by `lut_mix` (day to night),
+    // applied at `lut_strength`.
+    std::shared_ptr<const ColorLut> lut;
+    std::shared_ptr<const ColorLut> lut_to;
+    f32 lut_mix = 0.0f;
+    f32 lut_strength = 1.0f;
+};
+
+// The glow's shape and the lens' flares (CameraEffects3D::glow): ViewOptions3D::bloom's glow made wide, and what the
+// bright light it is made of draws on a lens. They need a view made with bloom (its strength and threshold are the
+// glow's); with every value at its default the glow is kin's own (two Gaussian rounds at half size), unchanged.
+struct Glow3D {
+    // A chain of ever smaller copies of the bright light, blurred back up (as Unreal's, Unity's and Godot's bloom): a
+    // wide glow falling off softly over many sizes instead of a narrow one. `radius` (0 to 1) is how much each larger
+    // size weighs against the one before: more is wider. Energy-conserving: the glow holds the light it was made of.
+    bool wide = false;
+    f32 radius = 0.7f;
+    // A picture of dust and smudges on the lens, stretched over the view, lit where bright light is near (a scene file
+    // names it by SceneEnvironment3D's glow_dirt), this strong (0 to 10).
+    Texture dirt;
+    f32 dirt_intensity = 0.0f;
+    // Ghosts: copies of the bright light mirrored through the middle of the view, `ghost_count` (1 to 8) of them
+    // `ghost_spacing` (0 to 1) of the way toward it each, this strong (0 to 10); and a halo, a ring of them
+    // `halo_width` (0 to 1) of the way out, this strong. With a little colour fringe, as a lens' own reflections.
+    f32 ghosts = 0.0f;
+    u32 ghost_count = 4;
+    f32 ghost_spacing = 0.35f;
+    f32 halo = 0.0f;
+    f32 halo_width = 0.45f;
+    // Anamorphic streaks: bright light drawn out sideways, `streak_length` (0 to 1) of the view's width each way, this
+    // strong (0 to 20), in this colour (an anamorphic lens' blue by default).
+    f32 streaks = 0.0f;
+    f32 streak_length = 0.3f;
+    LinearRgb streak_tint{0.5f, 0.7f, 1.0f};
+
+    // Whether any of it changes the glow (else the glow is kin's own).
+    bool shapes_glow() const {
+        return wide || (dirt && dirt_intensity > 0.0f) || ghosts > 0.0f || halo > 0.0f || streaks > 0.0f;
+    }
+};
+
+// What the camera adds to the picture (lens and film), after the scene is rendered and before the 2D drawn over the
+// view: off by default; off, the picture and its cost are those without it. Planar views (mirrors, portals) and
+// reflection captures are rendered without them: they belong to the eye, not to a picture inside the scene.
+struct CameraEffects3D {
+    DepthOfField3D depth_of_field{};
+    MotionBlur3D motion_blur{};
+    // Lens, film and grade go into the view's output (no pass of their own), in a view that keeps a float picture (an
+    // HDR view or one with Scene3D::taa; else off, said once). With an HDR 2D pipeline (which tonemaps the frame
+    // itself) the tone curve, the look and the grain are the 2D pipeline's: the view keeps the rest.
+    Lens3D lens{};
+    Film3D film{};
+    Grade3D grade{};
+    Glow3D glow{};
+
+    // Whether any of the lens, film and grade changes the picture (else the view's output is the plain one).
+    bool lens_film_or_grade() const {
+        return lens.vignette > 0.0f || lens.chromatic_aberration > 0.0f || film.grain > 0.0f ||
+               grade.tone_curve != ToneCurve3D::Aces || grade.temperature != 0.0f || grade.tint != 0.0f ||
+               grade.contrast != 1.0f || grade.saturation != 1.0f ||
+               ((grade.lut || grade.lut_to) && grade.lut_strength > 0.0f);
+    }
+};
+
 // Levels of detail: each copy of a mesh made with levels (MeshOptions3D::levels)
 // is drawn with the simplest level whose error, projected onto the screen at
 // the copy's distance from the camera, is under `error_pixels` / `bias`. One
@@ -828,6 +984,7 @@ public:
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
     ScreenSpaceReflections3D ssr{};
+    CameraEffects3D camera_effects{};
     // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
     // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
     f32 time = 0.0f;

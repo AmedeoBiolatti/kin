@@ -10434,3 +10434,91 @@ filters stay 2D; `env_filter.comp` gets an octahedral mode). Probes are captured
   water refraction and depth fade, GI in captures (borrowing the main view's GI), in that order.
 - **R4 — later.** Probes baked to disk as assets (and a bake button in kin-studio), probe gizmos, normalising probes by
   the GI's light, water refraction and depth fade on SSR's colour.
+
+## Camera effects: motion blur, depth of field, lens and film — plan (2026-11-16)
+
+A view's HDR picture goes from the temporal resolve straight to `finish_view` (`gpu_renderer3d.cpp`): bloom (one
+resolution, two Gaussian rounds), the auto-exposure meter, then `record_output` (exposure, ACES, sRGB encode, dither;
+`kin_view_output.inc.glsl`). Missing next to Unreal, Unity, Godot and Hazel: motion blur, depth of field, and the lens
+and film touches a camera adds. The 2D post chain has a vignette, chromatic aberration and LUT grading, but on the
+whole frame, so they reach the HUD.
+
+Decisions (2026-11-16): order C1 motion blur, C2 depth of field, C3 lens/film/grade, C4 bloom and flares, one PR each,
+on `feat/cinematic` (`kin/wt/cinematic`). Native SDL_GPU only for now: WebGL2 warns once and draws without them.
+
+**Where they run.** After the temporal resolve, at output size, in linear HDR, before bloom:
+
+```
+temporal_resolve -> depth_of_field -> motion_blur -> bloom -> exposure meter -> output (+ lens, film, grade)
+```
+
+So TAA does not reject the blur as a change, a bright highlight becomes a bokeh disc and a streak on its own, and the
+HUD drawn over the view stays sharp. Depth of field before motion blur (Unreal's order). The exposure meter keeps
+reading the resolved picture. The stock frame graph gains `depth_of_field` and `motion_blur` passes
+(`frame_graph_passes3d` 13 -> 15), each timed in `graph_pass_ms`.
+
+**Settings.** `Scene3D::camera_effects` (`CameraEffects3D`: `motion_blur`, `depth_of_field`, later `lens`, `film`,
+`grade`), on the scene and not on `ViewOptions3D` because focus and shutter change from frame to frame (view options
+are fixed when the view is made). Planar views (mirrors, portals) and reflection-probe captures render without them:
+the camera's effects belong to the eye, not to a picture inside the scene. ECS scene settings (`scene3d_settings.cpp`),
+`.kinscene` files and Lua as the other `Scene3D` settings. Off by default; off, the picture is the same bytes and the
+cost nothing. Targets are a view's feature targets (made on first use, given back after 120 renders without), and
+`warm_up()` makes their pipelines.
+
+- **C1 — motion blur.** `enabled`, `shutter_angle` (180 degrees: half the frame's motion), `max_length` (fraction of
+  the view's height), `samples` (8-16), `camera_scale` (0-1: the camera's own motion, kept apart from the objects'),
+  `target_fps` (0: the frame's own motion; else scaled to that rate, so the blur does not depend on frame rate).
+  Velocity is TAA's (skinned, morphs, particles, the overlay; dilated at output size under upscaling): without
+  `taa.enabled` the view runs TAA's passes for the velocity alone (no jitter, no history; added 2026-11-16). Tile max (16 px tiles), neighbour max, then a
+  depth-aware gather along the dominant direction (foreground over background, background behind a moving edge),
+  jittered by interleaved gradient noise. The camera's part is rebuilt from depth and the previous camera, so
+  `camera_scale` can take it out and leave the objects'. No blur on the first frame after `reset_history()` (a cut).
+  Tests: off is the same picture; a still camera and scene, no change; a camera pan blurs along the motion, by the
+  shutter; `camera_scale` 0 leaves a panned static scene sharp and a moving object blurred.
+- **C1 as built (2026-11-16).** As planned; the smear comes from the resolve's dilated velocity (history-sized, so it
+  works under temporal upscaling too), tiles as wide as the longest smear (8 to 64 pixels). Shown sharp-to-smeared on
+  a moving block in 8-bit and HDR views (RTX 4080, the Intel iGPU, lavapipe); 0.15 to 0.4 ms at 1080p on the `motion`
+  scene. `kin_reference --motion-blur` turns it on.
+- **C2 — depth of field.** A physical lens: `focus_distance` (m), `aperture` (f-number), `sensor_height` (mm, 24 a
+  full frame; the focal length follows from the camera's fov), `max_blur` (pixels), `quality`, `blades` (0 round).
+  Circle of confusion from the pre-pass's depth (DOF turns the pre-pass on, as ambient occlusion does); half-size
+  gather with separate near and far layers; the near layer spread over what is in focus by a tile maximum of its
+  circle; combined at full size. Then autofocus: a
+  screen point's depth, smoothed on the GPU like auto exposure (a storage buffer, no read-back). Transparent surfaces
+  and particles blur as the depth behind them (as in the other engines). Tests: the circle-of-confusion formula on the
+  CPU; the focal plane stays sharp, near and far blur; checked against Cycles with the same lens
+  (`tools/cycles`).
+- **C2 as built (2026-11-16).** A Gustafsson single-pass spiral gather at half size, bounded per texel by its own radius
+  and a 16-pixel tile's widest near blur spread as far as it reaches (in-focus areas skip it), then a depth-aware
+  upsample. The depth is TAA's main-pass depth, else the pre-pass's; it needs a float picture (HDR or TAA). No noise in
+  the spiral (nothing after it averages noise; a per-texel turn speckled edges in Sponza). Autofocus eases in 1 / z
+  on the GPU. 0.2 to 0.4 ms at 1080p on Sponza. Since: aperture blades (each sample's polygon reaching back to the
+  pixel), the Cycles check (`tools/cycles/defocus.py`: the same blur as Cycles' thin lens to half a pixel on
+  `spheres`), no brightness weighting in the halving (it ate small lights' bokeh), depth-matched texels and a 3 x 3
+  depth-aware upsample (softer edge steps). A physical lens blurs little at game fovs: the test uses a
+  100 mm sensor at f/0.7 to blur a 160 x 120 view by several pixels.
+- **C3 — lens, film and grade.** In the view output shader, no new pass: vignette (intensity, smoothness, roundness),
+  chromatic aberration (radial, the bloom too), film grain (by luminance, moving each frame, before the encode),
+  tonemapper choice (ACES stays the default; AgX, Khronos PBR Neutral), white balance, contrast, saturation, and a
+  `ColorLut` cross-fade as the 2D `ColorOutput` has. Tests: defaults are the same picture; each effect where it
+  belongs (corners, edges, mid-tones).
+- **C3 as built (2026-11-16).** A second output shader, `view_output_effects.frag`, chosen only when an effect is on
+  (so a view without them keeps the exact plain output); the adapted exposure's buffer always bound (a dummy where
+  none). White balance as Unity's (temperature/tint to a CIE xy, von Kries in LMS, a 3 x 3 on the CPU, the identity
+  at 0). LUTs are uploaded once each (kept by weak pointer); scene files name them (and C4's dirt) by path,
+  resolved with the other assets by resolve_render3d_assets (settings have no asset access). Tested in an HDR view and an 8-bit TAA view: a neutral LUT gives the plain picture exactly,
+  aberration fringes, vignette, grain, balance, saturation, the three curves, a red/blue swapping LUT.
+- **C4 — bloom and flares.** A mip-chain, energy-conserving bloom (the current one stays, as a setting), a lens-dirt
+  texture, screen-space ghosts and halo from the bloom's levels, optional anamorphic streaks.
+- **C4 as built (2026-11-16).** On `CameraEffects3D::glow` (the bloom's strength and threshold stay
+  `ViewOptions3D`'s, fixed at the view's making; the shape and flares change per frame). A 13-tap Karis down chain,
+  a tent up chain mixed by `radius` (weights summing to one), Chapman ghosts and halo from the third level, an
+  exponential row sum for the streaks, dirt lit by the fourth level, composed at half size into the texture the
+  output already reads as its bloom; kin's own bloom unchanged when it is all off. Checked in `rain_street` at 1080p
+  and a GPU test on three drivers; 0.04 to 0.1 ms.
+- **Later, on a game's request.** Lens distortion and Panini projection (they move picking's coordinates), motion blur
+  without TAA (a velocity pre-pass of its own), objects kept out of the blur (a first-person weapon), WebGL2 and the
+  A55's quality levels.
+
+Measured with the 3D perf harness before and after (each effect off: no change), on Sponza Walk and the reference
+scenes; docs/rendering_3d.md gets each effect's section as it is built.

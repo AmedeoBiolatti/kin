@@ -11,7 +11,13 @@
 //                 [--ao] [--ao-radius R] [--ao-intensity I] [--ao-half]
 //                 [--contact-shadows] [--contact-distance D] [--contact-steps N]
 //                 [--contact-thickness T]
-//                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
+//                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N] [--motion-blur]
+//                 [--dof DISTANCE] [--dof-aperture N] [--dof-sensor MM] [--dof-autofocus] [--dof-blades N]
+//                 [--tone-curve aces|agx|neutral] [--vignette V] [--aberration A] [--grain G] [--temperature T]
+//                 [--glow-wide] [--ghosts G] [--halo H] [--streaks S] [--snapshot DIR]
+//
+// --snapshot DIR writes each camera's scene as rendered for Blender's Cycles (write_scene_snapshot) into
+// DIR/<scene>_<camera>/, with kin's picture as kin.png: tools/cycles/compare.py renders and compares it.
 //                 [--supersample N] [--samples N]
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
@@ -114,6 +120,7 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/process.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/snapshot3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
 #include <kin/renderer/backend.hpp>
@@ -1898,6 +1905,13 @@ struct Overrides {
     bool graph_reference = false;
     bool taa = false;
     double taa_blend = 0.0, taa_sharpness = -1.0;
+    bool motion_blur = false;  // CameraEffects3D::motion_blur with its defaults (and --taa, whose velocity it reads)
+    kin::DepthOfField3D dof{}; // CameraEffects3D::depth_of_field (--dof DISTANCE turns it on)
+    kin::Lens3D lens{};        // and the lens, film and grade (--vignette, --aberration, --grain, --tone-curve, ...)
+    kin::Film3D film{};
+    kin::Grade3D grade{};
+    kin::Glow3D glow{};   // the glow's shape and the lens' flares (a scene's view needs bloom)
+    std::string snapshot; // --snapshot DIR
     bool lod = false;
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
@@ -2605,6 +2619,44 @@ int main(int argc, char** argv) {
             over.graph_reference = true;
         } else if (a == "--taa") {
             over.taa = true;
+        } else if (a == "--dof") {
+            over.dof.enabled = true;
+            over.dof.focus_distance = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--dof-aperture") {
+            over.dof.aperture = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--dof-sensor") {
+            over.dof.sensor_height = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--dof-blades") {
+            over.dof.blades = static_cast<kin::u32>(std::atoi(next().c_str()));
+        } else if (a == "--dof-autofocus") {
+            over.dof.enabled = true;
+            over.dof.autofocus = true;
+        } else if (a == "--tone-curve") {
+            const std::string curve = next();
+            over.grade.tone_curve = curve == "agx"       ? kin::ToneCurve3D::Agx
+                                    : curve == "neutral" ? kin::ToneCurve3D::Neutral
+                                                         : kin::ToneCurve3D::Aces;
+        } else if (a == "--vignette") {
+            over.lens.vignette = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--aberration") {
+            over.lens.chromatic_aberration = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--grain") {
+            over.film.grain = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--temperature") {
+            over.grade.temperature = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--snapshot") {
+            over.snapshot = next();
+        } else if (a == "--glow-wide") {
+            over.glow.wide = true;
+        } else if (a == "--ghosts") {
+            over.glow.ghosts = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--halo") {
+            over.glow.halo = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--streaks") {
+            over.glow.streaks = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--motion-blur") {
+            over.taa = true;
+            over.motion_blur = true;
         } else if (a == "--taa-blend") {
             over.taa = true;
             over.taa_blend = std::atof(next().c_str());
@@ -3148,6 +3200,12 @@ int main(int argc, char** argv) {
             merge_contact_shadows(scene.contact_shadows, doc.find("contact_shadows"), over);
             scene.taa = {};
             merge_taa(scene.taa, doc.find("taa"), over);
+            scene.camera_effects.motion_blur.enabled = over.motion_blur;
+            scene.camera_effects.depth_of_field = over.dof;
+            scene.camera_effects.lens = over.lens;
+            scene.camera_effects.film = over.film;
+            scene.camera_effects.grade = over.grade;
+            scene.camera_effects.glow = over.glow;
             scene.lod = {};
             merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
             scene.debug.gpu_pass_markers = over.gpu_pass_markers;
@@ -3704,6 +3762,23 @@ int main(int argc, char** argv) {
                 }
 
                 kin::save_image(image, png);
+                if (!over.snapshot.empty()) {
+                    const fs::path folder = fs::path(over.snapshot) / (name + "_" + camera_name);
+                    kin::SnapshotOptions3D written_with;
+                    written_with.view = {.background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
+                                         .hdr = view_doc.bool_at("hdr"),
+                                         .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
+                                         .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))};
+                    if (auto written = kin::write_scene_snapshot(r3d, scene, {width, height}, folder, written_with)) {
+                        kin::save_image(image, folder / "kin.png");
+                        std::printf("  snapshot %s: %u objects, %u baked\n", folder.string().c_str(),
+                                    written.value->objects, written.value->baked);
+                    } else {
+                        std::fprintf(stderr, "  %s: snapshot not written: %s\n", camera_name.c_str(),
+                                     kin::diagnostics3d_text(written.diagnostics).c_str());
+                        ++failures;
+                    }
+                }
                 if (over.flicker > 0) {
                     // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change
                     // from one to the next?

@@ -231,6 +231,16 @@ Result3D<SnapshotStats3D> write_scene_snapshot(Renderer3D& renderer, const Scene
         stats.notes.push_back("fog is not written");
     if (scene.overlay_if_any())
         stats.notes.push_back("the overlay is not written");
+    // The camera's effects: depth of field is the camera's (written with it); the rest are not in the truth.
+    const CameraEffects3D& effects = scene.camera_effects;
+    if (effects.depth_of_field.enabled && effects.depth_of_field.autofocus)
+        stats.notes.push_back("depth of field's autofocus is written as its focus_distance");
+    if (effects.motion_blur.enabled)
+        stats.notes.push_back("motion blur is not written");
+    if (effects.lens_film_or_grade())
+        stats.notes.push_back("the lens, film and grade are not written");
+    if (effects.glow.shapes_glow())
+        stats.notes.push_back("the glow's shape and the lens' flares are not written");
 
     // Meshes, read back once each.
     std::unordered_map<const void*, MeshData3D> meshes;
@@ -482,8 +492,17 @@ Result3D<SnapshotStats3D> write_scene_snapshot(Renderer3D& renderer, const Scene
       << ", \"up\": " << vec(cam.rotation.rotate({0, 1, 0}))
       << ", \"orthographic\": " << (cam.projection == Projection3D::Orthographic ? "true" : "false")
       << ", \"fov\": " << number(cam.fov) << ", \"height\": " << number(cam.height)
-      << ", \"near\": " << number(cam.z_near) << ", \"far\": " << number(std::isfinite(cam.z_far) ? cam.z_far : 1e5f)
-      << "},\n";
+      << ", \"near\": " << number(cam.z_near) << ", \"far\": " << number(std::isfinite(cam.z_far) ? cam.z_far : 1e5f);
+    // Depth of field (DepthOfField3D): the same thin lens for the path tracer (its focal length from the sensor's
+    // height and the fov).
+    if (const DepthOfField3D& dof = scene.camera_effects.depth_of_field;
+        dof.enabled && cam.projection == Projection3D::Perspective)
+        j << ", \"dof\": {\"focus_distance\": " << number(dof.focus_distance)
+          << ", \"aperture\": " << number(std::clamp(dof.aperture, 0.7f, 64.0f))
+          << ", \"sensor_height\": " << number(std::clamp(dof.sensor_height, 1.0f, 100.0f))
+          << ", \"blades\": " << (dof.blades >= 3 ? std::min(dof.blades, 12u) : 0u)
+          << ", \"blade_rotation\": " << number(dof.blade_rotation) << "}";
+    j << "},\n";
     const ViewOptions3D& v = options.view;
     const LinearColor bg = to_linear(v.background);
     j << "  \"view\": {\"hdr\": " << (v.hdr ? "true" : "false") << ", \"exposure\": " << number(v.exposure)

@@ -718,6 +718,8 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     // The pictures, each with the planar surfaces as stand-ins, but for a portal's own next level; without the overlay.
     const bool overlay = scene.show_overlay;
     scene.show_overlay = false;
+    const CameraEffects3D effects = scene.camera_effects; // the eye's, not the pictures'
+    scene.camera_effects = {};
     const auto picture = [&](View3D& view, const Camera3D& camera) {
         scene.camera = camera;
         if (!(d.lit_by ? d.renderer.render(view, scene, *d.lit_by) : d.renderer.render(view, scene))) {
@@ -778,6 +780,7 @@ Status3D PlanarViews3D::render(EcsWorld& world, Scene3D& scene, Vec2i view_size,
     }
     // The view's: the surfaces as themselves.
     scene.show_overlay = overlay;
+    scene.camera_effects = effects;
     scene.camera = eye;
     for (const Mirror& m : mirrors)
         (void)scene.set_draw_material(m.draw, m.real);

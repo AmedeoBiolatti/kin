@@ -166,12 +166,13 @@ void stock_graph_parity(Renderer2D& renderer) {
     for (int frame = 0; frame < 16; ++frame) {
         scene.debug.graph_reference = false;
         a = shoot(renderer, r3d, compiled, scene);
-        assert(r3d.debug_stats().graph_passes == 13 && (frame == 0 || r3d.debug_stats().graph_reused));
+        assert(r3d.debug_stats().graph_passes == frame_graph_passes3d &&
+               (frame == 0 || r3d.debug_stats().graph_reused));
         scene.debug.graph_reference = true;
         b = shoot(renderer, r3d, reference, scene);
     }
     assert(a == b);
-    // What tools are shown is what ran: the public recipe compiles to the 13 passes, none culled, and the render timed
+    // What tools are shown is what ran: the public recipe compiles to its passes, none culled, and the render timed
     // each (the main pass records draws: never free).
     ResourceGraphCompiler shown;
     const auto& plan = shown.compile(stock_frame_graph3d(), ~u64{0});
