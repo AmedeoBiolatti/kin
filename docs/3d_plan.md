@@ -10685,3 +10685,54 @@ transmittance march is reused, not the clouds' primary march). `feat/volumetric-
 Checks: the CPU tests (`test_cloud_layer_and_noise`: the layer's span, the noise tiles) and GPU tests (off is the same
 bytes, overcast greys the sky, a near box keeps its colour with and without MSAA, a red overcast a degree after
 sunset and a dark one after dusk, with and without TAA, the history kept, settled and dropped).
+
+## Terrain — plan (2026-11-16)
+
+Heightmap terrain with painted material layers, sculpting and level of detail, as Unreal's Landscape, Unity's Terrain
+and Godot's terrain plugins (Terrain3D) give. Kin has none: its games build terrain as meshes, and Jolt's height field
+(`Shape3D::height_field`) is for physics only.
+
+Decisions (2026-11-16): **CDLOD** (a quadtree of nodes, one grid mesh drawn for each, heights read in the vertex shader,
+vertices morphing between levels: no cracks, no popping); **weight-map splatting, 16 layers** (four RGBA weight maps,
+Unity's and Unreal's way, height-based blending); **sculpting as an engine brush API with undo, plus a sample editor
+in kin** (kin-studio's editor UI comes later); **native only** (WebGL2 later). Branch `feat/terrain`.
+
+**How it fits.** A terrain is one flat grid mesh (N x N quads, its vertices at y 0) drawn as instances, one a selected
+quadtree node, under a built-in **terrain surface shader** (`engine/shaders/terrain.surface.glsl`, embedded as the
+planar surfaces are: `kin_terrain_surface(<target>)`). Its vertex offset (a surface's World Position Offset, which every
+pass already runs: main, pre-passes, velocity, sun and local shadows, pick, visibility) lifts each vertex to the
+height at its place and morphs it toward the coarser level's grid by its distance from the camera (CDLOD: the node's
+level from its instance's scale). Each node's instance is placed at its lowest height and scaled to its height range
+(two unreferenced vertices at y 0 and 1 give the grid that height), so every pass culls it by its real box. Nothing
+new in the frame graph: terrain is drawn, shadowed, picked and velocity-tracked as an instanced mesh.
+
+- **Heights**: 16 bits a sample (`u16`, over a height range), in the height map's RG (high and low byte) of an RGBA8
+  texture read by `texelFetch` (vertices sit on texels at every level), its BA the normal's x and z (bilinear in the
+  fragment). One texture up to 8193 x 8193 samples in the first slice (no streaming, no tiles).
+- **Layers**: four weight maps (RGBA8, the height map's size or another) in the material's other slots; each layer's
+  albedo (with a height in alpha for height blending) and normal (with roughness) in the graph maps' array (32 layers:
+  `max_graph_map_layers3d` raised for terrain), its tiling a parameter. Layers under a weight threshold are skipped.
+- **CPU**: `Terrain3D` (kin/render3d/terrain3d.hpp): the heights, the weights, the quadtree's min and max heights, the
+  CDLOD selection for a camera (whole terrain by distance; the renderer culls each pass), `draw(scene)` adding one
+  instanced draw; height and normal at a point, a ray hit.
+
+Stages:
+
+- **T1 — heights and LOD.** `Terrain3D` from a height map (16-bit PNG, RAW, or numbers), the surface shader's
+  vertex offset and morph, normals, the selection, a stock material look (one colour); tests: the drawn surface at
+  the heights (depth and pick readbacks), no cracks between levels (no background through the surface), node counts
+  falling with distance, each pass's culling by the node boxes, shadows cast and received; timing (`kin_reference` a
+  terrain scene: 4097^2 samples).
+- **T2 — layers.** 16 weight-mapped layers, height blending, per-layer tiling, roughness and normal maps; the weights
+  normalised; a layer set saved with the terrain.
+- **T3 — sculpting.** Brushes on the CPU data (raise/lower, smooth, flatten, noise, paint a layer, erase), a falloff
+  and strength, strokes as undo/redo steps, the changed rectangles re-uploaded (heights, normals, weights) and the
+  quadtree's bounds refit; physics kept in sync (a Jolt height field of the terrain, its changed rectangle set with
+  `SetHeights`); save and load (`.kinterrain`: a header, the heights, the weights, the layers' materials).
+- **T4 — sample editor.** `examples/terrain_editor`: fly the camera, sculpt and paint with the mouse (the brush's ring
+  drawn on the surface), a layer palette, undo/redo, save/load.
+- **T5 — the rest.** Scene files and the ECS (a terrain entity), navigation meshes from it, the GI scene's stand-in
+  (the flat grid otherwise), docs and changelog.
+
+Limits planned: one height texture (no streaming or tiles past 8193^2), no holes, no overhangs (heights only), the
+GI scene sees the terrain only from T5.
