@@ -502,7 +502,7 @@ if(KIN_EXPERIMENTAL_3D)
         src/render3d/camera3d.cpp src/render3d/frame_graph3d.cpp src/render3d/reflection_probes3d.cpp src/render3d/mesh.cpp
         src/render3d/renderer3d.cpp
         src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
-        src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
+        src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/clouds3d.cpp src/render3d/particles3d.cpp
         src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/hdr_decode.c)
     if(KIN_HAS_GPU_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
@@ -521,6 +521,10 @@ if(KIN_EXPERIMENTAL_3D)
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/particle.vert.glsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/particle.frag.glsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/decal.vert.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/clouds_noise.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/clouds_trace.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/clouds_resolve.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/clouds_apply.frag.glsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/kin_graph.inc.glsl")
     endif()
     if(KIN_ENABLE_PHYSICS3D)

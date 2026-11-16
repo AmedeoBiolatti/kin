@@ -161,6 +161,7 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         scene.lights = {};
         scene.sky = {};
         scene.fog = {};
+        scene.clouds = {};
         scene.weather = {};
         scene.debug = {};
         scene.ambient_occlusion = {};

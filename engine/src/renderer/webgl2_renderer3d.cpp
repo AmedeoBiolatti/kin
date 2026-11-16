@@ -18,6 +18,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 
@@ -150,6 +151,32 @@ struct FogVolume {
         }
     }
 };
+// Scene3D::clouds' pictures of a view (native's _clouds_*): this frame's walk (RGBA16F light and share behind, R32F
+// distance) and the blend of the frames (this render's and the last's, swapped each render), what the last was made
+// with.
+struct CloudTargets {
+    GLuint raw = 0, raw_distance = 0, raw_framebuffer = 0;
+    std::array<GLuint, 2> light{}, distance{}, framebuffer{};
+    Vec2i size{};
+    u32 written = 0, frame = 0;
+    bool valid = false;
+    Mat4f previous{};
+    Vec3f eye{}, forward{};
+    std::shared_ptr<bool> alive;
+    CloudTargets() = default;
+    CloudTargets(const CloudTargets&) = delete;
+    CloudTargets& operator=(const CloudTargets&) = delete;
+    ~CloudTargets() {
+        if (alive && *alive) {
+            glDeleteFramebuffers(1, &raw_framebuffer);
+            glDeleteFramebuffers(2, framebuffer.data());
+            glDeleteTextures(1, &raw);
+            glDeleteTextures(1, &raw_distance);
+            glDeleteTextures(2, light.data());
+            glDeleteTextures(2, distance.data());
+        }
+    }
+};
 // What a view's scene is drawn into: its colour (the SDR texture or the HDR float picture), a depth texture and the
 // surfaces' normals (both read by decals and soft particles), and a framebuffer of the colour alone, through which
 // those draw while they read the depth.
@@ -207,8 +234,9 @@ struct View final : IViewBackend3D {
     ShadowCascades3D cascades;
     sky_model::AmbientLight3D ambient, overlay_ambient;
     std::vector<std::shared_ptr<PreparedInstances>> prepared, overlay_prepared;
-    std::shared_ptr<HdrTargets> hdr; // null: an SDR view, drawn straight into `color`
-    std::shared_ptr<FogVolume> fog;  // Fog3D::volumetric's, while it is on
+    std::shared_ptr<HdrTargets> hdr;      // null: an SDR view, drawn straight into `color`
+    std::shared_ptr<FogVolume> fog;       // Fog3D::volumetric's, while it is on
+    std::shared_ptr<CloudTargets> clouds; // Scene3D::clouds', while they are on
     std::shared_ptr<SceneTargets> targets;
     Texture texture() const override { return color; }
     Vec2i size() const override { return color.size(); }
@@ -406,8 +434,9 @@ enum Omitted : u32 {
     omit_depth_of_field = 1u << 19,
     omit_lens_film_grade = 1u << 20,
     omit_glow = 1u << 21,
+    omit_clouds = 1u << 22,
 };
-constexpr std::array<const char*, 22> omitted_text{
+constexpr std::array<const char*, 23> omitted_text{
     "custom material shaders (Material3D::shader) draw as kin's stock material",
     "wireframe materials draw filled",
     "particles cast and receive the sun's shadows only (no point, spot or moon shadows)",
@@ -430,6 +459,8 @@ constexpr std::array<const char*, 22> omitted_text{
     "depth of field (CameraEffects3D::depth_of_field) is off",
     "the camera's lens, film and grade (CameraEffects3D::lens, film, grade) are off",
     "the glow's shape and the lens' flares (CameraEffects3D::glow) are off: kin's own bloom",
+    "volumetric clouds (Scene3D::clouds) need EXT_color_buffer_float; their shadows and their light in the sky's "
+    "environment are left out",
 };
 // A draw's uniforms, cached per program (their values belong to the linked program).
 struct DrawUniforms {
@@ -587,6 +618,23 @@ struct WebGLRenderer3D::Impl {
         bool sun = false;
         Vec2i size{1, 1};
     } fog_state;
+    // Scene3D::clouds (native clouds_trace.comp, clouds_resolve.comp and clouds_apply.frag as fragments): the programs
+    // and the noise, made on first use; this render's blend for the main pass to draw (cloud_state.targets: none);
+    // the fog's veil under them (environment: the share they cover, the light of their bases).
+    GLuint cloud_noise_program = 0, cloud_trace_program = 0, cloud_resolve_program = 0, cloud_apply_program = 0;
+    GLuint cloud_shape = 0, cloud_detail = 0, cloud_weather = 0, cloud_framebuffer = 0;
+    bool clouds_tried = false;
+    View* cloud_view = nullptr; // the view this render's main pass walks the clouds for
+    sky_model::AmbientLight3D cloud_ambient;
+    struct {
+        const CloudTargets* targets = nullptr;
+        Mat4f inverse{}, view_projection{};
+        Vec3f eye{};
+    } cloud_state;
+    struct {
+        f32 share = 0.0f;
+        LinearRgb base{};
+    } fog_veil;
     bool float_targets = false; // EXT_color_buffer_float: HDR views can be drawn
     bool linear_output = false; // this render draws an HDR view's float picture
     Texture white;
@@ -825,6 +873,11 @@ struct WebGLRenderer3D::Impl {
         glDeleteVertexArrays(1, &decal_vao);
         glDeleteVertexArrays(1, &particle_vao);
         glDeleteTextures(1, &fog_volume_dummy);
+        for (const GLuint p : {cloud_noise_program, cloud_trace_program, cloud_resolve_program, cloud_apply_program})
+            glDeleteProgram(p);
+        for (const GLuint* t : {&cloud_shape, &cloud_detail, &cloud_weather})
+            glDeleteTextures(1, t);
+        glDeleteFramebuffers(1, &cloud_framebuffer);
         glDeleteVertexArrays(1, &sky_vao);
         glDeleteTextures(1, &shadow_dummy);
         glDeleteTextures(1, &graph_maps_dummy);
@@ -904,8 +957,17 @@ struct WebGLRenderer3D::Impl {
             glUniform4f(loc(name), value.x, value.y, value.z, value.w);
         };
         const auto vector = [&](const char* name, Vec3f value) { glUniform3f(loc(name), value.x, value.y, value.z); };
-        const auto& sky = scene.sky;
-        const auto& fog = scene.fog;
+        // Under clouds (fog_veil, native's fog_under_clouds): the fog's sky (1 - share) of the clear one's and the
+        // share of the clouds' light, its sun's glow (1 - share) of its; the sky pass keeps its own colour.
+        Sky3D sky = scene.sky;
+        Fog3D fog = scene.fog;
+        if (fog_veil.share > 0.0f) {
+            if (handle != sky_program) {
+                sky.intensity *= 1.0f - fog_veil.share;
+                sky.night_color = sky.night_color + fog_veil.base * fog_veil.share;
+            }
+            fog.sun_scatter *= 1.0f - fog_veil.share;
+        }
         const Vec3f sun =
             length_squared(scene.lights.sun.direction) > 0 ? normalize(scene.lights.sun.direction) : Vec3f{0, 1, 0};
         const Vec3f moon = length_squared(sky.moon_direction) > 0 ? normalize(sky.moon_direction) : Vec3f{0, 1, 0};
@@ -1116,6 +1178,9 @@ struct WebGLRenderer3D::Impl {
         bits |= scene.camera_effects.depth_of_field.enabled ? omit_depth_of_field : 0;
         bits |= scene.camera_effects.lens_film_or_grade() ? omit_lens_film_grade : 0;
         bits |= scene.camera_effects.glow.shapes_glow() ? omit_glow : 0;
+        bits |= scene.clouds.enabled && (!float_targets || scene.clouds.shadows || scene.lights.sky_lights_scene)
+                    ? omit_clouds
+                    : 0;
         bits |= scene.global_illumination.enabled ? omit_gi : 0;
         bits |= l.reflection_probes.empty() ? 0 : omit_probes;
         bits |= l.environment || (scene.sky.enabled && scene.sky.mode == SkyMode3D::Image) ? omit_environment : 0;
@@ -1578,6 +1643,359 @@ struct WebGLRenderer3D::Impl {
         stats.fog_volume_lights = point_count + spot_count + (sun ? 1 : 0) + (fill ? 1 : 0);
         glEnable(GL_DEPTH_TEST);
         glDepthMask(GL_TRUE);
+    }
+    // Scene3D::clouds: whether there are any to draw (native clouds_possible).
+    static bool clouds_possible(const Clouds3D& c, const Camera3D& camera) {
+        return c.enabled && c.coverage > 0.0f && c.density > 0.0f && std::isfinite(c.bottom) && std::isfinite(c.top) &&
+               c.top != c.bottom && camera.projection == Projection3D::Perspective;
+    }
+    // The clouds' programs and noise (native cloud_noise.comp and cloud_weather.comp's, as fragments), made on the
+    // first render that draws them; false (said once) where they cannot be.
+    bool make_clouds() {
+        if (clouds_tried)
+            return cloud_apply_program != 0;
+        clouds_tried = true;
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            const auto vertex = WebGLDevice::shader_source("sky.vert.glsl");
+            const auto make = [&](const char* name) {
+                return WebGLDevice::program(vertex.c_str(), WebGLDevice::shader_source(name).c_str());
+            };
+            cloud_noise_program = make("clouds_noise.frag.glsl");
+            cloud_trace_program = make("clouds_trace.frag.glsl");
+            cloud_resolve_program = make("clouds_resolve.frag.glsl");
+            cloud_apply_program = make("clouds_apply.frag.glsl");
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "WebGL2: volumetric clouds not available",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+            for (GLuint* p :
+                 {&cloud_noise_program, &cloud_trace_program, &cloud_resolve_program, &cloud_apply_program}) {
+                glDeleteProgram(*p);
+                *p = 0;
+            }
+            return false;
+        }
+        const auto parameters = [](GLenum target) {
+            glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            for (const GLenum axis : {GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TEXTURE_WRAP_R})
+                glTexParameteri(target, axis, GL_REPEAT);
+        };
+        glActiveTexture(GL_TEXTURE0);
+        glBindSampler(0, 0);
+        // (The shape volume at half native's side: made by fragments, on a software rasterizer the full one takes tens
+        // of seconds; it tiles all the same, a little softer.)
+        constexpr u32 shape_size = cloud_model::shape_size / 2;
+        for (const auto& [texture, size] :
+             {std::pair{&cloud_shape, shape_size}, std::pair{&cloud_detail, cloud_model::detail_size}}) {
+            glGenTextures(1, texture);
+            glBindTexture(GL_TEXTURE_3D, *texture);
+            glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA8, GLsizei(size), GLsizei(size), GLsizei(size));
+            parameters(GL_TEXTURE_3D);
+        }
+        glGenTextures(1, &cloud_weather);
+        glBindTexture(GL_TEXTURE_2D, cloud_weather);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, GLsizei(cloud_model::weather_size),
+                       GLsizei(cloud_model::weather_size));
+        parameters(GL_TEXTURE_2D);
+        glGenFramebuffers(1, &cloud_framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, cloud_framebuffer);
+        glUseProgram(cloud_noise_program);
+        current = nullptr;
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_SCISSOR_TEST);
+        glBindVertexArray(sky_vao);
+        const auto uniform_of = [&](const char* name) { return glGetUniformLocation(cloud_noise_program, name); };
+        const GLenum first_buffer = GL_COLOR_ATTACHMENT0;
+        glDrawBuffers(1, &first_buffer);
+        // The volumes, a slice a draw.
+        for (const auto& [texture, size, noise] :
+             {std::tuple{cloud_shape, shape_size, 0}, std::tuple{cloud_detail, cloud_model::detail_size, 1}}) {
+            glViewport(0, 0, GLsizei(size), GLsizei(size));
+            glUniform1i(uniform_of("uNoise"), noise);
+            glUniform1i(uniform_of("uSize"), GLint(size));
+            for (u32 slice = 0; slice < size; ++slice) {
+                glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0, GLint(slice));
+                glUniform1i(uniform_of("uSlice"), GLint(slice));
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            }
+        }
+        // The coverage map.
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cloud_weather, 0);
+        glViewport(0, 0, GLsizei(cloud_model::weather_size), GLsizei(cloud_model::weather_size));
+        glUniform1i(uniform_of("uNoise"), 2);
+        glUniform1i(uniform_of("uSize"), GLint(cloud_model::weather_size));
+        glUniform1i(uniform_of("uSlice"), 0);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        KIN_LOG_INFO_F(
+            "render", "WebGL2: the clouds' programs and noise made",
+            (LogFields{
+                {.name = "ms",
+                 .value = std::to_string(
+                     std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count())}}));
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        material_bindings = {};
+        return true;
+    }
+    // The fog's veil under the clouds for this render (native fog_under_clouds): the share of the sky they cover round
+    // the camera (the coverage asked for, with a map of the game's) and their bases' light, in grey.
+    void veil_fog(const Scene3D& scene) {
+        fog_veil = {};
+        const Clouds3D& c = scene.clouds;
+        if (!scene.fog.enabled || !float_targets || !clouds_possible(c, scene.camera))
+            return;
+        fog_veil.share = c.weather_map ? std::clamp(c.coverage, 0.0f, 1.0f)
+                                       : cloud_model::cover_share(c, scene.camera.position, scene.time);
+        LinearRgb above = scene.lights.ambient, below = scene.lights.ground_ambient.enabled
+                                                            ? scene.lights.ground_ambient.color
+                                                            : scene.lights.ambient;
+        if (scene.sky.enabled && scene.sky.mode == SkyMode3D::Procedural) {
+            cloud_ambient.update(scene.sky, scene.lights.sun.direction);
+            above = cloud_ambient.ambient;
+            below = cloud_ambient.ground;
+        }
+        const f32 grey =
+            0.5f * std::max(c.ambient, 0.0f) *
+            (0.2126f * (above.r + below.r) + 0.7152f * (above.g + below.g) + 0.0722f * (above.b + below.b));
+        fog_veil.base = {grey, grey, grey};
+    }
+    // This render's clouds (native clouds()): the walk at Clouds3D::resolution of the view, then its blend with the
+    // last; cloud_state says what the main pass draws. Needs float targets and a perspective camera.
+    void clouds(View& view, const Scene3D& scene, RenderDebugStats3D& stats, const SceneTargets* targets) {
+        cloud_state = {};
+        const Clouds3D& c = scene.clouds;
+        if (!float_targets || !clouds_possible(c, scene.camera) || !make_clouds()) {
+            view.clouds.reset();
+            return;
+        }
+        const Vec2i size = view.size();
+        const f32 scale = std::clamp(c.resolution, 0.25f, 1.0f);
+        const Vec2i walk{std::max(1, int(std::lround(f32(size.x) * scale))),
+                         std::max(1, int(std::lround(f32(size.y) * scale)))};
+        if (!view.clouds || view.clouds->size != walk) {
+            auto t = std::make_shared<CloudTargets>();
+            t->alive = device.alive();
+            t->size = walk;
+            const auto texture = [&](GLuint& handle, GLenum format, bool linear) {
+                glGenTextures(1, &handle);
+                glBindTexture(GL_TEXTURE_2D, handle);
+                glTexStorage2D(GL_TEXTURE_2D, 1, format, walk.x, walk.y);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            };
+            const auto framebuffer = [&](GLuint& handle, GLuint light, GLuint distance) {
+                glGenFramebuffers(1, &handle);
+                glBindFramebuffer(GL_FRAMEBUFFER, handle);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, light, 0);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, distance, 0);
+                const std::array<GLenum, 2> both{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, both.data());
+                return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+            };
+            glActiveTexture(GL_TEXTURE0);
+            texture(t->raw, GL_RGBA16F, false);
+            texture(t->raw_distance, GL_R32F, false);
+            bool complete = framebuffer(t->raw_framebuffer, t->raw, t->raw_distance);
+            for (u32 k = 0; k < 2; ++k) {
+                texture(t->light[k], GL_RGBA16F, true);
+                texture(t->distance[k], GL_R32F, false);
+                complete = framebuffer(t->framebuffer[k], t->light[k], t->distance[k]) && complete;
+            }
+            if (!complete) {
+                KIN_LOG_WARN("render", "WebGL2: the clouds' pictures could not be made");
+                view.clouds.reset();
+                return;
+            }
+            view.clouds = std::move(t);
+        }
+        CloudTargets& t = *view.clouds;
+        const Camera3D& camera = scene.camera;
+        const Vec3f eye = camera.position, forward = camera.forward();
+        const Mat4f vp = camera.view_projection(f32(size.x) / f32(size.y));
+        const Mat4f to_world = vp.inverse();
+        const f32 bottom = std::min(c.bottom, c.top), top = std::max(c.bottom, c.top);
+        const f32 radius = std::max(c.planet_radius, 1000.0f);
+        // The light (native make_cloud_params): the sun while it reaches the layer's top, else the moon when it shines.
+        const Lights3D& lights = scene.lights;
+        const auto shines = [](const DirectionalLight3D& l) {
+            return l.color.r + l.color.g + l.color.b > 0.0f && length_squared(l.direction) > 0.0f;
+        };
+        const bool atmosphere = scene.sky.enabled && scene.sky.mode == SkyMode3D::Procedural;
+        const Vec3f sun = length_squared(lights.sun.direction) > 0 ? normalize(lights.sun.direction) : Vec3f{0, 1, 0};
+        const bool sun_lights =
+            atmosphere ? sun.y + std::sqrt(2.0f * std::max(top, 0.0f) / radius) > -0.01f : shines(lights.sun);
+        const bool by_sun = sun_lights || !shines(lights.fill);
+        const Vec3f toward = by_sun ? sun : normalize(lights.fill.direction);
+        const LinearRgb light = by_sun ? lights.sun.color : lights.fill.color;
+        LinearRgb above = lights.ambient,
+                  below = lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient;
+        if (atmosphere) {
+            cloud_ambient.update(scene.sky, sun);
+            above = cloud_ambient.ambient;
+            below = cloud_ambient.ground;
+        }
+        // The history (native's rule: a jump of a twentieth of the way to the clouds, or a turn of 30 degrees, is a
+        // cut).
+        const f32 history = std::clamp(c.history, 0.0f, 0.98f);
+        const f32 to_clouds = std::max(std::abs(bottom - eye.y), 100.0f);
+        const bool cut = length(eye - t.eye) > 0.05f * to_clouds || dot(forward, t.forward) < 0.866f;
+        const bool previous = t.valid && history > 0.0f && !cut;
+        // The walk.
+        GLuint program = cloud_trace_program;
+        glUseProgram(program);
+        current = nullptr;
+        const auto at = [&](const char* name) { return glGetUniformLocation(program, name); };
+        const auto set = [&](const char* name, f32 x, f32 y, f32 z, f32 w) { glUniform4f(at(name), x, y, z, w); };
+        const auto set3 = [&](const char* name, Vec3f v, f32 w) { glUniform4f(at(name), v.x, v.y, v.z, w); };
+        const auto rgb = [&](const char* name, LinearRgb v, f32 w) { glUniform4f(at(name), v.r, v.g, v.b, w); };
+        glUniformMatrix4fv(at("uToWorld"), 1, GL_FALSE, to_world.m);
+        set3("uEye", eye, f32(t.frame++ % 4096u));
+        // The opaque meshes' depth (drawn before this, in the main pass) bounds the rays (native's pre-pass depth).
+        const Mat4f inverse = camera.projection_matrix(f32(size.x) / f32(size.y)).inverse();
+        set("uUnprojectXY", inverse.at(0, 0), inverse.at(1, 1), inverse.at(0, 3), inverse.at(1, 3));
+        set("uUnprojectZW", inverse.at(2, 2), inverse.at(2, 3), inverse.at(3, 2), inverse.at(3, 3));
+        set("uDepthSize", f32(size.x), f32(size.y), targets ? 1.0f : 0.0f, 0.0f);
+        glActiveTexture(GL_TEXTURE3);
+        glBindSampler(3, 0);
+        glBindTexture(GL_TEXTURE_2D, targets ? targets->depth : device.texture(white)->handle);
+        glUniform1i(at("uDepth"), 3);
+        glUniform2f(at("uSize"), f32(walk.x), f32(walk.y));
+        set("uClouds.layer", bottom, top, 0.5f / radius, std::max(c.distance, 0.0f));
+        set("uClouds.scales", 1.0f / std::max(c.shape_scale, 1.0f), 1.0f / std::max(c.detail_scale, 1.0f),
+            1.0f / std::max(c.weather_scale, 1.0f), std::clamp(c.erosion, 0.0f, 1.0f));
+        set("uClouds.cover", std::clamp(c.coverage, 0.0f, 1.0f), std::clamp(c.kind, 0.0f, 1.0f), c.density,
+            f32(std::clamp(c.steps, 16u, 256u)));
+        set3("uClouds.shape_offset", c.wind * -scene.time, f32(std::clamp(c.light_steps, 2u, 16u)));
+        set3("uClouds.detail_offset", c.wind * (-1.4f * scene.time), std::max(c.ambient, 0.0f));
+        set("uClouds.phase", std::clamp(c.forward, -0.95f, 0.95f), std::clamp(c.backward, -0.95f, 0.95f),
+            std::clamp(c.backward_share, 0.0f, 1.0f), std::clamp(c.multiple_scattering, 0.0f, 0.95f));
+        set3("uClouds.light", toward, by_sun && atmosphere ? 1.0f : 0.0f);
+        rgb("uClouds.light_color", light, top - bottom);
+        rgb("uClouds.ambient_top", above, 0.0f);
+        rgb("uClouds.ambient_bottom", below, atmosphere ? 1.0f : 0.0f);
+        const bool fogged = scene.fog.enabled && (scene.fog.density > 0.0f || scene.fog.height_density > 0.0f);
+        rgb("uClouds.sun_light", lights.sun.color, fogged ? 1.0f : 0.0f);
+        const Sky3D& sky = scene.sky;
+        const Vec3f moon = length_squared(sky.moon_direction) > 0 ? normalize(sky.moon_direction) : Vec3f{0, 1, 0};
+        set3("uSky.sun", sun, sky.sun_intensity);
+        set("uSky.shape", sky_model::mie_per_turbidity * std::clamp(sky.turbidity, 1.0f, 20.0f),
+            sky_model::mie_anisotropy, sky.intensity, sky.moon ? std::max(0.0f, sky.moon_light) : 0.0f);
+        rgb("uSky.ground", sky.ground_color, 0.0f);
+        set3("uSky.moon", moon, 0.0f);
+        rgb("uSky.night", sky.night_color, 0.0f);
+        const Fog3D& fog = scene.fog;
+        rgb("uFog.colour", fog.colour, fog.colour_from_sky && sky.mode == SkyMode3D::Procedural ? 1.0f : 0.0f);
+        set("uFog.density", std::max(0.0f, fog.density), std::max(0.0f, fog.height_density), fog.height_falloff,
+            fog.base_height);
+        set("uFog.limits", std::max(0.0f, fog.start), std::clamp(fog.max_opacity, 0.0f, 1.0f),
+            std::max(0.0f, fog.sun_scatter), std::clamp(fog.sun_anisotropy, -0.95f, 0.95f));
+        set("uFog.view", 0, 0, 0, 0);
+        const WebGLTexture* map = device.texture(c.weather_map);
+        const std::array<std::pair<GLenum, GLuint>, 3> noise{{{GL_TEXTURE_3D, cloud_shape},
+                                                              {GL_TEXTURE_3D, cloud_detail},
+                                                              {GL_TEXTURE_2D, map ? map->handle : cloud_weather}}};
+        constexpr std::array<const char*, 3> samplers{"uShape", "uDetail", "uWeather"};
+        for (u32 i = 0; i < 3; ++i) {
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindSampler(i, 0);
+            glBindTexture(noise[i].first, noise[i].second);
+            glUniform1i(at(samplers[i]), GLint(i));
+        }
+        if (map) { // (a picture of the game's: the clouds' map tiles)
+            glActiveTexture(GL_TEXTURE2);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        }
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_SCISSOR_TEST);
+        glBindVertexArray(sky_vao);
+        glBindFramebuffer(GL_FRAMEBUFFER, t.raw_framebuffer);
+        glViewport(0, 0, walk.x, walk.y);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        // The blend.
+        const u32 written = t.written ^ 1u;
+        program = cloud_resolve_program;
+        glUseProgram(program);
+        glUniformMatrix4fv(at("uToWorld"), 1, GL_FALSE, to_world.m);
+        glUniformMatrix4fv(at("uPrevious"), 1, GL_FALSE, t.previous.m);
+        glUniform3f(at("uEye"), eye.x, eye.y, eye.z);
+        set("uSize", f32(walk.x), f32(walk.y), history, previous ? 1.0f : 0.0f);
+        const std::array<GLuint, 4> inputs{t.raw, t.raw_distance, t.light[t.written], t.distance[t.written]};
+        constexpr std::array<const char*, 4> names{"uCurrent", "uCurrentDistance", "uHistory", "uHistoryDistance"};
+        for (u32 i = 0; i < 4; ++i) {
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindSampler(i, 0);
+            glBindTexture(GL_TEXTURE_2D, inputs[i]);
+            glUniform1i(at(names[i]), GLint(i));
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, t.framebuffer[written]);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glActiveTexture(GL_TEXTURE0);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        material_bindings = {};
+        t.written = written;
+        t.valid = true;
+        t.previous = vp;
+        t.eye = eye;
+        t.forward = forward;
+        cloud_state = {&t, to_world, vp, eye};
+        stats.clouds = true;
+        stats.clouds_history = previous;
+        stats.clouds_texels = u32(walk.x) * u32(walk.y);
+        stats.clouds_depth_bounded = targets != nullptr;
+    }
+    // The clouds over the picture after the opaque meshes (native clouds_apply.frag), at their depth.
+    void clouds_apply(Vec2i size) {
+        const CloudTargets* t = cloud_state.targets;
+        if (!t)
+            return;
+        glUseProgram(cloud_apply_program);
+        current = nullptr;
+        const auto at = [&](const char* name) { return glGetUniformLocation(cloud_apply_program, name); };
+        glUniformMatrix4fv(at("uInverseViewProjection"), 1, GL_FALSE, cloud_state.inverse.m);
+        glUniformMatrix4fv(at("uViewProjection"), 1, GL_FALSE, cloud_state.view_projection.m);
+        glUniform3f(at("uEye"), cloud_state.eye.x, cloud_state.eye.y, cloud_state.eye.z);
+        glUniform2f(at("uTarget"), f32(size.x), f32(size.y));
+        glUniform1i(at("uLinear"), linear_output);
+        for (u32 i = 0; i < 2; ++i) {
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindSampler(i, 0);
+            glBindTexture(GL_TEXTURE_2D, i == 0 ? t->light[t->written] : t->distance[t->written]);
+        }
+        glUniform1i(at("uClouds"), 0);
+        glUniform1i(at("uDistance"), 1);
+        glActiveTexture(GL_TEXTURE0);
+        // Premultiplied over, tested (not written) against the meshes' depth; the normals' attachment left alone.
+        GLint second = GL_NONE;
+        glGetIntegerv(GL_DRAW_BUFFER1, &second);
+        const std::array<GLenum, 2> colour{GL_COLOR_ATTACHMENT0, GL_NONE};
+        glDrawBuffers(2, colour.data());
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_GEQUAL);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(sky_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDisable(GL_BLEND);
+        glDepthFunc(GL_GREATER);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_CULL_FACE);
+        const std::array<GLenum, 2> restore{GL_COLOR_ATTACHMENT0, GLenum(second)};
+        glDrawBuffers(2, restore.data());
+        material_bindings = {};
     }
     // Scene3D's decals (native decal.vert/decal.frag's): each box's back faces, through the view's colour alone, so
     // the fragment reads the depth and normals the opaque receivers left; lit and fogged as a material, blended over
@@ -2319,8 +2737,18 @@ struct WebGLRenderer3D::Impl {
             if (!source.look->sort && !shown[k].empty())
                 transparent.push_back({nullptr, nullptr, k, ~0u, sum / f32(shown[k].size())});
         }
+        // The clouds over the sky and what lies farther than them, before what is blended (native's order); not the
+        // overlay's.
+        if (targets && shadowed && cloud_view) {
+            // Walked now that the opaque meshes' depth is drawn, then drawn over them.
+            clouds(*cloud_view, scene, stats, targets);
+            glBindFramebuffer(GL_FRAMEBUFFER, targets->framebuffer);
+            glViewport(0, 0, size.x, size.y);
+            clouds_apply(size);
+        }
         std::stable_sort(transparent.begin(), transparent.end(),
                          [](const auto& a, const auto& b) { return a.depth > b.depth; });
+
         // The sprites' records in the order they are drawn (one upload); consecutive sprites of a source are one draw.
         particle_records.clear();
         for (const auto& item : transparent) {
@@ -2478,6 +2906,9 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     _impl->shadows(*view, scene, stats);
     _impl->bind_shadow_units(true);
     _impl->fog_volume(*view, scene, stats);
+    _impl->veil_fog(scene);
+    _impl->cloud_view = view; // (walked in the main pass, after the opaque meshes)
+    _impl->cloud_state = {};
     if (!view->fog) {
         glActiveTexture(GL_TEXTURE0 + fog_volume_unit);
         glBindTexture(GL_TEXTURE_3D, _impl->fog_volume_dummy);

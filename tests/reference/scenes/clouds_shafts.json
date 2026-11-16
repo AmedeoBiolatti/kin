@@ -1,0 +1,115 @@
+{
+ "name": "clouds_shafts",
+ "purpose": "The valley in the morning (8:30) under scattered clouds, with a hazy volumetric fog that takes the sun through the clouds' shadow (Clouds3D::shadows, Fog3D::volumetric sun_and_moon): their shade on the ground, and shafts of sun through their gaps. 'sun' toward the sun, 'valley' along the valley, 'above' from a hill looking down on the drifting shade.",
+ "procedural": "landscape",
+ "trees": 2500,
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.35
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    1,
+    1,
+    1
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.2,
+   0.25
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 4,
+  "shadow_distance": 500,
+  "sky_lights_scene": true
+ },
+ "time_of_day": {
+  "hours": 8.5,
+  "day_of_year": 172,
+  "latitude": 45.0
+ },
+ "sky": {
+  "enabled": true,
+  "turbidity": 3.5,
+  "sun_disc": 30.0
+ },
+ "fog": {
+  "enabled": true,
+  "density": 0.0001,
+  "height_density": 0.004,
+  "height_falloff": 0.03,
+  "color_from_sky": true,
+  "sun_scatter": 0.3,
+  "sun_anisotropy": 0.7,
+  "volumetric": {
+   "enabled": true,
+   "distance": 2000,
+   "sun_and_moon": true
+  }
+ },
+ "cameras": [
+  {
+   "name": "sun",
+   "eye": [
+    0,
+    8,
+    60
+   ],
+   "at_sun": true,
+   "target_offset": [
+    0,
+    -20,
+    0
+   ],
+   "fov": 70,
+   "near": 0.1
+  },
+  {
+   "name": "valley",
+   "eye": [
+    0,
+    8,
+    60
+   ],
+   "target": [
+    0,
+    30,
+    -500
+   ],
+   "fov": 60,
+   "near": 0.1
+  },
+  {
+   "name": "above",
+   "eye": [
+    0,
+    600,
+    900
+   ],
+   "target": [
+    0,
+    0,
+    -1800
+   ],
+   "fov": 60,
+   "near": 0.5
+  }
+ ],
+ "clouds": {
+  "enabled": true,
+  "coverage": 0.5,
+  "kind": 0.7,
+  "bottom": 900,
+  "top": 3000
+ }
+}

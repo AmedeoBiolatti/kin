@@ -32,7 +32,9 @@ set(_kin_gpu_shader_names_3D
     motion_blur_prepare.comp motion_blur_tiles.comp motion_blur_neighbours.comp motion_blur.comp
     dof_focus.comp dof_prepare.comp dof_tiles.comp dof_spread.comp dof_gather.comp dof_combine.comp
     view_output_effects.frag glow_down.comp glow_up.comp glow_flare.comp glow_streak.comp glow_compose.comp
-    subsurface_scatter.comp subsurface_combine.frag)
+    subsurface_scatter.comp subsurface_combine.frag
+    cloud_noise.comp cloud_weather.comp clouds_trace.comp clouds_resolve.comp clouds_apply.frag cloud_shadow.comp
+    cloud_shadow_screen.comp clouds_env.frag)
 
 set(_kin_gpu_shader_names ${_kin_gpu_shader_names_2D})
 if(KIN_EXPERIMENTAL_3D)

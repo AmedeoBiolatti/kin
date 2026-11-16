@@ -22,6 +22,7 @@ struct SceneEnvironment3D {
     Lights3D lights;
     Sky3D sky;
     Fog3D fog;
+    Clouds3D clouds; // Scene3D::clouds (its weather_map from `clouds_weather`)
     AmbientOcclusion3D ambient_occlusion;
     ContactShadows3D contact_shadows;
     TemporalAA3D taa;
@@ -33,7 +34,9 @@ struct SceneEnvironment3D {
     ComponentAssetRef grade_lut;
     ComponentAssetRef grade_lut_to;
     ComponentAssetRef glow_dirt;
-    std::string bound_grade_lut, bound_grade_lut_to, bound_glow_dirt;
+    // The clouds' coverage map (Clouds3D::weather_map: a data image, r coverage, g kind), by content path.
+    ComponentAssetRef clouds_weather;
+    std::string bound_grade_lut, bound_grade_lut_to, bound_glow_dirt, bound_clouds_weather;
     u32 anisotropy = 1;          // Scene3D::anisotropy (1 to 16)
     f32 texture_lod_bias = 0.0f; // Scene3D::texture_lod_bias (-2 to 2)
     f32 specular_aa = 0.0f;      // Scene3D::specular_aa (0 to 1)

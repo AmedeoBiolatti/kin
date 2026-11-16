@@ -9,6 +9,9 @@ layout(location = 2) out vec2 vUV;
 #endif
 #include "kin_instance.inc.glsl"
 #include "kin_srgb.inc.glsl"
+// The same position as the pre-pass's to the bit (its depth can be the main pass's start: RenderDebugOptions3D::
+// prepass_depth), as the lit vertex shaders declare it: without, an unlit mesh speckled with the background there.
+invariant gl_Position;
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
     uvec4 first;

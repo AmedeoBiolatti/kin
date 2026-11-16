@@ -1046,6 +1046,8 @@ public:
     // off, the picture and the cost are as without the features.
     Sky3D sky{};
     Fog3D fog{};
+    // A layer of volumetric clouds over the scene, lit by the sky and the sun (render3d/sky3d.hpp). Off by default.
+    Clouds3D clouds{};
     // Rain, snow, dust and mist round the camera (render3d/particles3d.hpp, P3c): a function of `weather.time` and the
     // camera, drawn as particles (fogged, soft, lit by the scene's light as the layers' looks say). Off by default
     // (every layer's intensity 0: nothing is built, uploaded or drawn). The overlay's weather is ignored.
