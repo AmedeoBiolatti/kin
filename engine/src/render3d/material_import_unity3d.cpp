@@ -3,6 +3,7 @@
 #include "material_import3d_impl.hpp"
 
 #include <array>
+#include <cstring>
 #include <kin/core/json_value.hpp>
 #include <kin/render3d/material_graph3d.hpp>
 #include <map>
@@ -263,6 +264,72 @@ std::optional<bool> unity_srgb(const fs::path& texture) {
     return std::nullopt;
 }
 
+// An HDRP diffusion profile (a DiffusionProfileSettings asset's `profile:`): Burley's d a channel (its scattering
+// distance times the multiplier, millimetres), the thickness remap (millimetres), the size of a world unit (metres),
+// whether its transmission is a thin object's (its thickness from the material, not the shadow maps).
+struct DiffusionProfile {
+    std::string name;
+    std::array<f64, 3> distance{};
+    f64 multiplier = 1.0, world_scale = 1.0, thickness_min = 0.0, thickness_max = 5.0;
+    bool thin = false;
+    bool found = false; // a scattering distance read
+};
+
+DiffusionProfile read_diffusion_profile(const std::string& text) {
+    DiffusionProfile d;
+    std::istringstream in(text);
+    for (std::string line; std::getline(in, line);) {
+        const std::string t = trim(line);
+        const auto value = [&] { return trim(std::string_view(t).substr(t.find(':') + 1)); };
+        if (t.rfind("m_Name:", 0) == 0) {
+            d.name = value();
+        } else if (t.rfind("scatteringDistance:", 0) == 0) {
+            auto f = flow(t);
+            d.distance = {to_number(f["r"]), to_number(f["g"]), to_number(f["b"])};
+            d.found = true;
+        } else if (t.rfind("scatteringDistanceMultiplier:", 0) == 0) {
+            d.multiplier = to_number(value(), 1.0);
+        } else if (t.rfind("worldScale:", 0) == 0) {
+            d.world_scale = std::max(to_number(value(), 1.0), 1e-6);
+        } else if (t.rfind("thicknessRemap:", 0) == 0) {
+            auto f = flow(t);
+            d.thickness_min = to_number(f["x"]);
+            d.thickness_max = to_number(f["y"], 5.0);
+        } else if (t.rfind("transmissionMode:", 0) == 0) {
+            d.thin = to_number(value()) == 1.0;
+        }
+    }
+    return d;
+}
+
+// The GUID HDRP keeps of a material's diffusion profile (_DiffusionProfileAsset: its 16 bytes as four floats' bits,
+// HDUtils.ConvertGUIDToVector4), as the hex digits Unity's .meta files write.
+std::string unity_guid_of(const std::array<f32, 4>& v) {
+    std::string out;
+    for (const f32 f : v) {
+        u32 bits = 0;
+        std::memcpy(&bits, &f, 4);
+        for (int i = 0; i < 4; ++i) {
+            static const char* hex = "0123456789abcdef";
+            const u32 byte = (bits >> (8 * i)) & 0xffu;
+            out += hex[byte >> 4];
+            out += hex[byte & 15u];
+        }
+    }
+    return out;
+}
+
+// A material's HDRP diffusion profile (_DiffusionProfileAsset's GUID, in the project): nullopt where it has none or
+// the profile is not there or not read.
+std::optional<DiffusionProfile> unity_diffusion_profile(const UnityMaterial& m, const fs::path& project) {
+    const auto asset = m.color("_DiffusionProfileAsset");
+    const auto file = asset ? GuidIndex::find(project, unity_guid_of(*asset)) : std::nullopt;
+    if (!file || !fs::exists(*file))
+        return std::nullopt;
+    DiffusionProfile profile = read_diffusion_profile(read_file(*file));
+    return profile.found ? std::optional{profile} : std::nullopt;
+}
+
 f32 unity_linear(f32 gamma) {
     // A colour property as the inspector shows it (gamma), in linear light; HDR values past 1 by the same curve.
     return gamma <= 0.04045f ? gamma / 12.92f : std::pow((gamma + 0.055f) / 1.055f, 2.4f);
@@ -508,6 +575,43 @@ Result3D<ImportedMaterial3D> import_unity_material(const std::filesystem::path& 
         p.receives_shadow = m.number("_ReceiveShadows", 1) != 0;
         p.unlit = kind.unlit;
 
+        // HDRP's subsurface scattering (Material Type Subsurface Scattering; Translucent: its transmission alone) as
+        // kin's: the share its Subsurface Mask, the radius its diffusion profile's scattering distance (Burley's d,
+        // millimetres) in world units (the profile's world scale: metres a unit), light through thin parts with its
+        // Transmission (a Translucent material's always), the material's thickness (remapped by the profile, in
+        // millimetres) where no shadow map says.
+        const int material_id = int(m.number("_MaterialID", 1));
+        const bool scatters =
+            hdrp && !kind.unlit && (material_id == 0 || m.keywords.contains("_MATERIAL_FEATURE_SUBSURFACE_SCATTERING"));
+        const bool translucent = hdrp && !kind.unlit && !scatters && material_id == 5;
+        if (scatters || translucent) {
+            p.subsurface = scatters ? f32(std::clamp(m.number("_SubsurfaceMask", 1.0), 0.0, 1.0)) : 1.0f;
+            p.subsurface_transmission = translucent || m.number("_TransmissionEnable", 1) == 1 ||
+                                        m.keywords.contains("_MATERIAL_FEATURE_TRANSMISSION");
+            if (translucent)
+                x.note("Translucent (transmission alone): kin's light through thin parts comes with its scattering, "
+                       "scattered as well");
+            if (const auto found = unity_diffusion_profile(m, project)) {
+                const DiffusionProfile& profile = *found;
+                const f64 unit = 1000.0 * profile.world_scale; // millimetres a world unit
+                p.subsurface_radius = LinearRgb{f32(profile.distance[0] * profile.multiplier / unit),
+                                                f32(profile.distance[1] * profile.multiplier / unit),
+                                                f32(profile.distance[2] * profile.multiplier / unit)};
+                const f64 thickness = std::clamp(m.number("_Thickness", 1.0), 0.0, 1.0);
+                p.subsurface_thickness =
+                    f32((profile.thickness_min + thickness * (profile.thickness_max - profile.thickness_min)) / unit);
+                if (profile.thin)
+                    x.note("diffusion profile " + profile.name +
+                           ": thin-object transmission: kin takes the shadow maps' thickness where they see it, the "
+                           "material's elsewhere");
+            } else {
+                p.subsurface_radius = subsurface_radius3d(SubsurfacePreset3D::Skin);
+                x.note(m.color("_DiffusionProfileAsset")
+                           ? "its diffusion profile is not in the project: kin's skin radius"
+                           : "no diffusion profile: kin's skin radius");
+            }
+        }
+
         // What kin does not show: maps and keywords of features it lacks.
         for (const char* key : {"_DetailAlbedoMap", "_DetailNormalMap", "_DetailMap", "_ParallaxMap", "_HeightMap",
                                 "_ClearCoatMap", "_CoatMaskMap", "_SpecGlossMap", "_ThicknessMap", "_SubsurfaceMaskMap",
@@ -538,7 +642,9 @@ Result3D<ImportedMaterial3D> import_unity_material(const std::filesystem::path& 
                                                       "_BLENDMODE_ADD",
                                                       "_BLENDMODE_PRE_MULTIPLY",
                                                       "_ALPHATEST_ON",
-                                                      "_DISABLE_SSR_TRANSPARENT"};
+                                                      "_DISABLE_SSR_TRANSPARENT",
+                                                      "_MATERIAL_FEATURE_SUBSURFACE_SCATTERING",
+                                                      "_MATERIAL_FEATURE_TRANSMISSION"};
         for (const auto& k : m.keywords)
             if (own_shader && !understood.contains(k))
                 x.note("keyword " + k + ": not read");
@@ -1267,10 +1373,17 @@ static Result3D<ImportedMaterial3D> unity_graph_here(const std::filesystem::path
         std::erase_if(imported.notes, [](const std::string& n) { return n.rfind("a Shader Graph", 0) == 0; });
         // The blocks.
         static const std::vector<std::pair<const char*, const char*>> mapping{
-            {"SurfaceDescription.BaseColor", "base_color"}, {"SurfaceDescription.Metallic", "metallic"},
-            {"SurfaceDescription.Smoothness", "roughness"}, {"SurfaceDescription.Emission", "emission"},
-            {"SurfaceDescription.Occlusion", "occlusion"},  {"SurfaceDescription.NormalTS", "normal"},
-            {"SurfaceDescription.Alpha", "alpha"}};
+            {"SurfaceDescription.BaseColor", "base_color"},
+            {"SurfaceDescription.Metallic", "metallic"},
+            {"SurfaceDescription.Smoothness", "roughness"},
+            {"SurfaceDescription.Emission", "emission"},
+            {"SurfaceDescription.Occlusion", "occlusion"},
+            {"SurfaceDescription.NormalTS", "normal"},
+            {"SurfaceDescription.Alpha", "alpha"},
+            {"SurfaceDescription.SubsurfaceMask", "subsurface"},
+            {"SurfaceDescription.Thickness", "subsurface_thickness"}};
+        // HDRP's thickness (0 to 1) in world units by the diffusion profile's remap (the Tier 1 import's).
+        const auto profile = unity_diffusion_profile(m, project);
         for (const auto& [descriptor, target] : mapping) {
             const auto it = g.blocks.find(descriptor);
             if (it == g.blocks.end())
@@ -1286,6 +1399,20 @@ static Result3D<ImportedMaterial3D> unity_graph_here(const std::filesystem::path
                 v = b.add("one_minus", {{"x", *v}});
             if (to == "normal")
                 v = b.add("tangent_to_world", {{"normal", *v}});
+            // (Only where the material scatters, by the Tier 1 import's material type and profile.)
+            if ((to == "subsurface" || to == "subsurface_thickness") && !imported.asset.base.material.subsurface)
+                continue;
+            if (to == "subsurface_thickness") {
+                if (!profile)
+                    continue; // (the Tier 1 import's thickness)
+                const f64 unit = 1000.0 * profile->world_scale;
+                v = b.add(
+                    "add",
+                    {{"a", GraphBuilder::number(profile->thickness_min / unit)},
+                     {"b", b.add("multiply", {{"a", *v},
+                                              {"b", GraphBuilder::number(
+                                                        (profile->thickness_max - profile->thickness_min) / unit)}})}});
+            }
             b.outputs[to] = *v;
         }
         for (const auto& [descriptor, id] : g.blocks)

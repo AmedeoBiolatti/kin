@@ -36,6 +36,40 @@ struct Term {
     }
 };
 
+// Unreal's Subsurface Profile as kin's subsurface radius (Material3D::subsurface_radius, metres): Burley's d, as
+// Unreal's shaders take it (SubsurfaceBurleyNormalized.ush): the diffuse mean free path over the search-light scaling
+// factor of the surface albedo, times the profile's world unit scale; the diffuse mean free path from the mean free
+// path by Unreal's fit (SubsurfaceScatteringMath.h), so d = mfp x world unit scale / (0.6 x the perpendicular scaling
+// factor). A profile still in diffuse mean free paths (older settings) is taken as Unreal upgrades it. Distances in
+// centimetres. nullopt: not Burley's (a separable profile, before Unreal 4.26).
+std::optional<LinearRgb> unreal_subsurface_radius(const JsonValue& profile) {
+    if (!profile.bool_at("enable_burley", true))
+        return std::nullopt;
+    const auto rgb = [&](const char* key, std::array<f64, 3> fallback) {
+        if (const auto* v = profile.find(key); v && v->is_array() && v->items().size() >= 3)
+            for (int i = 0; i < 3; ++i)
+                fallback[i] = v->items()[i].as_number();
+        return fallback;
+    };
+    const auto albedo = rgb("surface_albedo", {0.91058, 0.338275, 0.2718});
+    const auto colour = rgb("mean_free_path_color", {1.0, 0.0890, 0.0721});
+    const f64 distance = profile.number_at("mean_free_path_distance", 2.6748);
+    f64 scale = profile.number_at("world_unit_scale", 0.1);
+    const bool mfp = profile.bool_at("enable_mean_free_path", true);
+    if (!mfp) // (Unreal's upgrade: the old kernel's scale put in the world unit scale)
+        scale /= 0.3;
+    std::array<f32, 3> d{};
+    for (int i = 0; i < 3; ++i) {
+        const f64 a = std::clamp(albedo[i], 0.01, 1.0);
+        const f64 perpendicular = 1.85 - a + 7.0 * std::pow(std::abs(a - 0.8), 3.0);
+        const f64 search = 3.5 + 100.0 * std::pow(a - 0.33, 4.0);
+        const f64 length = std::max(colour[i], 0.001) * distance; // cm
+        const f64 dmfp = mfp ? length * search / (perpendicular * 0.6) : length;
+        d[i] = f32(dmfp / search * scale * 0.01);
+    }
+    return LinearRgb{d[0], d[1], d[2]};
+}
+
 f32 srgb_of(f32 linear) {
     return linear_to_srgb(std::clamp(linear, 0.0f, 1.0f));
 }
@@ -540,7 +574,34 @@ Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path&
         p.alpha_cutoff = f32(std::clamp(doc.number_at("opacity_mask_clip_value", 0.3333), 0.0, 1.0));
         p.double_sided = doc.bool_at("two_sided", false);
         p.unlit = unlit;
-        if (!unlit && model != "MSM_DEFAULTLIT" && model != "MSM_DEFAULT_LIT")
+        // Subsurface Profile: kin's subsurface scattering by the profile's radius, its light through thin parts on
+        // (as Unreal's profiles), Opacity the share that scatters (Unreal's mask in this model).
+        const bool profiled = !unlit && model == "MSM_SUBSURFACE_PROFILE";
+        if (profiled) {
+            p.subsurface = 1.0f;
+            if (const auto it = terms.find("Opacity"); it != terms.end() && it->second.constant())
+                p.subsurface = std::clamp(it->second.bias[0], 0.0f, 1.0f);
+            else if (it != terms.end())
+                x.note("Opacity (the subsurface mask): read by the graph import only; 1 here");
+            p.subsurface_transmission = true;
+            const JsonValue* profile = doc.find("subsurface_profile");
+            const auto radius = profile ? unreal_subsurface_radius(*profile) : std::nullopt;
+            if (radius) {
+                p.subsurface_radius = *radius;
+            } else {
+                p.subsurface_radius = subsurface_radius3d(SubsurfacePreset3D::Skin);
+                x.note(profile ? "subsurface profile " + profile->string_at("name", "") +
+                                     ": separable, not Burley's: kin's skin radius instead"
+                               : "no subsurface profile (Unreal's default skin): kin's skin radius");
+            }
+            if (profile)
+                if (const auto* tint = profile->find("tint");
+                    tint && tint->is_array() && tint->items().size() >= 3 &&
+                    (tint->items()[0].as_number() < 0.99 || tint->items()[1].as_number() < 0.99 ||
+                     tint->items()[2].as_number() < 0.99))
+                    x.note("the profile's tint (a share that scatters a channel): kin's share is one for all");
+        }
+        if (!unlit && !profiled && model != "MSM_DEFAULTLIT" && model != "MSM_DEFAULT_LIT")
             x.note("shading model " + model + ": lit as kin's default");
 
         x.finish();
@@ -1741,6 +1802,8 @@ static Result3D<ImportedMaterial3D> unreal_graph_here(const std::filesystem::pat
         const bool unlit = model == "MSM_UNLIT";
         const bool foliage = model == "MSM_TWO_SIDED_FOLIAGE" || model == "MSM_TWOSIDED_FOLIAGE";
         const bool coated = model == "MSM_CLEAR_COAT" || model == "MSM_CLEARCOAT";
+        // Subsurface Profile: its Opacity is the share that scatters (the Tier 1 import's radius and transmission).
+        const bool profiled = model == "MSM_SUBSURFACE_PROFILE";
         const std::string lighting =
             doc.find("translucency_lighting_mode") ? doc.find("translucency_lighting_mode")->as_string() : "";
         const bool volume_lit =
@@ -1767,7 +1830,7 @@ static Result3D<ImportedMaterial3D> unreal_graph_here(const std::filesystem::pat
                 const auto* o = outputs ? outputs->find(from) : nullptr;
                 if (!o)
                     continue;
-                if ((std::string(from) == "Opacity" && blend == "BLEND_MASKED") ||
+                if ((std::string(from) == "Opacity" && blend == "BLEND_MASKED" && !profiled) ||
                     (std::string(from) == "OpacityMask" && blend != "BLEND_MASKED") ||
                     (std::string(from) == "SubsurfaceColor" && !foliage) || // (skin's and subsurface's: not kin's)
                     (std::string(from).starts_with("ClearCoat") && !coated))
@@ -1783,7 +1846,9 @@ static Result3D<ImportedMaterial3D> unreal_graph_here(const std::filesystem::pat
                     x.note(std::string(from) + ": " + why + ": its Tier 1 value kept");
                     continue;
                 }
-                std::string target = unlit && std::string(from) == "EmissiveColor" ? "base_color" : to;
+                std::string target = unlit && std::string(from) == "EmissiveColor" ? "base_color"
+                                     : profiled && std::string(from) == "Opacity"  ? "subsurface"
+                                                                                   : to;
                 if (target == "normal" && !doc.bool_at("tangent_space_normal", true)) // the world's (Unreal's axes)
                     v = b.add("normalize", {{"x", b.member(*v, "xzy")}});
                 else if (target == "normal") // Unreal's tangent space (green down) as kin's (+y up), then the world's
@@ -1793,6 +1858,8 @@ static Result3D<ImportedMaterial3D> unreal_graph_here(const std::filesystem::pat
                 else if (target == "offset") // Unreal's centimetres in its axes: kin's metres in its own
                     v = b.add("multiply", {{"a", b.member(b.fit(*v, 3), "xzy")}, {"b", "0.01"}});
                 b.outputs[target] = *v;
+                if (target == "subsurface") // (its Tier 1 word on it: the graph reads it)
+                    std::erase_if(imported.notes, [](const std::string& n) { return n.starts_with("Opacity (the"); });
             }
             // A base colour not connected is black in Unreal (an unlit material's: its emissive colour), not kin's
             // surface's (the vertex colour): the graph says so.

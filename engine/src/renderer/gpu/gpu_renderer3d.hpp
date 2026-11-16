@@ -237,6 +237,9 @@ public:
     // Its fog variants sample the fog volume's sums (uFogVolume, after the graph maps; made since volumetric fog): the
     // plain ones', and the light ones' (none: SDL_GPU's 16 samplers are the stock light layout's and the graph maps).
     bool fog_volume = false, fog_volume_lit = false;
+    // Its lit variants' material block has subsurface scattering's fields after the parameters (made since them): its
+    // materials can scatter (Material3D::subsurface); older SPIR-V's are drawn without the spread.
+    bool subsurface = false;
     bool valid() const override {
         for (u32 i = 0; i < surface_required_variants3d; ++i)
             if (!variants[i])
@@ -464,7 +467,11 @@ private:
     f32 _dof_time = 0.0f;
     bool _dof_time_seen = false;
     std::chrono::steady_clock::time_point _dof_wall{}; // (when Scene3D::time does not move: the wall clock's step)
-    u32 _grain_frame = 0;                              // Film3D::grain's pattern, a new one each render
+    // With subsurface scattering (Material3D::subsurface; made by the first render that asks): the subsurface pass's
+    // light (rgb, the profile's number + 1 in alpha) and its spread (subsurface_scatter.comp), RGBA16F, the shading
+    // size.
+    GpuTexture _sss_light, _sss_scattered;
+    u32 _grain_frame = 0; // Film3D::grain's pattern, a new one each render
     // With Glow3D (made by the first render that asks): the chain's levels down (half the view's size, then each half
     // the one before) and up, the ghosts and halo and the streaks (the second level's size), and the glow the output
     // reads (half the view's size); all RGBA16F. Whether this render used them (for age_targets).
@@ -615,7 +622,7 @@ private:
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
     u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0,
-        _idle_gi = 0, _idle_blur = 0, _idle_dof = 0, _idle_glow = 0;
+        _idle_gi = 0, _idle_blur = 0, _idle_dof = 0, _idle_glow = 0, _idle_sss = 0;
 };
 
 class GpuRenderer3D final : public IRendererBackend3D {
@@ -741,12 +748,21 @@ private:
         f32 params[4], pbr[4], maps[4], emission[4], uv[4];
     };
     static_assert(sizeof(MaterialUniforms) == 80);
-    // A surface shader's slot 1: the stock block, then Material3D::shader_params (kin_surface_param).
+    // kin's stock lit material's slot 1 in the main and subsurface passes: the block, then its subsurface scattering
+    // (kin_material_uniforms.inc.glsl's subsurface and subsurface_radius).
+    struct StockMaterialUniforms {
+        MaterialUniforms material;
+        f32 subsurface[4], subsurface_radius[4];
+    };
+    static_assert(sizeof(StockMaterialUniforms) == 112);
+    // A surface shader's slot 1: the stock block, then Material3D::shader_params (kin_surface_param), then subsurface
+    // scattering's as the stock block's (which a surface made before them does not read).
     struct SurfaceMaterialUniforms {
         MaterialUniforms material;
         f32 surface[surface_param_count3d];
+        f32 subsurface[4], subsurface_radius[4];
     };
-    static_assert(sizeof(SurfaceMaterialUniforms) == 80 + 4 * surface_param_count3d);
+    static_assert(sizeof(SurfaceMaterialUniforms) == 80 + 4 * surface_param_count3d + 32);
     static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity, bool fog,
                                        const GpuMesh3D* mesh) const;
@@ -871,6 +887,13 @@ private:
     // render cannot: no depth).
     const GpuTexture* depth_of_field(FrameCtx& ctx, const GpuTexture& source);
     bool ensure_dof_targets(GpuView3D& view, bool autofocus);
+    // Subsurface scattering (Material3D::subsurface): the subsurface pass (main_pass over the scattering materials
+    // alone, into _sss_light over the pre-pass's depth) and the spread (subsurface_scatter.comp); false where it could
+    // not run (the main pass then draws them whole). Its targets; the add-back inside the main pass.
+    bool subsurface_pass(FrameCtx& ctx);
+    bool ensure_sss_targets(GpuView3D& view);
+    bool subsurface_combine(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
+                            SDL_GPUTextureFormat format, u32 samples);
     void setup_frame(FrameCtx& ctx);    // cameras, temporal anti-aliasing and its jitter
     void fit_sun_shadow(FrameCtx& ctx); // the shadow map and its cascades or box
     bool portal_sun_pass(FrameCtx& ctx);
@@ -1300,6 +1323,9 @@ private:
     };
     std::vector<LutTexture> _lut_textures;
     bool _effects_warned = false;
+    // Subsurface scattering: subsurface_scatter.comp and subsurface_combine.frag.
+    SDL_GPUComputePipeline* _sss_scatter_pipeline = nullptr;
+    GpuShader _sss_combine_shader;
     // Glow3D: glow_down/_up/_flare/_streak/_compose.comp.
     SDL_GPUComputePipeline* _glow_down_pipeline = nullptr;
     SDL_GPUComputePipeline* _glow_up_pipeline = nullptr;

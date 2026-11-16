@@ -327,9 +327,13 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
 
         // Physical light units: emission in nits (emission_intensity), as the project says.
         bool physical = false;
+        f64 sss_scale = 0.05; // rendering/environment/subsurface_scattering/subsurface_scattering_scale
         if (const auto project = options.project / "project.godot"; std::filesystem::exists(project)) {
             const std::string settings = read_file(project);
             physical = settings.find("lights_and_shadows/use_physical_light_units=true") != std::string::npos;
+            const std::string key = "subsurface_scattering/subsurface_scattering_scale=";
+            if (const size_t at = settings.find(key); at != std::string::npos)
+                sss_scale = std::strtod(settings.c_str() + at + key.size(), nullptr);
         }
 
         // --- textures: a property's file, where kin reads it, and what is made from it
@@ -534,6 +538,34 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
         p.unlit = int(m.number("shading_mode", 1)) == 0;
         p.receives_shadow = !m.flag("disable_receive_shadows");
 
+        // Subsurface scattering: Godot's is a screen-space blur as wide as its strength times the project's scale
+        // (subsurface_scattering_scale, 0.05 by default), skin's falloff in skin mode, grey's else: kin's, all of the
+        // diffuse light scattering, its widest radius that width, skin's colours in skin mode. Transmittance: kin's
+        // light through thin parts (which comes with its scattering).
+        const bool scatters =
+            !*p.unlit && m.flag("subsurf_scatter_enabled") && m.number("subsurf_scatter_strength", 0) > 0;
+        const bool transmits = !*p.unlit && m.flag("subsurf_scatter_transmittance_enabled");
+        if (scatters || transmits) {
+            const f32 width = f32(std::clamp(m.number("subsurf_scatter_strength", 0.0), 0.0, 1.0) * sss_scale);
+            LinearRgb radius = subsurface_radius3d(SubsurfacePreset3D::Skin);
+            if (scatters && m.flag("subsurf_scatter_skin_mode"))
+                radius = LinearRgb{width, width * radius.g / radius.r, width * radius.b / radius.r};
+            else if (scatters)
+                radius = LinearRgb{width, width, width};
+            p.subsurface = 1.0f;
+            p.subsurface_radius = radius;
+            p.subsurface_transmission = transmits;
+            note("subsurface scattering: Godot's blur (its strength times the project's scale) as kin's radius, "
+                 "approximately");
+            if (!scatters)
+                note("subsurf_scatter_transmittance without scattering: kin's light through thin parts comes with its "
+                     "scattering (kin's skin radius), scattered as well");
+            if (m.find("subsurf_scatter_texture"))
+                note("subsurf_scatter_texture: not shown by kin (a graph's subsurface output can mask it)");
+            if (transmits)
+                note("subsurf_scatter_transmittance color, depth and boost: kin's transmittance is the radius's");
+        }
+
         // What kin does not show: said once each.
         static const std::set<std::string> read{
             "resource_name", "albedo_color", "albedo_texture", "metallic", "metallic_texture",
@@ -542,7 +574,10 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
             "ao_enabled", "ao_texture", "ao_texture_channel", "ao_light_affect", "emission_enabled", "emission",
             "emission_energy_multiplier", "emission_intensity", "emission_texture", "emission_operator", "transparency",
             "alpha_scissor_threshold", "blend_mode", "cull_mode", "shading_mode", "disable_receive_shadows",
-            "texture_filter", "texture_repeat",
+            "texture_filter", "texture_repeat", "subsurf_scatter_enabled", "subsurf_scatter_strength",
+            "subsurf_scatter_skin_mode", "subsurf_scatter_texture", "subsurf_scatter_transmittance_enabled",
+            "subsurf_scatter_transmittance_color", "subsurf_scatter_transmittance_depth",
+            "subsurf_scatter_transmittance_boost", "subsurf_scatter_transmittance_texture",
             // Harmless where they are: kin's anisotropy and alpha antialiasing are its own; vertex colours always
             // multiply (white without); the resource's local data.
             "alpha_antialiasing_mode", "alpha_antialiasing_edge", "vertex_color_use_as_albedo",
@@ -1226,9 +1261,9 @@ static Result3D<ImportedMaterial3D> godot_graph_here(const std::filesystem::path
             }
             return b.fit(*v, width);
         };
-        static const std::vector<std::tuple<int, const char*, int>> mapped{{0, "base_color", 3}, {1, "alpha", 1},
-                                                                           {2, "metallic", 1},   {3, "roughness", 1},
-                                                                           {5, "emission", 3},   {6, "occlusion", 1}};
+        static const std::vector<std::tuple<int, const char*, int>> mapped{
+            {0, "base_color", 3}, {1, "alpha", 1},     {2, "metallic", 1},   {3, "roughness", 1},
+            {5, "emission", 3},   {6, "occlusion", 1}, {17, "subsurface", 1}};
         for (const auto& [port, to, width] : mapped)
             if (const auto v = value(port, width))
                 b.outputs[to] = *v;
@@ -1238,6 +1273,9 @@ static Result3D<ImportedMaterial3D> godot_graph_here(const std::filesystem::path
                 b.add("tangent_to_world",
                       {{"normal", b.add("unpack_normal", {{"texel", *nm}, {"strength", depth.value_or("1")}})}});
         }
+        if (b.outputs.contains("subsurface"))
+            x.note("Subsurface Scattering: its strength as kin's share that scatters (Godot's widens the blur), by "
+                   "kin's skin radius");
         if (g.outputs.contains(8))
             x.note("Normal: a view-space normal (kin's graphs write the world's; Normal Map is read): left out");
         static const std::map<int, const char*> others{{4, "Specular"},
@@ -1248,7 +1286,6 @@ static Result3D<ImportedMaterial3D> godot_graph_here(const std::filesystem::path
                                                        {14, "Clearcoat Roughness"},
                                                        {15, "Anisotropy"},
                                                        {16, "Anisotropy Flow"},
-                                                       {17, "Subsurface Scattering"},
                                                        {18, "Backlight"},
                                                        {20, "Alpha Hash Scale"},
                                                        {21, "Alpha Antialiasing Edge"},

@@ -15,6 +15,7 @@
 //                 [--dof DISTANCE] [--dof-aperture N] [--dof-sensor MM] [--dof-autofocus] [--dof-blades N]
 //                 [--tone-curve aces|agx|neutral] [--vignette V] [--aberration A] [--grain G] [--temperature T]
 //                 [--glow-wide] [--ghosts G] [--halo H] [--streaks S] [--snapshot DIR]
+//                 [--subsurface skin|marble|wax|jade|milk|leaf] [--subsurface-scale S] [--transmission]
 //
 // --snapshot DIR writes each camera's scene as rendered for Blender's Cycles (write_scene_snapshot) into
 // DIR/<scene>_<camera>/, with kin's picture as kin.png: tools/cycles/compare.py renders and compares it.
@@ -1912,6 +1913,11 @@ struct Overrides {
     kin::Grade3D grade{};
     kin::Glow3D glow{};   // the glow's shape and the lens' flares (a scene's view needs bloom)
     std::string snapshot; // --snapshot DIR
+    // --subsurface PRESET: every lit opaque material scatters (Material3D::subsurface 1), its radius the preset's times
+    // --subsurface-scale; --transmission lets light through too.
+    std::optional<kin::LinearRgb> subsurface;
+    float subsurface_scale = 1.0f;
+    bool transmission = false;
     bool lod = false;
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
@@ -2644,6 +2650,19 @@ int main(int argc, char** argv) {
             over.film.grain = static_cast<float>(std::atof(next().c_str()));
         } else if (a == "--temperature") {
             over.grade.temperature = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--subsurface") {
+            const std::string name = next();
+            const kin::SubsurfacePreset3D preset = name == "marble" ? kin::SubsurfacePreset3D::Marble
+                                                   : name == "wax"  ? kin::SubsurfacePreset3D::Wax
+                                                   : name == "jade" ? kin::SubsurfacePreset3D::Jade
+                                                   : name == "milk" ? kin::SubsurfacePreset3D::Milk
+                                                   : name == "leaf" ? kin::SubsurfacePreset3D::Leaf
+                                                                    : kin::SubsurfacePreset3D::Skin;
+            over.subsurface = kin::subsurface_radius3d(preset);
+        } else if (a == "--subsurface-scale") {
+            over.subsurface_scale = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--transmission") {
+            over.transmission = true;
         } else if (a == "--snapshot") {
             over.snapshot = next();
         } else if (a == "--glow-wide") {
@@ -3545,6 +3564,18 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("evaluation sequence requires frames, capture indices and capture log");
             const auto pose = [&](int time) {
                 fill_scene(eval_frames ? std::max(0, time) : time);
+                if (over.subsurface)
+                    for (std::size_t d = 0; d < scene.draws().size(); ++d) {
+                        kin::Material3D m = scene.draws()[d].material;
+                        if (m.unlit || (m.blend != kin::Blend3D::Opaque && m.blend != kin::Blend3D::Mask))
+                            continue;
+                        m.subsurface = 1.0f;
+                        m.subsurface_radius = {over.subsurface->r * over.subsurface_scale,
+                                               over.subsurface->g * over.subsurface_scale,
+                                               over.subsurface->b * over.subsurface_scale};
+                        m.subsurface_transmission = over.transmission;
+                        (void)scene.set_draw_material(d, m);
+                    }
                 if (eval_frames) {
                     const auto& step =
                         eval_frames->items()[std::clamp<int>(time, 0, int(eval_frames->items().size()) - 1)];

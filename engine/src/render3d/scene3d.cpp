@@ -900,4 +900,24 @@ f32 depth_of_field_radius(const DepthOfField3D& dof, const Camera3D& camera, f32
     return far_radius * (1.0f - focus / distance);
 }
 
+LinearRgb subsurface_radius3d(SubsurfacePreset3D preset) {
+    switch (preset) {
+    // Burley's d: the measured diffuse mean free paths (Jensen et al.'s skin 3.7, 1.4, 0.7 mm; ...) over 3.5, Burley's
+    // search-light scaling for the diffuse mean free path at middling albedos (3.5 + 100 (A - 0.33)^4, as Unreal's).
+    case SubsurfacePreset3D::Skin:
+        return {0.00106f, 0.00040f, 0.00020f};
+    case SubsurfacePreset3D::Marble:
+        return {0.00243f, 0.00160f, 0.00114f};
+    case SubsurfacePreset3D::Wax:
+        return {0.00286f, 0.00171f, 0.00086f};
+    case SubsurfacePreset3D::Jade:
+        return {0.00114f, 0.00286f, 0.00143f};
+    case SubsurfacePreset3D::Milk:
+        return {0.00314f, 0.00229f, 0.00120f};
+    case SubsurfacePreset3D::Leaf:
+        return {0.00057f, 0.00114f, 0.00043f};
+    }
+    return {0.00106f, 0.00040f, 0.00020f};
+}
+
 } // namespace kin

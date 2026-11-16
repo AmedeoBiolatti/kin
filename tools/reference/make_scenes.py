@@ -15,6 +15,10 @@ shadows.glb  poles, thin plates at heights, steps, a slatted fence, a sphere
 canyon.glb   a street 8 m wide between two warm walls 12 m high, on a wide
              ground: one face and half the street in the sun, the other face
              lit by the sky and what they bounce (global illumination, G5).
+subsurface.glb  a pale slab (1.2 m square, albedo 0.8), and a ball of 10 cm
+             radius on a black base beside it, a plate 0.6 m up over half the slab (x < 0):
+             a straight shadow edge along z across the slab's middle, and a
+             terminator on the ball, to see the scattering spread (SS4).
 skinned_bend.glb  a tube bound to a chain of three joints, with the clips
              "bend" (the middle joint swings, the top counter-swings) and
              "wave" (every joint sways in turn): skinning with no download
@@ -121,6 +125,20 @@ def shadows(path):
            rotation=(0, 0.3826834, 0, 0.9238795))
     # A long wall the low sun grazes.
     g.node("wall", mesh=g.mesh("wall", *box((8, 1.5, 0.2)), material=light), translation=(0, 0.75, -6))
+    g.save(path)
+
+
+def subsurface(path):
+    g = Glb()
+    pale = g.material("pale", color=(0.8, 0.8, 0.8, 1), roughness=1.0)
+    dark = g.material("dark", color=(0.1, 0.1, 0.1, 1))
+    g.node("slab", mesh=g.mesh("slab", *box((1.2, 0.2, 1.2)), material=pale), translation=(0, -0.1, 0))
+    # The ball on a black base of its own beside the slab (no light bounced up from the pale slab under it).
+    black = g.material("black", color=(0.01, 0.01, 0.01, 1))
+    g.node("base", mesh=g.mesh("base", *box((0.6, 0.2, 0.6)), material=black), translation=(1.0, -0.1, 0.3))
+    g.node("ball", mesh=g.mesh("ball", *sphere(0.1, 96, 48), material=pale), translation=(1.0, 0.1, 0.3))
+    # Over x < 0, above the cameras: its shadow's edge along z at x = 0 under an overhead sun.
+    g.node("plate", mesh=g.mesh("plate", *box((1.0, 0.02, 2.0)), material=dark), translation=(-0.5, 0.6, 0))
     g.save(path)
 
 
@@ -522,6 +540,7 @@ def main():
     spheres(os.path.join(out, "furnace.glb"), furnace=True)
     shadows(os.path.join(out, "shadows.glb"))
     canyon(os.path.join(out, "canyon.glb"))
+    subsurface(os.path.join(out, "subsurface.glb"))
     skinned_bend(os.path.join(out, "skinned_bend.glb"))
     skinned_bend(os.path.join(out, "skinned_dense.glb"), rings=65, segments=32)  # 4,096 triangles
     floor20(os.path.join(out, "floor20.glb"))

@@ -141,6 +141,14 @@ layout(std430, set = 2, binding = 15 + KIN_STORAGE_SHIFT) readonly buffer KinGri
 
 const float PI = 3.14159265358979;
 #include "kin_material_uniforms.inc.glsl"
+// kin's stock lit material's block and a surface shader's have subsurface scattering's (material.subsurface,
+// subsurface_radius); a custom shader's and the materials' table do not.
+#if !defined(KIN_DRAW_MATERIALS) && !defined(KIN_CUSTOM_MATERIAL)
+#define KIN_SUBSURFACE
+#endif
+// The fragment's subsurface share and fallback thickness (KinSurface's subsurface and subsurface_thickness), as
+// kin_lit_surface last took them: kin_output's mask and the thickness search's fallback read them.
+float kin_subsurface_share = 0.0, kin_subsurface_thickness = 0.0;
 
 // Fog (Scene3D::fog): only the shaders made with KIN_FOG have it (mesh_fog.frag, mesh_velocity_fog.frag), so that every
 // other shader, and its compiled code, is as it was. Its block takes the slot custom parameters have elsewhere.
@@ -589,6 +597,10 @@ struct KinSurface {
                         // lighting of translucency, directional and not (wrapped_diffuse); no reflection with it
     vec4 reflection;    // rgb: a reflection of its own (linear light: a mirror's picture, kin_planar_reflection); a: how
                         // much of the reflection it is, in place of the environment's or the probes' (0: none, kin's own)
+    float subsurface;   // the share of the diffuse light that scatters under it (Material3D::subsurface; a mask's
+                        // place): only where the material scatters (its profile, Material3D::subsurface_radius)
+    float subsurface_thickness; // how thick it is where no shadow map says, for light through it (world units; 0:
+                                // none; Material3D::subsurface_thickness)
 };
 
 #ifdef KIN_SURFACE
@@ -892,6 +904,13 @@ KinSurface kin_stock_surface() {
     s.specular = 0.5;
     s.diffuse_wrap = 0.0;
     s.reflection = vec4(0.0);
+#ifdef KIN_SUBSURFACE
+    s.subsurface = material.subsurface.x;
+    s.subsurface_thickness = material.subsurface.z;
+#else
+    s.subsurface = 0.0;
+    s.subsurface_thickness = 0.0;
+#endif
     return s;
 }
 
@@ -986,6 +1005,115 @@ bool kin_backlit(Surface s) {
     return dot(s.backlight, vec3(1.0)) > 0.0;
 }
 
+// Subsurface scattering's light through thick parts (Material3D::subsurface_transmission; material.subsurface.w): the
+// light `radiance` from `l` arrives on the far side, goes `thickness` through the material, and leaves here, by
+// Burley's transmittance 0.25 (e^(-t/d) + 3 e^(-t/3d)) a channel (d its radius; as HDRP), on the side facing away from
+// the light (wrapped a little round), as diffuse light (the scattered share's: it spreads too).
+vec3 kin_transmission(Surface s, vec3 l, vec3 radiance, float thickness) {
+#ifdef KIN_SUBSURFACE
+    if (material.subsurface.w < 0.5 || thickness < 0.0) {
+        return vec3(0.0);
+    }
+    const vec3 d = max(material.subsurface_radius.rgb, vec3(1e-6));
+    const vec3 through = 0.25 * (exp(-thickness / d) + 3.0 * exp(-thickness / (3.0 * d)));
+    const float away = clamp(0.3 - dot(s.n, l), 0.0, 1.3) / 1.3;
+    return s.diffuse * through * (away * (1.0 - s.dielectric)) * radiance * s.keep.x;
+#else
+    return vec3(0.0);
+#endif
+}
+
+// How far the light along `l` goes through the material to reach `p`: searched along `l` (a few steps, to 6 times the
+// widest radius) for where a shadow map (`lit_at`: 1 where a point is lit, -1 outside the map) stops shadowing it;
+// -1 where the point is lit already or no map says (the material's thickness, if any, stands in for none: kin_thickness).
+#define KIN_THICKNESS_SEARCH(lit_at, p, l)                                                                             \
+    {                                                                                                                  \
+        const float reach = 6.0 * max(max(material.subsurface_radius.r, material.subsurface_radius.g),                 \
+                                      max(material.subsurface_radius.b, 1e-4));                                        \
+        const float here = lit_at(p);                                                                                  \
+        if (here < 0.0) {                                                                                              \
+            thickness = kin_subsurface_thickness > 0.0 ? kin_subsurface_thickness : -1.0;                              \
+        } else if (here > 0.5) {                                                                                       \
+            thickness = -1.0;                                                                                          \
+        } else if (lit_at((p) + (l) * reach) < 0.5) {                                                                  \
+            thickness = reach;                                                                                         \
+        } else {                                                                                                       \
+            float low = 0.0, high = reach;                                                                             \
+            for (int step = 0; step < 6; ++step) {                                                                     \
+                const float mid = 0.5 * (low + high);                                                                  \
+                if (lit_at((p) + (l) * mid) > 0.5)                                                                     \
+                    high = mid;                                                                                        \
+                else                                                                                                   \
+                    low = mid;                                                                                         \
+            }                                                                                                          \
+            thickness = 0.5 * (low + high);                                                                            \
+        }                                                                                                              \
+    }
+
+#ifdef KIN_SUBSURFACE
+// One comparison of the sun's map at `p` (its cascade for the fragment's depth): 1 lit, 0 shadowed, -1 off the map.
+float kin_sun_lit_at(vec3 p) {
+    if (frame.flags.z < 0.5 || material.params.z < 0.5) {
+        return -1.0;
+    }
+    const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
+    int k = 0;
+    for (int i = 0; i < int(frame.shadow.x) - 1; ++i) {
+        k += depth > frame.cascade_end[i] ? 1 : 0;
+    }
+    const vec4 clip = frame.shadow_matrix[k] * vec4(p, 1.0);
+    const vec3 ndc = clip.xyz / clip.w;
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    return texture(uShadow, vec4(uv, float(k), ndc.z + frame.cascade_bias[k].x));
+}
+// The sun's thickness at the fragment (kin_transmission's).
+float kin_sun_thickness() {
+    if (material.subsurface.w < 0.5) {
+        return -1.0;
+    }
+    float thickness;
+    KIN_THICKNESS_SEARCH(kin_sun_lit_at, vWorld, frame.sun_direction.xyz)
+    return thickness;
+}
+#endif
+
+#if defined(KIN_LIGHTS) && defined(KIN_SUBSURFACE)
+// One comparison of a local light's map (`kin_layer`'s, set by kin_local_thickness) at `p`: 1 lit, 0 shadowed, -1 off it.
+int kin_layer = 0;
+float kin_local_lit_at(vec3 p) {
+    const vec4 a = locals.local_a[kin_local_light(kin_layer)];
+    const vec4 clip = kin_local_clip(kin_layer, p);
+    if (clip.w <= a.z || clip.w > a.w) {
+        return -1.0;
+    }
+    const vec2 ndc = clip.xy / clip.w;
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+        return -1.0;
+    }
+    const vec4 c = locals.local_c[kin_layer];
+    const float ref = a.z * (a.w / clip.w - 1.0) / (a.w - a.z);
+    return texture(uLocalShadow, vec4(c.xy + uv * a.x, c.z, ref));
+}
+// A local light's thickness at the fragment: its map `layer` (-1: none, the material's thickness stands in).
+float kin_local_thickness(int layer, vec3 l) {
+    if (material.subsurface.w < 0.5) {
+        return -1.0;
+    }
+    float thickness;
+    if (layer < 0) {
+        thickness = material.subsurface.z > 0.0 ? material.subsurface.z : -1.0;
+        return thickness;
+    }
+    kin_layer = layer;
+    KIN_THICKNESS_SEARCH(kin_local_lit_at, vWorld, l)
+    return thickness;
+}
+#endif
+
 #ifdef KIN_LIGHTS
 // A light of `radius_squared` (its size, squared: colour.w) `d2` away is a sphere, not a point: its highlight is never
 // sharper than the angle it spans (as the sun's disc; a near-mirror's point-light peak is thinner than a pixel, so it
@@ -1025,7 +1153,22 @@ vec3 kin_point_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour
 #ifdef KIN_DIRECT_LIGHT
     return kin_direct_light(sphere, toward, colour.rgb * k, seen, KIN_LIGHT_POINT, at.xyz, sqrt(d2));
 #else
-    return shade(sphere, toward, colour.rgb * (k * seen));
+    vec3 through = vec3(0.0);
+#ifdef KIN_SUBSURFACE
+    // Through thick parts: the thickness from the cube's face this direction falls in.
+    if (material.subsurface.w > 0.5 && s.keep.x > 0.0 && dot(n, toward) < 0.3) {
+        int layer = -1;
+        if (first >= 0.0 && material.params.z > 0.5) {
+            const vec3 m = abs(-toward);
+            const int face = m.x >= m.y && m.x >= m.z ? (-toward.x < 0.0 ? 1 : 0)
+                             : m.y >= m.z             ? (-toward.y < 0.0 ? 3 : 2)
+                                                      : (-toward.z < 0.0 ? 5 : 4);
+            layer = int(first) + face;
+        }
+        through = kin_transmission(s, toward, colour.rgb * k, kin_local_thickness(layer, toward));
+    }
+#endif
+    return shade(sphere, toward, colour.rgb * (k * seen)) + through;
 #endif
 }
 
@@ -1057,7 +1200,14 @@ vec3 kin_spot_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour,
 #ifdef KIN_DIRECT_LIGHT
     return kin_direct_light(sphere, toward, colour.rgb * k, seen, KIN_LIGHT_SPOT, at.xyz, sqrt(d2));
 #else
-    return shade(sphere, toward, colour.rgb * (k * seen));
+    vec3 through = vec3(0.0);
+#ifdef KIN_SUBSURFACE
+    if (material.subsurface.w > 0.5 && s.keep.x > 0.0 && dot(n, toward) < 0.3) {
+        const int layer = more.y >= 0.0 && material.params.z > 0.5 ? int(more.y) : -1;
+        through = kin_transmission(s, toward, colour.rgb * k, kin_local_thickness(layer, toward));
+    }
+#endif
+    return shade(sphere, toward, colour.rgb * (k * seen)) + through;
 #endif
 }
 #endif
@@ -1158,6 +1308,19 @@ vec3 kin_coated(vec3 under, float coat, vec2 ab, float n_v, vec3 coat_above) {
     return under * (1.0 - fc) + coat * sky_reflectance(vec3(0.04), ab) * coat_above;
 }
 
+// Subsurface scattering's split (frame.subsurface.x; Material3D::subsurface): the share of the diffuse light this pass
+// writes (x) and of the rest (y), for a surface whose share is `share` (KinSurface::subsurface). (1, 1) everywhere but
+// for a material that scatters: the main pass writes all but that share of its diffuse, the subsurface pass that share
+// alone.
+vec2 kin_subsurface_keep(float share) {
+#ifdef KIN_SUBSURFACE
+    const float part = frame.subsurface.x > 0.5 ? clamp(share, 0.0, 1.0) : 0.0;
+    return frame.subsurface.x > 1.5 ? vec2(part, 0.0) : vec2(1.0 - part, 1.0);
+#else
+    return vec2(1.0);
+#endif
+}
+
 vec3 kin_lit_surface(KinSurface surface) {
     const vec3 base = surface.base_color, n = surface.normal, backlight = surface.backlight;
     const float metallic = surface.metallic, occlusion = surface.occlusion, coat = surface.clearcoat;
@@ -1194,6 +1357,10 @@ vec3 kin_lit_surface(KinSurface surface) {
     s.coat_alpha = coat_roughness * coat_roughness;
     s.dielectric = f0_dielectric;
     s.wrap = wrap;
+    kin_subsurface_share = surface.subsurface;
+    kin_subsurface_thickness = surface.subsurface_thickness;
+    s.keep = kin_subsurface_keep(surface.subsurface);
+    const vec2 keep = s.keep;
     const bool backlit = kin_backlit(s);
 
     vec3 light = vec3(0.0);
@@ -1237,6 +1404,13 @@ vec3 kin_lit_surface(KinSurface surface) {
         light += shade(sun_surface, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
 #endif
     }
+#ifdef KIN_SUBSURFACE
+    // Subsurface scattering's sunlight through thick parts, on the side facing away from it.
+    // (Not where this pass writes none of the diffuse: the main pass of a material that scatters all of it.)
+    if (material.subsurface.w > 0.5 && keep.x > 0.0 && sun < 0.3 && dot(frame.sun_color.rgb, vec3(1.0)) > 0.0) {
+        light += kin_transmission(s, frame.sun_direction.xyz, frame.sun_color.rgb, kin_sun_thickness());
+    }
+#endif
     for (int i = 0; i < int(frame.portal_sun.x); ++i) {
         const KinPortalSun p = frame.portal[i];
         const vec3 portal_offset = shadow_offset_normal(n);
@@ -1435,10 +1609,10 @@ vec3 kin_lit_surface(KinSurface surface) {
     const vec2 coat_ab = coat > 0.0 ? environment_brdf(coat_roughness, s.n_v) : vec2(0.0);
     const vec3 reflectance = mix(dielectric, multiscatter ? sky_reflectance(base, ab) : base * ab.x + ab.y, metallic);
 #ifdef KIN_GI
-    light += s.diffuse * (vec3(1.0) - dielectric) * area_light;
+    light += s.diffuse * (vec3(1.0) - dielectric) * area_light * keep.x;
 #ifdef KIN_LIGHT_GRID
     if (frame.gi.y > 0.5 && frame.gi.z > 0.5) {
-        light += kin_area_specular(s, n, roughness, area_light);
+        light += kin_area_specular(s, n, roughness, area_light) * keep.y;
     }
 #endif
 #endif
@@ -1464,12 +1638,16 @@ vec3 kin_lit_surface(KinSurface surface) {
 #endif
         const vec3 diffuse_light = s.diffuse * (vec3(1.0) - dielectric) * around * diffuse_visibility;
         const vec3 specular_light = reflectance * above * clamp(pow(s.n_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
-        return light + kin_coated(diffuse_light + specular_light, coat, coat_ab, s.n_v, coat_above) * occlusion +
-               backlight * behind * (ao * occlusion);
+        return light +
+               kin_coated(diffuse_light * keep.x + specular_light * keep.y, coat, coat_ab, s.n_v, coat_above * keep.y) *
+                   occlusion +
+               backlight * behind * (ao * occlusion) * keep.y;
     }
-    return light + kin_coated(s.diffuse * (vec3(1.0) - dielectric) * around + reflectance * above, coat, coat_ab, s.n_v,
-                              coat_above) * occlusion +
-           backlight * behind * occlusion;
+    return light +
+           kin_coated(s.diffuse * (vec3(1.0) - dielectric) * around * keep.x + reflectance * above * keep.y, coat,
+                      coat_ab, s.n_v, coat_above * keep.y) *
+               occlusion +
+           backlight * behind * occlusion * keep.y;
 }
 
 vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
@@ -1487,6 +1665,13 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     s.specular = 0.5;
     s.diffuse_wrap = 0.0;
     s.reflection = vec4(0.0);
+#ifdef KIN_SUBSURFACE
+    s.subsurface = material.subsurface.x;
+    s.subsurface_thickness = material.subsurface.z;
+#else
+    s.subsurface = 0.0;
+    s.subsurface_thickness = 0.0;
+#endif
     return kin_lit_surface(s);
 }
 
@@ -1518,7 +1703,8 @@ vec3 kin_fog_apply(vec3 colour) {
     if (opacity <= 0.0) {
         return colour;
     }
-    if (material.maps.w > 0.5) {
+    // An additive surface only dims; so does the subsurface pass's light (the main pass's fog over the rest stands).
+    if (material.maps.w > 0.5 || frame.subsurface.x > 1.5) {
         return colour * (1.0 - opacity);
     }
     vec3 fog_colour = fog_params.fog.colour.rgb;
@@ -1563,6 +1749,13 @@ vec4 kin_output(vec3 colour, float alpha) {
 #endif
 #ifdef KIN_FOG
     colour = kin_fog_apply(colour);
+#endif
+#ifdef KIN_SUBSURFACE
+    // The subsurface pass's (a float target): the light, and the profile's number + 1 as the scattering's mask (0
+    // where the surface's share is 0: a mask's holes are not the material, which the spread then leaves out).
+    if (frame.subsurface.x > 1.5) {
+        return vec4(colour, kin_subsurface_share > 0.0 ? material.subsurface.y + 1.0 : 0.0);
+    }
 #endif
     if (frame.flags.x > 0.5) {
         if (frame.flags.x > 1.5) // (ViewOptions3D::compress)

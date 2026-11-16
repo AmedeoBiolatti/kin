@@ -422,12 +422,13 @@ struct Field {
     const char* name;
     Type type;
 };
-constexpr Field surface_fields[] = {{"base_color", Type::Vec3}, {"alpha", Type::Float},
-                                    {"normal", Type::Vec3},     {"metallic", Type::Float},
-                                    {"roughness", Type::Float}, {"occlusion", Type::Float},
-                                    {"emission", Type::Vec3},   {"backlight", Type::Vec3},
-                                    {"clearcoat", Type::Float}, {"clearcoat_roughness", Type::Float},
-                                    {"specular", Type::Float},  {"diffuse_wrap", Type::Float}};
+constexpr Field surface_fields[] = {{"base_color", Type::Vec3},  {"alpha", Type::Float},
+                                    {"normal", Type::Vec3},      {"metallic", Type::Float},
+                                    {"roughness", Type::Float},  {"occlusion", Type::Float},
+                                    {"emission", Type::Vec3},    {"backlight", Type::Vec3},
+                                    {"clearcoat", Type::Float},  {"clearcoat_roughness", Type::Float},
+                                    {"specular", Type::Float},   {"diffuse_wrap", Type::Float},
+                                    {"subsurface", Type::Float}, {"subsurface_thickness", Type::Float}};
 
 bool identifier(const std::string& s) {
     if (s.empty() || s.size() > 64 || std::isdigit(static_cast<unsigned char>(s[0])))
@@ -507,7 +508,9 @@ public:
             {"clearcoat", {Type::Float, "clamp(%, 0.0, 1.0)"}},
             {"clearcoat_roughness", {Type::Float, "clamp(%, 0.045, 1.0)"}},
             {"specular", {Type::Float, "clamp(%, 0.0, 1.0)"}},
-            {"diffuse_wrap", {Type::Float, "clamp(%, 0.0, 1.0)"}}};
+            {"diffuse_wrap", {Type::Float, "clamp(%, 0.0, 1.0)"}},
+            {"subsurface", {Type::Float, "clamp(%, 0.0, 1.0)"}},
+            {"subsurface_thickness", {Type::Float, "max(%, 0.0)"}}};
         std::vector<std::string> writes;
         if (_vertex) { // only the offset, as kin_surface_offset returns it (kin_surface_vertex.inc.glsl)
             const auto* outputs = g.find("outputs");
@@ -569,7 +572,8 @@ public:
                 const auto f = fields.find(name);
                 if (f == fields.end()) {
                     error(name, "not an output (base_color, alpha, normal, metallic, roughness, occlusion, emission, "
-                                "backlight, clearcoat, clearcoat_roughness, specular, diffuse_wrap, offset)");
+                                "backlight, clearcoat, clearcoat_roughness, specular, diffuse_wrap, subsurface, "
+                                "subsurface_thickness, offset)");
                     continue;
                 }
                 _colour_read = false;
@@ -584,6 +588,8 @@ public:
                     out.traits.vertex_alpha = _colour_read;
                 else if (name == "emission")
                     out.traits.emission = !black(ref);
+                else if (name == "subsurface")
+                    out.traits.subsurface = !black(ref);
                 if (v.type == Type::Texture) {
                     error(name, "a texture is not a value: sample it (a texture node)");
                     continue;
@@ -1223,6 +1229,7 @@ std::string write_material_graph_layout3d(const CompiledMaterialGraph3D& graph) 
         .field("emission", graph.traits.emission)
         .field("vertex_color", graph.traits.vertex_color)
         .field("vertex_alpha", graph.traits.vertex_alpha)
+        .field("subsurface", graph.traits.subsurface)
         .end_object();
     json.end_object();
     return out.str();
@@ -1286,6 +1293,7 @@ std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_
         g.traits.emission = traits->bool_at("emission", false);
         g.traits.vertex_color = traits->bool_at("vertex_color", true);
         g.traits.vertex_alpha = traits->bool_at("vertex_alpha", true);
+        g.traits.subsurface = traits->bool_at("subsurface", false);
     }
     return g;
 }

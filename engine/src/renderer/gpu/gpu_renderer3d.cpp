@@ -362,8 +362,9 @@ struct FrameUniforms {
     f32 ssr_previous[16]; // world to the previous frame's clip space
     f32 portal_sun[4];    // count, shadow texel (uv), sun shadow strength
     PortalSunLight portal[max_portal_sun_maps];
+    f32 subsurface[4]; // x: 0 all the light, 1 the main pass's split, 2 the subsurface pass's (kin_subsurface_keep)
 };
-static_assert(sizeof(FrameUniforms) == 4000 && sizeof(FrameUniforms) <= 4096);
+static_assert(sizeof(FrameUniforms) == 4016 && sizeof(FrameUniforms) <= 4096);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -1591,6 +1592,20 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     _capabilities.glow = _glow_down_pipeline && _glow_up_pipeline && _glow_flare_pipeline && _glow_streak_pipeline &&
                          _glow_compose_pipeline;
+    // Subsurface scattering: the spread in compute over four-half targets, the add-back a full-screen draw; it reads
+    // the pre-pass's depth (so needs the ambient occlusion's targets).
+    if (_taa_available && _ao_available) {
+        _sss_scatter_pipeline = make_compute(handle, "subsurface_scatter.comp.spv", {.samplers = 2});
+        try {
+            _sss_combine_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                           "subsurface_combine.frag.spv", /*uniform_buffers=*/0,
+                                                           /*samplers=*/1);
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: subsurface scattering not available",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+    }
+    _capabilities.subsurface = _sss_scatter_pipeline && _sss_combine_shader;
     _capabilities.depth_of_field = _dof_focus_pipeline && _dof_prepare_pipeline && _dof_tiles_pipeline &&
                                    _dof_spread_pipeline && _dof_gather_pipeline && _dof_combine_pipeline;
     // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
@@ -1975,6 +1990,7 @@ GpuRenderer3D::~GpuRenderer3D() {
                                             _glow_flare_pipeline,
                                             _glow_streak_pipeline,
                                             _glow_compose_pipeline,
+                                            _sss_scatter_pipeline,
                                             _gc_cull,
                                             _gc_scan,
                                             _gc_args,
@@ -3224,6 +3240,7 @@ GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surfac
     try {
         auto shader = std::make_shared<GpuSurfaceShader3D>();
         bool layout_known = false; // whether a variant so far has shown which layout the shader has
+        bool subsurface = true;    // whether every lit variant's material block has subsurface scattering's fields
         // First which layout (the graph maps' or not), from any variant that shows it; then each variant made.
         for (u32 pass = 0; pass < 2; ++pass)
             for (u32 i = 0; i < surface_variant_count3d; ++i) {
@@ -3314,11 +3331,19 @@ GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surfac
                         (r.kind == ShaderResourceKind::UniformBuffer && (r.set != 3 || r.binding >= uniforms)))
                         throw std::runtime_error("surface shader variant " + std::to_string(i) +
                                                  " binds beyond kin's mesh shader layout");
+                if (!mask && !merged) {
+                    u32 block = 0;
+                    for (const auto& r : layout->resources)
+                        if (r.kind == ShaderResourceKind::UniformBuffer && r.set == 3 && r.binding == 1)
+                            block = r.min_bytes;
+                    subsurface = subsurface && block >= sizeof(SurfaceMaterialUniforms);
+                }
                 shader->variants[i] =
                     GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV, spirv[i],
                                           uniforms, samplers, storage);
             }
         shader->device = _device->shared();
+        shader->subsurface = subsurface;
         if (shader->graph_maps && !_white_maps) {
             static constexpr u8 white[4] = {255, 255, 255, 255};
             const u8* const layer = white;
@@ -4419,6 +4444,47 @@ bool GpuRenderer3D::record_output(SDL_GPUCommandBuffer* commands, const GpuTextu
 }
 
 namespace {
+// Whether a material scatters under its surface (Material3D::subsurface): kin's stock lit material or a surface
+// shader, opaque or cut out (a custom shader's light is its own; blended surfaces are not in the pre-pass).
+bool subsurface_material(const Material3D& m) {
+    if (m.unlit || m.wireframe || m.shader.backend() || (m.blend != Blend3D::Opaque && m.blend != Blend3D::Mask))
+        return false;
+    if (!m.surface.backend())
+        return m.subsurface > 0.0f;
+    // A surface shader's: one made with the fields (GpuSurfaceShader3D::subsurface), with a share or writing its own.
+    const auto* surface = dynamic_cast<const GpuSurfaceShader3D*>(m.surface.backend().get());
+    return surface && surface->subsurface && (m.subsurface > 0.0f || m.surface.traits().subsurface);
+}
+
+// The number of `radius`'s profile in `table` (`count` of them so far), added if new; past 16 the nearest one's.
+u32 subsurface_profile(std::array<LinearRgb, 16>& table, u32& count, LinearRgb radius) {
+    const auto apart = [&](const LinearRgb& a) {
+        return std::abs(a.r - radius.r) + std::abs(a.g - radius.g) + std::abs(a.b - radius.b);
+    };
+    u32 nearest = 0;
+    for (u32 i = 0; i < count; ++i) {
+        if (apart(table[i]) == 0.0f)
+            return i;
+        if (apart(table[i]) < apart(table[nearest]))
+            nearest = i;
+    }
+    if (count < table.size()) {
+        table[count] = radius;
+        return count++;
+    }
+    return nearest;
+}
+
+// A scattering material's fields of its block (kin_material_uniforms.inc.glsl's subsurface, subsurface_radius): its
+// share, its profile's number in `table`, its fallback thickness, whether light goes through it; its radius.
+void subsurface_uniforms(std::array<LinearRgb, 16>& table, u32& count, const Material3D& m, f32* sss, f32* radius) {
+    sss[0] = std::clamp(m.subsurface, 0.0f, 1.0f);
+    sss[1] = static_cast<f32>(subsurface_profile(table, count, m.subsurface_radius));
+    sss[2] = std::max(m.subsurface_thickness, 0.0f);
+    sss[3] = m.subsurface_transmission ? 1.0f : 0.0f;
+    put_color(radius, m.subsurface_radius, 0.0f);
+}
+
 // Whether `scene` asks for motion blur without temporal anti-aliasing (the view then runs TAA's passes for the velocity
 // alone). Not in a view shading at a lower resolution (`render_scale` under 1), which needs real TAA.
 bool blur_without_taa(const Scene3D& scene, f32 render_scale) {
@@ -4851,6 +4917,8 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
                                 &view._glow_flare,
                                 &view._glow_streak,
                                 &view._glow_final,
+                                &view._sss_light,
+                                &view._sss_scattered,
                                 &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
@@ -5545,6 +5613,15 @@ struct GpuRenderer3D::FrameCtx {
     bool dof_wanted = false;
     bool dof_prepass = false;
     bool focused = false;
+    // Subsurface scattering: scattering materials in view of a float picture (the pre-pass runs for it); the profiles'
+    // radii this render (subsurface_profile); whether this main_pass is the subsurface pass, and the frame uniform's
+    // part (kin_subsurface_keep: 0 all, 1 the main pass's split, 2 the subsurface pass); whether the spread is ready.
+    bool sss_wanted = false;
+    std::array<LinearRgb, 16> sss_profiles{};
+    u32 sss_profile_count = 0;
+    bool subsurface_pass = false;
+    u32 subsurface_mode = 0;
+    bool sss_scattered = false;
 };
 
 bool GpuRenderer3D::preparation_live(u64 frame) const {
@@ -6222,6 +6299,10 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             v._occ_reset = true;
         });
     age(v._idle_gi, ctx.gi, static_cast<bool>(v._gi.distance), [&] { release_gi(v); });
+    age(v._idle_sss, ctx.sss_wanted, v._sss_light || v._sss_scattered, [&] {
+        v._sss_light = {};
+        v._sss_scattered = {};
+    });
     age(v._idle_glow, v._glow_used, !v._glow_down.empty() || static_cast<bool>(v._glow_final), [&] {
         v._glow_down.clear();
         v._glow_up.clear();
@@ -7309,9 +7390,18 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
         view->_ssr_buffer.reset();
         view->_ssr_seen = false;
     }
+    // Subsurface scattering: its materials' profiles (distinct radii, 16 at most), and whether it runs: a float picture
+    // (HDR or TAA), the pre-pass's depth in the main pass's format (the subsurface pass draws over it).
+    ctx.sss_profile_count = 0;
+    if (_capabilities.subsurface && (ctx.taa || view->_hdr) && _ao_depth_format == _depth_format)
+        for (const Scene3D::Draw& draw : scene.draws())
+            if (subsurface_material(draw.material))
+                (void)subsurface_profile(ctx.sss_profiles, ctx.sss_profile_count, draw.material.subsurface_radius);
+    ctx.sss_wanted = ctx.sss_profile_count > 0;
+    stats.subsurface_profiles = ctx.sss_profile_count;
     const bool needs_prepass = scene.ambient_occlusion.enabled || ctx.contact_wanted || scene.lod.occlusion.enabled ||
                                ctx.soft_particles || gi_wanted || ctx.fog_sun_wanted || ctx.fog_volume_wanted ||
-                               ctx.ssr_wanted;
+                               ctx.ssr_wanted || ctx.sss_wanted;
     if (ctx.taa &&
         !(ensure_taa_targets(*view, taa_settings.sharpness > 0.0f) &&
           (needs_prepass ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution,
@@ -13250,8 +13340,9 @@ void GpuRenderer3D::emit_draw_span(FrameCtx& ctx, const DrawSpan& span, bool mat
         const auto& ref = _refs[r];
         if (!ref.out_count())
             continue;
+        // (A scattering material keeps a draw of its own: its subsurface block is not in the materials' table.)
         if (!(materials && span.materials && ref.direct && ref.levels == 1 && !ref.clustered &&
-              _draw_material_slots[ref.scene] != ~0u)) {
+              _draw_material_slots[ref.scene] != ~0u && !subsurface_material(ref.draw->material))) {
             _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
             batch = ~0u;
             continue;
@@ -13501,10 +13592,13 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     const Lights3D& lights = scene.lights;
     const GpuView3D* view = ctx.view;
     // A temporally anti-aliased picture is drawn in linear light into float and encoded after the resolve.
-    const bool encode = !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // a gamma target
+    // (Not the subsurface pass's float target.)
+    const bool encode =
+        !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM && ctx.subsurface_mode != 2; // a gamma target
     const bool decode =
         _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // textures stored encoded
     FrameUniforms f{};
+    f.subsurface[0] = s == 0 ? static_cast<f32>(ctx.subsurface_mode) : 0.0f; // (the overlay is not scattered)
     if (s == 0) {
         f.portal_sun[0] = f32(ctx.portal_sun.count);
         f.portal_sun[1] = ctx.sun_size ? 1.0f / f32(ctx.sun_size) : 0;
@@ -14958,14 +15052,15 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
     // stay off that attachment: masking an undefined shader output does not preserve it on every backend.
     ctx.main_velocity =
         ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles && !ctx.gi_lit &&
-        !ctx.fog_sun_wanted && !ctx.fog_volume_wanted && !ctx.decals && !ctx.ssr_wanted && _particle_batches.empty() &&
+        !ctx.sss_wanted && !ctx.fog_sun_wanted && !ctx.fog_volume_wanted && !ctx.decals && !ctx.ssr_wanted &&
+        _particle_batches.empty() &&
         std::none_of(_refs.begin(), _refs.end(), [](const DrawRef& ref) { return ref.mesh->previous != nullptr; }) &&
         ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
         std::none_of(_refs.begin(), _refs.end(),
                      [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
     if (!ctx.main_velocity &&
         (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit || ctx.fog_sun_wanted ||
-         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted || ctx.dof_prepass) &&
+         ctx.fog_volume_wanted || ctx.decals || ctx.ssr_wanted || ctx.dof_prepass || ctx.sss_wanted) &&
         _ao_available && (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
         SDL_GPUColorTargetInfo target{};
@@ -15274,6 +15369,10 @@ void GpuRenderer3D::draw_decals(FrameCtx& ctx, SDL_GPURenderPass* pass,
 bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     RenderDebugStats3D& stats = ctx.stats;
+    // The subsurface pass (subsurface_pass): the scattering materials alone, their scattered share of the diffuse
+    // light, into _sss_light over the pre-pass's depth; nothing else this pass does (no sky, decals, fog, particles,
+    // overlay).
+    const bool sss = ctx.subsurface_pass;
     SDL_GPUCommandBuffer* commands = ctx.commands;
     SDL_GPUBuffer* storage = ctx.storage;
     // The scene (and its overlay): into the multisampled colour, resolved into
@@ -15286,7 +15385,10 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         clear = {l.r, l.g, l.b, l.a};
     }
     clear = {clear.r * clear.a, clear.g * clear.a, clear.b * clear.a, clear.a};
-    SDL_GPUTexture* resolved = ctx.taa      ? (view->_hdr ? view->_scene.handle() : view->_taa_in.handle())
+    if (sss)
+        clear = {0.0f, 0.0f, 0.0f, 0.0f};
+    SDL_GPUTexture* resolved = sss          ? view->_sss_light.handle()
+                               : ctx.taa    ? (view->_hdr ? view->_scene.handle() : view->_taa_in.handle())
                                : view->_hdr ? view->_scene.handle()
                                             : view->_resolved->texture().handle();
     SDL_GPUColorTargetInfo colour{};
@@ -15294,7 +15396,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     const bool load_surface = ctx.surface_stage == SurfaceStage3D::Transparent;
     colour.load_op = load_surface ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
     colour.cycle = !load_surface; // a frame still reading the last picture keeps it
-    if (view->_colour && !ctx.taa) {
+    if (view->_colour && !ctx.taa && !sss) {
         colour.texture = view->_colour.handle();
         colour.store_op = SDL_GPU_STOREOP_RESOLVE;
         colour.resolve_texture = resolved;
@@ -15303,27 +15405,34 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         colour.texture = resolved;
         colour.store_op = SDL_GPU_STOREOP_STORE;
     }
-    ctx.mesh_coverage = ctx.taa && std::any_of(_order.begin(), _order.end(), [&](u32 index) {
-                            return pass_of(_refs[index].draw->material) != Pass::Opaque;
-                        });
-    ctx.taa_reactive = ctx.taa && (!_particle_batches.empty() || ctx.mesh_coverage);
+    if (!sss) {
+        ctx.mesh_coverage = ctx.taa && std::any_of(_order.begin(), _order.end(), [&](u32 index) {
+                                return pass_of(_refs[index].draw->material) != Pass::Opaque;
+                            });
+        ctx.taa_reactive = ctx.taa && (!_particle_batches.empty() || ctx.mesh_coverage);
+    }
     // Reverse Z: the far plane.
-    const GpuTexture& main_depth = ctx.surface_depth ? *ctx.surface_depth : ctx.taa ? view->_taa_depth : view->_depth;
+    const GpuTexture& main_depth = sss                 ? view->_ao_depth
+                                   : ctx.surface_depth ? *ctx.surface_depth
+                                   : ctx.taa           ? view->_taa_depth
+                                                       : view->_depth;
     SDL_GPUDepthStencilTargetInfo depth = depth_target(
         main_depth.handle(),
         ctx.surface_only || ctx.taa_reactive || (ctx.taa && _taa_depth_sampled) ? SDL_GPU_STOREOP_STORE
                                                                                 : SDL_GPU_STOREOP_DONT_CARE,
         /*cycle=*/true);
-    if (load_surface) {
-        depth.load_op = SDL_GPU_LOADOP_LOAD;
+    if (load_surface || sss) {
+        depth.load_op = SDL_GPU_LOADOP_LOAD; // (the subsurface pass draws over the pre-pass's: equal depths pass)
         depth.cycle = false;
+        if (sss)
+            depth.store_op = SDL_GPU_STOREOP_STORE;
     }
     // Or the pre-pass's depth, where it has one alike (a sample a pixel, the view's size, the same format; no overlay,
     // whose depths the main pass puts in a range of their own): the main pass starts from the scene's nearest surfaces,
     // and the fragments they hide fail the depth test before they are shaded. The pre-pass's copies are drawn again
     // over them at the same depths (the vertex shaders' positions are invariant); what it left out (blended, custom,
     // unlit, the overlay) is drawn as before.
-    if (ctx.scene.debug.prepass_depth && ctx.prepass_ran && !ctx.overlaid && main_depth && view->_ao_depth &&
+    if (!sss && ctx.scene.debug.prepass_depth && ctx.prepass_ran && !ctx.overlaid && main_depth && view->_ao_depth &&
         _ao_depth_format == _depth_format && (ctx.taa || view->_samples <= 1) &&
         main_depth.width() == view->_ao_depth.width() && main_depth.height() == view->_ao_depth.height()) {
         if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
@@ -15460,10 +15569,13 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // left), before its blended and additive ones and the overlay. It binds a pipeline of its own: what the binder
     // and the texture cache remember is forgotten. Then the volume's fog light (Fog3D::volumetric), added over what is
     // drawn so far: a blended surface drawn after dims it by its own opacity as it dims what is behind it.
-    const bool fog_in_pass = ctx.fog_volume && !ctx.main_velocity;
-    bool sky_done = !ctx.sky_pass && !fog_in_pass;
+    const bool fog_in_pass = ctx.fog_volume && !ctx.main_velocity && !sss;
+    bool sky_done = sss || (!ctx.sky_pass && !fog_in_pass);
     // The decals: after the scene's opaque meshes too, before the sky (which leaves the pixels they cover alone).
-    bool decals_done = !ctx.decals || !ctx.prepass_ran;
+    bool decals_done = sss || !ctx.decals || !ctx.prepass_ran;
+    // Subsurface scattering's spread light, added after the opaque meshes and their decals, before the sky, the fog's
+    // light, the overlay and the blended meshes (which cover or dim it as the rest).
+    bool scattered_done = ctx.subsurface_mode != 1 || !ctx.sss_scattered;
     const auto sky_now = [&] {
         sky_done = true;
         if (ctx.sky_pass) {
@@ -15509,6 +15621,26 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     };
     const auto opaque_done = [&] {
         decals_now();
+        if (!scattered_done) {
+            scattered_done = true;
+            stats.subsurface_combined =
+                subsurface_combine(ctx, pass, main_depth.format(), ctx.taa ? hdr_format : view->_format,
+                                   ctx.taa ? 1u : view->_samples)
+                    ? 1u
+                    : 0u;
+            // Its pipeline and sampler: the meshes' are bound again.
+            push_frame_uniforms(ctx, current_scene);
+            binder.reset();
+            bound_textures = unbound;
+            bound_binding = ~0u;
+            bound_draw_materials = nullptr;
+            bound_inputs = nullptr;
+            fragment_storage = {};
+            material_slot_ready = false;
+            fog_bound = false;
+            lights_bound = false;
+            custom_lights_bound = false;
+        }
         if (!sky_done)
             sky_now();
     };
@@ -15516,6 +15648,8 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         fill_uniforms(draw_uniforms, 0);
         const std::array<SDL_GPUBuffer*, 2> buffers{storage, ctx.previous_storage};
         for (const MainItem& item : _main_order) {
+            if (sss && (item.particle || item.transparent || item.materials))
+                continue;
             if (item.particle) {
                 opaque_done();
                 draw_particles(ctx, pass, false, item.ref, item.first, item.count);
@@ -15531,7 +15665,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             }
             const DrawRef& ref = _refs[item.ref];
             const Material3D& material = ref.draw->material;
-            if (!(sky_done && decals_done) && (ref.scene != 0 || pass_of(material) != Pass::Opaque)) {
+            if (sss && (ref.scene != 0 || !subsurface_material(material)))
+                continue;
+            if (!(sky_done && decals_done && scattered_done) && (ref.scene != 0 || pass_of(material) != Pass::Opaque)) {
                 opaque_done();
             } else if (!decals_done && !material.receives_decals) {
                 decals_now(); // (the meshes that do not receive them come last among the world's opaque ones)
@@ -15541,7 +15677,8 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 begin_scene(current_scene);
                 fill_uniforms(draw_uniforms, current_scene);
             }
-            const auto* command = main_command(ctx, item.ref, item.materials);
+            // (The subsurface pass's pipelines are for its own target: not the main pass's cached commands.)
+            const auto* command = sss ? nullptr : main_command(ctx, item.ref, item.materials);
             const auto selection =
                 command ? command->selection
                         : material_pipeline(material, ref.skinned, ctx.taa, ctx.main_velocity, ctx.fog, ref.mesh);
@@ -15553,9 +15690,10 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             SDL_GPUGraphicsPipeline* p =
                 command
                     ? command->pipeline
-                    : pipeline(MeshPipelineRequest{ctx.taa ? hdr_format : view->_format, ctx.taa ? 1u : view->_samples,
-                                                   selection, ctx.main_velocity, ref.skinned, ctx.fog && !custom,
-                                                   ctx.lights_variant && !custom, ref.retained != ~0u, item.materials});
+                    : pipeline(MeshPipelineRequest{sss || ctx.taa ? hdr_format : view->_format,
+                                                   sss || ctx.taa ? 1u : view->_samples, selection, ctx.main_velocity,
+                                                   ref.skinned, ctx.fog && !custom, ctx.lights_variant && !custom,
+                                                   ref.retained != ~0u, item.materials});
             if (!p) {
                 continue;
             }
@@ -15731,12 +15869,19 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             }
             if (selection.surface) {
                 // A surface shader's block is the stock one with its parameters after it.
-                SurfaceMaterialUniforms m{material_uniforms(material, unlit), {}};
+                SurfaceMaterialUniforms m{material_uniforms(material, unlit), {}, {}, {}};
                 std::memcpy(m.surface, material.shader_params.data(), sizeof(m.surface));
+                if (ctx.subsurface_mode != 0 && !item.materials && subsurface_material(material))
+                    subsurface_uniforms(ctx.sss_profiles, ctx.sss_profile_count, material, m.subsurface,
+                                        m.subsurface_radius);
                 SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
                 material_slot_ready = false;
             } else if (!item.materials || !material_slot_ready) {
-                const MaterialUniforms m = command ? command->uniforms : material_uniforms(material, unlit);
+                StockMaterialUniforms m{command ? command->uniforms : material_uniforms(material, unlit), {}, {}};
+                // Subsurface scattering's share and profile (kin_subsurface_keep), where it is split this render.
+                if (ctx.subsurface_mode != 0 && !item.materials && subsurface_material(material))
+                    subsurface_uniforms(ctx.sss_profiles, ctx.sss_profile_count, material, m.subsurface,
+                                        m.subsurface_radius);
                 // Batched variants don't read slot 1, but SDL's uniform slot
                 // layout still includes it before fog/local-light slots.
                 SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
@@ -15832,14 +15977,14 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         draw_all(draw_uniforms);
     }
     opaque_done(); // nothing but opaque meshes (or none) in the scene
-    if (ctx.gi && ctx.scene.debug.gi_view != GiView3D::Off) {
+    if (!sss && ctx.gi && ctx.scene.debug.gi_view != GiView3D::Off) {
         // The GI scene instead of the picture (RenderDebugOptions3D::gi_view).
         draw_gi_view(commands, pass, *view, ctx.scene, ctx.drawn[0], ctx.taa ? hdr_format : view->_format,
                      ctx.taa ? 1u : view->_samples, ctx.main_velocity ? hdr_format : SDL_GPU_TEXTUREFORMAT_INVALID,
                      !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
     }
     SDL_EndGPURenderPass(pass);
-    if (ctx.taa_reactive && !reactive_pass(ctx)) {
+    if (!sss && ctx.taa_reactive && !reactive_pass(ctx)) {
         // The colour pass is complete. Show it and reset temporal history;
         // an unavailable optional coverage pass must not drop the frame.
         ctx.velocity_drawn = false;
@@ -16594,6 +16739,120 @@ const GpuTexture* GpuRenderer3D::depth_of_field(FrameCtx& ctx, const GpuTexture&
     return &view._dof_result;
 }
 
+bool GpuRenderer3D::ensure_sss_targets(GpuView3D& view) {
+    const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
+    const auto sized = [&](const GpuTexture& t) { return t && t.width() == w && t.height() == h; };
+    try {
+        if (!sized(view._sss_light))
+            view._sss_light = _device->create_target(w, h, hdr_format,
+                                                     SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        if (!sized(view._sss_scattered))
+            view._sss_scattered = _device->create_target(
+                w, h, hdr_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: subsurface targets not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        view._sss_light = {};
+        view._sss_scattered = {};
+        return false;
+    }
+    return true;
+}
+
+namespace {
+// The subsurface spread's sample radii for a profile of radius 1 (subsurface_scatter.comp's params.radii): Burley's
+// radial distribution F(r) = 1 - e^(-r)/4 - 3 e^(-r/3)/4 inverted at (i + 1/2) / count, by bisection.
+std::array<f32, 32> subsurface_radii(u32 count) {
+    std::array<f32, 32> radii{};
+    for (u32 i = 0; i < count && i < radii.size(); ++i) {
+        const f64 u = (static_cast<f64>(i) + 0.5) / static_cast<f64>(count);
+        f64 low = 0.0, high = 64.0;
+        for (int step = 0; step < 48; ++step) {
+            const f64 r = 0.5 * (low + high);
+            const f64 f = 1.0 - 0.25 * std::exp(-r) - 0.75 * std::exp(-r / 3.0);
+            (f < u ? low : high) = r;
+        }
+        radii[i] = static_cast<f32>(0.5 * (low + high));
+    }
+    return radii;
+}
+} // namespace
+
+bool GpuRenderer3D::subsurface_pass(FrameCtx& ctx) {
+    GpuView3D* view = ctx.view;
+    if (!ctx.sss_wanted || !ctx.prepass_ran || !view->_ao_depth || !ensure_sss_targets(*view))
+        return false;
+    RenderDebugStats3D& stats = ctx.stats;
+    // The scattering materials' share of their diffuse light: the main pass over them alone. What it counts is its own.
+    const RenderDebugStats3D before = stats;
+    ctx.subsurface_pass = true;
+    ctx.subsurface_mode = 2;
+    const bool drawn = main_pass(ctx);
+    ctx.subsurface_pass = false;
+    ctx.subsurface_mode = 0;
+    const u32 draws = stats.draws - before.draws;
+    stats = before;
+    stats.subsurface_draws = draws;
+    if (!drawn)
+        return false;
+    // The spread.
+    const f32 w = static_cast<f32>(view->_size.x), h = static_cast<f32>(view->_size.y);
+    const u32 samples = ctx.taa ? 16u : 32u; // (temporal anti-aliasing averages the turn from frame to frame)
+    static const std::array<f32, 32> radii16 = subsurface_radii(16), radii32 = subsurface_radii(32);
+    const std::array<f32, 32>& radii = samples == 16 ? radii16 : radii32;
+    struct {
+        f32 unproject_xy[4], unproject_zw[4], size[4], shape[4], limits[4];
+        f32 profiles[16][4];
+        f32 radii[32], density[32];
+    } u{};
+    const Unprojection unproject = unproject_coefficients(ctx.main_projection);
+    std::memcpy(u.unproject_xy, unproject.xy, sizeof(u.unproject_xy));
+    std::memcpy(u.unproject_zw, unproject.zw, sizeof(u.unproject_zw));
+    const f32 size[4] = {w, h, 1.0f / w, 1.0f / h};
+    std::memcpy(u.size, size, sizeof(size));
+    const bool orthographic = ctx.scene.camera.projection == Projection3D::Orthographic;
+    u.shape[0] = static_cast<f32>(samples);
+    u.shape[1] = ctx.taa ? std::fmod(static_cast<f32>(view->_taa_frame) * 0.618034f, 1.0f) * 6.2831853f : 0.0f;
+    u.shape[2] = ctx.main_projection.at(1, 1) * 0.5f * h; // pixels a unit spans at a distance of 1 (orthographic: any)
+    u.shape[3] = orthographic ? 1.0f : 0.0f;
+    u.limits[0] = 0.2f * h;
+    for (u32 i = 0; i < ctx.sss_profile_count; ++i) {
+        const LinearRgb r = ctx.sss_profiles[i];
+        put(u.profiles[i], {std::max(r.r, 0.0f), std::max(r.g, 0.0f), std::max(r.b, 0.0f)},
+            std::max({r.r, r.g, r.b, 1e-6f}));
+    }
+    std::memcpy(u.radii, radii.data(), sizeof(u.radii));
+    // Burley's profile for d = 1 at each radius (its 1 / (8 pi) left out, as the shader's).
+    for (u32 i = 0; i < samples; ++i) {
+        u.density[i] = (std::exp(-radii[i]) + std::exp(-radii[i] / 3.0f)) / std::max(radii[i], 1e-6f);
+    }
+    const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.subsurface_scatter"};
+    const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+        SDL_GPUTextureSamplerBinding{view->_sss_light.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{view->_ao_depth.handle(), _point_sampler}};
+    if (!compute_pass(ctx.commands, _sss_scatter_pipeline, view->_sss_scattered, inputs, &u, sizeof(u)))
+        return false;
+    stats.subsurface_dispatches = 1;
+    return true;
+}
+
+bool GpuRenderer3D::subsurface_combine(FrameCtx& ctx, SDL_GPURenderPass* pass, SDL_GPUTextureFormat depth_format,
+                                       SDL_GPUTextureFormat format, u32 samples) {
+    SDL_GPUGraphicsPipeline* p = _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                                       .fragment = _sss_combine_shader.handle(),
+                                                                       .blend = GpuBlendMode::PremultipliedAdditive,
+                                                                       .format = format,
+                                                                       .layout = GpuVertexLayout::None,
+                                                                       .depth_stencil = depth_format,
+                                                                       .samples = sample_count(samples)});
+    if (!p)
+        return false;
+    SDL_BindGPUGraphicsPipeline(pass, p);
+    const SDL_GPUTextureSamplerBinding scattered{ctx.view->_sss_scattered.handle(), _point_sampler};
+    SDL_BindGPUFragmentSamplers(pass, 0, &scattered, 1);
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    return true;
+}
+
 void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     RenderDebugStats3D& stats = ctx.stats;
@@ -17075,7 +17334,17 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
              overlay_velocity(ctx);
              return true;
          },
-         [&] { return main_pass(ctx); },
+         [&] {
+             // Subsurface scattering: its materials' scattered light, spread, before the main pass adds it back.
+             ctx.sss_scattered = ctx.sss_wanted && subsurface_pass(ctx);
+             return true;
+         },
+         [&] {
+             ctx.subsurface_mode = ctx.sss_scattered ? 1u : 0u;
+             const bool drawn = main_pass(ctx);
+             ctx.subsurface_mode = 0;
+             return drawn;
+         },
          [&] {
              if (ctx.fog_sun)
                  fog_sun_apply(ctx);
@@ -17119,8 +17388,9 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
          }}};
     static constexpr std::array<const char*, frame_graph_passes3d> markers{
         {"kin3d.clusters", "kin3d.local_shadows", "kin3d.gi_scene", "kin3d.gi_probes", "kin3d.sun_shadow",
-         "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.main", "kin3d.fog_sun",
-         "kin3d.temporal_resolve", "kin3d.depth_of_field", "kin3d.motion_blur", "kin3d.picking", "kin3d.output"}};
+         "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.subsurface", "kin3d.main",
+         "kin3d.fog_sun", "kin3d.temporal_resolve", "kin3d.depth_of_field", "kin3d.motion_blur", "kin3d.picking",
+         "kin3d.output"}};
     const auto record_start = std::chrono::steady_clock::now();
     for (u32 i = 0; i < plan.order.size(); ++i) {
         const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
@@ -17210,8 +17480,11 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
                                 scene.fog.sun_scatter > 0.0f && scene.camera.projection == Projection3D::Perspective;
     const bool fog_volume_wanted = _fog_volume_pipeline && fog_volume_possible(scene.fog, scene.camera);
     const bool ssr_wanted = scene.ssr.enabled && _ssr_pipeline && _ao_available && _lights_available;
+    const bool sss =
+        _capabilities.subsurface && (taa || view->_hdr) && _ao_depth_format == _depth_format &&
+        std::ranges::any_of(scene.draws(), [](const Scene3D::Draw& d) { return subsurface_material(d.material); });
     const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft || gi_wanted || fog_sun_wanted ||
-                               fog_volume_wanted || ssr_wanted;
+                               fog_volume_wanted || ssr_wanted || sss;
     if (taa) {
         taa = ensure_taa_targets(*view, scene.taa.sharpness > 0.0f) &&
               (needs_prepass || custom_shader || particles
@@ -17222,9 +17495,11 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
         if (taa && scene.camera_effects.motion_blur.enabled && _capabilities.motion_blur)
             (void)ensure_blur_targets(*view,
                                       blur_shape(scene.camera_effects.motion_blur, f32(view->size().y), 0.0f).tile);
-    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted || fog_volume_wanted || dof_prepass) {
+    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted || fog_volume_wanted || dof_prepass || sss) {
         ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/false);
     }
+    if (sss)
+        (void)ensure_sss_targets(*view);
     if (!taa && dof_prepass)
         (void)ensure_dof_targets(*view, scene.camera_effects.depth_of_field.autofocus);
     if (shadows) {

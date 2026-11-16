@@ -10522,3 +10522,106 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
 
 Measured with the 3D perf harness before and after (each effect off: no change), on Sponza Walk and the reference
 scenes; docs/rendering_3d.md gets each effect's section as it is built.
+
+## Subsurface scattering — plan (2026-11-16)
+
+Light that enters a translucent material (skin, wax, marble, jade, milk, leaves seen thick) spreads under the
+surface before it leaves: soft shading, light bleeding past shadow edges, a glow through thin parts. Kin has a thin
+surface's `backlight` (foliage) and a wrapped diffuse (`KinSurface::diffuse_wrap`), not the spread; the importers drop
+Unreal's Subsurface Profile, Unity HDRP's diffusion profiles and Godot's `subsurf_scatter`.
+
+Decisions (2026-11-16): native first; **disc-sampled Burley** (Unity HDRP's and Unreal 5's: an importance-sampled
+disc of Burley's normalised diffusion profile, turned per pixel and per frame), and the first slice includes light
+through thick parts. Branch `feat/subsurface`.
+
+**How it fits a forward renderer.** Kin shades in one forward main pass (opaque meshes, then the sky and the
+volumetric fog's light, then blended meshes), MSAA in HDR views, and its lit shaders have no sampler slot left. So
+the scattered light is made before the main pass and added inside it, without a second output in every lit variant:
+
+1. The depth pre-pass runs (as for ambient occlusion). A **subsurface pass** draws only the subsurface materials, with
+   the main pass's own pipelines and draw order, into a float target over the pre-pass's depth (its equal depths
+   pass the reverse-Z `GREATER_OR_EQUAL` test): each writes `subsurface` times its diffuse light (direct and ambient,
+   the fog's transmittance applied, no reflections, no emission) and, in alpha, its profile's number.
+2. A **scattering compute pass** spreads it: for each subsurface pixel, N samples (16 to 32 by quality) on a disc
+   whose radii are importance-sampled from Burley's profile of the widest channel (precomputed on the CPU), turned by
+   a per-pixel noise (per frame too under TAA), projected to pixels by the depth; each weighed per channel by the
+   profile at the samples' real 3D distance over its sampling density; samples off the material (another profile, no
+   subsurface, a depth gap) count nothing; normalised per channel (energy kept).
+3. The **main pass** draws subsurface materials without that share of their diffuse (`1 - subsurface`), and, after
+   the opaque meshes and before the sky, fog and blended meshes, a full-screen additive draw puts the scattered light
+   back where the profile mask says (so fog, transparency and MSAA apply to it as to the rest).
+
+A frame uniform says which part a lit shader writes (all, all but the scattered share, the scattered share only); a
+material uniform carries the strength and profile. Both appended at the end of their blocks, so cooked material
+graphs keep working; subsurface materials are not merged into multi-material draws (whose table layout cooked graphs
+share).
+
+**Profiles.** `Material3D::subsurface` (0 to 1, the share of the diffuse that scatters) and
+`subsurface_radius` (per channel, world units: how far red, green and blue spread; skin's red the widest), with
+presets (skin, marble, wax, jade, milk, leaf). Each frame's distinct radii make a table of up to 16 profiles (as
+HDRP's diffusion profile list).
+
+**Through thick parts.** `subsurface_transmission`: the light of the sun, spots and points on the far side reaches
+the near side through the thickness between them, by Burley's transmittance `0.25 (e^-t/d + 3 e^-t/3d)` per
+channel. The thickness comes from the shadow maps (their comparison samplers searched in a few steps for where the
+lit side is), else the material's `subsurface_thickness`. Added to the scattered share (it spreads too).
+
+- **SS1 — scattering.** Material fields and presets, the light split in the lit shaders, the subsurface pass, the
+  scattering pass, the combine; frame-graph pass `subsurface`; ECS/scene files/Lua; stats; GPU tests (energy kept on
+  a flat lit patch, the shadow edge softened over about the radius, red spreading farther than blue for skin, off =
+  the same bytes, MSAA and TAA views); docs.
+- **SS2 — transmission.** Thickness from the sun's cascades and the local lights' maps, the fallback thickness, tests
+  (a lit slab's far side glows by its thickness and fades with it).
+- **SS3 — authoring.** Material graph outputs (`subsurface`, `subsurface_radius`, `thickness`), material files, the
+  importers (Unreal Subsurface Profile / Subsurface Color, Unity HDRP diffusion profile and thickness, Godot
+  `subsurf_scatter` and transmittance, glTF `KHR_materials_volume` thickness and `KHR_materials_diffuse_transmission`).
+- **SS4 — checked against Cycles.** Snapshots write the subsurface (Principled BSDF random walk, the same radius);
+  `tools/cycles` compares the falloff across a lit/shadow edge on a slab and a head-sized sphere.
+
+Limits planned: needs a float picture (HDR or TAA views; else the wrapped diffuse stands in), the overlay (first-person
+hands) not scattered in the first slice (no pre-pass depth for it), what is off screen does not scatter in.
+
+**SS1 and SS2 as built (2026-11-16).** As planned, with these differences:
+
+- The scattering pass draws its samples' radii from the widest channel's profile and weighs each by the profile at
+  `sqrt(r^2 + dz^2)` (`r` the radius drawn, `dz` the depth gap), not by the distance between the pixels it lands on:
+  that one is 0 for a sample rounded onto the pixel itself, where the profile's `1 / r` has no bound. Samples
+  per pixel follow the spread's width on screen (4 up to 16 under TAA, 32 without).
+- Scene files, the ECS and Lua take the new fields through material files (`subsurface`, `subsurface_radius` as a
+  preset name or three numbers, `subsurface_transmission`, `subsurface_thickness`); no new bindings were needed.
+- Thickness for transmission: a bisection over the sun's cascade and the spot/point shadow maps with their
+  comparison samplers, up to 6 times the widest radius; else `subsurface_thickness`. Transmission is only added
+  where the material scatters (`subsurface > 0`).
+- Cost (`spheres`, 1080p, TAA, every surface scattering, RTX 4080 Laptop GPU at 77-82 C, three order-alternated
+  rounds): 0.36 ms without, 0.93 ms with; transmission within the noise (under 0.05 ms). Again after SS4's preset and
+  reach changes (skin x 15 now a third as wide; two clean rounds of three, 80-83 C): 0.35-0.40 ms without, 0.70-0.81
+  with, transmission 0.71-0.85.
+- Tests: the shadow edge spread (HDR: red 23 px since the reach went to 0.2, blue 8 px against a sharp 0; MSAA; 8-bit TAA; 8-bit without TAA
+  the same bytes as off), transmission by thickness (1 cm, 5 cm, fallback, none), material-file parsing. Pass on
+  NVIDIA, Intel and lavapipe.
+
+**SS3 and SS4 as built (2026-11-16).**
+
+- Surface shaders scatter too: `KinSurface::subsurface` (the share a pixel, a mask) and `subsurface_thickness`, the
+  graph outputs of those names; the radius stays the material's (one profile a material, as HDRP's and Unreal's). A
+  graph writing a non-zero `subsurface` (`SurfaceTraits3D::subsurface`) scatters with the material's own share 0.
+  Surface SPIR-V made before (its material block 32 bytes shorter, seen by reflection) draws without the spread; no
+  old cooked graph was at hand to test that path.
+- Importers: Unreal Subsurface Profile (`unreal_export.py` writes the profile's settings; d = mfp x world unit scale /
+  (0.6 x the perpendicular scaling factor), from Unreal's own shaders), Opacity as the graph's share; Unity HDRP Lit
+  (diffusion profile by the GUID in `_DiffusionProfileAsset`, d = scattering distance x multiplier / world scale, mm;
+  `_SubsurfaceMask`, `_Thickness` remapped, Shader Graph's Subsurface Mask and Thickness blocks); Godot (blur width =
+  strength x `subsurface_scattering_scale` as the widest d, approximate); glTF diffuse transmission through a volume
+  (the pinned cgltf does not parse `KHR_materials_diffuse_transmission`: read from its raw JSON).
+- The radius is Burley's d (as HDRP's scattering distance and what the importers compute). The presets were Jensen's
+  diffuse mean free paths used as d (about 3.5x too wide): now those over 3.5 (skin 1.06, 0.40, 0.20 mm; HDRP's
+  default skin 0.76, 0.32, 0.20).
+- Cycles (`tests/reference/scenes/subsurface.json`, `tools/cycles/subsurface.py`: Burley's line spread fitted to the
+  edge, each renderer against its own unscattered picture; Christensen-Burley with radius = d x 4 pi x s(A)): at skin
+  x 1.5 (d 5.6, 2.1, 1.05 mm; 6.9, 2.6, 1.3 px) kin 6.75, 2.25, 1.0 px, Cycles 7.75, 2.5, 1.25 px; at skin x 3 kin 15.5,
+  5.25, 2.5 px for 13.9, 5.2, 2.6 asked, Cycles 18.5, 5.5, 2.5. A 10 cm ball's terminator: green and blue within 3-4
+  levels of Cycles, red darker past the terminator (5 levels at x 1.5, 15 at x 3; Cycles' red is wider than asked on
+  the flat edge too). The fit found the scattering pass's reach (0.1 of the picture's height) cutting red's tail: now
+  0.2 (kin's red at x 3 went from 11.0 to 15.5 px).
+
+Open: WebGL2 (draws without the spread).

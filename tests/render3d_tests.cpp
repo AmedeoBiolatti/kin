@@ -7058,6 +7058,197 @@ void test_gpu_glow() {
     });
 }
 
+// Subsurface scattering (Material3D::subsurface) on a white floor seen from above (an orthographic camera, 30 pixels
+// a metre), half of it in the shadow of a slab the camera does not see (Camera3D::hidden_id; it still casts): a
+// straight edge across the middle row. Without
+// scattering the edge is sharp; with it (radius 20, 8 and 4 cm) the light spreads into the shadow over a ramp several
+// pixels wide, red's wider than blue's, the row's light about the same (moved, not made). The same in an HDR view with
+// one sample and with four (MSAA), and in one with temporal anti-aliasing. An 8-bit view without TAA (no float picture)
+// draws it without the spread: the same bytes as without scattering.
+void test_gpu_subsurface() {
+    with_gpu("test_gpu_subsurface", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().subsurface, "subsurface scattering")) {
+            return;
+        }
+        const kin::Mesh3D floor = r3d.create_mesh(kin::meshes::plane({8, 8})).value_or({});
+        const kin::Mesh3D slab = make_box(r3d, {6.0f, 0.1f, 8.0f});
+        kin::Scene3D scene;
+        const auto draw = [&](float subsurface, const kin::SurfaceShader3D& surface) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0, 10, 0}, {0, 0, 0}, 60, {0, 0, -1});
+            scene.camera.projection = kin::Projection3D::Orthographic;
+            scene.camera.height = 4.0f;
+            scene.camera.z_far = 30.0f;
+            scene.camera.hidden_id = 7;
+            scene.lights.sun.direction = kin::normalize(Vec3f{0.0f, 1.0f, 0.0f});
+            scene.lights.sun.color = {0.6f, 0.6f, 0.6f};
+            scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+            scene.lights.ground_ambient = {.enabled = true, .color = {0.02f, 0.02f, 0.02f}};
+            scene.lights.shadow_area = {{-6, -1, -6}, {6, 4, 6}};
+            scene.lights.shadow_resolution = 2048;
+            kin::Material3D white{.color = kin::colors::white,
+                                  .roughness = 1.0f,
+                                  .subsurface = subsurface,
+                                  .subsurface_radius = {0.2f, 0.08f, 0.04f}};
+            white.surface = surface;
+            (void)scene.draw(floor, Mat4f{}, white);
+            // The slab over x < 0, its shadow's edge at x = 0.
+            const std::array<kin::MeshInstance3D, 1> hidden{
+                {{.transform = Mat4f::translation({-3.0f, 2.0f, 0.0f}), .id = 7}}};
+            (void)scene.draw_instanced(slab, hidden, {.color = kin::colors::black});
+        };
+        const auto shoot = [&](kin::View3D& view, float subsurface, int frames,
+                               const kin::SurfaceShader3D& surface = {}) {
+            Pixels p;
+            for (int f = 0; f < frames; ++f) {
+                draw(subsurface, surface);
+                p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+            }
+            return p;
+        };
+        // How wide the ramp from the shadow to the light is in a channel along row 60 (10 % to 90 % of the way).
+        const auto ramp = [](const Pixels& p, int channel) {
+            const auto at = [&](int x) {
+                const Color c = p.at(x, 60);
+                return channel == 0 ? int(c.r) : channel == 1 ? int(c.g) : int(c.b);
+            };
+            const int dark = at(40), lit = at(120);
+            int from = 80, to = 80;
+            for (int x = 40; x < 120; ++x) {
+                if (at(x) <= dark + (lit - dark) / 10)
+                    from = x;
+                if (at(x) < lit - (lit - dark) / 10)
+                    to = x;
+            }
+            return std::pair{to - from, lit - dark};
+        };
+        // The row's green in linear light (the spread moves linear light: the sRGB bytes' mean rises as it spreads).
+        const auto mean = [](const Pixels& p) {
+            double sum = 0;
+            for (int x = 20; x < 140; ++x) {
+                const double c = p.at(x, 60).g / 255.0;
+                sum += c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+            }
+            return 255.0 * sum / 120.0;
+        };
+        struct Case {
+            const char* name;
+            kin::ViewOptions3D options;
+            bool taa;
+        };
+        const std::array<Case, 3> cases{{{"HDR", {.samples = 1, .hdr = true}, false},
+                                         {"HDR 4x MSAA", {.samples = 4, .hdr = true}, false},
+                                         {"8-bit TAA", {.samples = 1}, true}}};
+        for (const Case& c : cases) {
+            kin::View3D view = r3d.create_view({160, 120}, c.options).value_or({});
+            scene.taa.enabled = c.taa;
+            const int frames = c.taa ? 8 : 1;
+            const Pixels sharp = shoot(view, 0.0f, frames);
+            assert(r3d.debug_stats().subsurface_draws == 0);
+            const Pixels spread = shoot(view, 1.0f, frames);
+            const auto stats = r3d.debug_stats();
+            const auto [red_sharp, rise] = ramp(sharp, 0);
+            const auto red = ramp(spread, 0).first, blue = ramp(spread, 2).first;
+            std::printf("    subsurface (%s): %u draws, %u dispatches, combined %u; ramp red %d px (sharp %d), blue %d "
+                        "px; row mean %.1f against %.1f\n",
+                        c.name, stats.subsurface_draws, stats.subsurface_dispatches, stats.subsurface_combined, red,
+                        red_sharp, blue, mean(spread), mean(sharp));
+            assert(stats.subsurface_draws > 0 && stats.subsurface_dispatches == 1 && stats.subsurface_combined == 1);
+            assert(rise > 40);
+            assert(red_sharp <= 4 && red >= red_sharp + 4 && red > blue);
+            assert(std::abs(mean(spread) - mean(sharp)) < 0.06 * mean(sharp));
+        }
+        // No float picture: drawn without the spread, as without scattering.
+        scene.taa.enabled = false;
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const Pixels a = shoot(plain, 0.0f, 1), b = shoot(plain, 1.0f, 1);
+        assert(r3d.debug_stats().subsurface_draws == 0 && a.rgba == b.rgba);
+        // A material graph's subsurface output (KinSurface::subsurface): one writing 1 scatters as kin's own material
+        // does, with the material's own share 0 (its traits say it writes one); one writing 0 does not, with the
+        // material's share 1 (a mask's hole).
+        if (!kin::shader_compiler_available())
+            return;
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_subsurface_graph_test";
+        std::filesystem::create_directories(dir);
+        const auto graph = [&](const char* name, const char* outputs) {
+            const auto file = dir / (std::string(name) + ".kingraph.json");
+            std::ofstream{file} << R"({"schema": "kin.material-graph/1", "nodes": [], "outputs": {)" << outputs << "}}";
+            auto made = r3d.compile_material_graph(file);
+            assert(made);
+            return made->surface;
+        };
+        const kin::SurfaceShader3D on = graph("sss_on", R"("subsurface": 1)"),
+                                   off = graph("sss_off", R"("subsurface": 0)");
+        assert(on.traits().subsurface && !off.traits().subsurface);
+        kin::View3D hdr = r3d.create_view({160, 120}, {.samples = 1, .hdr = true}).value_or({});
+        const Pixels sharp = shoot(hdr, 0.0f, 1), stock = shoot(hdr, 1.0f, 1);
+        const Pixels graphed = shoot(hdr, 0.0f, 1, on);
+        assert(r3d.debug_stats().subsurface_draws > 0);
+        const Pixels holed = shoot(hdr, 1.0f, 1, off);
+        int most = 0;
+        for (size_t i = 0; i < stock.rgba.size(); ++i)
+            most = std::max(most, std::abs(int(stock.rgba[i]) - int(graphed.rgba[i])));
+        std::printf("    subsurface (graph): ramp red %d px (kin's own %d, sharp %d), most apart from kin's own %d; "
+                    "writing 0: %d px\n",
+                    ramp(graphed, 0).first, ramp(stock, 0).first, ramp(sharp, 0).first, most, ramp(holed, 0).first);
+        assert(ramp(graphed, 0).first >= ramp(sharp, 0).first + 4 && most <= 4);
+        assert(ramp(holed, 0).first <= ramp(sharp, 0).first + 1);
+    });
+}
+
+// Subsurface scattering's light through thick parts (Material3D::subsurface_transmission): a white slab seen from
+// above, the sun below it, so the face seen faces away from the sun and is in the slab's own shadow. With transmission
+// a slab 1 cm thick glows through (red more than blue, the radii 2, 1 and 0.5 cm), one 5 cm thick much less, none
+// without it; without a shadow map the material's thickness stands in (and none with no thickness).
+void test_gpu_subsurface_transmission() {
+    with_gpu("test_gpu_subsurface_transmission", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().subsurface, "subsurface scattering")) {
+            return;
+        }
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .hdr = true}).value_or({});
+        kin::Scene3D scene;
+        const auto shoot = [&](float thickness, bool transmission, bool shadows, float fallback) {
+            const kin::Mesh3D slab = make_box(r3d, {3.0f, thickness, 3.0f});
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0, 10, 0}, {0, 0, 0}, 60, {0, 0, -1});
+            scene.camera.projection = kin::Projection3D::Orthographic;
+            scene.camera.height = 4.0f;
+            scene.camera.z_far = 30.0f;
+            scene.lights.sun.direction = {0.0f, -1.0f, 0.0f};
+            scene.lights.sun.color = {1.0f, 1.0f, 1.0f};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.lights.ground_ambient = {.enabled = true, .color = {0.0f, 0.0f, 0.0f}};
+            scene.lights.shadow_area = shadows ? kin::Bounds3D{{-3, -2, -3}, {3, 2, 3}} : kin::Bounds3D{};
+            scene.lights.shadow_resolution = 2048;
+            (void)scene.draw(slab, Mat4f{},
+                             {.color = kin::colors::white,
+                              .roughness = 1.0f,
+                              .subsurface = 1.0f,
+                              .subsurface_radius = {0.02f, 0.01f, 0.005f},
+                              .subsurface_transmission = transmission,
+                              .subsurface_thickness = fallback});
+            const Color c = shoot_view(renderer, r3d, view, scene).at(80, 60);
+            renderer.present();
+            return c;
+        };
+        const Color none = shoot(0.01f, false, true, 0.0f);
+        const Color thin = shoot(0.01f, true, true, 0.0f), thick = shoot(0.05f, true, true, 0.0f);
+        const Color fallback = shoot(0.01f, true, false, 0.01f), unknown = shoot(0.01f, true, false, 0.0f);
+        std::printf(
+            "    transmission: none %d,%d,%d; 1 cm %d,%d,%d; 5 cm %d,%d,%d; no shadow map, 1 cm stated %d,%d,%d, "
+            "none stated %d,%d,%d\n",
+            none.r, none.g, none.b, thin.r, thin.g, thin.b, thick.r, thick.g, thick.b, fallback.r, fallback.g,
+            fallback.b, unknown.r, unknown.g, unknown.b);
+        assert(none.r < 8 && unknown.r < 8);
+        assert(thin.r > 60 && thin.r > thin.b + 10);
+        assert(thick.r + 20 < thin.r && thick.b < thin.b);
+        assert(fallback.r > 60 && fallback.r > fallback.b);
+    });
+}
+
 // Motion blur (CameraEffects3D::motion_blur) over a white block on black, 10 pixels a unit. Off, and on over a still
 // picture, the pictures are the same bytes. A block moving sideways a unit a frame is smeared sideways over about the
 // shutter's share of its motion (its left and right edges become ramps; its top and bottom stay sharp); panning the
@@ -24848,6 +25039,8 @@ int main(int argc, char** argv) {
     RUN(test_gpu_specular_aa());
     RUN(test_gpu_specular_multiscatter());
     RUN(test_gpu_motion_blur());
+    RUN(test_gpu_subsurface());
+    RUN(test_gpu_subsurface_transmission());
     RUN(test_gpu_glow());
     RUN(test_gpu_lens_film_grade());
     RUN(test_gpu_depth_of_field());

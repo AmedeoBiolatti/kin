@@ -14,6 +14,8 @@ How kin's scene becomes Cycles' (the lights as tools/reference/blender_truth.py 
   traces the occlusion);
 - `water` a Principled BSDF with `transmission` of light through (IOR 1.33), casting no shadow (its murk is not
   written), `holdout` a hole (not compared);
+- `subsurface` (Material3D::subsurface) Cycles' Christensen-Burley subsurface of the same profile (its weight the
+  share, its radius from kin's d);
 - `unlit` an emission of its colour, unseen by diffuse rays (kin's unlit surfaces light nothing);
 - the sun and the fill Sun lamps of strength pi * max(c) (the sun's disc as wide as the sky's), point and spot lights
   lamps of power 4 pi^2 * max(c) (a white surface facing one at a metre then shows c, as kin's; kin fades them to
@@ -94,7 +96,7 @@ class Materials:
         key = (o["kind"], page if o["baked"] else None, o["unlit"], o["blend"], o["emission_from_base"],
                None if o["baked"] else (tuple(o["color"]), o["alpha"], o["metallic"], o["roughness"],
                                          tuple(o["emission"])),
-               o.get("transmission"))
+               o.get("transmission"), o.get("subsurface"), tuple(o.get("subsurface_radius", ())))
         if key not in self.cache:
             self.cache[key] = self.make(o, page)
         return self.cache[key]
@@ -196,6 +198,20 @@ class Materials:
         if emission is not None:
             links.new(emission, bsdf.inputs["Emission Color"])
             bsdf.inputs["Emission Strength"].default_value = 1.0
+        if o.get("subsurface", 0) > 0:
+            # kin's subsurface scattering as Cycles' Christensen-Burley (the same profile): the share as the weight;
+            # kin's radius is Burley's d, Cycles' a mean free path it divides by 4 pi and by the diffuse scaling factor
+            # of the albedo (bssrdf_burley_setup: s = 1.9 - A + 3.5 (A - 0.8)^2), so d x 4 pi x s(A) a channel, A
+            # the material's colour (baked: 0.8).
+            bsdf.subsurface_method = "BURLEY"
+            bsdf.inputs["Subsurface Weight"].default_value = o["subsurface"]
+            bsdf.inputs["Subsurface Scale"].default_value = 1.0
+            albedo = o["color"] if not baked else (0.8, 0.8, 0.8)
+            radius = []
+            for d, a in zip(o["subsurface_radius"], albedo):
+                a = min(max(a, 0.0), 1.0)
+                radius.append(d * 4.0 * math.pi * (1.9 - a + 3.5 * (a - 0.8) ** 2))
+            bsdf.inputs["Subsurface Radius"].default_value = radius
         if o["kind"] == "water":
             bsdf.inputs["Transmission Weight"].default_value = o.get("transmission", 1.0)
             bsdf.inputs["IOR"].default_value = 1.33

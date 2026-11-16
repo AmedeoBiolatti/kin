@@ -118,6 +118,10 @@ MaterialPatch3D patch(const JsonValue& value) {
                    "shader_params",
                    "emission_color",
                    "emission_mode",
+                   "subsurface",
+                   "subsurface_radius",
+                   "subsurface_transmission",
+                   "subsurface_thickness",
                    "uv_scale",
                    "uv_offset",
                    "graph",
@@ -206,12 +210,33 @@ MaterialPatch3D patch(const JsonValue& value) {
     NUMBER(normal_scale, 0, 100);
     NUMBER(occlusion_strength, 0, 1);
     NUMBER(alpha_cutoff, 0, 1);
+    NUMBER(subsurface, 0, 1);
+    NUMBER(subsurface_thickness, 0, 1e3);
 #undef NUMBER
+    if (const auto* v = value.find("subsurface_radius")) {
+        if (v->is_string()) {
+            static constexpr std::pair<std::string_view, SubsurfacePreset3D> presets[] = {
+                {"skin", SubsurfacePreset3D::Skin}, {"marble", SubsurfacePreset3D::Marble},
+                {"wax", SubsurfacePreset3D::Wax},   {"jade", SubsurfacePreset3D::Jade},
+                {"milk", SubsurfacePreset3D::Milk}, {"leaf", SubsurfacePreset3D::Leaf}};
+            const auto found = std::find_if(std::begin(presets), std::end(presets),
+                                            [&](const auto& p) { return p.first == v->as_string(); });
+            require(found != std::end(presets),
+                    "subsurface_radius: a preset (skin, marble, wax, jade, milk, leaf) or three numbers");
+            result.subsurface_radius = subsurface_radius3d(found->second);
+        } else {
+            require(v->is_array() && v->items().size() == 3, "subsurface_radius requires three numbers (world units)");
+            result.subsurface_radius = {number(v->items()[0], 0, 1e3, "subsurface_radius"),
+                                        number(v->items()[1], 0, 1e3, "subsurface_radius"),
+                                        number(v->items()[2], 0, 1e3, "subsurface_radius")};
+        }
+    }
 #define BOOLEAN(name)                                                                                                  \
     if (const auto* v = value.find(#name)) {                                                                           \
         require(v->is_bool(), "expected bool '" #name "'");                                                            \
         result.name = v->as_bool();                                                                                    \
     }
+    BOOLEAN(subsurface_transmission);
     BOOLEAN(unlit);
     BOOLEAN(double_sided);
     BOOLEAN(casts_shadow);
@@ -285,6 +310,10 @@ void merge(MaterialPatch3D& to, const MaterialPatch3D& from) {
     FIELD(emissive);
     FIELD(emission_color);
     FIELD(emission_mode);
+    FIELD(subsurface);
+    FIELD(subsurface_radius);
+    FIELD(subsurface_transmission);
+    FIELD(subsurface_thickness);
     FIELD(normal_scale);
     FIELD(occlusion_strength);
     FIELD(alpha_cutoff);
@@ -436,6 +465,19 @@ void write_patch(JsonWriter& json, const MaterialPatch3D& p) {
             .value(tidy(p.emission_color->g))
             .value(tidy(p.emission_color->b))
             .end_array();
+    if (p.subsurface)
+        json.field("subsurface", tidy(*p.subsurface));
+    if (p.subsurface_radius)
+        json.key("subsurface_radius")
+            .begin_array()
+            .value(tidy(p.subsurface_radius->r))
+            .value(tidy(p.subsurface_radius->g))
+            .value(tidy(p.subsurface_radius->b))
+            .end_array();
+    if (p.subsurface_transmission)
+        json.field("subsurface_transmission", *p.subsurface_transmission);
+    if (p.subsurface_thickness)
+        json.field("subsurface_thickness", tidy(*p.subsurface_thickness));
     if (p.graph)
         p.graph->empty() ? json.key("graph").value_null() : json.field("graph", p.graph->generic_string());
     if (!p.params.empty()) {
@@ -620,6 +662,10 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         FIELD(emissive);
         FIELD(emission_color);
         FIELD(emission_mode);
+        FIELD(subsurface);
+        FIELD(subsurface_radius);
+        FIELD(subsurface_transmission);
+        FIELD(subsurface_thickness);
         FIELD(normal_scale);
         FIELD(occlusion_strength);
         FIELD(alpha_cutoff);

@@ -36,6 +36,22 @@ void cpu() {
     assert(roundtrip.emission_mode == m.emission_mode && roundtrip.emission_color == m.emission_color &&
            roundtrip.emissive == m.emissive && roundtrip.texture->sampler == m.texture->sampler &&
            !roundtrip.normal->reset_sampler && roundtrip.occlusion->reset_sampler && !roundtrip.occlusion->sampler);
+    // Subsurface scattering in a material file: a preset's radius or three numbers, round trip, bad values refused.
+    const auto skin = parse_materials3d_asset(R"({"schema":"kin.materials3d/1","material":{"subsurface":0.8,
+        "subsurface_radius":"skin","subsurface_transmission":true,"subsurface_thickness":0.01}})");
+    assert(skin && skin->base.material.subsurface == 0.8f &&
+           skin->base.material.subsurface_radius == subsurface_radius3d(SubsurfacePreset3D::Skin) &&
+           skin->base.material.subsurface_transmission == true && skin->base.material.subsurface_thickness == 0.01f);
+    const auto skin_again = parse_materials3d_asset(write_materials3d_asset(*skin));
+    assert(skin_again && skin_again->base.material.subsurface == skin->base.material.subsurface &&
+           skin_again->base.material.subsurface_radius == skin->base.material.subsurface_radius &&
+           skin_again->base.material.subsurface_transmission == true);
+    const auto wax = parse_materials3d_asset(
+        R"({"schema":"kin.materials3d/1","material":{"subsurface":1,"subsurface_radius":[0.01,0.006,0.003]}})");
+    assert(wax && wax->base.material.subsurface_radius == (LinearRgb{0.01f, 0.006f, 0.003f}));
+    for (const auto* bad :
+         {R"({"subsurface":2})", R"({"subsurface_radius":"chalk"})", R"({"subsurface_radius":[1,2]})"})
+        assert(!parse_materials3d_asset(std::string("{\"schema\":\"kin.materials3d/1\",\"material\":") + bad + "}"));
     const auto legacy = parse_materials3d_asset(R"({"schema":"kin.materials3d/1","material":{"emissive":2}})");
     assert(legacy && legacy->base.material.emission_mode == EmissionMode3D::BaseRelative);
     for (const auto* bad : {R"({"emission_color":[1,0]})", R"({"emission_color":[-1,0,0]})",
@@ -484,6 +500,31 @@ void check_gpu(Renderer2D& renderer) {
     }
     const auto unlit_model = r3d.load_model(path);
     assert(unlit_model && unlit_model->parts[0].material.unlit && unlit_model->parts[0].material.emissive == 0);
+    // Diffuse transmission through a volume as kin's subsurface scattering: the factor the share, the thickness, the
+    // radius distance / -ln(colour) / 3.5 a channel; without a volume, none.
+    const auto load = [&](const char* material) {
+        root["materials"] = *parse_json(material).value;
+        root["extensionsUsed"] = *parse_json(R"(["KHR_materials_diffuse_transmission", "KHR_materials_volume"])").value;
+        const auto file = scratch.path / "subsurface.gltf";
+        {
+            std::ofstream stream(file);
+            JsonWriter json{stream};
+            write_json(json, JsonValue{root});
+        }
+        auto model = r3d.load_model(file);
+        assert(model);
+        return model->parts[0].material;
+    };
+    const Material3D wax = load(R"([{"extensions":{"KHR_materials_diffuse_transmission":{
+        "diffuseTransmissionFactor":0.75},"KHR_materials_volume":{"thicknessFactor":0.02,"attenuationDistance":0.01,
+        "attenuationColor":[0.5,0.25,0.125]}}}])");
+    const auto near = [](f32 a, f32 b) { return std::abs(a - b) < 1e-6f; };
+    assert(near(wax.subsurface, 0.75f) && wax.subsurface_transmission && near(wax.subsurface_thickness, 0.02f));
+    assert(near(wax.subsurface_radius.r, 0.01f / std::log(2.0f) / 3.5f) &&
+           near(wax.subsurface_radius.b, 0.01f / std::log(8.0f) / 3.5f));
+    const Material3D thin =
+        load(R"([{"extensions":{"KHR_materials_diffuse_transmission":{"diffuseTransmissionFactor":0.75}}}])");
+    assert(thin.subsurface == 0.0f && !thin.subsurface_transmission);
 #endif
 }
 } // namespace

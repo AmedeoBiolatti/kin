@@ -35,6 +35,11 @@ struct MaterialPatch3D {
     std::optional<Blend3D> blend;
     std::optional<Wrap3D> wrap_u, wrap_v;
     std::optional<LinearRgb> emission_color;
+    // Subsurface scattering (Material3D::subsurface*): the radius as three numbers (world units) or a preset's name
+    // ("skin", "marble", "wax", "jade", "milk", "leaf").
+    std::optional<f32> subsurface, subsurface_thickness;
+    std::optional<LinearRgb> subsurface_radius;
+    std::optional<bool> subsurface_transmission;
     std::optional<Vec2f> uv_scale, uv_offset; // Material3D's: every map's tiling
     std::optional<EmissionMode3D> emission_mode;
     std::optional<MaterialTexture3D> texture, metallic_roughness, normal, occlusion, emissive_texture;

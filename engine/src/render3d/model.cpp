@@ -4,6 +4,7 @@
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
+#include <kin/core/json_value.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/model3d.hpp>
@@ -1286,6 +1287,39 @@ public:
     }
 
 private:
+    // KHR_materials_diffuse_transmission through a KHR_materials_volume (thickness above 0: a medium light goes
+    // through diffusely; skin, wax, a thick leaf) as kin's subsurface scattering (Material3D::subsurface): its diffuse
+    // transmission factor the share, light through thin parts on, the volume's thickness factor the thickness where no
+    // shadow map says, and the radius Burley's d for the mean free path the volume's attenuation says, distance /
+    // -ln(colour) a channel, over 3.5 (as subsurface_radius3d's presets; kin's skin radius without attenuation). A thin
+    // one (no volume) is not shown. (Not on blended or unlit materials, which do not scatter.) The diffuse transmission
+    // extension is read from its JSON (cgltf keeps it so).
+    static void gltf_subsurface(const cgltf_material& m, Material3D& out) {
+        if (!m.has_volume || m.volume.thickness_factor <= 0.0f || out.unlit || out.blend == Blend3D::Alpha ||
+            out.blend == Blend3D::Additive)
+            return;
+        f32 factor = 0.0f;
+        for (cgltf_size i = 0; i < m.extensions_count; ++i)
+            if (m.extensions[i].name && m.extensions[i].data &&
+                std::strcmp(m.extensions[i].name, "KHR_materials_diffuse_transmission") == 0)
+                if (const auto parsed = parse_json(m.extensions[i].data); parsed.ok())
+                    factor = static_cast<f32>(parsed.value->number_at("diffuseTransmissionFactor", 0.0));
+        if (factor <= 0.0f)
+            return;
+        out.subsurface = std::min(factor, 1.0f);
+        out.subsurface_transmission = true;
+        out.subsurface_thickness = m.volume.thickness_factor;
+        const f32 distance = m.volume.attenuation_distance;
+        if (distance > 0.0f && distance < 1e30f) {
+            const auto path = [&](f32 colour) {
+                const f32 absorbed = -std::log(std::clamp(colour, 1e-4f, 0.9999f));
+                return std::min(distance / absorbed, 100.0f * distance) / 3.5f;
+            };
+            out.subsurface_radius = {path(m.volume.attenuation_color[0]), path(m.volume.attenuation_color[1]),
+                                     path(m.volume.attenuation_color[2])};
+        }
+    }
+
     Material3D material(const cgltf_material* m) {
         Material3D out;
         out.wrap_u = out.wrap_v = Wrap3D::Repeat;
@@ -1316,6 +1350,7 @@ private:
                     : m->alpha_mode == cgltf_alpha_mode_mask ? Blend3D::Mask
                                                              : Blend3D::Opaque;
         out.alpha_cutoff = m->alpha_cutoff;
+        gltf_subsurface(*m, out);
         const auto sampler = [](const cgltf_texture* texture) -> std::optional<TextureSampler3D> {
             if (!texture)
                 return {};

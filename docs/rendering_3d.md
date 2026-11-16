@@ -1886,7 +1886,9 @@ diffuse; 0.5: the light's first two spherical harmonic bands, 1/4 + n.l / 2, lig
 Unreal's directional volume lighting of translucency; 1: the first alone, 1/4 from every side, the ambient light the mean
 of both sides'), and `reflection` (0 as kin's material makes it: rgb a reflection of its own in linear light, a how much
 of the surface's reflection it is, in place of the environment's or the probes': a mirror's picture, Mirrors and
-portals). After the function, kin lights it
+portals), and `subsurface` and `subsurface_thickness` (the material's `subsurface` and `subsurface_thickness`: the
+share of the diffuse light that scatters under the surface, a mask, and the thickness light goes through where no
+shadow map says; Subsurface scattering). After the function, kin lights it
 (`kin_lit_surface(s)`; `kin_lit(base, n, metallic, roughness, occlusion)` for a surface without either) and adds the emission, or, for an `unlit` material, shows its colour plus
 its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
 (`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,
@@ -1941,8 +1943,9 @@ shadowed, fogged and GI-lit as kin's own materials are.
   of the surface before the graph (`base_color`, `alpha`, `normal`, `metallic`, `roughness`, `occlusion`,
   `emission`). A value is a number or an array of 2 to 4. Types are float, vec2, vec3, vec4: a float widens to any
   vector; a vector narrows to its first components, or widens with 0 (and 1 for the fourth), as Unreal's do.
-- **Outputs** (`base_color`, `alpha`, `normal` in world space, `metallic`, `roughness`, `occlusion`, `emission`)
-  replace the surface's; those not given keep what the material makes. Roughness is kept within [0.045, 1], the
+- **Outputs** (`base_color`, `alpha`, `normal` in world space, `metallic`, `roughness`, `occlusion`, `emission`,
+  and the other `KinSurface` fields: `backlight`, `clearcoat`, `clearcoat_roughness`, `specular`, `diffuse_wrap`,
+  `subsurface`, `subsurface_thickness`) replace the surface's; those not given keep what the material makes. Roughness is kept within [0.045, 1], the
   normal unit, colours non-negative. `offset` (Unreal's World Position Offset) moves each vertex in the world, in
   metres: compiled again for the surface's vertex variants (`SurfaceVariant3D::VertexMesh` ...: mesh.vert,
   mesh_velocity.vert, mesh_indexed.vert, the pre-passes' and the shadows', each with `kin_surface_vertex.inc.glsl`
@@ -3241,6 +3244,82 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
   screen is the probes'). A normal map's detail is followed with the face's hit distance: close for bumps, off for steep
   ones (which fade to the probes). The stock lit shaders, material graphs and surfaces (the light variants: a scene
   with them draws with those); custom material shaders and WebGL2 have none.
+
+## Subsurface scattering
+
+Light that enters a translucent material spreads under its surface before it leaves: skin, wax, marble, jade and
+milk shade softly, light bleeds past a shadow's edge (red farthest in skin), and thin parts glow when lit from
+behind.
+
+```cpp
+kin::Material3D skin{.color = ..., .roughness = 0.5f};
+skin.subsurface = 1.0f;                                                        // the share of the diffuse light that spreads
+skin.subsurface_radius = kin::subsurface_radius3d(kin::SubsurfacePreset3D::Skin); // how far red, green, blue spread (m)
+skin.subsurface_transmission = true;                                           // light through thick parts (an ear)
+skin.subsurface_thickness = 0.0f;                                              // where no shadow map says (0: none)
+```
+
+Material files: `"subsurface": 1, "subsurface_radius": "skin"` (or `[0.00106, 0.0004, 0.0002]`),
+`"subsurface_transmission": true`, `"subsurface_thickness": 0.01`. The radius is Burley's `d` a channel (his profile
+`(e^(-r/d) + e^(-r/3d)) / (8 pi d r)`; HDRP's scattering distance), in world units. The presets (`SubsurfacePreset3D`:
+skin, marble, wax, jade, milk, leaf) are Jensen et al.'s measured diffuse mean free paths over 3.5 (Burley's
+search-light scaling at middling albedos), in metres: a millimetre for skin's red (HDRP's default skin: 0.76, 0.32,
+0.2 mm), so the spread shows up close (a face filling the view), not across a room.
+
+- **How.** Disc-sampled Burley, as Unity HDRP's and Unreal 5's: the scattering materials' share of their diffuse
+  light, spread by Burley's normalised diffusion profile. Kin shades forward, so: the depth pre-pass runs; a
+  **subsurface pass** draws the scattering materials again, with the main pass's own pipelines, into a float target
+  over the pre-pass's depth, writing only that share (the fog's dimming applied; no reflections or emission) and its
+  profile's number; a compute pass spreads it (16 samples a pixel under temporal anti-aliasing, turned each frame; 32
+  without; fewer where the spread covers only a pixel or two), each counting per channel by the profile at the
+  sample's distance `sqrt(r^2 + dz^2)` over the density it was drawn with, samples of another profile or off the
+  material counting nothing, normalised per channel (the light is kept, only moved). The main pass draws those
+  materials without that share and adds the spread light back after its opaque meshes, before the sky, the fog's
+  light, the overlay and blended meshes, which cover or dim it as the rest. A frame's distinct radii make up to 16
+  profiles. `debug_stats()`: `subsurface_draws`, `subsurface_dispatches`, `subsurface_profiles`,
+  `subsurface_combined`. Frame graph pass `subsurface`, before `main`.
+- **Through thick parts.** With `subsurface_transmission` the sun, spots and point lights on the far side reach the
+  near side through the material: its thickness there is searched along the light (a few comparisons of the light's
+  shadow map: where the surface facing the light is), else `subsurface_thickness`; Burley's transmittance
+  `0.25 (e^(-t/d) + 3 e^(-t/3d))` per channel (thin: almost white; thick: only red gets through). It spreads with the
+  scattered share.
+- **Surface shaders and material graphs.** A surface shader's `KinSurface` has `subsurface` (the share, a pixel: a
+  mask; the material's `subsurface` as kin's material makes it) and `subsurface_thickness` (the material's): a material
+  graph's outputs of those names. The radius stays the material's (one profile a material, as HDRP's and Unreal's). A
+  graph writing `subsurface` (not a constant 0: `SurfaceTraits3D::subsurface`) scatters with the material's own
+  `subsurface` at 0. Where the share is 0 the pixel is not the material (a mask's hole: nothing spreads into it).
+  Surface shaders compiled or cooked before this (their material block without the fields; seen by its size) are
+  drawn without the spread.
+- **Imported.** Unreal's Subsurface Profile shading model: the profile's radius (Burley's `d` as Unreal's shaders take
+  it: mean free path x world unit scale / (0.6 x the perpendicular scaling factor of the surface albedo), cm to m),
+  transmission on, Opacity the share (the graph's `subsurface`; `unreal_export.py` writes the profile's settings);
+  no profile: kin's skin, noted. Unity HDRP's Lit of Material Type Subsurface Scattering (Translucent too, noted): the
+  diffusion profile (found by the GUID `_DiffusionProfileAsset` keeps) gives the radius (scattering distance x
+  multiplier, millimetres, over its world scale) and the thickness (`_Thickness` remapped, millimetres), `_SubsurfaceMask`
+  the share, `_TransmissionEnable`; a Shader Graph's Subsurface Mask and Thickness blocks are the graph's outputs.
+  Godot's `subsurf_scatter_*`: its blur's width (strength x the project's `subsurface_scattering_scale`) as the widest
+  radius, skin's colours in skin mode, transmittance as transmission (approximate, noted); a visual shader's
+  Subsurface Scattering output as the graph's `subsurface`. glTF: `KHR_materials_diffuse_transmission` through a
+  `KHR_materials_volume` (thickness above 0): its factor the share, the volume's thickness, the radius from the mean
+  free path its attenuation says (`distance / -ln(colour)` a channel, over 3.5 as the presets); a thin one (no volume)
+  is not shown.
+- **Checked against Cycles.** `tests/reference/scenes/subsurface.json` (run with `--subsurface PRESET
+  [--subsurface-scale S]` and `--snapshot`; its snapshots carry the share and radius to Cycles' Christensen-Burley
+  subsurface, the same profile) and `tools/cycles/subsurface.py`, which fits Burley's spread across the slab's shadow
+  edge in each renderer's picture against its own unscattered one: at skin x 1.5 (d 6.9, 2.6, 1.3 px) kin 6.75, 2.25,
+  1.0 px and Cycles 7.75, 2.5, 1.25 px. On the scene's 10 cm ball green and blue are within a few levels of Cycles'
+  across the terminator; red a little darker past it (Cycles' red also spreads wider than asked on the flat edge).
+- **Where it runs.** kin's stock lit material or a surface shader, opaque or cut out (not a custom shader, not
+  blended), not in merged multi-material draws (a scattering material keeps its own), in a view with a float picture
+  (HDR, or temporal anti-aliasing); elsewhere, and on WebGL2, drawn without the spread. The overlay (first-person hands) is not scattered.
+  MSAA views: the spread light is added to every sample of a pixel.
+- **Cost.** A second draw of the scattering materials, the depth pre-pass (if nothing else asked for it), and the
+  spread over their pixels. In the `spheres` scene at 1080p with temporal anti-aliasing and every surface scattering
+  (the worst case: skin x 15, a red d of 1.6 cm), on an RTX 4080 Laptop GPU: about 0.37 ms without, 0.75 ms with
+  (+0.4 ms); transmission adds no more than the run-to-run noise. A scene where only characters scatter pays for their pixels.
+- **Limits.** Only what is on screen scatters into what is on screen. A sample reaches at most a fifth of the
+  picture's height: a spread wider than about a thirtieth of it (its d) loses some of its far tail. One profile a material (a surface shader can
+  mask the share and vary the thickness a pixel, not the radius). The same profile on two touching things (a sphere on a floor) bleeds a little across where they meet.
 
 ## Camera effects
 
@@ -4677,8 +4756,7 @@ as the studio. Every field kin has is written, so the file replaces a model's im
   (`Material3D::uv_scale`, `uv_offset`), and the texture filter and repeat as every map's sampler.
 
 Maps inside the content root are referenced where they are; others are copied into `<out>/textures`, beside the
-maps made. What kin does not show as Godot does is printed as a note for each material (backlight, subsurface
-scattering, proximity and distance fade, refraction, detail maps, front-face culling,
+maps made. What kin does not show as Godot does is printed as a note for each material (backlight, proximity and distance fade, refraction, detail maps, front-face culling,
 subtract and multiply blending, ...), not dropped silently. Maps a material needs repacked but kin cannot decode (DDS,
 KTX) are left out with their factor kept, and said. Every file written is read back through
 `parse_materials3d_asset` first.

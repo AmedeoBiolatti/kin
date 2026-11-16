@@ -56,6 +56,8 @@ struct Surface {
     float coat_alpha; // the coat's roughness squared
     float dielectric; // what a dielectric reflects head on (0.04: KinSurface::specular 0.5)
     float wrap;       // how far the diffuse light wraps round (KinSurface::diffuse_wrap); 0: Lambert's
+    vec2 keep;        // the share of the diffuse light this pass writes (x) and of the rest (y): reflections, the clear
+                      // coat, a thin surface's light through; (1, 1) but in subsurface scattering's split
 };
 
 // The diffuse light's share at `n_l` (the cosine to the light), wrapped by `wrap`: Lambert's at 0; at 0.5 the light's
@@ -78,9 +80,9 @@ vec3 transmitted(Surface s, vec3 l, float n_l) {
 
 vec3 shade(Surface s, vec3 l, vec3 radiance) {
     float n_l = dot(s.n, l);
-    vec3 through = transmitted(s, l, n_l) * radiance;
+    vec3 through = transmitted(s, l, n_l) * radiance * s.keep.y;
     if (s.wrap > 0.0) {
-        through += s.diffuse * (wrapped_diffuse(n_l, s.wrap) * (1.0 - s.dielectric)) * radiance;
+        through += s.diffuse * (wrapped_diffuse(n_l, s.wrap) * (1.0 - s.dielectric)) * radiance * s.keep.x;
     }
     if (n_l <= 0.0) {
         return through;
@@ -94,12 +96,15 @@ vec3 shade(Surface s, vec3 l, vec3 radiance) {
     // `diffuse`; between, glTF mixes the two materials).
     vec3 specular = s.boost * f * (distribution(n_h, s.alpha) * visibility(n_l, max(s.n_v, 1e-4), s.alpha) * PI);
     // (A wrapped diffuse is in `through`, weighed by the reflectance head on: Lambert's here.)
-    vec3 lit = (s.wrap > 0.0 ? vec3(0.0) : s.diffuse * (1.0 - fresnel(vec3(s.dielectric), v_h))) + specular;
+    vec3 lit = (s.wrap > 0.0 ? vec3(0.0) : s.diffuse * (1.0 - fresnel(vec3(s.dielectric), v_h)) * s.keep.x) +
+               specular * s.keep.y;
     if (s.coat > 0.0) {
         // A clear coat (a dielectric of IOR 1.5, glTF's KHR_materials_clearcoat): its own highlight, and what it
         // reflects the layer below does not get.
         float fc = s.coat * fresnel(vec3(0.04), v_h).x;
-        lit = lit * (1.0 - fc) + vec3(fc * distribution(n_h, s.coat_alpha) * visibility(n_l, max(s.n_v, 1e-4), s.coat_alpha) * PI);
+        lit = lit * (1.0 - fc) +
+              vec3(fc * distribution(n_h, s.coat_alpha) * visibility(n_l, max(s.n_v, 1e-4), s.coat_alpha) * PI) *
+                  s.keep.y;
     }
     return lit * radiance * n_l + through;
 }
