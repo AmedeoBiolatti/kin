@@ -3,6 +3,7 @@
 #include <cmath>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/scene3d.hpp>
+#include <kin/renderer/color_grading.hpp>
 
 namespace kin {
 
@@ -456,6 +457,62 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
             mirror->normal = std::move(normal);
             mirror->bound_normal = path;
             entity.modified<Mirror3D>();
+        }
+    }
+    // The camera effects' pictures (SceneEnvironment3D's grade_lut, grade_lut_to, glow_dirt): loaded when their path
+    // changes; a failed load keeps the previous picture; an emptied path clears what a path had set.
+    {
+        std::vector<EcsEntity> environments;
+        if (selected.empty())
+            world.each([&](flecs::entity entity, const SceneEnvironment3D&) { environments.emplace_back(entity); });
+        else
+            for (auto id : selected)
+                if (auto e = world.entity_by_id(id); e && e.has<SceneEnvironment3D>())
+                    environments.push_back(e);
+        std::sort(environments.begin(), environments.end(), [](auto a, auto b) { return a.id() < b.id(); });
+        for (auto entity : environments) {
+            const SceneEnvironment3D& was = *entity.get<SceneEnvironment3D>();
+            if (was.grade_lut.id == was.bound_grade_lut && was.grade_lut_to.id == was.bound_grade_lut_to &&
+                was.glow_dirt.id == was.bound_glow_dirt)
+                continue;
+            SceneEnvironment3D settings = was;
+            const auto fail = [&](const char* field, const std::string& path, const std::string& why) {
+                diagnostics.push_back("entity '" + entity.name() + "' (" + std::to_string(entity.id()) +
+                                      "), SceneEnvironment3D " + field + " '" + path + "': " + why);
+            };
+            const auto look = [&](const ComponentAssetRef& ref, std::string& bound,
+                                  std::shared_ptr<const ColorLut>& lut, const char* field) {
+                if (ref.id == bound)
+                    return;
+                if (ref.id.empty()) {
+                    lut.reset();
+                    bound.clear();
+                    return;
+                }
+                std::string error;
+                if (auto loaded = ColorLut::load(assets.root() / ref.id, &error)) {
+                    lut = std::make_shared<const ColorLut>(std::move(*loaded));
+                    bound = ref.id;
+                } else {
+                    fail(field, ref.id,
+                         error.empty() ? std::string("not a colour look (.cube, or a LUT image)") : error);
+                }
+            };
+            look(settings.grade_lut, settings.bound_grade_lut, settings.camera_effects.grade.lut, "grade_lut");
+            look(settings.grade_lut_to, settings.bound_grade_lut_to, settings.camera_effects.grade.lut_to,
+                 "grade_lut_to");
+            if (settings.glow_dirt.id != settings.bound_glow_dirt) {
+                if (settings.glow_dirt.id.empty()) {
+                    settings.camera_effects.glow.dirt = {};
+                    settings.bound_glow_dirt.clear();
+                } else if (Texture dirt = assets.load_texture(settings.glow_dirt.id, false, true).value_or({})) {
+                    settings.camera_effects.glow.dirt = std::move(dirt);
+                    settings.bound_glow_dirt = settings.glow_dirt.id;
+                } else {
+                    fail("glow_dirt", settings.glow_dirt.id, diagnostics3d_text(assets.diagnostics()));
+                }
+            }
+            entity.raw().set<SceneEnvironment3D>(std::move(settings));
         }
     }
     auto material_errors = resolve_materials3d_assets(world, assets, selected).diagnostics;

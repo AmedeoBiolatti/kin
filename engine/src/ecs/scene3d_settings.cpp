@@ -69,6 +69,12 @@ void register_scene3d_settings(EcsWorld& world) {
     if (!registry.find("SceneEnvironment3D")) {
         auto builder = registry.native<SceneEnvironment3D>("SceneEnvironment3D");
         builder.field("enabled", &SceneEnvironment3D::enabled).field("priority", &SceneEnvironment3D::priority);
+        builder.field("grade_lut", &SceneEnvironment3D::grade_lut)
+            .description("A look for the grade (a .cube or a LUT image), by content path.");
+        builder.field("grade_lut_to", &SceneEnvironment3D::grade_lut_to)
+            .description("A second look the grade cross-fades to by grade_lut_mix.");
+        builder.field("glow_dirt", &SceneEnvironment3D::glow_dirt)
+            .description("A picture of lens dirt the glow lights, by content path.");
         // These properties use exactly the same field codec/overrides as direct
         // members. Keep the authored names flat for ordinary inspector rows.
 #define SETTING(name, member)                                                                                          \
@@ -203,6 +209,8 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("dof_autofocus", camera_effects.depth_of_field.autofocus);
         SETTING("dof_focus_point", camera_effects.depth_of_field.focus_point);
         SETTING("dof_focus_time", camera_effects.depth_of_field.focus_time);
+        SETTING("dof_blades", camera_effects.depth_of_field.blades);
+        SETTING("dof_blade_rotation", camera_effects.depth_of_field.blade_rotation);
         SETTING("motion_blur", camera_effects.motion_blur.enabled);
         SETTING("lens_vignette", camera_effects.lens.vignette);
         SETTING("lens_vignette_smoothness", camera_effects.lens.vignette_smoothness);
@@ -465,7 +473,8 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  dof.aperture <= 64 && dof.sensor_height >= 1 && dof.sensor_height <= 100 && dof.max_blur >= 0 &&
                  dof.max_blur <= .05f && dof.quality <= 2 && dof.focus_point.x >= 0 && dof.focus_point.x <= 1 &&
                  dof.focus_point.y >= 0 && dof.focus_point.y <= 1 && dof.focus_time >= 0 &&
-                 std::isfinite(dof.focus_time);
+                 std::isfinite(dof.focus_time) && (dof.blades == 0 || (dof.blades >= 3 && dof.blades <= 12)) &&
+                 std::isfinite(dof.blade_rotation);
         if (!valid)
             errors.push_back("SceneEnvironment3D entity '" + entity.name() + "': invalid environment/view settings");
         else {

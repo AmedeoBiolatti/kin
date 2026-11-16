@@ -11,23 +11,24 @@ releases may change APIs.
 
 - 3D glow and lens flares ([3D rendering](rendering_3d.md#glow-and-lens-flares)): `Scene3D::camera_effects.glow`
   makes the view's bloom wide (an energy-conserving mip chain, as Unreal's and Unity's) and adds lens dirt, ghosts, a
-  halo and anamorphic streaks; authored as `SceneEnvironment3D`'s `glow_*` (the dirt picture from code). With every
+  halo and anamorphic streaks; authored as `SceneEnvironment3D`'s `glow_*` (the dirt picture as `glow_dirt`, by path). With every
   value at its default the bloom is unchanged. Native renderer only.
 - 3D lens, film and grade ([3D rendering](rendering_3d.md#lens-film-and-grade)): `Scene3D::camera_effects` gains a
   vignette, chromatic aberration, film grain, a choice of tone curve (ACES, AgX, Khronos PBR Neutral), white balance,
   contrast, saturation and a LUT look cross-faded between two, in the view's output pass; authored as
-  `SceneEnvironment3D`'s `lens_*`, `film_*` and `grade_*` (LUTs from code). With them all at their defaults the
+  `SceneEnvironment3D`'s `lens_*`, `film_*` and `grade_*` (LUTs as `grade_lut`, `grade_lut_to`, by path). With them all at their defaults the
   output is unchanged, byte for byte. Native renderer only.
 - 3D depth of field ([3D rendering](rendering_3d.md#depth-of-field)): `Scene3D::camera_effects.depth_of_field`, a
   physical lens (focus distance, f-number, sensor height with the camera's fov) with round bokeh, the near blur
-  spreading over what is in focus, and GPU autofocus on a point of the view; `kin::depth_of_field_radius` gives the
+  spreading over what is in focus, aperture blades for polygonal bokeh, and GPU autofocus on a point of the view
+  (checked against Cycles' thin lens: the same blur to half a pixel, `tools/cycles/defocus.py`); `kin::depth_of_field_radius` gives the
   blur at a distance. Authored as `SceneEnvironment3D`'s `depth_of_field` and `dof_*`. Runs in HDR or temporally
   anti-aliased views (without TAA it turns the depth pre-pass on); native renderer only. The stock 3D frame graph
   gains a `depth_of_field` pass.
 - 3D motion blur ([3D rendering](rendering_3d.md#motion-blur)): `Scene3D::camera_effects.motion_blur` smears what
   moves across the picture, the camera's motion and each object's, after the temporal resolve and before bloom
   (shutter angle, longest smear, samples, how much of the camera's own motion, a frame-rate-independent mode); authored
-  as `SceneEnvironment3D`'s `motion_blur*`. Needs temporal anti-aliasing; native renderer only (WebGL2 says once it is
+  as `SceneEnvironment3D`'s `motion_blur*`. Reads TAA's velocity (without TAA it runs TAA's passes with no jitter or history, one sample); native renderer only (WebGL2 says once it is
   off). Mirrors, portals and reflection captures render without it. The stock 3D frame graph gains a `motion_blur`
   pass (`frame_graph_passes3d` is 15 with depth of field's).
 - Experimental native temporal upscaling ([3D rendering](rendering_3d.md#temporal-upscaling)):

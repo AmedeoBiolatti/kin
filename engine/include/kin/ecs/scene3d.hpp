@@ -27,9 +27,16 @@ struct SceneEnvironment3D {
     TemporalAA3D taa;
     ScreenSpaceReflections3D ssr;   // Scene3D::ssr
     CameraEffects3D camera_effects; // Scene3D::camera_effects
-    u32 anisotropy = 1;             // Scene3D::anisotropy (1 to 16)
-    f32 texture_lod_bias = 0.0f;    // Scene3D::texture_lod_bias (-2 to 2)
-    f32 specular_aa = 0.0f;         // Scene3D::specular_aa (0 to 1)
+    // The camera effects' pictures by content path, loaded into camera_effects by resolve_render3d_assets: the looks
+    // (Grade3D::lut, lut_to: a .cube or a LUT image) and the lens dirt (Glow3D::dirt, an sRGB image). Empty: whatever
+    // code set there stays. The bound_* are what they were loaded from (not authored).
+    ComponentAssetRef grade_lut;
+    ComponentAssetRef grade_lut_to;
+    ComponentAssetRef glow_dirt;
+    std::string bound_grade_lut, bound_grade_lut_to, bound_glow_dirt;
+    u32 anisotropy = 1;          // Scene3D::anisotropy (1 to 16)
+    f32 texture_lod_bias = 0.0f; // Scene3D::texture_lod_bias (-2 to 2)
+    f32 specular_aa = 0.0f;      // Scene3D::specular_aa (0 to 1)
     Lod3D lod;
     GlobalIllumination3D global_illumination; // Scene3D::global_illumination
     // The picture (samples, background, hdr, exposure, bloom). `pick` is not

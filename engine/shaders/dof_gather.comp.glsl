@@ -13,11 +13,24 @@ layout(set = 0, binding = 2) uniform sampler2D uSpread;   // dof_spread's
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uBlurred;
 layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D uReach; // x: radius that reached it, y: distance
 layout(set = 2, binding = 0) uniform Params {
-    vec4 shape; // x: the spiral's step (half texels; smaller: more samples), y: the widest radius (full pixels)
+    vec4 shape; // x: the spiral's step (half texels; smaller: more samples), y: the widest radius (full pixels),
+                // z: the aperture's blades (0: round), w: their turn (radians)
 }
 params;
 
 const float golden_angle = 2.39996323;
+const float pi = 3.14159265;
+
+// How far a polygonal opening of `blades` sides (inscribed in a circle of 1) reaches along `angle`: 1 at its corners,
+// cos(pi / blades) across its sides; 1 everywhere for a round one.
+float aperture(float angle) {
+    if (params.shape.z < 2.5) {
+        return 1.0;
+    }
+    const float side = 2.0 * pi / params.shape.z;
+    const float within = mod(angle - params.shape.w, side) - 0.5 * side;
+    return cos(0.5 * side) / cos(within);
+}
 
 void main() {
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
@@ -51,7 +64,8 @@ void main() {
         if (sample_blur.y > own.y) {
             size = min(size, own_size * 2.0);
         }
-        const float m = smoothstep(radius - 0.5, radius + 0.5, size);
+        // The sample's own disc reaches back to this texel along the opposite way (a polygon is not symmetric).
+        const float m = smoothstep(radius - 0.5, radius + 0.5, size * aperture(angle + pi));
         colour += mix(colour / total, sample_colour, m);
         total += 1.0;
         if (sample_blur.y < own.y) {

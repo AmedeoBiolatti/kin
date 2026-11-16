@@ -3256,7 +3256,7 @@ lists what comes later (aperture blades, motion blur without TAA, WebGL2).
 strength and threshold, so the view needs bloom) and adds what bright light draws on a lens:
 
 ```cpp
-auto& glow = scene.camera_effects.glow; // authored: SceneEnvironment3D's "glow_*" (the dirt picture from code)
+auto& glow = scene.camera_effects.glow; // authored: SceneEnvironment3D's "glow_*" (the picture: "glow_dirt")
 glow.wide = true;             // a chain of ever smaller blurs: a wide, soft glow
 glow.radius = 0.7f;           // how much each wider size weighs (0 to 1): more is wider
 glow.dirt = dirt_texture;     // dust and smudges over the view, lit where bright light is near
@@ -3280,8 +3280,9 @@ glow.streak_length = 0.3f;    // of the view's width each way (0 to 1), in glow.
 - **Off, unchanged.** With every value at its default (and no dirt) the glow is kin's own, the same passes and bytes.
 - **Cost.** At 1920 x 1080 (RTX 4080 Laptop, `rain_street`): about 0.04 to 0.06 ms for the wide glow over kin's own,
   0.08 to 0.1 ms with ghosts, halo and streaks too.
-- **Limits.** The ghosts and halo come from what is on screen (a light just off the edge makes none). The dirt
-  picture cannot be named in scene files yet.
+- **The dirt picture.** A scene file names it by content path, `SceneEnvironment3D`'s `glow_dirt` (an sRGB image),
+  loaded when the path changes; code may set `glow.dirt` itself instead.
+- **Limits.** The ghosts and halo come from what is on screen (a light just off the edge makes none).
 
 ### Lens, film and grade
 
@@ -3317,8 +3318,9 @@ fx.grade.lut = assets2d.color_lut("looks/teal.cube"); // a look (ColorLut), cros
   no tone curve: the curve is skipped, the rest applies). With an HDR 2D pipeline (which tonemaps the whole frame)
   the tone curve, the look and the grain are the 2D pipeline's (`Renderer2D::set_color_output`); the view keeps the
   aberration, vignette, white balance, contrast and saturation. Native renderer only.
-- **LUTs.** Scene files cannot name one yet: set `grade.lut` from code (on the scene, or on the `SceneEnvironment3D`
-  component when a scene's settings drive the scene). Each LUT is uploaded once while it lives.
+- **LUTs.** A scene file names them by content path, `SceneEnvironment3D`'s `grade_lut` and `grade_lut_to` (a `.cube`
+  or a LUT image), loaded when the path changes (`resolve_render3d_assets`); code may set `grade.lut` itself instead
+  (an empty path leaves it). Each LUT is uploaded once while it lives.
 
 ### Depth of field
 
@@ -3344,12 +3346,13 @@ float px = kin::depth_of_field_radius(dof, scene.camera, 1080.0f, 25.0f); // the
   10 m blurs the horizon by about a third of a pixel at 1080p. For a shallow focus bring the focus closer, open the
   aperture, narrow the fov (a longer lens) or take a larger sensor (a radius grows with `sensor_height`).
 - **How.** After the temporal resolve, before motion blur, bloom and the tonemap, in linear light. The picture is
-  halved (each texel its four pixels' mean weighed down by brightness, so a single bright pixel does not make a
-  sparkling disc, and the radius of its nearest pixel); tiles of 16 pixels keep the widest blur in front of the focus,
+  halved (each texel the radius and distance of its nearest pixel, and the plain mean of its pixels at about that
+  distance: a small bright light keeps its light for a bright disc, and a texel across an edge holds only the near
+  side's colour); tiles of 16 pixels keep the widest blur in front of the focus,
   spread over the tiles it reaches; a gather on a golden-angle spiral (Gustafsson's single-pass bokeh) runs out to the
   widest radius that can reach each texel, a sample counting as far as its own disc reaches; then each full pixel
-  mixes itself with the blur by how wide the blur reaching it is (sharp under about a pixel), reading the half-size
-  texels whose distance agrees with its own. Where nothing is blurred the gather is skipped.
+  mixes itself with the blur by how wide the blur reaching it is (sharp under about a pixel), reading the 3 x 3
+  half-size texels round it as their distance agrees with its own. Where nothing is blurred the gather is skipped.
 - **Depth.** With `scene.taa` it reads the main pass's depth (the overlay stays sharp); without, the depth pre-pass
   runs for it (as for ambient occlusion), whose depth has no overlay: the overlay is blurred with what is behind it.
 - **Where it runs.** Perspective cameras, in a view that keeps a float picture: an HDR view or one with temporal
@@ -3361,8 +3364,22 @@ float px = kin::depth_of_field_radius(dof, scene.camera, 1080.0f, 25.0f); // the
   the picture is in focus. `quality` 0 halves the gather's samples, 2 doubles them.
 - **Memory.** Four half-size targets and the full-size result, of four halves a pixel (about 16 bytes a pixel of the
   view in all), and two small tile targets; made by the first render that asks, given back after 120 renders without.
-- **Limits.** Transparent surfaces and particles are not in the depth: they blur as what is behind them. Discs are
-  round (no aperture blades yet). A sharp edge against a blurred background keeps a step of the half-size grid.
+- **Aperture blades.** `dof.blades` (3 to 12; 0 round) makes the bokeh polygonal, `dof.blade_rotation` turns it:
+  each sample counts as far as its own polygon reaches back to the pixel.
+- **Checked against Cycles.** `write_scene_snapshot` writes the lens with the camera, and Cycles renders it as the
+  same thin lens (focus, f-number, sensor, blades). On the `spheres` scene at 960 x 540 (focused at 3 m, f/1,
+  100 mm sensor), the disc blur that best turns each renderer's sharp picture into its defocused one is the same in
+  kin as in Cycles to half a pixel, from 7.5 to 10.5 pixels across the rows:
+
+  ```sh
+  kin_reference tests/reference/scenes/spheres.json --out out/runs/k --width 960 --height 540 --taa --snapshot out/runs/sharp
+  kin_reference tests/reference/scenes/spheres.json --out out/runs/k --width 960 --height 540 --taa \
+      --dof 3 --dof-aperture 1 --dof-sensor 100 --snapshot out/runs/dof
+  python3 tools/cycles/compare.py out/runs/sharp/spheres_front && python3 tools/cycles/compare.py out/runs/dof/spheres_front
+  python3 tools/cycles/defocus.py out/runs/sharp/spheres_front out/runs/dof/spheres_front
+  ```
+- **Limits.** Transparent surfaces and particles are not in the depth: they blur as what is behind them. A sharp edge
+  against a blurred background can still show a faint step of the half-size grid.
 
 ### Motion blur
 
@@ -3370,7 +3387,7 @@ What moves across the picture while the shutter is open is smeared along its mot
 object's (skinned and morphing meshes, particles and the overlay included, as temporal anti-aliasing tracks them).
 
 ```cpp
-scene.taa.enabled = true;                          // motion blur reads its velocity
+scene.taa.enabled = true;                          // (optional: motion blur reads TAA's velocity either way)
 auto& blur = scene.camera_effects.motion_blur;     // authored: SceneEnvironment3D's "motion_blur", "motion_blur_*"
 blur.enabled = true;
 blur.shutter_angle = 180.0f; // degrees of each frame the shutter is open (0 to 360): 180 smears half its motion
@@ -3387,8 +3404,12 @@ blur.target_fps = 0.0f;      // else the motion over 1 / target_fps s of Scene3D
   then a gather of `samples` colours along the neighbourhood's longest smear and the pixel's own, weighed by which is
   in front (McGuire et al. 2012, with Jimenez's 2014 second direction). Where nothing round a pixel moves half a pixel,
   it is copied. `debug_stats().motion_blur_dispatches` is 4 when it ran.
-- **When it does not run.** Without `scene.taa` (said once), on the first frame after `View3D::reset_history()` (a
-  cut: no smear across it), with a shutter of 0 or a `max_length` under a pixel.
+- **Without temporal anti-aliasing.** The view runs TAA's passes for the velocity alone, with no jitter and no history
+  (the resolve passes each frame through): the same smear, the picture otherwise the plain one, but drawn with one
+  sample as TAA draws (MSAA is off while motion blur is on). Not in a view shading at a lower resolution, which needs
+  TAA itself.
+- **When it does not run.** On the first frame after `View3D::reset_history()` (a cut: no smear across it), with a
+  shutter of 0 or a `max_length` under a pixel.
 - **Cost.** About 0.15 to 0.4 ms of the GPU at 1920 x 1080 (RTX 4080 Laptop, `kin_reference` on the `motion` scene
   with `--taa` against `--motion-blur`), most of it in the gather where things move.
 - **Memory.** Two view-sized targets of four halves a pixel (8 bytes each) and two small tile targets, made by the
@@ -5523,7 +5544,10 @@ area in the world (`texels_per_unit`), and is drawn there by the renderer itself
 (`RenderDebugOptions3D::unwrap` and `surface_channel`), so that a graph is evaluated by kin's own shader at that point
 of the world. `SnapshotOptions3D::reflection` and `window` (the planar surfaces) make mirrors real mirrors, water a real
 refracting surface, and portals holes the comparison leaves out. Fog, particles and the overlay are not written; kin's
-bloom is not in the truth.
+bloom is not in the truth. The camera's depth of field is written with the camera (the same thin lens); its other
+effects (motion blur, lens, film, grade, glow) are listed in the notes and not in the truth. `kin_reference
+--snapshot DIR` writes one for each camera of a reference scene, and `tools/cycles/defocus.py` compares how wide
+kin's and Cycles' depth of field blur, band by band.
 
 The gallery's `atrium` writes one from where its bottom line (F3) says the camera is:
 

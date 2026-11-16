@@ -1,7 +1,9 @@
 #version 450 core
-// Depth of field (DepthOfField3D), first pass: the picture at half size, each texel the mean of its four pixels, each
-// weighed down by its brightness (Karis: a single very bright pixel does not make a sparkling disc), and the blur
-// radius (full pixels) and distance of its nearest pixel (so a sharp thing in front keeps its edge).
+// Depth of field (DepthOfField3D), first pass: the picture at half size, each texel the blur radius (full pixels) and
+// distance of its nearest pixel (so a sharp thing in front keeps its edge) and the plain mean of those of its four
+// pixels at about that distance (a texel across an edge holds the near side's colour only, which the combine then
+// matches by distance: no background mixed into the edge of what is in front). Not weighed down by brightness: a
+// small bright light must keep its light to become a bright disc of bokeh.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uColour; // the picture, linear, premultiplied
 layout(set = 0, binding = 1) uniform sampler2D uDepth;
@@ -17,20 +19,26 @@ void main() {
         return;
     }
     const float focus = params.lens.w > 0.5 ? texelFetch(uFocus, ivec2(0), 0).x : params.lens.y;
-    vec4 sum = vec4(0.0);
-    float weights = 0.0, nearest = 1e9, radius = 0.0;
+    vec4 colours[4];
+    float distances[4];
+    float nearest = 1e9, radius = 0.0;
     for (int i = 0; i < 4; ++i) {
         const ivec2 q = min(p * 2 + ivec2(i & 1, i >> 1), ivec2(params.size.xy) - 1);
-        const vec4 c = texelFetch(uColour, q, 0);
-        const float w = 1.0 / (1.0 + dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)));
-        sum += c * w;
-        weights += w;
-        const float z = dof_distance(uDepth, (vec2(q) + 0.5) * params.size.zw);
-        if (z < nearest) {
-            nearest = z;
-            radius = dof_radius(z, focus);
+        colours[i] = texelFetch(uColour, q, 0);
+        distances[i] = dof_distance(uDepth, (vec2(q) + 0.5) * params.size.zw);
+        if (distances[i] < nearest) {
+            nearest = distances[i];
+            radius = dof_radius(nearest, focus);
         }
     }
-    imageStore(uHalf, p, sum / weights);
+    vec4 sum = vec4(0.0);
+    float count = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (distances[i] <= nearest * 1.05 + 0.01) {
+            sum += colours[i];
+            count += 1.0;
+        }
+    }
+    imageStore(uHalf, p, sum / count);
     imageStore(uHalfBlur, p, vec4(radius, nearest, 0.0, 0.0));
 }

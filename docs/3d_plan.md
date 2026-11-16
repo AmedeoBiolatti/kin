@@ -10469,7 +10469,7 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
   the view's height), `samples` (8-16), `camera_scale` (0-1: the camera's own motion, kept apart from the objects'),
   `target_fps` (0: the frame's own motion; else scaled to that rate, so the blur does not depend on frame rate).
   Velocity is TAA's (skinned, morphs, particles, the overlay; dilated at output size under upscaling): without
-  `taa.enabled` it is off, said once, as `render_scale` below 1 is. Tile max (16 px tiles), neighbour max, then a
+  `taa.enabled` the view runs TAA's passes for the velocity alone (no jitter, no history; added 2026-11-16). Tile max (16 px tiles), neighbour max, then a
   depth-aware gather along the dominant direction (foreground over background, background behind a moving edge),
   jittered by interleaved gradient noise. The camera's part is rebuilt from depth and the previous camera, so
   `camera_scale` can take it out and leave the objects'. No blur on the first frame after `reset_history()` (a cut).
@@ -10483,7 +10483,7 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
   full frame; the focal length follows from the camera's fov), `max_blur` (pixels), `quality`, `blades` (0 round).
   Circle of confusion from the pre-pass's depth (DOF turns the pre-pass on, as ambient occlusion does); half-size
   gather with separate near and far layers; the near layer spread over what is in focus by a tile maximum of its
-  circle; bright texels weighted down (Karis) so highlights do not sparkle; combined at full size. Then autofocus: a
+  circle; combined at full size. Then autofocus: a
   screen point's depth, smoothed on the GPU like auto exposure (a storage buffer, no read-back). Transparent surfaces
   and particles blur as the depth behind them (as in the other engines). Tests: the circle-of-confusion formula on the
   CPU; the focal plane stays sharp, near and far blur; checked against Cycles with the same lens
@@ -10492,7 +10492,10 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
   and a 16-pixel tile's widest near blur spread as far as it reaches (in-focus areas skip it), then a depth-aware
   upsample. The depth is TAA's main-pass depth, else the pre-pass's; it needs a float picture (HDR or TAA). No noise in
   the spiral (nothing after it averages noise; a per-texel turn speckled edges in Sponza). Autofocus eases in 1 / z
-  on the GPU. 0.2 to 0.4 ms at 1080p on Sponza. Not yet: aperture blades, the Cycles check. A physical lens blurs little at game fovs: the test uses a
+  on the GPU. 0.2 to 0.4 ms at 1080p on Sponza. Since: aperture blades (each sample's polygon reaching back to the
+  pixel), the Cycles check (`tools/cycles/defocus.py`: the same blur as Cycles' thin lens to half a pixel on
+  `spheres`), no brightness weighting in the halving (it ate small lights' bokeh), depth-matched texels and a 3 x 3
+  depth-aware upsample (softer edge steps). A physical lens blurs little at game fovs: the test uses a
   100 mm sensor at f/0.7 to blur a 160 x 120 view by several pixels.
 - **C3 — lens, film and grade.** In the view output shader, no new pass: vignette (intensity, smoothness, roundness),
   chromatic aberration (radial, the bloom too), film grain (by luminance, moving each frame, before the encode),
@@ -10502,8 +10505,8 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
 - **C3 as built (2026-11-16).** A second output shader, `view_output_effects.frag`, chosen only when an effect is on
   (so a view without them keeps the exact plain output); the adapted exposure's buffer always bound (a dummy where
   none). White balance as Unity's (temperature/tint to a CIE xy, von Kries in LMS, a 3 x 3 on the CPU, the identity
-  at 0). LUTs are uploaded once each (kept by weak pointer); scene files cannot name one yet (no asset access while
-  settings apply). Tested in an HDR view and an 8-bit TAA view: a neutral LUT gives the plain picture exactly,
+  at 0). LUTs are uploaded once each (kept by weak pointer); scene files name them (and C4's dirt) by path,
+  resolved with the other assets by resolve_render3d_assets (settings have no asset access). Tested in an HDR view and an 8-bit TAA view: a neutral LUT gives the plain picture exactly,
   aberration fringes, vignette, grain, balance, saturation, the three curves, a red/blue swapping LUT.
 - **C4 — bloom and flares.** A mip-chain, energy-conserving bloom (the current one stays, as a setting), a lens-dirt
   texture, screen-space ghosts and halo from the bloom's levels, optional anamorphic streaks.

@@ -15,6 +15,7 @@
 #include <kin/ecs/system.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/renderer/backend.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/scene/planar_views3d.hpp>
 #include <kin/scene/reflection_probes3d.hpp>
@@ -138,13 +139,16 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
     if (!r3d.capabilities().motion_blur)
         return;
     Scratch scratch;
+    // A two-point look that swaps red and blue, and a lens-dirt picture.
+    write(scratch.path / "swap.cube", "LUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n");
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "shared pixel.png", scratch.path / "dirt.png");
     write(scratch.path / "blur.kinscene", R"({"entities":[
       {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"taa_enabled":true,"motion_blur":true,
         "motion_blur_shutter_angle":90,"motion_blur_samples":8,"motion_blur_camera_scale":0.5,
         "depth_of_field":true,"dof_focus_distance":3,"dof_aperture":1.4,"dof_autofocus":true,
         "dof_focus_point":[0.25,0.75],"lens_vignette":0.4,"lens_chromatic_aberration":0.005,"film_grain":0.2,
         "grade_tone_curve":"agx","grade_temperature":0.3,"grade_contrast":1.2,"grade_saturation":0.8,
-        "glow_wide":true,"glow_ghosts":0.5,"glow_ghost_count":3,"glow_streaks":2,"glow_streak_tint":[1,0.5,0.25]}}}]})");
+        "glow_wide":true,"grade_lut":"swap.cube","glow_dirt":"dirt.png","glow_ghosts":0.5,"glow_ghost_count":3,"glow_streaks":2,"glow_streak_tint":[1,0.5,0.25]}}}]})");
     Assets3D assets{r3d, scratch.path};
     SceneSession3DOptions options;
     options.viewport = {160, 120};
@@ -167,6 +171,8 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
     check(effects.glow.wide && effects.glow.ghosts == 0.5f && effects.glow.ghost_count == 3 &&
               effects.glow.streaks == 2.0f && effects.glow.streak_tint.g == 0.5f,
           "glow settings were not applied");
+    check(effects.grade.lut && effects.grade.lut->size() == 2 && effects.glow.dirt,
+          "the look and the lens dirt named in the scene were not loaded");
     const auto dispatches = [&] {
         check(session.render(), "motion blur render failed");
         renderer.present();
@@ -196,6 +202,9 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
     write(scratch.path / "bad.kinscene", R"({"entities":[
       {"id":"environment","components":{"SceneEnvironment3D":{"glow_ghost_count":0}}}]})");
     check(!session.load("bad.kinscene"), "no ghosts' count accepted");
+    write(scratch.path / "bad.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"grade_lut":"missing.cube"}}}]})");
+    check(!session.load("bad.kinscene"), "a missing look accepted");
 }
 
 void gpu_live_edits(Renderer2D& renderer) {

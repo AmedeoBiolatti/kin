@@ -6810,6 +6810,54 @@ void test_gpu_depth_of_field() {
     });
 }
 
+// The aperture's blades (DepthOfField3D::blades): a bright point far behind the focus becomes a disc of light (bokeh)
+// about 18 pixels across in a 480 x 360 HDR view; through three blades a triangle, about 0.41 of the round disc's area
+// (a triangle in a circle), and turned 60 degrees the other way up (most of its pixels not the first's).
+void test_gpu_dof_blades() {
+    with_gpu("test_gpu_dof_blades", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().depth_of_field, "depth of field")) {
+            return;
+        }
+        const kin::Mesh3D dot = make_box(r3d, {0.08f, 0.08f, 0.08f});
+        kin::View3D view =
+            r3d.create_view({480, 360}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = true}).value_or({});
+        kin::Scene3D scene;
+        const auto bokeh = [&](kin::u32 blades, float rotation) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0, 0, 0}, {0, 0, -1}, 40.0f);
+            scene.camera_effects.depth_of_field = {.enabled = true,
+                                                   .focus_distance = 1.0f,
+                                                   .aperture = 0.7f,
+                                                   .sensor_height = 100.0f,
+                                                   .max_blur = 0.05f,
+                                                   .quality = 2,
+                                                   .blades = blades,
+                                                   .blade_rotation = rotation};
+            (void)scene.draw(dot, Mat4f::translation({0, 0, -20}),
+                             {.color = Color::rgb(255, 255, 255), .emissive = 3000.0f, .unlit = true});
+            Pixels p = shoot_large(renderer, r3d, view, scene);
+            renderer.present();
+            std::vector<bool> lit(static_cast<std::size_t>(480 * 360));
+            for (int y = 0; y < 360; ++y)
+                for (int x = 0; x < 480; ++x)
+                    lit[static_cast<std::size_t>(y * 480 + x)] = level(p.at(x, y)) > 40;
+            return lit;
+        };
+        const auto area = [](const std::vector<bool>& lit) { return std::count(lit.begin(), lit.end(), true); };
+        const auto round = bokeh(0, 0.0f), triangle = bokeh(3, 0.0f), turned = bokeh(3, 60.0f);
+        long both = 0;
+        for (std::size_t i = 0; i < triangle.size(); ++i)
+            both += triangle[i] && turned[i] ? 1 : 0;
+        std::printf("    bokeh: round %ld pixels, triangle %ld, turned %ld (%ld in common)\n", long(area(round)),
+                    long(area(triangle)), long(area(turned)), both);
+        assert(area(round) > 400);
+        assert(area(triangle) < area(round) * 0.6 && area(triangle) > area(round) * 0.25);
+        assert(std::abs(area(turned) - area(triangle)) < area(triangle) / 5);
+        assert(both < area(triangle) * 0.8);
+    });
+}
+
 // The camera's lens, film and grade (CameraEffects3D::lens, film, grade) over a flat unlit wall (a colour, or a white
 // bar on black) filling an HDR view (exposed, tonemapped and encoded in its output) and an 8-bit temporally
 // anti-aliased one (encoded only). A neutral LUT takes the effects' output path and gives the plain one's picture to
@@ -7098,7 +7146,7 @@ void test_gpu_motion_blur() {
             // motion as much; with camera_scale 0, a panned still block stays as sharp as without.
             assert(blurred[0].first >= sharp[0].first + 6 && blurred[1].first >= sharp[1].first + 6);
             assert(blurred[2].first <= sharp[2].first + 1);
-            // The first frame after a reset is not blurred; nor with a shutter of 0, nor without the resolve.
+            // The first frame after a reset is not blurred; nor with a shutter of 0.
             on.reset_history();
             (void)frame(on, 0, 1.0f, 0.0f, &blur);
             assert(r3d.debug_stats().motion_blur_dispatches == 0);
@@ -7106,9 +7154,21 @@ void test_gpu_motion_blur() {
             closed.shutter_angle = 0.0f;
             (void)frame(on, 1, 1.0f, 0.0f, &closed);
             assert(r3d.debug_stats().motion_blur_dispatches == 0);
+            // Without temporal anti-aliasing it runs TAA's passes for the velocity alone (no jitter, no history): the
+            // moving block smears as much, and with blur off the picture is the plain one, unmoved by any jitter.
             scene.taa.enabled = false;
-            (void)frame(on, 2, 1.0f, 0.0f, &blur);
-            assert(r3d.debug_stats().motion_blur_dispatches == 0);
+            Pixels without, plain_frame;
+            on.reset_history();
+            off.reset_history();
+            for (int f = 0; f < 4; ++f) {
+                plain_frame = frame(off, f, 1.0f, 0.0f, nullptr);
+                without = frame(on, f, 1.0f, 0.0f, &blur);
+            }
+            assert(r3d.debug_stats().motion_blur_dispatches == 4);
+            const auto alone = ramps(without, 80), unblurred = ramps(plain_frame, 80);
+            std::printf("    motion blur (%s) without TAA: ramps across/down %d/%d (%d/%d unblurred)\n",
+                        hdr ? "hdr" : "8-bit", alone.first, alone.second, unblurred.first, unblurred.second);
+            assert(alone.first >= unblurred.first + 6 && alone.second <= 4);
             scene.taa.enabled = true;
         }
     });
@@ -24791,6 +24851,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_glow());
     RUN(test_gpu_lens_film_grade());
     RUN(test_gpu_depth_of_field());
+    RUN(test_gpu_dof_blades());
     RUN(test_gpu_taa_crowd());
     RUN(test_gpu_taa_overlay());
     RUN(test_gpu_taa_main_velocity());

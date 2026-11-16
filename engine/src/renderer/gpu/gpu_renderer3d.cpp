@@ -3853,7 +3853,8 @@ bool GpuRenderer3D::renders_part(const IViewBackend3D& base, const Scene3D& scen
     const Scene3D* overlay = scene.overlay_if_any();
     // (A GI of its own builds windows round the view's whole picture; one borrowed is resolved over the part.)
     const bool gi = scene.global_illumination.enabled && (!lit_by || lit_by == &base);
-    return !scene.taa.enabled && !gi && !(scene.fog.enabled && scene.fog.sun_shadows) && !scene.lod.occlusion.enabled &&
+    return !scene.taa.enabled && !scene.camera_effects.motion_blur.enabled && !gi &&
+           !(scene.fog.enabled && scene.fog.sun_shadows) && !scene.lod.occlusion.enabled &&
            !scene.contact_shadows.enabled && !(overlay && !overlay->draws().empty());
 }
 
@@ -4416,6 +4417,14 @@ bool GpuRenderer3D::record_output(SDL_GPUCommandBuffer* commands, const GpuTextu
     ++stats.output_draws;
     return true;
 }
+
+namespace {
+// Whether `scene` asks for motion blur without temporal anti-aliasing (the view then runs TAA's passes for the velocity
+// alone). Not in a view shading at a lower resolution (`render_scale` under 1), which needs real TAA.
+bool blur_without_taa(const Scene3D& scene, f32 render_scale) {
+    return scene.camera_effects.motion_blur.enabled && !scene.taa.enabled && render_scale >= 1.0f;
+}
+} // namespace
 
 namespace {
 // Grade3D's white balance as a matrix on linear sRGB (rows), as Unity's: the white the temperature and tint name (a
@@ -5527,6 +5536,9 @@ struct GpuRenderer3D::FrameCtx {
     Mat4f blur_before{};
     bool blur_velocity = false;
     bool blurred = false;
+    // The temporal anti-aliasing this frame runs with: the scene's, or (motion blur without it) one with no jitter and
+    // no history, only for the velocity.
+    TemporalAA3D taa_settings{};
     // Depth of field: asked for and possible (a perspective camera, a float picture, a depth to read); whether the
     // pre-pass runs for its depth (no temporal anti-aliasing, whose main-pass depth it reads otherwise); whether it
     // ran.
@@ -7237,7 +7249,17 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     // exact. It replaces MSAA, and the sums that need the main pass's own
     // depth (the occlusion's, the contact shadows') are given the jittered
     // projection, so that they unproject what the pre-pass drew.
-    const TemporalAA3D& taa_settings = scene.taa;
+    // Motion blur without temporal anti-aliasing takes its velocity from the same passes, with no jitter and no
+    // history (the resolve passes this frame through): one sample, as under TAA.
+    ctx.taa_settings = scene.taa;
+    if (_capabilities.motion_blur && blur_without_taa(scene, view->_options.render_scale))
+        ctx.taa_settings = {.enabled = true,
+                            .blend = 0.0f,
+                            .still_blend = 0.0f,
+                            .sharpness = 0.0f,
+                            .jitter_scale = 0.0f,
+                            .jitter_samples = 1};
+    const TemporalAA3D& taa_settings = ctx.taa_settings;
     ctx.taa = taa_settings.enabled;
     if (ctx.taa && !_taa_available) {
         warn_once(_taa_warned, "3D: temporal anti-aliasing asked for, but this device cannot do it: off");
@@ -16328,7 +16350,8 @@ const GpuTexture* GpuRenderer3D::motion_blur(FrameCtx& ctx, const GpuTexture& so
         return &source;
     }
     if (!ctx.taa) {
-        warn_once(_motion_blur_taa_warned, "3D: motion blur needs temporal anti-aliasing (Scene3D::taa): off");
+        warn_once(_motion_blur_taa_warned,
+                  "3D: motion blur needs temporal anti-aliasing's passes (for its velocity), which did not run: off");
         return &source;
     }
     // The step since the last blurred render, in Scene3D::time (MotionBlur3D::target_fps); 0 when unknown.
@@ -16545,7 +16568,9 @@ const GpuTexture* GpuRenderer3D::depth_of_field(FrameCtx& ctx, const GpuTexture&
     // 3. The gather, at half size: the spiral's step by quality (half texels; about r^2 / (2 step) samples out to r).
     {
         static constexpr f32 steps[3] = {2.0f, 1.0f, 0.5f};
-        const f32 shape[4] = {steps[std::min(dof.quality, 2u)], widest, 0.0f, 0.0f};
+        const u32 blades = dof.blades >= 3 ? std::min(dof.blades, 12u) : 0u;
+        const f32 shape[4] = {steps[std::min(dof.quality, 2u)], widest, static_cast<f32>(blades),
+                              dof.blade_rotation * (3.14159265f / 180.0f)};
         const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
             SDL_GPUTextureSamplerBinding{view._dof_half.handle(), _owner->_sampler_linear},
             SDL_GPUTextureSamplerBinding{view._dof_half_blur.handle(), _point_sampler},
@@ -16573,7 +16598,7 @@ void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     RenderDebugStats3D& stats = ctx.stats;
     SDL_GPUCommandBuffer* commands = ctx.commands;
-    const TemporalAA3D& taa_settings = ctx.scene.taa;
+    const TemporalAA3D& taa_settings = ctx.taa_settings;
     ctx.shown = nullptr;
     // The resolve: this frame into the history, before bloom and the tonemap,
     // which see the finished picture. The next frame finds the cameras and the
@@ -17171,7 +17196,9 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
             custom_shader = custom_shader || custom_of(draw.material);
         }
     }
-    bool taa = scene.taa.enabled && _taa_available;
+    bool taa =
+        (scene.taa.enabled || (_capabilities.motion_blur && blur_without_taa(scene, view->_options.render_scale))) &&
+        _taa_available;
     // Depth of field without temporal anti-aliasing reads the pre-pass's depth (in an HDR view).
     const bool dof_prepass = !taa && scene.camera_effects.depth_of_field.enabled && _capabilities.depth_of_field &&
                              view->_hdr && _ao_available && scene.camera.projection == Projection3D::Perspective;

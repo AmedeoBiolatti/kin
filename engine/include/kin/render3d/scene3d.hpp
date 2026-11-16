@@ -596,8 +596,9 @@ struct TemporalAA3D {
 // Motion blur (CameraEffects3D::motion_blur): what moves across the picture while the shutter is open is smeared along
 // its motion, the camera's own and each object's, as a film camera shows it. After the temporal resolve, at the view's
 // size, in linear light (so a bright light streaks), before bloom and the tonemap; the HUD drawn over the view stays
-// sharp. It reads the temporal anti-aliasing's velocity, so it needs Scene3D::taa (without it, off, said once). The
-// first frame after View3D::reset_history() (a cut) is not blurred. Native renderer only (WebGL2: off, said once).
+// sharp. It reads the temporal anti-aliasing's velocity: without Scene3D::taa the view runs TAA's passes for the
+// velocity alone (no jitter, no history), drawing with one sample as TAA does (no MSAA). The first frame after
+// View3D::reset_history() (a cut) is not blurred. Native renderer only (WebGL2: off, said once).
 struct MotionBlur3D {
     bool enabled = false;
     // How long the shutter is open, in degrees of the frame (0 to 360): 180, half of each frame's motion (a film
@@ -631,6 +632,10 @@ struct DepthOfField3D {
     // blurring more there.
     f32 max_blur = 0.02f;
     u32 quality = 1; // 0 (fewer samples), 1 or 2 (more: smoother discs, slower)
+    // The aperture's blades: 0 a round opening (round bokeh), else 3 to 12 straight blades (polygonal bokeh, a
+    // hexagon with 6), turned `blade_rotation` degrees.
+    u32 blades = 0;
+    f32 blade_rotation = 0.0f;
     // The focus follows what is at `focus_point` (0 to 1 across and down the view; the middle by default), measured on
     // the GPU each render, eased toward over `focus_time` seconds of Scene3D::time (0: at once); focus_distance is then
     // where it starts (and after View3D::reset_history()).
@@ -678,9 +683,9 @@ struct Grade3D {
     f32 tint = 0.0f;
     f32 contrast = 1.0f;   // round mid-grey, in stops (0 flat to 2)
     f32 saturation = 1.0f; // 0 grey to 2
-    // Then a look from a lookup table (ColorLut: a .cube or a LUT image, as Renderer2D::set_color_output's; scene
-    // files cannot name one yet: set it from code, e.g. Assets2D::color_lut), cross-faded toward `lut_to` by
-    // `lut_mix` (day to night), applied at `lut_strength`.
+    // Then a look from a lookup table (ColorLut: a .cube or a LUT image, as Renderer2D::set_color_output's; a scene
+    // file names it by SceneEnvironment3D's grade_lut), cross-faded toward `lut_to` by `lut_mix` (day to night),
+    // applied at `lut_strength`.
     std::shared_ptr<const ColorLut> lut;
     std::shared_ptr<const ColorLut> lut_to;
     f32 lut_mix = 0.0f;
@@ -696,8 +701,8 @@ struct Glow3D {
     // size weighs against the one before: more is wider. Energy-conserving: the glow holds the light it was made of.
     bool wide = false;
     f32 radius = 0.7f;
-    // A picture of dust and smudges on the lens, stretched over the view, lit where bright light is near (linear
-    // colour; set from code, scene files cannot name one yet), this strong (0 to 10).
+    // A picture of dust and smudges on the lens, stretched over the view, lit where bright light is near (a scene file
+    // names it by SceneEnvironment3D's glow_dirt), this strong (0 to 10).
     Texture dirt;
     f32 dirt_intensity = 0.0f;
     // Ghosts: copies of the bright light mirrored through the middle of the view, `ghost_count` (1 to 8) of them
