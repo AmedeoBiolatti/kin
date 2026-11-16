@@ -459,6 +459,7 @@ struct SceneSession3D::Data {
         std::unique_ptr<PlanarViews3D> planar;      // made for the first Mirror3D or Portal3D
         std::unique_ptr<ReflectionProbes3D> probes; // made for the first ReflectionProbe3D
         std::unique_ptr<PortalTravel3D> travel;     // made for the first PortalTraveller3D
+        std::unique_ptr<Terrains3D> terrains;       // made for the first TerrainRenderer3D
         f64 clock = 0;                              // seconds stepped: Scene3D::time (a material graph's `time`)
         std::vector<std::filesystem::path> dependencies;
         std::map<std::filesystem::path, SourceStamp> watches;
@@ -924,6 +925,14 @@ struct SceneSession3D::Data {
             auto context = state.context();
             options.compose(context, state.scene);
         }
+        if (renderer.available() && (state.terrains || state.world.raw().count<TerrainRenderer3D>() > 0)) {
+            if (!state.terrains)
+                state.terrains = std::make_unique<Terrains3D>(renderer, assets.root(), options.terrain_surface);
+            if (auto drawn = state.terrains->update(state.world, state.scene, state.physics.get()); !drawn) {
+                append(errors, drawn.diagnostics);
+                return false;
+            }
+        }
         if (!state.scene.diagnostics().empty()) {
             append(errors, state.scene.diagnostics());
             return false;
@@ -995,6 +1004,8 @@ struct SceneSession3D::Data {
             const auto own = [](const auto* r) { return r && r->visible && !r->id; };
             if (own(e.get<MeshRenderer3D>()) || own(e.get<ModelRenderer3D>()) || own(e.get<SkinnedMeshRenderer3D>()))
                 return EcsEntity{e};
+            if (const auto* terrain = e.get<TerrainRenderer3D>(); terrain && terrain->enabled && !terrain->id)
+                return EcsEntity{e};
         }
         flecs::entity found;
         const auto scan = [&]<class T>() {
@@ -1006,6 +1017,10 @@ struct SceneSession3D::Data {
         scan.template operator()<MeshRenderer3D>();
         scan.template operator()<ModelRenderer3D>();
         scan.template operator()<SkinnedMeshRenderer3D>();
+        state.world.each([&](flecs::entity e, const TerrainRenderer3D& r) {
+            if (r.enabled && r.id == id && (!found || e.id() < found.id()))
+                found = e;
+        });
         return found ? EcsEntity{found} : EcsEntity{};
     }
 };
@@ -2759,6 +2774,9 @@ WorldRenderState3D* SceneSession3D::rendering() {
 }
 World3D* SceneSession3D::physics() {
     return active() ? _data->current->physics.get() : nullptr;
+}
+Terrains3D* SceneSession3D::terrains() {
+    return active() ? _data->current->terrains.get() : nullptr;
 }
 WorldPhysicsState3D* SceneSession3D::bodies() {
     return active() ? _data->current->bodies.get() : nullptr;

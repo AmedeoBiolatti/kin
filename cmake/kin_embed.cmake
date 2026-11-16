@@ -8,15 +8,22 @@
 #     machines without glslc. With neither, it skips the shaders and <out_var>
 #     lists only those it has.
 #
-#   kin_compile_surface_shader(<out_var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl [CUTOUTS])
+#   kin_compile_surface_shader(<out_var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl [CUTOUTS] [OFFSET])
 #     A 3D surface shader (Material3D::surface; docs/rendering_3d.md, Surface
 #     shaders): its eight variants, each kin's mesh fragment shader with the
 #     source's kin_surface() between its halves, compiled with that variant's
 #     defines, as <dir>/<name>.<variant>.spv. <out_var> lists them in
 #     SurfaceVariant3D's order, as Renderer3D::create_surface_shader takes them
 #     (the merged draws' four after the eight); with CUTOUTS (a surface
-#     defining kin_surface_alpha) the cut-out passes' five after those.
+#     defining kin_surface_alpha) the cut-out passes' five after those; with
+#     OFFSET (a surface defining kin_surface_offset, under KIN_SURFACE_VERTEX,
+#     its fragment part under its #else) the eight vertex variants after those.
 #     Needs glslc (no KIN_SPIRV_DIR form yet).
+#
+#   kin_terrain_surface(<target>)
+#     kin's terrain surface (engine/shaders/terrain.surface.glsl, its vertex variants too) compiled and built into
+#     <target> (kin_embed_files, NAME terrain_surface): create_terrain_surface(r3d, terrain_surface) makes it
+#     (kin/render3d/terrain3d.hpp). Needs glslc; sets KIN_TERRAIN_SURFACE on <target> when it built it.
 #
 #   kin_planar_surfaces(<target>)
 #     kin's planar surfaces (mirrors and portals: engine/shaders/planar_reflection.surface.glsl and
@@ -129,11 +136,22 @@ set(_KIN_SURFACE_DEFINES_material KIN_DRAW_MATERIALS CACHE INTERNAL "")
 set(_KIN_SURFACE_DEFINES_material_fog KIN_DRAW_MATERIALS KIN_FOG CACHE INTERNAL "")
 set(_KIN_SURFACE_DEFINES_material_lights KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID CACHE INTERNAL "")
 set(_KIN_SURFACE_DEFINES_material_lights_fog KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_FOG CACHE INTERNAL "")
+# The vertex variants' (OFFSET: a surface defining kin_surface_offset): each its pass's vertex body, then its defines.
+set(_KIN_SURFACE_VERTICES vertex_mesh vertex_mesh_velocity vertex_mesh_indexed vertex_prepass vertex_prepass_indexed
+    vertex_prepass_velocity vertex_shadow vertex_shadow_mask CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_mesh kin_mesh_vertex.inc.glsl CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_mesh_velocity kin_mesh_vertex.inc.glsl KIN_VELOCITY CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_mesh_indexed kin_mesh_vertex.inc.glsl KIN_INDEXED CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_prepass kin_prepass_vertex.inc.glsl CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_prepass_indexed kin_prepass_vertex.inc.glsl KIN_INDEXED CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_prepass_velocity kin_prepass_velocity_vertex.inc.glsl KIN_VELOCITY CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_shadow kin_shadow_vertex.inc.glsl CACHE INTERNAL "")
+set(_KIN_SURFACE_VERTEX_vertex_shadow_mask kin_shadow_vertex.inc.glsl KIN_SHADOW_MASK CACHE INTERNAL "")
 # The cut-outs' (CUTOUTS: a surface defining kin_surface_alpha), each its pass's body (kin_<pass>.inc.glsl).
 set(_KIN_SURFACE_MASKS shadow_mask pick_mask prepass_mask prepass_velocity_mask visibility_mask CACHE INTERNAL "")
 
 function(kin_compile_surface_shader out_var)
-    cmake_parse_arguments(ARG "CUTOUTS" "OUTPUT_DIR;SOURCE" "" ${ARGN})
+    cmake_parse_arguments(ARG "CUTOUTS;OFFSET" "OUTPUT_DIR;SOURCE" "" ${ARGN})
     set(depfile_tool "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_shader_depfile.cmake")
     if(NOT ARG_OUTPUT_DIR OR NOT ARG_SOURCE)
         message(FATAL_ERROR "kin_compile_surface_shader: OUTPUT_DIR and SOURCE are required")
@@ -197,6 +215,39 @@ function(kin_compile_surface_shader out_var)
                 DEPENDS "${source}" "${mask_wrapper}" "${depfile_tool}"
                 DEPFILE "${depfile}"
                 COMMENT "glslc: ${name} (${mask}) -> ${stem}.${mask}.spv"
+                VERBATIM)
+            list(APPEND outputs "${output}")
+        endforeach()
+    endif()
+    if(ARG_OFFSET)
+        # The vertex variants (a surface defining kin_surface_offset under KIN_SURFACE_VERTEX), each the offset's
+        # prelude, the surface, then its pass's vertex body, as surface_shader_source writes them.
+        foreach(vertex IN LISTS _KIN_SURFACE_VERTICES)
+            list(GET _KIN_SURFACE_VERTEX_${vertex} 0 body)
+            set(defines)
+            foreach(define IN LISTS _KIN_SURFACE_VERTEX_${vertex})
+                if(NOT define STREQUAL body)
+                    list(APPEND defines "-D${define}")
+                endif()
+            endforeach()
+            set(vertex_wrapper "${ARG_OUTPUT_DIR}/${stem}.${vertex}.vert.glsl")
+            file(CONFIGURE OUTPUT "${vertex_wrapper}" CONTENT
+"#version 450 core
+#define KIN_SURFACE_VERTEX
+#include \"kin_surface_vertex.inc.glsl\"
+#include \"${name}\"
+#include \"${body}\"
+")
+            set(output "${ARG_OUTPUT_DIR}/${stem}.${vertex}.spv")
+            set(depfile "${output}.d")
+            add_custom_command(
+                OUTPUT "${output}"
+                COMMAND "${KIN_GLSLC}" -fshader-stage=vertex -I "${KIN_SHADER_INCLUDE_DIR}" -I "${folder}" ${defines}
+                        -MD -MF "${depfile}" -MT "${output}" -o "${output}" "${vertex_wrapper}"
+                COMMAND "${CMAKE_COMMAND}" "-DDEPFILE=${depfile}" "-DOUTPUT=${output}" -P "${depfile_tool}"
+                DEPENDS "${source}" "${vertex_wrapper}" "${depfile_tool}"
+                DEPFILE "${depfile}"
+                COMMENT "glslc: ${name} (${vertex}) -> ${stem}.${vertex}.spv"
                 VERBATIM)
             list(APPEND outputs "${output}")
         endforeach()
@@ -301,6 +352,15 @@ ${close_ns}")
         VERBATIM)
     target_sources(${target} PRIVATE "${source}")
     target_include_directories(${target} PRIVATE "${dir}")
+endfunction()
+
+function(kin_terrain_surface target)
+    set(dir "${CMAKE_CURRENT_BINARY_DIR}/kin_terrain_surface/${target}")
+    kin_compile_surface_shader(terrain OFFSET OUTPUT_DIR "${dir}" SOURCE "${KIN_SHADER_INCLUDE_DIR}/terrain.surface.glsl")
+    if(terrain)
+        kin_embed_files(${target} NAME terrain_surface FILES ${terrain})
+        target_compile_definitions(${target} PRIVATE KIN_TERRAIN_SURFACE)
+    endif()
 endfunction()
 
 function(kin_planar_surfaces target)

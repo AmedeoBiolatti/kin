@@ -13,7 +13,9 @@
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
+#include <kin/physics3d/world3d.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/render3d/terrain3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -1250,6 +1252,79 @@ void gpu_pick(Renderer2D& renderer) {
           "pick without a pick pass did not say why");
     renderer.present();
 }
+// A terrain authored in a scene (TerrainRenderer3D; Terrains3D through the session): a .kinterrain of a bump on flat
+// ground, its entity 100 m along x. Drawn there (a pick at the middle names the entity, at the bump's height); a
+// static height field of it in the scene's physics (a ray down meets the bump); sculpting it through the session's
+// Terrains3D and asking for its collision again moves both.
+void gpu_terrain(Renderer2D& renderer) {
+    Scratch scratch;
+    Renderer3D r3d{renderer};
+    const auto surface = compile_terrain_surface(r3d);
+    if (!surface) {
+        std::cout << "terrain session checks skipped (no glslc for the terrain surface)\n";
+        return;
+    }
+    std::vector<u16> heights(65 * 65);
+    for (int z = 0; z < 65; ++z)
+        for (int x = 0; x < 65; ++x) {
+            const float d = std::hypot(float(x - 32), float(z - 32));
+            heights[size_t(z * 65 + x)] = u16(std::lround(std::max(0.0f, 1.0f - d / 12.0f) * 32767.0f));
+        }
+    auto made = Terrain3D::create(r3d, *surface, {.samples = {65, 65}, .spacing = 1.0f, .max_height = 10.0f}, heights);
+    check(bool(made), "the terrain was not made");
+    check(bool(made->save(scratch.path / "land.kinterrain")), "the terrain was not saved");
+    write(scratch.path / "terrain.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[132,20,32],"rotation":[-0.7071068,0,0,0.7071068]},
+        "SceneCamera3D":{"fov":40}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"land","components":{"Transform3D":{"position":[100,0,0]},
+        "TerrainRenderer3D":{"terrain":"land.kinterrain"}}}]})");
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.view.pick = true;
+    options.warm_up = false;
+    options.terrain_surface = *surface;
+    options.physics = World3DConfig{};
+    SceneSession3D session{r3d, assets, options};
+    if (auto loaded = session.load("terrain.kinscene"); !loaded)
+        for (const auto& e : loaded.diagnostics)
+            std::cerr << "terrain scene: " << e << '\n';
+    check(session.active(), "the terrain scene failed");
+    renderer.clear();
+    if (!session.render())
+        for (const auto& e : session.diagnostics())
+            std::cerr << e << '\n';
+    renderer.present();
+    check(session.terrains() && session.terrains()->size() == 1, "the terrain was not loaded");
+    const auto picked = session.pick({80, 60}).value_or(std::nullopt);
+    check(picked && picked->entity && picked->entity.id() == session.entity("land").id(),
+          "a pick on the terrain did not name its entity");
+    check(std::abs(picked->position.x - 132.0f) < 0.5f && std::abs(picked->position.y - 5.0f) < 0.1f,
+          "the terrain is not drawn at its entity's place");
+    World3D* physics = session.physics();
+    check(physics != nullptr, "the scene has no physics");
+    physics->step(1.0f / 60.0f);
+    const auto ray = physics->raycast({132, 30, 32}, {132, -10, 32});
+    check(ray && std::abs(ray->point.y - 5.0f) < 0.1f, "the terrain's collision is not at its place");
+    // Sculpted through the session: the drawn surface and, asked again, the collision follow.
+    Terrain3D* land = session.terrains()->terrain(session.entity("land"));
+    check(land != nullptr, "no terrain for the entity");
+    const auto changed = land->brush(
+        {.mode = TerrainBrushMode3D::Raise, .radius = 4.0f, .strength = 2.0f, .falloff = 0.0f}, {132.0f, 32.0f});
+    session.terrains()->heights_changed(session.entity("land"), changed); // (in place: World3D::set_heights)
+    renderer.clear();
+    check(bool(session.render()), "the sculpted terrain did not render");
+    renderer.present();
+    physics->step(1.0f / 60.0f);
+    const auto raised = session.pick({80, 60}).value_or(std::nullopt);
+    const auto again = physics->raycast({132, 30, 32}, {132, -10, 32});
+    check(raised && std::abs(raised->position.y - 7.0f) < 0.1f && again && std::abs(again->point.y - 7.0f) < 0.1f,
+          "sculpting did not move the surface and its collision");
+    std::cout << "terrain session: drawn, picked, collided and sculpted at its entity's place\n";
+}
+
 // Mirrors and portals authored in a scene (Mirror3D, Portal3D; PlanarViews3D through render()): through the portal
 // the view shows what a camera standing where the portals take the eye sees; without the planar surfaces the portal
 // is its stand-in colour; portal_step goes through it; a mirror's scene renders.
@@ -1752,6 +1827,7 @@ int main(int argc, char** argv) {
         gpu_prepared_requests(renderer);
         gpu_pick(renderer);
         gpu_planar(renderer);
+        gpu_terrain(renderer);
         gpu_probes(renderer);
         gpu_frame_pick(renderer);
         gpu_frame_cost(renderer);

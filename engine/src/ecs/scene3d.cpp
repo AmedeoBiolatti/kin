@@ -108,6 +108,16 @@ void register_render3d_components(EcsWorld& world) {
             .field("murk_depth", &Mirror3D::murk_depth)
             .units("m")
             .description("How deep the water is before what is below is mostly gone into its murk.");
+    if (!registry.find("TerrainRenderer3D"))
+        registry.native<TerrainRenderer3D>("TerrainRenderer3D")
+            .field("enabled", &TerrainRenderer3D::enabled)
+            .field("terrain", &TerrainRenderer3D::terrain)
+            .asset_type("Terrain3D")
+            .description("A .kinterrain file (Terrain3D::save; the terrain_editor sample writes them).")
+            .field("collision", &TerrainRenderer3D::collision)
+            .description("A static height field of it in the scene's physics.")
+            .field("id", &TerrainRenderer3D::id)
+            .description("Picking ID; 0: the entity's.");
     if (!registry.find("Portal3D"))
         registry.native<Portal3D>("Portal3D")
             .field("enabled", &Portal3D::enabled)

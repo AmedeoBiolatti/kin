@@ -60,9 +60,10 @@ struct GiVoxelizeUniforms {
     i32 window[4];
     i32 low[4], high[4]; // xyz: the box round the blocks to make; low.w: every block inside the box is dirty
     f32 emission[4];
-    f32 vertex[4]; // the vertex colour's share in the base colour (rgb) and alpha: 1, or 0 (a stand-in's surface's)
+    f32 vertex[4];     // the vertex colour's share in the base colour (rgb) and alpha: 1, or 0 (a stand-in's surface's)
+    f32 terrain[2][4]; // a terrain's (SurfaceGi3D::Terrain): its surface's parameters 0 and 1, the last 1
 };
-static_assert(sizeof(GiVoxelizeUniforms) == 176);
+static_assert(sizeof(GiVoxelizeUniforms) == 208);
 
 // gi_clear.comp's.
 struct GiClearUniforms {
@@ -551,9 +552,13 @@ constexpr u64 gi_proxy_idle = 600;
 // The maps the GI scene reads of a material: none of a surface whose GI is its fields (SurfaceGi3D::Fields: its maps
 // may hold pictures of the view, as kin's planar surfaces' do), its colour and emission fields alone.
 namespace {
+// (A terrain's base map is its height map, which the voxelizer reads as heights: SurfaceGi3D::Terrain.)
+bool gi_terrain(const Material3D& m) {
+    return m.surface.backend() && m.surface.traits().gi == SurfaceGi3D::Terrain;
+}
 const Texture& gi_base_map(const Material3D& m) {
     static const Texture none{};
-    return m.surface.backend() && m.surface.traits().gi != SurfaceGi3D::StandIn ? none : m.texture;
+    return m.surface.backend() && m.surface.traits().gi != SurfaceGi3D::StandIn && !gi_terrain(m) ? none : m.texture;
 }
 const Texture& gi_emissive_map(const Material3D& m) {
     static const Texture none{};
@@ -1407,7 +1412,9 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         // emitters', which stay whole) that bring all the copies' within it.
         std::size_t occluding = 0;
         for (const Copy& c : copies) {
-            occluding += jobs[c.job].skinned ? 0 : jobs[c.job].mesh->gi_triangles.size() / 3;
+            occluding += jobs[c.job].skinned || gi_terrain(jobs[c.job].draw->material)
+                             ? 0
+                             : jobs[c.job].mesh->gi_triangles.size() / 3;
         }
         u32 coarse = 0;
         while (coarse < 8 && (occluding >> coarse) > std::max<u32>(area_settings.max_triangles, 1)) {
@@ -1437,7 +1444,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             for (u32 ci = 0; ci < copies.size(); ++ci) {
                 const Copy& c = copies[ci];
                 const Job& j = jobs[c.job];
-                if (j.skinned || j.mesh->gi_triangles.empty()) {
+                // (A terrain's triangles are its flat grid's on the CPU: it is shaped in the voxelizer alone.)
+                if (j.skinned || j.mesh->gi_triangles.empty() || gi_terrain(j.draw->material)) {
                     continue;
                 }
                 const std::vector<Vec3f>& corners = j.mesh->gi_triangles;
@@ -1798,6 +1806,13 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 const SurfaceTraits3D traits = proxy ? m.surface.traits() : SurfaceTraits3D{};
                 u.vertex[0] = u.vertex[1] = u.vertex[2] = traits.vertex_color ? 1.0f : 0.0f;
                 u.vertex[3] = traits.vertex_alpha ? 1.0f : 0.0f;
+                if (gi_terrain(m)) {
+                    for (int i = 0; i < 4; ++i) {
+                        u.terrain[0][i] = m.shader_params[static_cast<std::size_t>(i)];
+                        u.terrain[1][i] = m.shader_params[static_cast<std::size_t>(4 + i)];
+                    }
+                    u.terrain[1][3] = 1.0f;
+                }
                 u.first[0] = lj.copy_first;
                 u.first[1] = k * words;
                 u.first[2] = lj.pair_first;

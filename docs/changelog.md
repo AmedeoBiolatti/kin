@@ -9,6 +9,15 @@ releases may change APIs.
 
 ### Added
 
+- 3D heightmap terrain ([3D rendering](rendering_3d.md#terrain)): `Terrain3D` with CDLOD level of detail (one
+  instanced grid, heights and morphing in kin's terrain surface, every pass culled by the nodes' boxes), up to 16
+  weight-mapped layers with height blending, sculpting brushes (raise, lower, smooth, flatten, noise, paint) with
+  stroke undo/redo, `.kinterrain` files, raw/8-bit height map loading and a Jolt height field
+  (`terrain_shape3d`, updated in place by `update_terrain_collision` / `World3D::set_heights`); 16-bit PNG height
+  maps; `TerrainRenderer3D` in scene files and the ECS (drawn, picked and collided by `SceneSession3D`, `Terrains3D`);
+  `terrain_mesh3d` for navigation meshes; global illumination sees it (`SurfaceGi3D::Terrain`: the voxelizer shapes
+  the grid by the height map). `kin_terrain_surface(<target>)` and `kin_compile_surface_shader(...
+  OFFSET)` build surfaces with vertex offsets. Sample: `examples/terrain_editor`. Native renderer only.
 - 3D subsurface scattering ([3D rendering](rendering_3d.md#subsurface-scattering)): `Material3D::subsurface`,
   `subsurface_radius` (presets for skin, marble, wax, jade, milk, leaf) and light through thick parts
   (`subsurface_transmission`, thickness from the shadow maps or `subsurface_thickness`); disc-sampled Burley as Unity

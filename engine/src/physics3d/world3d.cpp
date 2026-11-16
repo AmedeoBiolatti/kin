@@ -21,6 +21,7 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/CompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/DecoratedShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Constraints/ConeConstraint.h>
@@ -1974,6 +1975,27 @@ bool World3D::set_shape(Body3D body, const Shape3D& shape) {
         return false;
     }
     return owner_set_shape(body, shape);
+}
+
+bool World3D::set_heights(Body3D body, Vec2i at, Vec2i size, std::span<const f32> heights) {
+    Impl& m = *_impl;
+    const Impl::Slot* s = m.find(body);
+    if (s == nullptr || !s->shape.valid() || s->shape.kind() != Shape3DKind::HeightField || at.x < 0 || at.y < 0 ||
+        size.x <= 0 || size.y <= 0 || at.x % 2 != 0 || at.y % 2 != 0 || size.x % 2 != 0 || size.y % 2 != 0 ||
+        heights.size() != static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y))
+        return false;
+    // (Shapes are shared and otherwise immutable: a height field is the one kind Jolt changes in place.)
+    auto* field =
+        const_cast<JPH::HeightFieldShape*>(static_cast<const JPH::HeightFieldShape*>(s->shape._data->shape.GetPtr()));
+    const u32 count = field->GetSampleCount();
+    if (static_cast<u32>(at.x + size.x) > count || static_cast<u32>(at.y + size.y) > count)
+        return false;
+    const JPH::Vec3 centre = field->GetCenterOfMass();
+    field->SetHeights(static_cast<JPH::uint>(at.x), static_cast<JPH::uint>(at.y), static_cast<JPH::uint>(size.x),
+                      static_cast<JPH::uint>(size.y), heights.data(), size.x, m.temp);
+    m.bi().NotifyShapeChanged(s->id, centre, false, JPH::EActivation::Activate);
+    m.wake_touching(s->id);
+    return true;
 }
 
 bool World3D::owner_set_shape(Body3D body, const Shape3D& shape) {

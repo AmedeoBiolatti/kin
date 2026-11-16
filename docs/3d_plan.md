@@ -10710,8 +10710,9 @@ new in the frame graph: terrain is drawn, shadowed, picked and velocity-tracked 
   texture read by `texelFetch` (vertices sit on texels at every level), its BA the normal's x and z (bilinear in the
   fragment). One texture up to 8193 x 8193 samples in the first slice (no streaming, no tiles).
 - **Layers**: four weight maps (RGBA8, the height map's size or another) in the material's other slots; each layer's
-  albedo (with a height in alpha for height blending) and normal (with roughness) in the graph maps' array (32 layers:
-  `max_graph_map_layers3d` raised for terrain), its tiling a parameter. Layers under a weight threshold are skipped.
+  albedo (with a height in alpha for height blending) and normal (with roughness) in the graph maps' array (32 layers;
+  `create_map_array` itself has no limit, only graphs' 16), its tiling a parameter. Layers under a weight threshold are
+  skipped.
 - **CPU**: `Terrain3D` (kin/render3d/terrain3d.hpp): the heights, the weights, the quadtree's min and max heights, the
   CDLOD selection for a camera (whole terrain by distance; the renderer culls each pass), `draw(scene)` adding one
   instanced draw; height and normal at a point, a ray hit.
@@ -10736,3 +10737,46 @@ Stages:
 
 Limits planned: one height texture (no streaming or tiles past 8193^2), no holes, no overhangs (heights only), the
 GI scene sees the terrain only from T5.
+
+**T1-T4 as built (2026-11-16).**
+
+- As planned, with the surface's offset doing all the vertex work; `kin_compile_surface_shader` gained `OFFSET` (the
+  eight vertex variants) and `kin_terrain_surface(<target>)` embeds the terrain's. The surface's fragment part is under
+  `#else` of `KIN_SURFACE_VERTEX`, one file for both.
+- CDLOD's own condition needed care: a level-l node can reach a node diagonal past its range, where its coarser
+  neighbour must not have begun morphing and no neighbour two levels coarser may sit. The test with nodes of 8 quads
+  and `lod_distance` 1 showed cracks (11 background pixels); the terrain now widens its ranges so the steepest finest
+  node's diagonal is at most half a range and starts the morph no earlier than (1 + d/r) / 2 (none since).
+- Layers: each pixel samples its four strongest layers only (8 texture reads at most), blended by weight times
+  ((height + 0.02) / (highest + 0.02))^(16 blend) (relative: a layer alone keeps its weight; an absolute form darkened
+  low layers).
+- Sculpting on the CPU copy; undo keeps the 32 x 32 tiles a stroke first touches (heights and weights), swapped back
+  and forth. Collision: the whole height field rebuilt after a stroke (150-160 ms at 1025^2 on this laptop), not
+  Jolt's `SetHeights` yet.
+- Tests (`kin_render3d_tests`): `test_gpu_terrain` (heights between samples, raycast, selection levels, picks within
+  2 mm of the heights near the camera, no background below the skyline with 2 and 4 levels, hill shadows),
+  `test_gpu_terrain_layers` (two layers by halves; half and half by weight and by height),
+  `test_gpu_terrain_sculpt` (each brush, a stroke undone and redone exactly, the drawn surface and a Jolt ray after
+  sculpting, a `.kinterrain` round trip). Pass on NVIDIA, Intel and lavapipe.
+- Cost: `tests/reference/scenes/terrain.json` (4097^2, three layers, four cascades, 1280 x 720): 0.96 ms GPU from a
+  ridge without layers, 0.75 ms with (the GPU at 83-88 C: noisy).
+
+**T5 as built (2026-11-16).**
+
+- Scene files and the ECS: `TerrainRenderer3D` (a `.kinterrain` asset, collision, pick id), `Terrains3D`
+  (kin/scene/terrains3d.hpp) owning the loaded terrains and their static bodies, run by `SceneSession3D` after
+  `compose`; picks resolve to the entity; `session.terrains()` for game code. Collision only when the session has
+  physics (`SceneSession3DOptions::physics`, as everything else's). Test: `kin_scene_session3d_tests` gpu_terrain.
+- Navigation: `terrain_mesh3d` / `Terrain3D::mesh(stride)` as triangles for `build_navmesh3d` (CPU only). Test: a
+  cone too steep to walk is left out, the path goes round it (`kin_navmesh3d_tests`).
+- Collision in place: `Shape3D::height_field` takes the range to keep open, `World3D::set_heights` wraps Jolt's
+  `SetHeights` (2 x 2 blocks; `NotifyShapeChanged`), `update_terrain_collision` sends a changed rectangle: 12 ms for a
+  317 x 81 stroke at 1025^2, against 150-600 ms for a new shape.
+- `load_height_map` reads 16-bit PNGs (non-interlaced; first channel).
+- The GI scene (the user's choice: teach the voxelizer, 2026-11-16): `SurfaceGi3D::Terrain`. The voxelizer reads the
+  vertex buffers itself (gi_voxelize.comp); for a terrain draw it binds the height map as the base map, takes the
+  surface's first two parameter vectors, and lifts each grid vertex to its sample's height (unmorphed) with the
+  sample's normal; the voxels' colour is `Material3D::color`, which Terrain3D sets to its mean colour. The height
+  map's version is in the GI key, so sculpting remakes the terrain's voxels. Not among the area lights' occluders
+  (their triangles are the CPU's flat grid). Test `test_gpu_terrain_gi` (read_gi_scene: the cone's surface full, the
+  air above empty, its colour; raised, the voxels follow). Open: streaming past one texture, WebGL2, Lua helpers.

@@ -503,7 +503,7 @@ if(KIN_EXPERIMENTAL_3D)
         src/render3d/renderer3d.cpp
         src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/clouds3d.cpp src/render3d/particles3d.cpp
-        src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/hdr_decode.c)
+        src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/terrain3d.cpp src/render3d/hdr_decode.c)
     if(KIN_HAS_GPU_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
                                           src/renderer/gpu/gpu_area_lights3d.cpp src/renderer/gpu/gpu_area_lights_ltc.cpp
@@ -533,7 +533,7 @@ if(KIN_EXPERIMENTAL_3D)
             src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/ecs/surface_details3d.cpp
             src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp
             src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/scene/planar_views3d.cpp
-            src/scene/reflection_probes3d.cpp
+            src/scene/reflection_probes3d.cpp src/scene/terrains3d.cpp
             src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp)
     endif()
     option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)
@@ -579,7 +579,7 @@ if(KIN_EXPERIMENTAL_3D)
         # fusing multiply-adds in the glue (determinism); -fno-rtti is Jolt's own build setting, which its classes
         # that these sources derive from need.
         add_library(kin_physics3d_objects OBJECT
-            src/physics3d/shape3d.cpp
+            src/physics3d/shape3d.cpp src/physics3d/terrain_shape3d.cpp
             src/physics3d/world3d.cpp
             src/physics3d/character3d.cpp
             src/physics3d/traversal3d.cpp
