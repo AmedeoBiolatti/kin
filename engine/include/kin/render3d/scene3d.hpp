@@ -687,6 +687,39 @@ struct Grade3D {
     f32 lut_strength = 1.0f;
 };
 
+// The glow's shape and the lens' flares (CameraEffects3D::glow): ViewOptions3D::bloom's glow made wide, and what the
+// bright light it is made of draws on a lens. They need a view made with bloom (its strength and threshold are the
+// glow's); with every value at its default the glow is kin's own (two Gaussian rounds at half size), unchanged.
+struct Glow3D {
+    // A chain of ever smaller copies of the bright light, blurred back up (as Unreal's, Unity's and Godot's bloom): a
+    // wide glow falling off softly over many sizes instead of a narrow one. `radius` (0 to 1) is how much each larger
+    // size weighs against the one before: more is wider. Energy-conserving: the glow holds the light it was made of.
+    bool wide = false;
+    f32 radius = 0.7f;
+    // A picture of dust and smudges on the lens, stretched over the view, lit where bright light is near (linear
+    // colour; set from code, scene files cannot name one yet), this strong (0 to 10).
+    Texture dirt;
+    f32 dirt_intensity = 0.0f;
+    // Ghosts: copies of the bright light mirrored through the middle of the view, `ghost_count` (1 to 8) of them
+    // `ghost_spacing` (0 to 1) of the way toward it each, this strong (0 to 10); and a halo, a ring of them
+    // `halo_width` (0 to 1) of the way out, this strong. With a little colour fringe, as a lens' own reflections.
+    f32 ghosts = 0.0f;
+    u32 ghost_count = 4;
+    f32 ghost_spacing = 0.35f;
+    f32 halo = 0.0f;
+    f32 halo_width = 0.45f;
+    // Anamorphic streaks: bright light drawn out sideways, `streak_length` (0 to 1) of the view's width each way, this
+    // strong (0 to 20), in this colour (an anamorphic lens' blue by default).
+    f32 streaks = 0.0f;
+    f32 streak_length = 0.3f;
+    LinearRgb streak_tint{0.5f, 0.7f, 1.0f};
+
+    // Whether any of it changes the glow (else the glow is kin's own).
+    bool shapes_glow() const {
+        return wide || (dirt && dirt_intensity > 0.0f) || ghosts > 0.0f || halo > 0.0f || streaks > 0.0f;
+    }
+};
+
 // What the camera adds to the picture (lens and film), after the scene is rendered and before the 2D drawn over the
 // view: off by default; off, the picture and its cost are those without it. Planar views (mirrors, portals) and
 // reflection captures are rendered without them: they belong to the eye, not to a picture inside the scene.
@@ -699,6 +732,7 @@ struct CameraEffects3D {
     Lens3D lens{};
     Film3D film{};
     Grade3D grade{};
+    Glow3D glow{};
 
     // Whether any of the lens, film and grade changes the picture (else the view's output is the plain one).
     bool lens_film_or_grade() const {

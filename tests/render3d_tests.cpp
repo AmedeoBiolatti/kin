@@ -6948,6 +6948,68 @@ void test_gpu_lens_film_grade() {
     });
 }
 
+// The glow's shape and the lens' flares (CameraEffects3D::glow) round a small bright square up and left of the middle
+// of an HDR view with bloom (10 pixels a unit, the square at 40, 30): the wide glow reaches farther than kin's own;
+// ghosts put light mirrored through the middle (120, 90); streaks draw it out along its row and not its column; the
+// lens dirt tints the glow with its own colour. With none of it, kin's own bloom (no dispatches), and without bloom
+// nothing.
+void test_gpu_glow() {
+    with_gpu("test_gpu_glow", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().glow, "the glow's shape and the lens' flares")) {
+            return;
+        }
+        const kin::Mesh3D square = make_box(r3d, {0.6f, 0.6f, 0.1f});
+        const std::array<kin::u8, 16> red_texels{255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255};
+        const kin::Texture red_dirt = renderer.create_texture_from_rgba(red_texels.data(), {2, 2});
+        kin::Scene3D scene;
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0), .bloom = 1.0f}).value_or({});
+        const auto shoot = [&](const kin::Glow3D& glow, kin::View3D& target) {
+            scene.clear();
+            scene.camera = flat_camera();
+            scene.camera_effects.glow = glow;
+            (void)scene.draw(square, Mat4f::translation({-4.0f, 3.0f, 0.0f}),
+                             {.color = Color::rgb(255, 255, 255), .emissive = 12.0f, .unlit = true});
+            Pixels p = shoot_view(renderer, r3d, target, scene);
+            renderer.present();
+            return p;
+        };
+        // The brightness summed over a 9 x 9 square round (x, y).
+        const auto around = [](const Pixels& p, int x, int y) {
+            long sum = 0;
+            for (int dy = -4; dy <= 4; ++dy)
+                for (int dx = -4; dx <= 4; ++dx)
+                    sum += brightness(p.at(std::clamp(x + dx, 0, 159), std::clamp(y + dy, 0, 119)));
+            return sum;
+        };
+        const Pixels plain = shoot({}, view);
+        assert(r3d.debug_stats().glow_dispatches == 0);
+        const Pixels wide = shoot({.wide = true, .radius = 0.85f}, view);
+        assert(r3d.debug_stats().glow_dispatches > 0);
+        const Pixels ghosts = shoot({.ghosts = 4.0f, .ghost_count = 1}, view);
+        const Pixels streaks = shoot({.streaks = 12.0f, .streak_length = 0.5f}, view);
+        const Pixels dirty = shoot({.dirt = red_dirt, .dirt_intensity = 8.0f}, view);
+        std::printf("    glow: 30 px right %ld plain, %ld wide; mirrored %ld plain, %ld with ghosts; 40 px along the "
+                    "row %ld plain, %ld streaked, 40 px down %ld, %ld\n",
+                    around(plain, 70, 30), around(wide, 70, 30), around(plain, 120, 90), around(ghosts, 120, 90),
+                    around(plain, 80, 30), around(streaks, 80, 30), around(plain, 40, 70), around(streaks, 40, 70));
+        assert(around(wide, 70, 30) > around(plain, 70, 30) + 81 * 3);
+        assert(around(ghosts, 120, 90) > around(plain, 120, 90) + 81 * 3);
+        assert(around(streaks, 80, 30) > around(plain, 80, 30) + 81 * 3);
+        assert(std::abs(around(streaks, 40, 70) - around(plain, 40, 70)) <= 81);
+        const Color tinted = dirty.at(52, 30), untinted = plain.at(52, 30);
+        std::printf("    glow: lens dirt (red) by the square %d,%d,%d against %d,%d,%d\n", tinted.r, tinted.g, tinted.b,
+                    untinted.r, untinted.g, untinted.b);
+        assert(tinted.r > untinted.r + 10 && std::abs(int(tinted.g) - int(untinted.g)) <= 3);
+        // Without bloom there is no glow to shape.
+        kin::View3D unglowing =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = true}).value_or({});
+        (void)shoot({.wide = true, .ghosts = 1.0f}, unglowing);
+        assert(r3d.debug_stats().glow_dispatches == 0);
+    });
+}
+
 // Motion blur (CameraEffects3D::motion_blur) over a white block on black, 10 pixels a unit. Off, and on over a still
 // picture, the pictures are the same bytes. A block moving sideways a unit a frame is smeared sideways over about the
 // shutter's share of its motion (its left and right edges become ramps; its top and bottom stay sharp); panning the
@@ -24726,6 +24788,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_specular_aa());
     RUN(test_gpu_specular_multiscatter());
     RUN(test_gpu_motion_blur());
+    RUN(test_gpu_glow());
     RUN(test_gpu_lens_film_grade());
     RUN(test_gpu_depth_of_field());
     RUN(test_gpu_taa_crowd());

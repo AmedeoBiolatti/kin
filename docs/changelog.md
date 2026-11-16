@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- 3D glow and lens flares ([3D rendering](rendering_3d.md#glow-and-lens-flares)): `Scene3D::camera_effects.glow`
+  makes the view's bloom wide (an energy-conserving mip chain, as Unreal's and Unity's) and adds lens dirt, ghosts, a
+  halo and anamorphic streaks; authored as `SceneEnvironment3D`'s `glow_*` (the dirt picture from code). With every
+  value at its default the bloom is unchanged. Native renderer only.
 - 3D lens, film and grade ([3D rendering](rendering_3d.md#lens-film-and-grade)): `Scene3D::camera_effects` gains a
   vignette, chromatic aberration, film grain, a choice of tone curve (ACES, AgX, Khronos PBR Neutral), white balance,
   contrast, saturation and a LUT look cross-faded between two, in the view's output pass; authored as

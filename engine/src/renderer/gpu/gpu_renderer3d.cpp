@@ -1581,6 +1581,16 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _dof_gather_pipeline = make_compute(handle, "dof_gather.comp.spv", {.samplers = 3, .readwrite_textures = 2});
         _dof_combine_pipeline = make_compute(handle, "dof_combine.comp.spv", {.samplers = 5});
     }
+    // The glow's chain and the lens' flares (Glow3D).
+    if (_taa_available) {
+        _glow_down_pipeline = make_compute(handle, "glow_down.comp.spv", {.samplers = 1});
+        _glow_up_pipeline = make_compute(handle, "glow_up.comp.spv", {.samplers = 2});
+        _glow_flare_pipeline = make_compute(handle, "glow_flare.comp.spv", {.samplers = 1});
+        _glow_streak_pipeline = make_compute(handle, "glow_streak.comp.spv", {.samplers = 1});
+        _glow_compose_pipeline = make_compute(handle, "glow_compose.comp.spv", {.samplers = 5});
+    }
+    _capabilities.glow = _glow_down_pipeline && _glow_up_pipeline && _glow_flare_pipeline && _glow_streak_pipeline &&
+                         _glow_compose_pipeline;
     _capabilities.depth_of_field = _dof_focus_pipeline && _dof_prepare_pipeline && _dof_tiles_pipeline &&
                                    _dof_spread_pipeline && _dof_gather_pipeline && _dof_combine_pipeline;
     // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
@@ -1960,6 +1970,11 @@ GpuRenderer3D::~GpuRenderer3D() {
                                             _dof_spread_pipeline,
                                             _dof_gather_pipeline,
                                             _dof_combine_pipeline,
+                                            _glow_down_pipeline,
+                                            _glow_up_pipeline,
+                                            _glow_flare_pipeline,
+                                            _glow_streak_pipeline,
+                                            _glow_compose_pipeline,
                                             _gc_cull,
                                             _gc_scan,
                                             _gc_args,
@@ -4237,6 +4252,125 @@ bool GpuRenderer3D::post_pass(SDL_GPUCommandBuffer* commands, const GpuTexture& 
     return true;
 }
 
+const GpuTexture* GpuRenderer3D::record_glow(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source,
+                                             const Glow3D& glow, const GpuTexture* base, f32 threshold,
+                                             RenderDebugStats3D& stats) {
+    view._glow_used = true;
+    const u32 w = source.width(), h = source.height();
+    // The levels: half the picture, then each half the one before while both sides stay 8 or more (at most 8); only
+    // as many as needed when the glow is not wide (the flares read the third, the dirt's light the fourth).
+    u32 levels = 0;
+    for (u32 lw = (w + 1) / 2, lh = (h + 1) / 2; levels < 8 && lw >= 8 && lh >= 8; lw = (lw + 1) / 2, lh = (lh + 1) / 2)
+        ++levels;
+    const bool dirt_on = glow.dirt && glow.dirt_intensity > 0.0f;
+    if (!glow.wide)
+        levels = std::min(levels, dirt_on ? 4u : 3u);
+    if (levels < 2)
+        return nullptr;
+    constexpr SDL_GPUTextureUsageFlags stored =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+    const auto sized = [](const GpuTexture& t, u32 x, u32 y) { return t && t.width() == x && t.height() == y; };
+    try {
+        view._glow_down.resize(levels);
+        view._glow_up.resize(glow.wide ? levels - 1 : 0);
+        u32 lw = (w + 1) / 2, lh = (h + 1) / 2;
+        for (u32 l = 0; l < levels; ++l, lw = (lw + 1) / 2, lh = (lh + 1) / 2) {
+            if (!sized(view._glow_down[l], lw, lh))
+                view._glow_down[l] = _device->create_target(lw, lh, hdr_format, stored);
+            if (glow.wide && l + 1 < levels && !sized(view._glow_up[l], lw, lh))
+                view._glow_up[l] = _device->create_target(lw, lh, hdr_format, stored);
+        }
+        const GpuTexture& second = view._glow_down[1];
+        if (!sized(view._glow_flare, second.width(), second.height()))
+            view._glow_flare = _device->create_target(second.width(), second.height(), hdr_format, stored);
+        if (!sized(view._glow_streak, second.width(), second.height()))
+            view._glow_streak = _device->create_target(second.width(), second.height(), hdr_format, stored);
+        if (!sized(view._glow_final, (w + 1) / 2, (h + 1) / 2))
+            view._glow_final = _device->create_target((w + 1) / 2, (h + 1) / 2, hdr_format, stored);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: glow targets not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        view._glow_down.clear();
+        view._glow_up.clear();
+        view._glow_flare = {};
+        view._glow_streak = {};
+        view._glow_final = {};
+        return nullptr;
+    }
+    SDL_GPUSampler* linear = _owner->_sampler_linear;
+    u32 dispatches = 0;
+    // Down: the first level from the picture (Karis, threshold), the rest from the one before.
+    for (u32 l = 0; l < levels; ++l) {
+        const f32 params[4] = {l == 0 ? 1.0f : 0.0f, std::max(threshold, 0.0f), 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding input{(l == 0 ? source : view._glow_down[l - 1]).handle(), linear};
+        if (!compute_pass(commands, _glow_down_pipeline, view._glow_down[l], std::span{&input, 1}, params,
+                          sizeof(params)))
+            return nullptr;
+        ++dispatches;
+    }
+    // Up (wide): each level mixed with the one below it, from the smallest (whose own light is its "up").
+    if (glow.wide) {
+        for (u32 l = levels - 1; l-- > 0;) {
+            const GpuTexture& below = l + 2 == levels ? view._glow_down[l + 1] : view._glow_up[l + 1];
+            const f32 params[4] = {std::clamp(glow.radius, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f};
+            const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
+                SDL_GPUTextureSamplerBinding{view._glow_down[l].handle(), linear},
+                SDL_GPUTextureSamplerBinding{below.handle(), linear}};
+            if (!compute_pass(commands, _glow_up_pipeline, view._glow_up[l], inputs, params, sizeof(params)))
+                return nullptr;
+            ++dispatches;
+        }
+    }
+    // The ghosts and halo (from the third level where there is one: softer), and the streaks (from the second).
+    const bool flares = glow.ghosts > 0.0f || glow.halo > 0.0f;
+    if (flares) {
+        const GpuTexture& bright = view._glow_down[std::min(2u, levels - 1)];
+        const f32 params[8] = {
+            std::clamp(glow.ghosts, 0.0f, 10.0f),       static_cast<f32>(std::clamp(glow.ghost_count, 1u, 8u)),
+            std::clamp(glow.ghost_spacing, 0.0f, 1.0f), 0.0f,
+            std::clamp(glow.halo, 0.0f, 10.0f),         std::clamp(glow.halo_width, 0.0f, 1.0f),
+            static_cast<f32>(w) / static_cast<f32>(h),  0.0f};
+        const SDL_GPUTextureSamplerBinding input{bright.handle(), linear};
+        if (!compute_pass(commands, _glow_flare_pipeline, view._glow_flare, std::span{&input, 1}, params,
+                          sizeof(params)))
+            return nullptr;
+        ++dispatches;
+    }
+    const f32 streaks = std::clamp(glow.streaks, 0.0f, 20.0f);
+    if (streaks > 0.0f) {
+        const f32 params[4] = {std::clamp(glow.streak_length, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f};
+        const SDL_GPUTextureSamplerBinding input{view._glow_down[1].handle(), linear};
+        if (!compute_pass(commands, _glow_streak_pipeline, view._glow_streak, std::span{&input, 1}, params,
+                          sizeof(params)))
+            return nullptr;
+        ++dispatches;
+    }
+    // Together, with the lens dirt lit by a wide level (the fourth: about a sixteenth of the view across).
+    const auto* dirt_backend = dirt_on ? dynamic_cast<const GpuTextureBackend*>(glow.dirt.backend().get()) : nullptr;
+    const bool dirt = dirt_backend && dirt_backend->texture();
+    const GpuTexture& dirt_light =
+        glow.wide ? view._glow_up[std::min(3u, levels - 2)] : view._glow_down[std::min(3u, levels - 1)];
+    const GpuTexture& glowing = glow.wide ? view._glow_up[0] : *base;
+    const f32 params[8] = {flares ? 1.0f : 0.0f,
+                           dirt ? std::clamp(glow.dirt_intensity, 0.0f, 10.0f) : 0.0f,
+                           0.0f,
+                           0.0f,
+                           glow.streak_tint.r * streaks,
+                           glow.streak_tint.g * streaks,
+                           glow.streak_tint.b * streaks,
+                           0.0f};
+    const std::array<SDL_GPUTextureSamplerBinding, 5> inputs{
+        SDL_GPUTextureSamplerBinding{glowing.handle(), linear},
+        SDL_GPUTextureSamplerBinding{view._glow_flare.handle(), linear},
+        SDL_GPUTextureSamplerBinding{view._glow_streak.handle(), linear},
+        SDL_GPUTextureSamplerBinding{dirt_light.handle(), linear},
+        SDL_GPUTextureSamplerBinding{dirt ? dirt_backend->texture().handle() : _owner->_white.handle(), linear}};
+    if (!compute_pass(commands, _glow_compose_pipeline, view._glow_final, inputs, params, sizeof(params)))
+        return nullptr;
+    ++dispatches;
+    stats.glow_dispatches += dispatches;
+    return &view._glow_final;
+}
+
 bool GpuRenderer3D::record_bloom(SDL_GPUCommandBuffer* commands, const GpuTexture& source, const GpuTexture& result,
                                  const GpuTexture& scratch, f32 threshold, RenderDebugStats3D& stats) {
     const auto pass = [&](const GpuTexture& target, const GpuTexture& from, const std::array<f32, 4>& params) {
@@ -4425,8 +4559,21 @@ bool GpuRenderer3D::record_output_effects(SDL_GPUCommandBuffer* commands, GpuVie
 bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
                                 bool dither, f32 time, RenderDebugStats3D& stats, const CameraEffects3D* effects) {
     const bool bloom = !plain && view._options.bloom > 0 && view._bloom_a && view._bloom_b;
-    if (bloom && !record_bloom(commands, source, view._bloom_a, view._bloom_b, view._options.bloom_threshold, stats))
+    // Glow3D shapes the glow (and needs it); else kin's own bloom, as ever.
+    const Glow3D* glow = bloom && effects && effects->glow.shapes_glow() ? &effects->glow : nullptr;
+    if (glow && !_capabilities.glow) {
+        warn_once(_glow_warned, "3D: the glow's shape and the lens' flares asked for, but this device cannot: off");
+        glow = nullptr;
+    }
+    const GpuTexture* glowing = nullptr;
+    if (glow && glow->wide)
+        glowing = record_glow(commands, view, source, *glow, nullptr, view._options.bloom_threshold, stats);
+    if (bloom && !glowing &&
+        !record_bloom(commands, source, view._bloom_a, view._bloom_b, view._options.bloom_threshold, stats))
         return false;
+    if (glow && !glow->wide)
+        glowing = record_glow(commands, view, source, *glow, &view._bloom_a, view._options.bloom_threshold, stats);
+    const GpuTexture* bloom_texture = !bloom ? nullptr : glowing ? glowing : &view._bloom_a;
     // Auto exposure meters the picture before the bloom is added (the glow follows the exposure as the scene does).
     // An HDR 2D pipeline (mode 2) tonemaps itself: there is nothing to expose here.
     const bool tonemapped = !plain && view._output_format != hdr_format;
@@ -4434,7 +4581,7 @@ bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view,
         view._options.auto_exposure.enabled && tonemapped && meter_exposure(commands, view, source, time, stats);
     if (effects && effects->lens_film_or_grade()) {
         if (_output_effects_shader)
-            return record_output_effects(commands, view, source, bloom ? &view._bloom_a : nullptr,
+            return record_output_effects(commands, view, source, bloom_texture,
                                          {.bloom_strength = bloom ? view._options.bloom : 0.f,
                                           .exposure = view._options.exposure,
                                           .tone_map_sdr = !plain,
@@ -4442,7 +4589,7 @@ bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view,
                                          *effects, metered ? view._exposure->handle() : nullptr, stats);
         warn_once(_effects_warned, "3D: the camera's lens, film and grade asked for, but this device cannot: off");
     }
-    return record_output(commands, source, view._resolved->texture(), bloom ? &view._bloom_a : nullptr,
+    return record_output(commands, source, view._resolved->texture(), bloom_texture,
                          {.bloom_strength = bloom ? view._options.bloom : 0.f,
                           .exposure = view._options.exposure,
                           .tone_map_sdr = !plain,
@@ -4692,12 +4839,18 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
                                 &view._dof_tiles[1],
                                 &view._dof_focus[0],
                                 &view._dof_focus[1],
+                                &view._glow_flare,
+                                &view._glow_streak,
+                                &view._glow_final,
                                 &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
         bytes += texture_bytes(t);
     }
+    for (const std::vector<GpuTexture>* chain : {&view._glow_down, &view._glow_up})
+        for (const GpuTexture& t : *chain)
+            bytes += texture_bytes(t);
     // The fog's volumes (Fog3D::volumetric): three of four halves a cell.
     if (view._fog_volume_sum) {
         bytes += 3ull * 8ull * view._fog_volume_cells[0] * view._fog_volume_cells[1] * view._fog_volume_cells[2];
@@ -6057,6 +6210,14 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             v._occ_reset = true;
         });
     age(v._idle_gi, ctx.gi, static_cast<bool>(v._gi.distance), [&] { release_gi(v); });
+    age(v._idle_glow, v._glow_used, !v._glow_down.empty() || static_cast<bool>(v._glow_final), [&] {
+        v._glow_down.clear();
+        v._glow_up.clear();
+        v._glow_flare = {};
+        v._glow_streak = {};
+        v._glow_final = {};
+    });
+    v._glow_used = false;
     age(v._idle_dof, ctx.focused, v._dof_half || v._dof_result || v._dof_focus[0], [&] {
         v._dof_half = {};
         v._dof_half_blur = {};

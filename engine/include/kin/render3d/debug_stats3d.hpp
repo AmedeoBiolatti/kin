@@ -110,6 +110,8 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 dof_dispatches = 0;
     // 1 when the view's output drew the lens, film and grade (CameraEffects3D), else 0.
     u32 camera_effect_draws = 0;
+    // Compute dispatches of the glow's chain and the lens' flares (CameraEffects3D::glow): 0 for kin's own bloom.
+    u32 glow_dispatches = 0;
     bool taa_reset = false; // its history was not used this render: the first, after a resize or reset_history(), or
                             // the camera changed kind
     Vec2f taa_jitter{};     // this render's offset in pixels (0, 0 when off)

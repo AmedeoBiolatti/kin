@@ -48,6 +48,7 @@ struct RendererCapabilities3D {
     bool temporal_upscaling = false; // lower-resolution shading into display-resolution temporal history
     bool motion_blur = false;        // CameraEffects3D::motion_blur (with temporal_aa, whose velocity it reads)
     bool depth_of_field = false;     // CameraEffects3D::depth_of_field
+    bool glow = false;               // CameraEffects3D::glow (the wide glow and the lens' flares)
     // Whether Scene3D::lod's cluster cut can run in compute (Scene3D::debug.gpu_culling): compute with storage buffers
     // read and written, buffers that are index and indirect-argument buffers a compute pass writes. Else the CPU cuts.
     bool gpu_driven_clusters = false;

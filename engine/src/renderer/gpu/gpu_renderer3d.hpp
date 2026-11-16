@@ -465,6 +465,12 @@ private:
     bool _dof_time_seen = false;
     std::chrono::steady_clock::time_point _dof_wall{}; // (when Scene3D::time does not move: the wall clock's step)
     u32 _grain_frame = 0;                              // Film3D::grain's pattern, a new one each render
+    // With Glow3D (made by the first render that asks): the chain's levels down (half the view's size, then each half
+    // the one before) and up, the ghosts and halo and the streaks (the second level's size), and the glow the output
+    // reads (half the view's size); all RGBA16F. Whether this render used them (for age_targets).
+    std::vector<GpuTexture> _glow_down, _glow_up;
+    GpuTexture _glow_flare, _glow_streak, _glow_final;
+    bool _glow_used = false;
     GpuCopyHistory _taa_last, _taa_now;
     struct ParticleHistory {
         u64 source = 0, id = 0, look = 0;
@@ -609,7 +615,7 @@ private:
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
     u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0,
-        _idle_gi = 0, _idle_blur = 0, _idle_dof = 0;
+        _idle_gi = 0, _idle_blur = 0, _idle_dof = 0, _idle_glow = 0;
 };
 
 class GpuRenderer3D final : public IRendererBackend3D {
@@ -808,6 +814,10 @@ private:
     bool record_output_effects(SDL_GPUCommandBuffer*, GpuView3D& view, const GpuTexture& source,
                                const GpuTexture* bloom, const OutputOptions3D&, const CameraEffects3D& effects,
                                SDL_GPUBuffer* exposure, RenderDebugStats3D&);
+    // Glow3D over `source`: the glow the output reads (half size), or null where it cannot (kin's own bloom then).
+    // `base` is kin's own bloom, already recorded, when the glow is not wide.
+    const GpuTexture* record_glow(SDL_GPUCommandBuffer*, GpuView3D& view, const GpuTexture& source, const Glow3D& glow,
+                                  const GpuTexture* base, f32 threshold, RenderDebugStats3D&);
     // A Grade3D LUT's strip as a texture, uploaded once while the LUT lives.
     const GpuTexture* lut_texture(const std::shared_ptr<const ColorLut>& lut);
     // ViewOptions3D::auto_exposure: meters `source` into the view's exposure buffer and adapts it; false (the view is
@@ -1290,6 +1300,13 @@ private:
     };
     std::vector<LutTexture> _lut_textures;
     bool _effects_warned = false;
+    // Glow3D: glow_down/_up/_flare/_streak/_compose.comp.
+    SDL_GPUComputePipeline* _glow_down_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_up_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_flare_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_streak_pipeline = nullptr;
+    SDL_GPUComputePipeline* _glow_compose_pipeline = nullptr;
+    bool _glow_warned = false;
     bool _effects_float_warned = false; // camera effects asked for in a view that is neither HDR nor temporally
                                         // anti-aliased (no float picture)
     // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.

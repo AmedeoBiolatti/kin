@@ -231,6 +231,17 @@ void register_scene3d_settings(EcsWorld& world) {
                     return true;
                 })
             .choices({"aces", "agx", "neutral"});
+        SETTING("glow_wide", camera_effects.glow.wide);
+        SETTING("glow_radius", camera_effects.glow.radius);
+        SETTING("glow_dirt_intensity", camera_effects.glow.dirt_intensity);
+        SETTING("glow_ghosts", camera_effects.glow.ghosts);
+        SETTING("glow_ghost_count", camera_effects.glow.ghost_count);
+        SETTING("glow_ghost_spacing", camera_effects.glow.ghost_spacing);
+        SETTING("glow_halo", camera_effects.glow.halo);
+        SETTING("glow_halo_width", camera_effects.glow.halo_width);
+        SETTING("glow_streaks", camera_effects.glow.streaks);
+        SETTING("glow_streak_length", camera_effects.glow.streak_length);
+        RGB_SETTING("glow_streak_tint", camera_effects.glow.streak_tint);
         SETTING("grade_temperature", camera_effects.grade.temperature);
         SETTING("grade_tint", camera_effects.grade.tint);
         SETTING("grade_contrast", camera_effects.grade.contrast);
@@ -444,6 +455,11 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  within(film.grain, 0, 1) && within(film.grain_size, 1, 4) && within(grade.temperature, -1, 1) &&
                  within(grade.tint, -1, 1) && within(grade.contrast, 0, 2) && within(grade.saturation, 0, 2) &&
                  within(grade.lut_mix, 0, 1) && within(grade.lut_strength, 0, 1);
+        const Glow3D& glow = settings.camera_effects.glow;
+        valid &= within(glow.radius, 0, 1) && within(glow.dirt_intensity, 0, 10) && within(glow.ghosts, 0, 10) &&
+                 glow.ghost_count >= 1 && glow.ghost_count <= 8 && within(glow.ghost_spacing, 0, 1) &&
+                 within(glow.halo, 0, 10) && within(glow.halo_width, 0, 1) && within(glow.streaks, 0, 20) &&
+                 within(glow.streak_length, 0, 1);
         const DepthOfField3D& dof = settings.camera_effects.depth_of_field;
         valid &= std::isfinite(dof.focus_distance) && dof.focus_distance > 0 && dof.aperture >= .7f &&
                  dof.aperture <= 64 && dof.sensor_height >= 1 && dof.sensor_height <= 100 && dof.max_blur >= 0 &&

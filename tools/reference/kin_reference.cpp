@@ -14,6 +14,7 @@
 //                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N] [--motion-blur]
 //                 [--dof DISTANCE] [--dof-aperture N] [--dof-sensor MM] [--dof-autofocus]
 //                 [--tone-curve aces|agx|neutral] [--vignette V] [--aberration A] [--grain G] [--temperature T]
+//                 [--glow-wide] [--ghosts G] [--halo H] [--streaks S]
 //                 [--supersample N] [--samples N]
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
@@ -1905,6 +1906,7 @@ struct Overrides {
     kin::Lens3D lens{};        // and the lens, film and grade (--vignette, --aberration, --grain, --tone-curve, ...)
     kin::Film3D film{};
     kin::Grade3D grade{};
+    kin::Glow3D glow{}; // the glow's shape and the lens' flares (a scene's view needs bloom)
     bool lod = false;
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
@@ -2635,6 +2637,14 @@ int main(int argc, char** argv) {
             over.film.grain = static_cast<float>(std::atof(next().c_str()));
         } else if (a == "--temperature") {
             over.grade.temperature = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--glow-wide") {
+            over.glow.wide = true;
+        } else if (a == "--ghosts") {
+            over.glow.ghosts = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--halo") {
+            over.glow.halo = static_cast<float>(std::atof(next().c_str()));
+        } else if (a == "--streaks") {
+            over.glow.streaks = static_cast<float>(std::atof(next().c_str()));
         } else if (a == "--motion-blur") {
             over.taa = true;
             over.motion_blur = true;
@@ -3186,6 +3196,7 @@ int main(int argc, char** argv) {
             scene.camera_effects.lens = over.lens;
             scene.camera_effects.film = over.film;
             scene.camera_effects.grade = over.grade;
+            scene.camera_effects.glow = over.glow;
             scene.lod = {};
             merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
             scene.debug.gpu_pass_markers = over.gpu_pass_markers;

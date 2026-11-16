@@ -405,8 +405,9 @@ enum Omitted : u32 {
     omit_motion_blur = 1u << 18,
     omit_depth_of_field = 1u << 19,
     omit_lens_film_grade = 1u << 20,
+    omit_glow = 1u << 21,
 };
-constexpr std::array<const char*, 21> omitted_text{
+constexpr std::array<const char*, 22> omitted_text{
     "custom material shaders (Material3D::shader) draw as kin's stock material",
     "wireframe materials draw filled",
     "particles cast and receive the sun's shadows only (no point, spot or moon shadows)",
@@ -428,6 +429,7 @@ constexpr std::array<const char*, 21> omitted_text{
     "motion blur (CameraEffects3D::motion_blur) is off",
     "depth of field (CameraEffects3D::depth_of_field) is off",
     "the camera's lens, film and grade (CameraEffects3D::lens, film, grade) are off",
+    "the glow's shape and the lens' flares (CameraEffects3D::glow) are off: kin's own bloom",
 };
 // A draw's uniforms, cached per program (their values belong to the linked program).
 struct DrawUniforms {
@@ -1113,6 +1115,7 @@ struct WebGLRenderer3D::Impl {
         bits |= scene.camera_effects.motion_blur.enabled ? omit_motion_blur : 0;
         bits |= scene.camera_effects.depth_of_field.enabled ? omit_depth_of_field : 0;
         bits |= scene.camera_effects.lens_film_or_grade() ? omit_lens_film_grade : 0;
+        bits |= scene.camera_effects.glow.shapes_glow() ? omit_glow : 0;
         bits |= scene.global_illumination.enabled ? omit_gi : 0;
         bits |= l.reflection_probes.empty() ? 0 : omit_probes;
         bits |= l.environment || (scene.sky.enabled && scene.sky.mode == SkyMode3D::Image) ? omit_environment : 0;

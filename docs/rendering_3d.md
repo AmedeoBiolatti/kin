@@ -3248,7 +3248,40 @@ scene.ssr.steps = 48;           // marching steps a ray (8 to 128), then a refin
 before the 2D drawn over the view, so a HUD stays sharp. Off by default; off, the picture and its cost are those
 without it. Planar views (mirrors, portals) and reflection captures are rendered without them. The native renderer
 only; WebGL2 leaves them out (said once). The [plan](3d_plan.md#camera-effects-motion-blur-depth-of-field-lens-and-film--plan-2026-11-16)
-lists what comes next (bloom and lens flares).
+lists what comes later (aperture blades, motion blur without TAA, WebGL2).
+
+### Glow and lens flares
+
+`scene.camera_effects.glow` (`Glow3D`) shapes the view's bloom (`ViewOptions3D::bloom` and `bloom_threshold` stay its
+strength and threshold, so the view needs bloom) and adds what bright light draws on a lens:
+
+```cpp
+auto& glow = scene.camera_effects.glow; // authored: SceneEnvironment3D's "glow_*" (the dirt picture from code)
+glow.wide = true;             // a chain of ever smaller blurs: a wide, soft glow
+glow.radius = 0.7f;           // how much each wider size weighs (0 to 1): more is wider
+glow.dirt = dirt_texture;     // dust and smudges over the view, lit where bright light is near
+glow.dirt_intensity = 2.0f;   // (0 to 10)
+glow.ghosts = 0.5f;           // copies of the bright light mirrored through the middle (0 to 10)
+glow.ghost_count = 4;         // (1 to 8), each glow.ghost_spacing (0 to 1) of the way toward the middle
+glow.halo = 0.3f;             // a ring glow.halo_width (0 to 1) out from the middle (0 to 10)
+glow.streaks = 4.0f;          // anamorphic streaks, drawn sideways (0 to 20)
+glow.streak_length = 0.3f;    // of the view's width each way (0 to 1), in glow.streak_tint (blue by default)
+```
+
+- **How.** The bright light (past the threshold, with kin's soft knee) is taken down a chain of half-size levels with
+  13 taps each (Jimenez 2014), the first weighing groups of taps down by brightness (Karis, so a lone bright pixel does
+  not flicker), to 8 pixels or eight levels. Wide, it comes back up with a 3 x 3 tent, each level `(1 - radius)` its
+  own and `radius` the wider one below: the weights sum to one, so the glow holds the light it was made of, spread
+  wider and fainter near its source than kin's own bloom (raise `ViewOptions3D::bloom` for more). The ghosts and halo
+  are Chapman's screen-space flare on the third level (with a little colour fringe); the streaks an exponential sum
+  along the row of the second level; the dirt picture is lit by the fourth level. They are added into a half-size
+  glow the output reads in place of kin's own bloom. `debug_stats().glow_dispatches` counts the passes (about 14 with
+  everything on at 1080p).
+- **Off, unchanged.** With every value at its default (and no dirt) the glow is kin's own, the same passes and bytes.
+- **Cost.** At 1920 x 1080 (RTX 4080 Laptop, `rain_street`): about 0.04 to 0.06 ms for the wide glow over kin's own,
+  0.08 to 0.1 ms with ghosts, halo and streaks too.
+- **Limits.** The ghosts and halo come from what is on screen (a light just off the edge makes none). The dirt
+  picture cannot be named in scene files yet.
 
 ### Lens, film and grade
 

@@ -10507,6 +10507,12 @@ cost nothing. Targets are a view's feature targets (made on first use, given bac
   aberration fringes, vignette, grain, balance, saturation, the three curves, a red/blue swapping LUT.
 - **C4 — bloom and flares.** A mip-chain, energy-conserving bloom (the current one stays, as a setting), a lens-dirt
   texture, screen-space ghosts and halo from the bloom's levels, optional anamorphic streaks.
+- **C4 as built (2026-11-16).** On `CameraEffects3D::glow` (the bloom's strength and threshold stay
+  `ViewOptions3D`'s, fixed at the view's making; the shape and flares change per frame). A 13-tap Karis down chain,
+  a tent up chain mixed by `radius` (weights summing to one), Chapman ghosts and halo from the third level, an
+  exponential row sum for the streaks, dirt lit by the fourth level, composed at half size into the texture the
+  output already reads as its bloom; kin's own bloom unchanged when it is all off. Checked in `rain_street` at 1080p
+  and a GPU test on three drivers; 0.04 to 0.1 ms.
 - **Later, on a game's request.** Lens distortion and Panini projection (they move picking's coordinates), motion blur
   without TAA (a velocity pre-pass of its own), objects kept out of the blur (a first-person weapon), WebGL2 and the
   A55's quality levels.

@@ -143,7 +143,8 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
         "motion_blur_shutter_angle":90,"motion_blur_samples":8,"motion_blur_camera_scale":0.5,
         "depth_of_field":true,"dof_focus_distance":3,"dof_aperture":1.4,"dof_autofocus":true,
         "dof_focus_point":[0.25,0.75],"lens_vignette":0.4,"lens_chromatic_aberration":0.005,"film_grain":0.2,
-        "grade_tone_curve":"agx","grade_temperature":0.3,"grade_contrast":1.2,"grade_saturation":0.8}}}]})");
+        "grade_tone_curve":"agx","grade_temperature":0.3,"grade_contrast":1.2,"grade_saturation":0.8,
+        "glow_wide":true,"glow_ghosts":0.5,"glow_ghost_count":3,"glow_streaks":2,"glow_streak_tint":[1,0.5,0.25]}}}]})");
     Assets3D assets{r3d, scratch.path};
     SceneSession3DOptions options;
     options.viewport = {160, 120};
@@ -163,6 +164,9 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
               effects.grade.tone_curve == ToneCurve3D::Agx && effects.grade.temperature == 0.3f &&
               effects.grade.contrast == 1.2f && effects.grade.saturation == 0.8f,
           "lens, film and grade settings were not applied");
+    check(effects.glow.wide && effects.glow.ghosts == 0.5f && effects.glow.ghost_count == 3 &&
+              effects.glow.streaks == 2.0f && effects.glow.streak_tint.g == 0.5f,
+          "glow settings were not applied");
     const auto dispatches = [&] {
         check(session.render(), "motion blur render failed");
         renderer.present();
@@ -189,6 +193,9 @@ void gpu_camera_effect_settings(Renderer2D& renderer) {
     write(scratch.path / "bad.kinscene", R"({"entities":[
       {"id":"environment","components":{"SceneEnvironment3D":{"grade_tone_curve":"filmic"}}}]})");
     check(!session.load("bad.kinscene"), "an unknown tone curve accepted");
+    write(scratch.path / "bad.kinscene", R"({"entities":[
+      {"id":"environment","components":{"SceneEnvironment3D":{"glow_ghost_count":0}}}]})");
+    check(!session.load("bad.kinscene"), "no ghosts' count accepted");
 }
 
 void gpu_live_edits(Renderer2D& renderer) {
