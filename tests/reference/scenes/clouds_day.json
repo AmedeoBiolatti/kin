@@ -1,6 +1,6 @@
 {
  "name": "clouds_day",
- "purpose": "The valley on a June afternoon (15:00) under scattered heaps of volumetric cloud (Scene3D::clouds, coverage 0.5), with the sky's light: 'up' looks up into them, 'valley' along the valley to the far clouds paling into the horizon, 'sun' toward the sun (silver linings).",
+ "purpose": "The valley on a June afternoon (15:00) under scattered heaps of volumetric cloud (Scene3D::clouds, coverage 0.5), with the sky's light: 'up' looks up into them, 'valley' along the valley to the far clouds paling into the horizon, 'sun' toward the sun (silver linings). 'isometric' is an orthographic view down on the valley (under the layer: the clouds' shade drifting over it).",
  "procedural": "landscape",
  "trees": 2500,
  "view": {
@@ -96,6 +96,21 @@
    ],
    "fov": 70,
    "near": 0.1
+  },
+  {
+   "name": "isometric",
+   "eye": [
+    200,
+    900,
+    -200
+   ],
+   "target": [
+    -200,
+    0,
+    -1000
+   ],
+   "orthographic": 1500,
+   "near": 0.5
   }
  ],
  "clouds": {

@@ -1627,7 +1627,14 @@ their shadows and their place in the sky's light are left out (said once). `expe
 include them (`check_clouds`).
 
 The far deck at the horizon is seen at a grazing angle (a row's ray crosses tens of kilometres of it): at the walk's
-resolution it shows as streaks with stepped edges. Not supported: orthographic cameras (no clouds are drawn). docs/3d_plan.md "Volumetric clouds" has the
+resolution it shows as streaks with stepped edges.
+
+**Orthographic cameras** (an isometric or top-down view) walk parallel rays, each from its pixel's point on the near
+plane along the view, bounded by the pre-pass's depth as a perspective camera's are; the blend reprojects those points
+and the composite draws the clouds at their depth on that ray (an orthographic view's depth is linear; its far plane
+is the near one plus 10 km when Camera3D::z_far is infinite, so clouds past it are drawn behind everything). A camera
+under the layer looking down sees no clouds (none below the level from under it), only their shadow drifting over the
+ground: the usual case of an isometric game. In the browser as natively. docs/3d_plan.md "Volumetric clouds" has the
 plan.
 
 ### Spot lights and shadows from lights that are not the sun

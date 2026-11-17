@@ -2269,6 +2269,10 @@ void merge_clouds(kin::Clouds3D& clouds, const kin::JsonValue* doc) {
     number("distance", clouds.distance);
     number("resolution", clouds.resolution);
     number("history", clouds.history);
+    number("shadow_strength", clouds.shadow_strength);
+    number("shadow_extent", clouds.shadow_extent);
+    clouds.shadows = doc->bool_at("shadows", clouds.shadows);
+    clouds.shadow_resolution = static_cast<kin::u32>(doc->number_at("shadow_resolution", clouds.shadow_resolution));
     clouds.steps = static_cast<kin::u32>(doc->number_at("steps", clouds.steps));
     clouds.light_steps = static_cast<kin::u32>(doc->number_at("light_steps", clouds.light_steps));
     clouds.wind = vec3(doc->find("wind"), clouds.wind);
@@ -3797,6 +3801,11 @@ int main(int argc, char** argv) {
                 }
                 scene.camera = kin::Camera3D::look_at(eye + moved, target + moved, fov);
                 scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
+                // `orthographic: H`: an orthographic camera H units tall (an isometric view).
+                if (const kin::JsonValue* height = c.find("orthographic")) {
+                    scene.camera.projection = kin::Projection3D::Orthographic;
+                    scene.camera.height = static_cast<float>(height->as_number());
+                }
                 attach();
             };
             if (!over.hitch.empty()) {

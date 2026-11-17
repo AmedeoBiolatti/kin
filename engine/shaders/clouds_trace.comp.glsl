@@ -23,7 +23,7 @@ layout(set = 1, binding = 1, r32f) uniform writeonly image2D uDistance;
 layout(std140, set = 2, binding = 0) uniform Params {
     mat4 to_world; // clip space (without the jitter) to world
     vec4 eye;      // xyz: the camera, w: this frame's number (the start's offset moves with it)
-    vec4 size;     // xy: the walk's texels
+    vec4 size;     // xy: the walk's texels, z: 1 for an orthographic camera
     KinClouds clouds;
     KinSky atmosphere;
     KinFog fog;
@@ -58,6 +58,11 @@ float kin_cloud_limit(ivec2 xy) {
     vec3 seen = vec3(params.unproject_xy.x * ndc.x + params.unproject_xy.z,
                      params.unproject_xy.y * ndc.y + params.unproject_xy.w,
                      params.unproject_zw.x * farthest + params.unproject_zw.y) / w;
+    if (params.size.z > 0.5) {
+        // Orthographic: along the ray from its point on the near plane (depth 1), the view depth between them.
+        float near_z = (params.unproject_zw.x + params.unproject_zw.y) / (params.unproject_zw.z + params.unproject_zw.w);
+        return abs(seen.z - near_z);
+    }
     return length(seen);
 }
 
@@ -67,9 +72,19 @@ void main() {
         return;
     }
     const vec2 uv = (vec2(xy) + 0.5) / params.size.xy;
-    const vec4 near = params.to_world * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
-    const vec3 eye = params.eye.xyz;
-    const vec3 dir = normalize(near.xyz / near.w - eye);
+    const vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    const vec4 near = params.to_world * vec4(ndc, 1.0, 1.0);
+    // The ray: from the camera through the pixel, or (orthographic: size.z) parallel to the view from the pixel's point
+    // on the near plane toward its point on the far one.
+    vec3 eye = params.eye.xyz;
+    vec3 dir;
+    if (params.size.z > 0.5) {
+        const vec4 far_point = params.to_world * vec4(ndc, 0.0, 1.0);
+        eye = near.xyz / near.w;
+        dir = normalize(far_point.xyz / far_point.w - eye);
+    } else {
+        dir = normalize(near.xyz / near.w - eye);
+    }
     vec2 span = kin_cloud_span(params.clouds, eye, dir);
     span.y = min(span.y, kin_cloud_limit(xy));
     if (span.x >= span.y) {

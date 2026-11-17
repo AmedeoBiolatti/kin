@@ -40,6 +40,8 @@ releases may change APIs.
   `clouds_weather`, by path). WebGL2 draws them too (without their shadows or sky light). Geometry inside the layer
   (a mountain in the clouds, a plane flying through them) takes the cloud in front of it: the walk stops at the depth
   pre-pass's surfaces; the stock 3D frame graph's clouds work is two passes, `clouds` and `clouds_trace`.
+- 3D volumetric clouds under orthographic cameras ([3D rendering](rendering_3d.md#volumetric-clouds)): isometric and
+  top-down views draw them (parallel rays from the near plane) and their shadow, natively and in the browser.
 - 3D glow and lens flares ([3D rendering](rendering_3d.md#glow-and-lens-flares)): `Scene3D::camera_effects.glow`
   makes the view's bloom wide (an energy-conserving mip chain, as Unreal's and Unity's) and adds lens dirt, ghosts, a
   halo and anamorphic streaks; authored as `SceneEnvironment3D`'s `glow_*` (the dirt picture as `glow_dirt`, by path). With every

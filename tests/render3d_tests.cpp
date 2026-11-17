@@ -16567,6 +16567,61 @@ void test_gpu_clouds_around_geometry() {
     });
 }
 
+// Orthographic cameras: one above the layer looking down sees the clouds' tops (the picture changed nearly
+// everywhere), a box in front of them keeping its colour; a low isometric one under the layer sees none of them, only
+// their shadow on the floor (darker than with the shadow off).
+void test_gpu_clouds_orthographic() {
+    with_gpu("test_gpu_clouds_orthographic", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene = cloudy_scene(40.0f, 1.0f);
+        scene.camera = kin::Camera3D::look_at({0.0f, 6000.0f, 0.0f}, {0.0f, 0.0f, -6000.0f}, 60.0f);
+        scene.camera.projection = kin::Projection3D::Orthographic;
+        scene.camera.height = 3000.0f;
+        scene.clouds.enabled = false;
+        const Pixels clear = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        scene.clouds.enabled = true;
+        const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
+        (void)scene.draw(box,
+                         Mat4f::translation(scene.camera.position + scene.camera.forward() * 100.0f) *
+                             Mat4f::scaling({400.0f, 400.0f, 400.0f}),
+                         red);
+        Pixels tops;
+        for (int frame = 0; frame < 3; ++frame) {
+            tops = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+        }
+        assert(r3d.debug_stats().clouds && r3d.debug_stats().clouds_history);
+        int changed = 0;
+        for (int y = 0; y < 120; y += 4)
+            for (int x = 0; x < 160; x += 4)
+                changed += largest_difference(clear.at(x, y), tops.at(x, y)) > 12 ? 1 : 0;
+        std::cerr << "clouds under an orthographic camera: " << changed << " of 1200 samples changed from above\n";
+        assert(changed > 1000);
+        expect(tops.at(80, 60), red.color, "the box in front of the clouds (orthographic)", 1);
+        // A low isometric view of a floor: no clouds seen, their shadow on it.
+        const auto floor = [&](bool shadows) {
+            kin::Scene3D low = cloudy_scene(60.0f, 1.0f);
+            low.camera = kin::Camera3D::look_at({0.0f, 60.0f, 60.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            low.camera.projection = kin::Projection3D::Orthographic;
+            low.camera.height = 50.0f;
+            low.lights.ambient = {0.1f, 0.1f, 0.1f};
+            low.lights.sun.color = {0.8f, 0.8f, 0.8f};
+            low.clouds.shadows = shadows;
+            (void)low.draw(box, Mat4f::scaling({400.0f, 1.0f, 400.0f}) * Mat4f::translation({0.0f, -0.5f, 0.0f}),
+                           {.color = Color::rgb(230, 230, 230)});
+            const Pixels p = shoot_view(renderer, r3d, view, low);
+            renderer.present();
+            return p.at(80, 60);
+        };
+        const Color lit = floor(false), shaded = floor(true);
+        std::cerr << "clouds' shadow under an isometric camera: " << lit << " without, " << shaded << " with\n";
+        assert(r3d.debug_stats().clouds_shadowed && int(lit.r) - int(shaded.r) > 40);
+    });
+}
+
 void test_gpu_sky_under_taa() {
     with_gpu("test_gpu_sky_under_taa", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -25969,6 +26024,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_clouds_veil_the_fog());
     RUN(test_gpu_clouds_weather_map());
     RUN(test_gpu_clouds_around_geometry());
+    RUN(test_gpu_clouds_orthographic());
     RUN(test_gpu_sky_under_taa());
     RUN(test_gpu_sky_sun_under_taa());
     RUN(test_gpu_sky_lights_the_scene());

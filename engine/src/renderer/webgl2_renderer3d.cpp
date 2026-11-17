@@ -630,6 +630,7 @@ struct WebGLRenderer3D::Impl {
         const CloudTargets* targets = nullptr;
         Mat4f inverse{}, view_projection{};
         Vec3f eye{};
+        bool orthographic = false;
     } cloud_state;
     struct {
         f32 share = 0.0f;
@@ -1645,9 +1646,9 @@ struct WebGLRenderer3D::Impl {
         glDepthMask(GL_TRUE);
     }
     // Scene3D::clouds: whether there are any to draw (native clouds_possible).
-    static bool clouds_possible(const Clouds3D& c, const Camera3D& camera) {
+    static bool clouds_possible(const Clouds3D& c, const Camera3D&) {
         return c.enabled && c.coverage > 0.0f && c.density > 0.0f && std::isfinite(c.bottom) && std::isfinite(c.top) &&
-               c.top != c.bottom && camera.projection == Projection3D::Perspective;
+               c.top != c.bottom;
     }
     // The clouds' programs and noise (native cloud_noise.comp and cloud_weather.comp's, as fragments), made on the
     // first render that draws them; false (said once) where they cannot be.
@@ -1856,6 +1857,8 @@ struct WebGLRenderer3D::Impl {
         const auto rgb = [&](const char* name, LinearRgb v, f32 w) { glUniform4f(at(name), v.r, v.g, v.b, w); };
         glUniformMatrix4fv(at("uToWorld"), 1, GL_FALSE, to_world.m);
         set3("uEye", eye, f32(t.frame++ % 4096u));
+        const bool orthographic = camera.projection == Projection3D::Orthographic;
+        glUniform1i(at("uOrthographic"), orthographic);
         // The opaque meshes' depth (drawn before this, in the main pass) bounds the rays (native's pre-pass depth).
         const Mat4f inverse = camera.projection_matrix(f32(size.x) / f32(size.y)).inverse();
         set("uUnprojectXY", inverse.at(0, 0), inverse.at(1, 1), inverse.at(0, 3), inverse.at(1, 3));
@@ -1929,6 +1932,7 @@ struct WebGLRenderer3D::Impl {
         glUniformMatrix4fv(at("uPrevious"), 1, GL_FALSE, t.previous.m);
         glUniform3f(at("uEye"), eye.x, eye.y, eye.z);
         set("uSize", f32(walk.x), f32(walk.y), history, previous ? 1.0f : 0.0f);
+        glUniform1i(at("uOrthographic"), orthographic);
         const std::array<GLuint, 4> inputs{t.raw, t.raw_distance, t.light[t.written], t.distance[t.written]};
         constexpr std::array<const char*, 4> names{"uCurrent", "uCurrentDistance", "uHistory", "uHistoryDistance"};
         for (u32 i = 0; i < 4; ++i) {
@@ -1948,7 +1952,7 @@ struct WebGLRenderer3D::Impl {
         t.previous = vp;
         t.eye = eye;
         t.forward = forward;
-        cloud_state = {&t, to_world, vp, eye};
+        cloud_state = {&t, to_world, vp, eye, orthographic};
         stats.clouds = true;
         stats.clouds_history = previous;
         stats.clouds_texels = u32(walk.x) * u32(walk.y);
@@ -1967,6 +1971,7 @@ struct WebGLRenderer3D::Impl {
         glUniform3f(at("uEye"), cloud_state.eye.x, cloud_state.eye.y, cloud_state.eye.z);
         glUniform2f(at("uTarget"), f32(size.x), f32(size.y));
         glUniform1i(at("uLinear"), linear_output);
+        glUniform1i(at("uOrthographic"), cloud_state.orthographic);
         for (u32 i = 0; i < 2; ++i) {
             glActiveTexture(GL_TEXTURE0 + i);
             glBindSampler(i, 0);
