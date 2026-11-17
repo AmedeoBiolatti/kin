@@ -3439,6 +3439,75 @@ search-light scaling at middling albedos), in metres: a millimetre for skin's re
   picture's height: a spread wider than about a thirtieth of it (its d) loses some of its far tail. One profile a material (a surface shader can
   mask the share and vary the thickness a pixel, not the radius). The same profile on two touching things (a sphere on a floor) bleeds a little across where they meet.
 
+## Terrain
+
+Heightmap terrain (`kin/render3d/terrain3d.hpp`), as Unreal's Landscape, Unity's Terrain and Godot's Terrain3D give:
+16-bit heights on a regular grid, up to 16 painted layers, sculpting with undo, and level of detail.
+
+```cpp
+// The surface: built into the game (kin_terrain_surface(<target>) in CMake, as kin's planar surfaces), or compiled
+// now by glslc in development builds (compile_terrain_surface).
+auto surface = kin::create_terrain_surface(r3d, terrain_surface);
+kin::Terrain3D terrain = kin::Terrain3D::create(r3d, *surface,
+    {.samples = {1025, 1025}, .spacing = 1.0f, .origin = {-512, 0, -512}, .max_height = 240.0f},
+    heights /* 1025 * 1025 u16, row by row from z 0 */).value_or({});
+terrain.set_layers(layers);                       // TerrainLayer3D: albedo (alpha: height), normal, tint, roughness, tile
+terrain.set_weights(1, {0, 0}, {1025, 1025}, w);  // a layer's weights (0-255), shared out by their sum
+...
+terrain.draw(scene);                              // each frame: the nodes for scene.camera, one instanced draw
+```
+
+- **Level of detail: CDLOD.** A quadtree of nodes over the heights; the finest nodes (`node_quads` quads a side,
+  as many samples) near the camera, each coarser level twice as far (`lod_distance` finest nodes for the first).
+  Every node is one copy of the same flat grid mesh, drawn in one instanced draw; kin's terrain surface
+  (`engine/shaders/terrain.surface.glsl`) lifts each vertex to the height at its place in the vertex shader (a
+  surface's offset: the main pass, the pre-passes, velocity, the sun's and local lights' shadows, pick and visibility
+  all run it) and morphs it toward the coarser level's grid over the last part of its level's range, so levels meet
+  without cracks or popping. Each node's copy spans its height range, so every pass culls it by its real box.
+  `select(eye)` returns the nodes (`TerrainNode3D`), `draw` adds them. The ranges and the morph's start are widened
+  where the terrain is steep enough to crack otherwise (for a flat one at least 2.8 finest nodes, morphing from 0.75 of
+  a level's range).
+- **Heights** are 0 to 65535 over `min_height` to `max_height` (above `origin.y`), stored in an RGBA8 texture with
+  each sample's normal; `height(xz)`, `normal(xz)` and `raycast(from, direction)` read the CPU copy.
+  `load_height_map` reads a raw 16-bit file (`.r16`, `.raw`), a 16-bit PNG (its first channel) or an 8-bit image. Up to
+  8193 x 8193 samples (one texture: no streaming or tiles).
+- **Layers.** Up to 16 (`max_terrain_layers3d`), weights in four RGBA maps the heights' size; each pixel blends its
+  four strongest layers, by weight and, with `TerrainLook3D::blend`, by the layers' heights (the albedo's alpha: where
+  two meet, the higher shows, as Unreal's height blend). Each layer's maps tile every `tile` world units; its normal map
+  is tangent space (green up) on the terrain's normal. Without layers: one colour (`TerrainLook3D`).
+- **Sculpting.** `brush(TerrainBrush3D, xz, amount)`: raise, lower, smooth, flatten (toward `height`), noise and paint
+  (a layer's share up, the others' down), each with a radius, strength and falloff; the changed rectangle's normals,
+  node bounds and textures follow (the textures at the next `update()` or `draw`). Dabs between `begin_stroke()` and
+  `end_stroke()` are one undo step (`undo()`, `redo()`; each 32 x 32 tile a stroke touches is kept as it was). `save`
+  and `load` a `.kinterrain` file: heights, weights, layers (their pictures too), deflated.
+- **Collision.** `terrain_shape3d(terrain)` (`kin/physics3d/terrain_shape3d.hpp`) is a Jolt height field of it for a
+  static body, its whole height range kept open; after a stroke, `update_terrain_collision(world, body, terrain,
+  terrain.end_stroke())` changes it in place over what the stroke changed (`World3D::set_heights`, Jolt's
+  `SetHeights`: about 12 ms for a 317 x 81 sample stroke on a 1025 x 1025 terrain, where a new shape takes
+  150-600 ms).
+- **Scene files and the ECS.** `TerrainRenderer3D {terrain: "land.kinterrain", collision, id}` on an entity: the
+  terrain at its file's origin moved by the entity's world position (not turned or scaled). `SceneSession3D` loads,
+  draws and keeps them (`Terrains3D`, `kin/scene/terrains3d.hpp`; `SceneSession3DOptions::terrain_surface`, else
+  compiled by glslc in development builds), with a static height field each in the scene's physics
+  (`SceneSession3DOptions::physics`); a pick on one names its entity; `session.terrains()->terrain(entity)` to sculpt
+  it from game code, then `heights_changed(entity, changed)` for its collision.
+- **Navigation.** `terrain.mesh(stride)` / `terrain_mesh3d(desc, heights, stride)` (no renderer: a server's) is its
+  surface as triangles for `build_navmesh3d` (with a level's own meshes: append them); slopes past
+  `max_slope_degrees` drop out as for any mesh.
+- **Sample.** `examples/terrain_editor`: fly, sculpt and paint with the mouse, undo/redo, save/load; balls dropped on
+  it roll down what was sculpted.
+- **Cost.** `tests/reference/scenes/terrain.json` (4097 x 4097 samples, three layers, four shadow cascades, 1280 x 720,
+  RTX 4080 Laptop GPU): 184,320 triangles in one draw, about 0.75-1 ms of GPU time from a ridge.
+- **Global illumination.** The GI scene sees it as drawn: kin's terrain surface is `SurfaceGi3D::Terrain`, for which
+  the voxelizer lifts the grid's vertices to the height map (unmorphed: each to its sample's height) and gives the
+  voxels the terrain's mean colour (its layers' mean albedos by their shares of the weights, else its look's; kept in
+  `Material3D::color`, which the surface itself does not read). Sculpting changes the height map, so the voxels over
+  the terrain are made again. Its triangles are not among the area lights' occluders (on the CPU they are the flat
+  grid's).
+- **Limits.** Native renderer only. No holes or overhangs. A session draws terrains
+  only with a renderer (a headless server builds collision and navigation from `terrain_mesh3d` and the file's
+  heights itself). Mirrors and portals morph it by their own camera.
+
 ## Camera effects
 
 `scene.camera_effects` (`CameraEffects3D`) holds what the camera adds to the picture after the scene is rendered and

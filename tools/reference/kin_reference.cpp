@@ -125,6 +125,7 @@
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/snapshot3d.hpp>
 #include <kin/render3d/taa3d.hpp>
+#include <kin/render3d/terrain3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -579,6 +580,134 @@ struct Motion {
 // valley's walls and mountains at the far end (vertices spaced finer near the camera), 2500 cone trees on its floor and
 // slopes, and six red pillars 40 m tall at 50, 200, 500, 1000, 2000 and 4000 m down the valley (their colour against
 // the fog tells the distance). The ground is coloured by height and slope: grass, rock, snow.
+// `procedural: "terrain"` (docs/rendering_3d.md, Terrain): a heightmap terrain (kin/render3d/terrain3d.hpp) of fractal
+// hills, centred on the origin: `terrain: {samples, spacing, height, node_quads, lod_distance, seed}`. Its surface
+// is compiled now (glslc).
+struct TerrainScene {
+    kin::Terrain3D terrain;
+    kin::Bounds3D bounds{};
+
+    static float hash(int x, int z, int seed) {
+        uint32_t h = static_cast<uint32_t>(x) * 374761393u + static_cast<uint32_t>(z) * 668265263u +
+                     static_cast<uint32_t>(seed) * 2246822519u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return static_cast<float>((h ^ (h >> 16)) & 0xffffffu) / 16777215.0f;
+    }
+    static float noise(float x, float z, int seed) {
+        const int ix = static_cast<int>(std::floor(x)), iz = static_cast<int>(std::floor(z));
+        const float fx = x - static_cast<float>(ix), fz = z - static_cast<float>(iz);
+        const float ux = fx * fx * (3.0f - 2.0f * fx), uz = fz * fz * (3.0f - 2.0f * fz);
+        const float a = hash(ix, iz, seed), b = hash(ix + 1, iz, seed), c = hash(ix, iz + 1, seed),
+                    d = hash(ix + 1, iz + 1, seed);
+        return (a + (b - a) * ux) + ((c + (d - c) * ux) - (a + (b - a) * ux)) * uz;
+    }
+
+    bool make(kin::Renderer3D& r3d, const kin::JsonValue& doc) {
+        static const kin::JsonValue none;
+        const kin::JsonValue* t = doc.find("terrain");
+        const kin::JsonValue& d = t ? *t : none;
+        const int samples = static_cast<int>(d.number_at("samples", 1025));
+        const float spacing = static_cast<float>(d.number_at("spacing", 1.0));
+        const float height = static_cast<float>(d.number_at("height", 200.0));
+        const int seed = static_cast<int>(d.number_at("seed", 1));
+        auto surface = kin::compile_terrain_surface(r3d);
+        if (!surface) {
+            std::fprintf(stderr, "terrain: %s\n", kin::diagnostics3d_text(surface.diagnostics).c_str());
+            return false;
+        }
+        std::vector<kin::u16> heights(static_cast<std::size_t>(samples) * static_cast<std::size_t>(samples));
+        const float feature = 600.0f / spacing; // the largest hills' width, in samples
+        for (int z = 0; z < samples; ++z)
+            for (int x = 0; x < samples; ++x) {
+                float sum = 0.0f, amplitude = 0.5f, frequency = 1.0f / feature;
+                for (int o = 0; o < 8; ++o) {
+                    sum += amplitude *
+                           noise(static_cast<float>(x) * frequency, static_cast<float>(z) * frequency, seed + o);
+                    amplitude *= 0.5f;
+                    frequency *= 2.0f;
+                }
+                const float ridged = std::pow(std::clamp(sum, 0.0f, 1.0f), 1.6f);
+                heights[static_cast<std::size_t>(z) * static_cast<std::size_t>(samples) + static_cast<std::size_t>(x)] =
+                    static_cast<kin::u16>(std::lround(ridged * 65535.0f));
+            }
+        const float half = 0.5f * static_cast<float>(samples - 1) * spacing;
+        kin::TerrainDesc3D desc{.samples = {samples, samples},
+                                .spacing = spacing,
+                                .origin = {-half, 0.0f, -half},
+                                .max_height = height,
+                                .node_quads = static_cast<kin::u32>(d.number_at("node_quads", 32)),
+                                .lod_distance = static_cast<float>(d.number_at("lod_distance", 3.0))};
+        auto made = kin::Terrain3D::create(r3d, std::move(*surface), desc, heights);
+        if (!made) {
+            std::fprintf(stderr, "terrain: %s\n", kin::diagnostics3d_text(made.diagnostics).c_str());
+            return false;
+        }
+        terrain = std::move(*made);
+        bounds = {{-half, 0.0f, -half}, {half, height, half}};
+        if (d.bool_at("layers", true)) {
+            // Grass, rock where it is steep, snow high up: small noise pictures (their alpha the height), weights
+            // from the slope and the height.
+            const auto picture = [&](std::array<float, 3> a, std::array<float, 3> b, float scale, int s) {
+                kin::Image image{{128, 128}, std::vector<kin::u8>(128 * 128 * 4)};
+                for (int y = 0; y < 128; ++y)
+                    for (int x = 0; x < 128; ++x) {
+                        // (A noise repeating every picture: it tiles.)
+                        float v = 0.0f, amp = 0.5f;
+                        for (int o = 0, n = static_cast<int>(scale * 128.0f); o < 4; ++o, n *= 2, amp *= 0.5f) {
+                            const float px = static_cast<float>(x) * static_cast<float>(n) / 128.0f,
+                                        py = static_cast<float>(y) * static_cast<float>(n) / 128.0f;
+                            const int ix = static_cast<int>(px), iy = static_cast<int>(py);
+                            const float fx = px - static_cast<float>(ix), fy = py - static_cast<float>(iy);
+                            const float ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+                            const auto at = [&](int cx, int cy) { return hash(cx % n, cy % n, s + o); };
+                            const float top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * ux;
+                            const float bottom = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * ux;
+                            v += amp * (top + (bottom - top) * uy);
+                        }
+                        kin::u8* px = &image.rgba[static_cast<std::size_t>(y * 128 + x) * 4];
+                        for (int c = 0; c < 3; ++c)
+                            px[c] = static_cast<kin::u8>(
+                                std::lround(255.0f * std::clamp(a[c] + (b[c] - a[c]) * v, 0.0f, 1.0f)));
+                        px[3] = static_cast<kin::u8>(std::lround(255.0f * std::clamp(v, 0.0f, 1.0f)));
+                    }
+                return image;
+            };
+            std::array<kin::TerrainLayer3D, 3> layers{};
+            layers[0] = {.albedo = picture({0.25f, 0.38f, 0.14f}, {0.42f, 0.5f, 0.2f}, 1.0f / 16.0f, 11),
+                         .roughness = 0.9f,
+                         .tile = 6.0f};
+            layers[1] = {.albedo = picture({0.35f, 0.33f, 0.3f}, {0.6f, 0.57f, 0.52f}, 1.0f / 8.0f, 21),
+                         .roughness = 0.8f,
+                         .tile = 9.0f};
+            layers[2] = {.albedo = picture({0.85f, 0.87f, 0.9f}, {0.98f, 0.98f, 1.0f}, 1.0f / 32.0f, 31),
+                         .roughness = 0.6f,
+                         .tile = 12.0f};
+            (void)terrain.set_layers(layers, {128, 128});
+            std::array<std::vector<kin::u8>, 3> w;
+            for (auto& v : w)
+                v.resize(heights.size());
+            for (int z = 0; z < samples; ++z)
+                for (int x = 0; x < samples; ++x) {
+                    const kin::Vec2f p{-half + static_cast<float>(x) * spacing,
+                                       -half + static_cast<float>(z) * spacing};
+                    const float slope = 1.0f - terrain.normal(p).value_or(kin::Vec3f{0, 1, 0}).y;
+                    const float h = (terrain.height(p).value_or(0.0f)) / height;
+                    const float rock = std::clamp((slope - 0.12f) * 8.0f, 0.0f, 1.0f);
+                    const float snow = std::clamp((h - 0.6f) * 6.0f, 0.0f, 1.0f) * (1.0f - rock);
+                    const std::size_t i =
+                        static_cast<std::size_t>(z) * static_cast<std::size_t>(samples) + static_cast<std::size_t>(x);
+                    w[1][i] = static_cast<kin::u8>(std::lround(rock * 255.0f));
+                    w[2][i] = static_cast<kin::u8>(std::lround(snow * 255.0f));
+                    w[0][i] = static_cast<kin::u8>(std::lround((1.0f - rock) * (1.0f - snow) * 255.0f));
+                }
+            for (kin::u32 l = 0; l < 3; ++l)
+                (void)terrain.set_weights(l, {0, 0}, {samples, samples}, w[l]);
+        }
+        return true;
+    }
+    kin::Status3D draw(kin::Scene3D& scene) { return terrain.draw(scene, 1); }
+};
+
 struct Landscape {
     kin::Mesh3D terrain, tree, pillar;
     std::vector<kin::MeshInstance3D> trees;
@@ -3037,6 +3166,12 @@ int main(int argc, char** argv) {
         if (is_motion) {
             motion.make(r3d, levels_of(doc));
         }
+        TerrainScene terrain_scene;
+        const bool is_terrain = doc.string_at("procedural") == "terrain";
+        if (is_terrain && !terrain_scene.make(r3d, doc)) {
+            ++failures;
+            continue;
+        }
         Landscape landscape;
         const bool is_landscape = doc.string_at("procedural") == "landscape";
         if (is_landscape) {
@@ -3161,6 +3296,7 @@ int main(int argc, char** argv) {
             is_crowd       ? kin::Bounds3D{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
             : is_motion    ? kin::Bounds3D{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
             : is_landscape ? kin::Bounds3D{{-3000.0f, -60.0f, -6000.0f}, {3000.0f, 1000.0f, 120.0f}}
+            : is_terrain   ? terrain_scene.bounds
             : is_stage     ? kin::Bounds3D{{-12.0f, -0.2f, -14.0f}, {12.0f, 7.0f, 8.0f}}
             : is_hidden
                 ? kin::Bounds3D{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
@@ -3518,6 +3654,9 @@ int main(int argc, char** argv) {
             }
             if (is_landscape) {
                 (void)landscape.draw(scene);
+            }
+            if (is_terrain) {
+                (void)terrain_scene.draw(scene);
             }
             if (is_stage) {
                 (void)stage.draw(scene);

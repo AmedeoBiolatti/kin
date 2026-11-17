@@ -207,6 +207,18 @@ struct Mirror3D {
 // front, the entity is put at the exit (its character or dynamic body carried by the physics, its velocity turned with
 // it: WorldPhysicsState3D::carry; else its Transform3D moved and turned). SceneSession3D runs it after each physics
 // step.
+// A heightmap terrain (docs/rendering_3d.md, Terrain): a .kinterrain file (`terrain`, relative to the content root)
+// drawn at its own origin moved by the entity's world position (not turned or scaled), with a static Jolt height field
+// of it in the scene's physics (SceneSession3DOptions::physics) when `collision`. SceneSession3D loads, draws and keeps
+// it (Terrains3D, kin/scene/terrains3d.hpp); Terrains3D::terrain gives game code the loaded terrain to sculpt.
+struct TerrainRenderer3D {
+    bool enabled = true;
+    ComponentAssetRef terrain;
+    bool collision = true;
+    // Picking ID; zero uses the entity's low 32 bits.
+    u32 id = 0;
+};
+
 struct PortalTraveller3D {
     bool enabled = true;
     f32 height = 1.0f;

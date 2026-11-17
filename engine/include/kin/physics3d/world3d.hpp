@@ -504,6 +504,11 @@ public:
     // its mass and gets the new shape's inertia; a mesh or height field is refused for a dynamic body. The
     // body is woken. Returns false when refused, also for a body that belongs to a character, ragdoll or rope.
     [[nodiscard]] bool set_shape(Body3D body, const Shape3D& shape);
+    // Changes a height field body's samples in place (Jolt's SetHeights: a terrain sculpted): `size` samples from `at`
+    // (x, z), `heights` row by row in the shape's units (before its scale; FLT_MAX: a hole), clamped to the range it
+    // was made for (Shape3D::height_field's height_range). `at` and `size` must be even (its blocks). Every body with
+    // that shape changes. False when refused (no such body, not a height field, a rectangle outside or not even).
+    [[nodiscard]] bool set_heights(Body3D body, Vec2i at, Vec2i size, std::span<const f32> heights);
     // The live bodies, by body number.
     std::vector<Body3D> bodies() const;
     // A dynamic body becomes kinematic (a ragdoll animated by a clip: the body follows and pushes) or a kinematic one

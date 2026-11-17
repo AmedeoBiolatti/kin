@@ -330,7 +330,8 @@ Shape3D Shape3D::triangle_mesh(std::span<const Vec3f> vertices, std::span<const 
     return out;
 }
 
-Shape3D Shape3D::height_field(std::span<const f32> heights, i32 sample_count, Vec3f offset, Vec3f scale) {
+Shape3D Shape3D::height_field(std::span<const f32> heights, i32 sample_count, Vec3f offset, Vec3f scale,
+                              Vec2f height_range) {
     Shape3D out;
     if (sample_count < 4 || sample_count % 2 != 0 ||
         heights.size() != static_cast<std::size_t>(sample_count) * static_cast<std::size_t>(sample_count) ||
@@ -340,6 +341,10 @@ Shape3D Shape3D::height_field(std::span<const f32> heights, i32 sample_count, Ve
     physics3d_detail::ensure_jolt_runtime();
     JPH::HeightFieldShapeSettings settings(heights.data(), to_jolt(offset), to_jolt(scale),
                                            static_cast<JPH::uint32>(sample_count));
+    if (std::isfinite(height_range.x) && std::isfinite(height_range.y) && height_range.x < height_range.y) {
+        settings.mMinHeightValue = height_range.x;
+        settings.mMaxHeightValue = height_range.y;
+    }
     out._data = make_data(settings.Create(), Shape3DKind::HeightField);
     return out;
 }

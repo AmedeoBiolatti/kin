@@ -9,6 +9,7 @@
 #include <kin/scene/planar_views3d.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>
 #include <kin/scene/scene_entity3d.hpp>
+#include <kin/scene/terrains3d.hpp>
 
 namespace sol {
 class state;
@@ -163,9 +164,9 @@ private:
 
 // What SceneSession3D::pick found under a pixel of the last rendered frame.
 struct ScenePick3D {
-    // The live entity drawn there: one whose MeshRenderer3D, ModelRenderer3D or SkinnedMeshRenderer3D draws with `id`
-    // (its own id, or the entity's low 32 bits when that is 0). Empty when none does: a compose() draw, or an entity
-    // gone since.
+    // The live entity drawn there: one whose MeshRenderer3D, ModelRenderer3D, SkinnedMeshRenderer3D or
+    // TerrainRenderer3D draws with `id` (its own id, or the entity's low 32 bits when that is 0). Empty when none does:
+    // a compose() draw, or an entity gone since.
     EcsEntity entity;
     u32 id = 0;       // the id drawn there (PickResult3D::id)
     Vec3f position{}; // the point of it the pixel showed, in the world
@@ -230,6 +231,10 @@ struct SceneSession3DOptions {
     // entities: render() draws them and renders their pictures (PlanarViews3D) after compose. Without them, mirrors are
     // kin's own metal and portals their stand-in colour.
     PlanarSurfaces3D planar_surfaces;
+    // kin's terrain surface (create_terrain_surface), for the scene's TerrainRenderer3D entities (Terrains3D: drawn
+    // after compose, a static height field each in the scene's physics). Without it a development build compiles it
+    // with glslc when first needed; a build without glslc draws no terrain (said in the errors).
+    SurfaceShader3D terrain_surface;
     // Optional ECS audio (kin/ecs/audio.hpp), both or neither: each step() then runs update_audio_listeners,
     // update_audio_emitters and consume_audio_one_shots after the Audio phase's systems, so emitters and one-shots
     // sound from their WorldTransform3D and the listener follows the AudioListener entity or else the active
@@ -371,6 +376,9 @@ public:
     EcsEntity entity(std::string_view authored_id);
     WorldRenderState3D* rendering();
     World3D* physics();
+    // The scene's terrains (TerrainRenderer3D; null until the first is drawn): Terrains3D::terrain(entity) to sculpt
+    // one.
+    Terrains3D* terrains();
     WorldPhysicsState3D* bodies();
     PhysicsAssets3D& physics_assets();
     const SceneInstance* instance() const;

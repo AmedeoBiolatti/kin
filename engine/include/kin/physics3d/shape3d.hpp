@@ -13,7 +13,6 @@
 
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
-
 #include <memory>
 #include <span>
 #include <vector>
@@ -64,9 +63,11 @@ public:
     // y = offset.y + scale.y * height, z = offset.z + scale.z * z. sample_count is
     // even and at least 4. A height of FLT_MAX is a hole. Heights are stored in
     // 8 bits per sample relative to their block, so a surface is within about
-    // a 256th of its block's height range. Static and kinematic bodies only.
+    // a 256th of its block's height range. Static and kinematic bodies only. `height_range` (min, max of the heights
+    // before `scale`; empty: the heights' own) is the range World3D::set_heights may later set within (outside it is
+    // clamped).
     static Shape3D height_field(std::span<const f32> heights, i32 sample_count, Vec3f offset = {},
-                                Vec3f scale = {1.0f, 1.0f, 1.0f});
+                                Vec3f scale = {1.0f, 1.0f, 1.0f}, Vec2f height_range = {});
     // Several shapes as one rigid shape (at least one). Its centre of mass is
     // the volume-weighted mean of the children's.
     static Shape3D compound(std::span<const ShapeChild3D> children);

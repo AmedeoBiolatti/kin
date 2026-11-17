@@ -77,6 +77,12 @@ layout(std140, set = 2, binding = 0) uniform Params {
     vec4 emission; // xyz: linear factor, w: independent emission
     vec4 vertex;   // the vertex colour's share in the base colour (rgb) and alpha (a): 1, or 0 where a surface's
                    // stand-in's surface doesn't read it (SurfaceTraits3D)
+    // A heightmap terrain's draw (SurfaceGi3D::Terrain, terrain.surface.glsl's parameters 0 and 1): its grid's
+    // vertices lifted to the heights at their places, as its surface's offset lifts them (unmorphed), the base map
+    // its height map (RG: a 16-bit height; BA: the normal's x and z), its colour the copy's alone. terrain1.w: 1 for
+    // a terrain.
+    vec4 terrain0; // the corner x, z, the samples' spacing, the height map's width
+    vec4 terrain1; // its height, the lowest height, a step of the 16 bits, 1
 } p;
 
 #include "kin_srgb.inc.glsl"
@@ -124,6 +130,17 @@ void corner(uint copy, uint index, out vec3 position, out vec3 normal, out vec2 
     }
     position = (copies[copy].model * vec4(position, 1.0)).xyz;
     normal = mat3(copies[copy].normal0.xyz, copies[copy].normal1.xyz, copies[copy].normal2.xyz) * normal;
+    if (p.terrain1.w > 0.5) {
+        // The sample under the vertex (its grid's vertices sit on samples at every level), clamped to the terrain.
+        const ivec2 top = ivec2(int(p.terrain0.w) - 1, int(p.terrain1.x) - 1);
+        const ivec2 s = clamp(ivec2(round((position.xz - p.terrain0.xy) / p.terrain0.z)), ivec2(0), top);
+        position.xz = p.terrain0.xy + vec2(s) * p.terrain0.z;
+        const vec4 texel = texelFetch(uBase, s, 0);
+        const vec2 rg = texel.rg * 255.0 + 0.5;
+        position.y = p.terrain1.y + (floor(rg.r) * 256.0 + floor(rg.g)) * p.terrain1.z;
+        const vec2 n = texel.ba * 2.0 - 1.0;
+        normal = vec3(n.x, sqrt(max(1.0 - dot(n, n), 0.0)), n.y);
+    }
 }
 
 // Item `id` (of this draw): its triangle in voxels and its corners. False when it touches no voxel to make (no area,
@@ -275,6 +292,9 @@ float mip_for(Tri t, Corners k, vec2 texels) {
 // The base colour (linear) and alpha at the voxel's point.
 vec4 base_at(Tri t, Corners k, vec3 b, vec2 uv) {
     const vec4 vertex = mix(vec4(1.0), k.colour[0] * b.x + k.colour[1] * b.y + k.colour[2] * b.z, p.vertex);
+    if (p.terrain1.w > 0.5) {
+        return copies[k.copy].colour * vertex; // (its base map holds heights)
+    }
     vec4 tex = textureLod(uBase, uv, mip_for(t, k, vec2(textureSize(uBase, 0))));
     if (p.flags.z != 0u) {
         tex.rgb = decode(tex.rgb);

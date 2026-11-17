@@ -6,6 +6,7 @@
 
 #ifdef KIN_EXPERIMENTAL_3D
 #include <kin/render3d/mesh3d.hpp>
+#include <kin/render3d/terrain3d.hpp>
 #endif
 
 #include <algorithm>
@@ -14,6 +15,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <span>
@@ -842,6 +845,100 @@ void test_against_shortest_paths() {
 }
 
 #ifdef KIN_EXPERIMENTAL_3D
+// A heightmap terrain's navigation mesh (terrain_mesh3d, no renderer): 65 x 65 samples a metre apart, flat but for a
+// steep cone in the middle (rising 12 m over 6). Its slopes past 45 degrees are not walkable, so a path across the
+// middle goes round the cone, and the mesh at stride 2 has a quarter of the triangles.
+void test_terrain_navmesh() {
+    const kin::TerrainDesc3D desc{.samples = {65, 65}, .spacing = 1.0f, .max_height = 20.0f};
+    std::vector<kin::u16> heights(65 * 65);
+    for (int z = 0; z < 65; ++z)
+        for (int x = 0; x < 65; ++x) {
+            const float d = std::hypot(float(x - 32), float(z - 32));
+            heights[static_cast<std::size_t>(z * 65 + x)] =
+                static_cast<kin::u16>(std::lround(std::max(0.0f, 12.0f - 2.0f * d) / 20.0f * 65535.0f));
+        }
+    const kin::MeshData3D surface = kin::terrain_mesh3d(desc, heights);
+    assert(surface.vertices.size() == 65 * 65 && surface.indices.size() == 64 * 64 * 6);
+    assert(std::abs(surface.vertices[32 * 65 + 32].position.y - 12.0f) < 0.01f);
+    assert(kin::terrain_mesh3d(desc, heights, 2).indices.size() == 32 * 32 * 6);
+    assert(kin::terrain_mesh3d(desc, heights, 3).vertices.size() == 23 * 23); // (0, 3 ... 63, then 64)
+    const kin::NavMesh3D mesh = kin::build_navmesh3d(surface).value_or({});
+    assert(mesh.valid() && mesh.region_count() >= 1);
+    const auto path = kin::find_path(mesh, {2.0f, 0.0f, 32.0f}, {62.0f, 0.0f, 32.0f});
+    assert(path.size() >= 3);
+    float highest = 0.0f, length = 0.0f;
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        highest = std::max(highest, path[i].y);
+        if (i > 0)
+            length += kin::length(path[i] - path[i - 1]);
+    }
+    std::printf("terrain navmesh: %zu triangles, a path of %zu points, %.1f m long, at most %.2f m up\n",
+                mesh.triangle_count(), path.size(), length, highest);
+    assert(highest < 1.0f && length > 61.0f);
+}
+
+// Height maps from files (load_height_map): a 16-bit grey PNG (written here: rows filtered None and Up, its CRCs
+// not checked) and a raw .r16 give back their exact samples.
+extern "C" unsigned char* kin_zlib_deflate(const unsigned char* bytes, int size, int* out_size);
+extern "C" void kin_deflate_free(void* bytes);
+void test_height_map_files() {
+    const int w = 5, h = 3;
+    std::vector<kin::u16> samples(w * h);
+    for (int i = 0; i < w * h; ++i)
+        samples[static_cast<std::size_t>(i)] = static_cast<kin::u16>(i * 4099 + 7);
+    std::vector<unsigned char> rows;
+    for (int y = 0; y < h; ++y) {
+        const int filter = y % 2; // 0 None, 1 Sub on the odd rows
+        rows.push_back(static_cast<unsigned char>(filter));
+        for (int x = 0; x < w; ++x)
+            for (int b = 0; b < 2; ++b) {
+                const kin::u16 v = samples[static_cast<std::size_t>(y * w + x)];
+                const unsigned char byte = static_cast<unsigned char>(b == 0 ? v >> 8 : v & 0xff);
+                const kin::u16 left = x > 0 ? samples[static_cast<std::size_t>(y * w + x - 1)] : 0;
+                const unsigned char prev = static_cast<unsigned char>(b == 0 ? left >> 8 : left & 0xff);
+                rows.push_back(filter == 1 ? static_cast<unsigned char>(byte - prev) : byte);
+            }
+    }
+    int size = 0;
+    unsigned char* z = kin_zlib_deflate(rows.data(), static_cast<int>(rows.size()), &size);
+    assert(z);
+    std::vector<unsigned char> png{137, 80, 78, 71, 13, 10, 26, 10};
+    const auto chunk = [&](const char* type, std::vector<unsigned char> data) {
+        const auto be = [&](unsigned v) {
+            for (int s = 24; s >= 0; s -= 8)
+                png.push_back(static_cast<unsigned char>(v >> s));
+        };
+        be(static_cast<unsigned>(data.size()));
+        png.insert(png.end(), type, type + 4);
+        png.insert(png.end(), data.begin(), data.end());
+        be(0); // (CRC: not checked)
+    };
+    chunk("IHDR", {0, 0, 0, static_cast<unsigned char>(w), 0, 0, 0, static_cast<unsigned char>(h), 16, 0, 0, 0, 0});
+    chunk("IDAT", std::vector<unsigned char>(z, z + size));
+    chunk("IEND", {});
+    kin_deflate_free(z);
+    const auto dir = std::filesystem::temp_directory_path();
+    {
+        std::ofstream out(dir / "kin_heights.png", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+        std::ofstream raw(dir / "kin_heights.r16", std::ios::binary);
+        for (const kin::u16 v : samples) {
+            raw.put(static_cast<char>(v & 0xff));
+            raw.put(static_cast<char>(v >> 8));
+        }
+    }
+    std::string why;
+    const auto from_png = kin::load_height_map(dir / "kin_heights.png", {}, &why);
+    if (!from_png)
+        std::printf("16-bit PNG: %s\n", why.c_str());
+    assert(from_png && from_png->samples == (kin::Vec2i{w, h}) && from_png->heights == samples);
+    const auto from_raw = kin::load_height_map(dir / "kin_heights.r16", {w, h});
+    assert(from_raw && from_raw->heights == samples);
+    assert(!kin::load_height_map(dir / "kin_heights.r16", {4, 4}));
+    std::filesystem::remove(dir / "kin_heights.png");
+    std::filesystem::remove(dir / "kin_heights.r16");
+}
+
 void test_mesh_data() {
     const kin::MeshData3D plane = kin::meshes::plane({10.0f, 10.0f}, 10);
     const kin::NavMesh3D mesh = kin::build_navmesh3d(plane, kin::Mat4f::translation({5.0f, 1.0f, 5.0f})).value_or({});
@@ -1446,6 +1543,8 @@ int main() {
     test_against_shortest_paths();
 #ifdef KIN_EXPERIMENTAL_3D
     test_mesh_data();
+    test_terrain_navmesh();
+    test_height_map_files();
 #endif
     test_cost();
     std::printf("navmesh3d_tests: all passed\n");

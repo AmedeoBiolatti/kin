@@ -79,6 +79,13 @@ if(KIN_EXPERIMENTAL_3D)
         target_link_libraries(planar_views PRIVATE kin::engine)
         kin_planar_surfaces(planar_views)
     endif()
+    # terrain_editor: sculpt and paint a heightmap terrain; kin's terrain surface compiled at build time
+    # (kin_terrain_surface), Jolt's height field of it kept up with the strokes.
+    if(KIN_GLSLC AND KIN_ENABLE_PHYSICS3D)
+        add_executable(terrain_editor terrain_editor/main.cpp)
+        target_link_libraries(terrain_editor PRIVATE kin::engine)
+        kin_terrain_surface(terrain_editor)
+    endif()
     # bunker_exit: auto exposure, decals and morph targets in one small scene (every picture made in code).
     add_executable(bunker_exit bunker_exit/main.cpp)
     target_link_libraries(bunker_exit PRIVATE kin::engine)

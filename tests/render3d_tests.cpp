@@ -24,6 +24,8 @@
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/render3d.hpp>
+#include <kin/physics3d/terrain_shape3d.hpp>
+#include <kin/physics3d/world3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/animation3d.hpp>
@@ -36,6 +38,7 @@
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/taa3d.hpp>
+#include <kin/render3d/terrain3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -3402,6 +3405,83 @@ void test_gpu_gi_scene() {
         kin::GiScene3D unioned;
         assert(r3d.read_gi_scene(layered, unioned).value_or(false));
         assert(unioned.subcells[f] == 0xff);
+    });
+}
+
+// A heightmap terrain in the GI scene (SurfaceGi3D::Terrain): the voxelizer lifts its grid to the heights as its
+// surface does, so a hill's surface is in full voxels (its flat grid at the nodes' lowest heights would not be), the
+// air a metre above it empty, in the terrain's colour (its look's, linear); raised by sculpting, the voxels follow.
+void test_gpu_terrain_gi() {
+    with_gpu("test_gpu_terrain_gi", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_terrain_gi", "no glslc");
+            return;
+        }
+        auto surface = kin::compile_terrain_surface(r3d);
+        assert(surface);
+        // 33 x 33 samples a quarter metre apart over (-4, -4) to (4, 4): a cone 1.5 m high in the middle.
+        std::vector<kin::u16> heights(33 * 33);
+        for (int z = 0; z < 33; ++z)
+            for (int x = 0; x < 33; ++x) {
+                const float d = std::hypot(float(x - 16), float(z - 16)) * 0.25f;
+                heights[static_cast<std::size_t>(z * 33 + x)] =
+                    static_cast<kin::u16>(std::lround(std::max(0.0f, 1.5f - 0.6f * d) / 3.0f * 65535.0f));
+            }
+        kin::Terrain3D terrain =
+            kin::Terrain3D::create(
+                r3d, *surface,
+                {.samples = {33, 33}, .spacing = 0.25f, .origin = {-4, 0, -4}, .max_height = 3.0f, .node_quads = 8},
+                heights)
+                .value_or({});
+        assert(terrain.valid());
+        terrain.set_look({.color = {0.6f, 0.1f, 0.1f}});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        const auto voxels = [&] {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
+            scene.global_illumination = {.enabled = true,
+                                         .area = {{-4.0f, -0.5f, -4.0f}, {4.0f, 3.5f, 4.0f}},
+                                         .cell = 0.1f,
+                                         .probes = {.enabled = false}};
+            assert(terrain.draw(scene));
+            render_ok(r3d, view, scene);
+            renderer.present();
+            GiVoxels g;
+            assert(r3d.read_gi_scene(view, g.s).value_or(false));
+            expect_gi_occupancy(g.s);
+            return g;
+        };
+        const GiVoxels g = voxels();
+        int on = 0, above = 0, points = 0;
+        for (int i = 0; i < 24; ++i) {
+            const float a = static_cast<float>(i) * 0.2618f, r = 0.4f + 0.05f * static_cast<float>(i % 8);
+            const kin::Vec2f xz{std::cos(a) * r, std::sin(a) * r};
+            const float h = *terrain.height(xz);
+            ++points;
+            on += g.full({xz.x, h, xz.y}) || g.full({xz.x, h - 0.05f, xz.y}) || g.full({xz.x, h + 0.05f, xz.y});
+            above += g.full({xz.x, h + 1.0f, xz.y});
+        }
+        const auto top = g.of({0.0f, 1.5f, 0.0f});
+        const std::size_t ti = g.index(top[0], top[1], top[2]);
+        std::cerr << "terrain gi: " << on << " of " << points << " points of the cone's surface in full voxels, "
+                  << above << " a metre above; its top's colour " << g.channel(ti, 0) << ' ' << g.channel(ti, 1) << ' '
+                  << g.channel(ti, 2) << '\n';
+        assert(on == points && above == 0);
+        assert(g.full(top[0], top[1], top[2]) && std::abs(g.channel(ti, 0) - 153) <= 3 &&
+               std::abs(g.channel(ti, 1) - 26) <= 3);
+        // Raised a metre round the top: the voxels follow (the height map's new pixels are a change of the copies).
+        (void)terrain.brush({.mode = kin::TerrainBrushMode3D::Raise, .radius = 0.6f, .strength = 1.0f, .falloff = 0.0f},
+                            {0.0f, 0.0f});
+        const GiVoxels raised = voxels();
+        std::cerr << "terrain gi: raised, the top at 2.5 m " << raised.full({0.0f, 2.45f, 0.0f}) << ", at 1.5 m "
+                  << raised.full({0.0f, 1.55f, 0.0f}) << '\n';
+        assert(raised.full({0.0f, 2.45f, 0.0f}) || raised.full({0.0f, 2.55f, 0.0f}));
+        assert(!raised.full({0.0f, 1.55f, 0.0f}));
     });
 }
 
@@ -7195,6 +7275,277 @@ void test_gpu_subsurface() {
                     ramp(graphed, 0).first, ramp(stock, 0).first, ramp(sharp, 0).first, most, ramp(holed, 0).first);
         assert(ramp(graphed, 0).first >= ramp(sharp, 0).first + 4 && most <= 4);
         assert(ramp(holed, 0).first <= ramp(sharp, 0).first + 1);
+    });
+}
+
+// Heightmap terrain (kin/render3d/terrain3d.hpp): 257 x 257 samples half a metre apart of rolling hills. On the CPU,
+// heights between samples, the CDLOD selection (several levels near the camera, one node from far above) and a ray's
+// hit. Drawn from above a corner looking across it: every pixel below the horizon is the terrain (no crack between
+// levels shows the background), at the terrain's heights (picked positions against Terrain3D::height: within a few
+// centimetres near the camera, where the finest level is drawn); the hills shade themselves under a low sun.
+void test_gpu_terrain() {
+    with_gpu("test_gpu_terrain", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_terrain", "no glslc");
+            return;
+        }
+        auto surface = kin::compile_terrain_surface(r3d);
+        if (!surface) {
+            std::cerr << kin::diagnostics3d_text(surface.diagnostics) << '\n';
+            assert(false && "the terrain surface did not compile");
+        }
+        const kin::TerrainDesc3D desc{.samples = {257, 257}, .spacing = 0.5f, .min_height = 0.0f, .max_height = 20.0f};
+        const auto world = [](float x, float z) { return 8.0f + 6.0f * std::sin(x * 0.1f) * std::cos(z * 0.08f); };
+        std::vector<kin::u16> heights(257 * 257);
+        for (int z = 0; z < 257; ++z)
+            for (int x = 0; x < 257; ++x)
+                heights[static_cast<std::size_t>(z * 257 + x)] =
+                    static_cast<kin::u16>(std::lround(world(x * 0.5f, z * 0.5f) / 20.0f * 65535.0f));
+        kin::Terrain3D terrain = kin::Terrain3D::create(r3d, *surface, desc, heights).value_or({});
+        assert(terrain.valid() && terrain.size() == (kin::Vec2f{128.0f, 128.0f}));
+        assert(std::abs(*terrain.height({30.0f, 40.0f}) - world(30.0f, 40.0f)) < 1e-3f);
+        assert(std::abs(*terrain.height({30.25f, 40.25f}) - world(30.25f, 40.25f)) < 0.01f);
+        assert(!terrain.height({-1.0f, 5.0f}) && !terrain.height({5.0f, 129.0f}));
+        const auto hit = terrain.raycast({50.0f, 40.0f, 50.0f}, {0.0f, -1.0f, 0.0f});
+        assert(hit && std::abs(hit->position.y - world(50.0f, 50.0f)) < 0.01f && hit->normal.y > 0.5f);
+        assert(!terrain.raycast({50.0f, 40.0f, 50.0f}, {0.0f, 1.0f, 0.0f}));
+        // The selection: near the ground several levels, the finest by the camera; from far above, the root alone.
+        const Vec3f eye{20.0f, 25.0f, 20.0f};
+        const auto near = terrain.select(eye);
+        const std::size_t near_count = near.size();
+        kin::u32 finest = 99, coarsest = 0;
+        for (const kin::TerrainNode3D& n : near) {
+            finest = std::min(finest, n.level);
+            coarsest = std::max(coarsest, n.level);
+        }
+        const std::size_t far_count = terrain.select({64.0f, 5000.0f, 64.0f}).size();
+        std::printf("    terrain: %zu nodes near (levels %u to %u), %zu from far above\n", near_count, finest, coarsest,
+                    far_count);
+        assert(finest == 0 && coarsest >= 1 && far_count == 1 && near_count > far_count);
+
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(255, 0, 255), .pick = true})
+                .value_or({});
+        kin::Scene3D scene;
+        const auto draw = [&](bool shadows) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at(eye, {70.0f, 2.0f, 70.0f}, 60.0f);
+            scene.camera.z_far = 500.0f;
+            scene.lights.sun.direction = kin::normalize(Vec3f{1.0f, 0.35f, 0.2f});
+            scene.lights.sun.color = {1.0f, 1.0f, 1.0f};
+            scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+            scene.lights.shadow_area = shadows ? kin::Bounds3D{{0, 0, 0}, {128, 20, 128}} : kin::Bounds3D{};
+            scene.lights.shadow_resolution = 2048;
+            assert(terrain.draw(scene, 9));
+        };
+        draw(true);
+        const Pixels lit = shoot_view(renderer, r3d, view, scene);
+        int background = 0, picked = 0, missed = 0;
+        float worst = 0.0f;
+        for (int y = 55; y < 120; y += 3) // (row 45 is about the far edge's skyline)
+            for (int x = 0; x < 160; x += 3) {
+                const Color c = lit.at(x, y);
+                background += c.r > 240 && c.g < 20 && c.b > 240;
+                const kin::PickResult3D p = r3d.pick(view, {x, y}).value_or({});
+                if (!p.hit || p.id != 9) {
+                    ++missed;
+                    continue;
+                }
+                ++picked;
+                // Near the camera (the finest level, unmorphed) the drawn surface is the terrain's.
+                if (kin::length(p.position - eye) < 35.0f)
+                    worst = std::max(worst, std::abs(p.position.y - *terrain.height({p.position.x, p.position.z})));
+            }
+        draw(false);
+        const Pixels unshadowed = shoot_view(renderer, r3d, view, scene);
+        long darker = 0;
+        for (std::size_t i = 0; i < lit.rgba.size(); i += 4)
+            darker += lit.rgba[i + 1] + 8 < unshadowed.rgba[i + 1];
+        std::printf("    terrain: %d picked below the horizon, %d missed, %d background pixels; near heights within "
+                    "%.3f m; %ld pixels in the hills' shadows\n",
+                    picked, missed, background, worst, darker);
+        assert(background == 0 && missed == 0 && picked > 1000);
+        assert(worst < 0.05f);
+        assert(darker > 200);
+        // Many levels in view (nodes of 8 quads, each level's range one node): every pixel below the skyline is still
+        // the terrain, where levels meet and morph.
+        kin::TerrainDesc3D fine = desc;
+        fine.node_quads = 8;
+        fine.lod_distance = 1.0f;
+        terrain = kin::Terrain3D::create(r3d, *surface, fine, heights).value_or({});
+        kin::u32 levels = 0;
+        for (const kin::TerrainNode3D& n : terrain.select(eye))
+            levels = std::max(levels, n.level + 1);
+        draw(false);
+        const Pixels many = shoot_view(renderer, r3d, view, scene);
+        int holes = 0;
+        for (int y = 55; y < 120; ++y)
+            for (int x = 0; x < 160; ++x) {
+                const Color c = many.at(x, y);
+                holes += c.r > 240 && c.g < 20 && c.b > 240;
+            }
+        std::printf("    terrain: %zu nodes over %u levels, %d background pixels below the skyline\n",
+                    terrain.select(eye).size(), levels, holes);
+        assert(levels >= 4 && holes == 0);
+    });
+}
+
+// Terrain layers (Terrain3D::set_layers, set_weights): a flat terrain seen from above, a red layer painted over its
+// left half and a blue one over its right: each half its layer's colour, the seam between. Then both at half weight
+// everywhere: with blending by height off, an even mix (purple); with it on, the layer whose albedo stands higher
+// (alpha 230 against 30) shows almost alone.
+void test_gpu_terrain_layers() {
+    with_gpu("test_gpu_terrain_layers", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_terrain_layers", "no glslc");
+            return;
+        }
+        auto surface = kin::compile_terrain_surface(r3d);
+        assert(surface);
+        kin::Terrain3D terrain =
+            kin::Terrain3D::create(r3d, *surface, {.samples = {129, 129}, .spacing = 1.0f}).value_or({});
+        assert(terrain.valid() && terrain.weights({5, 5})[0] == 255 && terrain.weights({5, 5})[1] == 0);
+        const auto plain = [](kin::u8 height) { return kin::Image{{1, 1}, {255, 255, 255, height}}; };
+        std::array<kin::TerrainLayer3D, 2> layers{};
+        layers[0] = {.albedo = plain(230), .tint = {0.8f, 0.05f, 0.05f}, .roughness = 1.0f};
+        layers[1] = {.albedo = plain(30), .tint = {0.05f, 0.05f, 0.8f}, .roughness = 1.0f};
+        assert(terrain.set_layers(layers, {8, 8}) && terrain.layer_count() == 2);
+        std::vector<kin::u8> left(129 * 129), right(129 * 129);
+        for (int z = 0; z < 129; ++z)
+            for (int x = 0; x < 129; ++x) {
+                left[static_cast<std::size_t>(z * 129 + x)] = x < 64 ? 255 : 0;
+                right[static_cast<std::size_t>(z * 129 + x)] = x < 64 ? 0 : 255;
+            }
+        assert(terrain.set_weights(0, {0, 0}, {129, 129}, left) && terrain.set_weights(1, {0, 0}, {129, 129}, right));
+        assert(!terrain.set_weights(16, {0, 0}, {1, 1}, std::span<const kin::u8>{left.data(), 1}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        const auto shoot = [&] {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({64.0f, 150.0f, 64.0f}, {64.0f, 0.0f, 64.0f}, 50.0f, {0, 0, -1});
+            scene.lights.sun = {.direction = {0.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.2f};
+            assert(terrain.draw(scene));
+            return shoot_view(renderer, r3d, view, scene);
+        };
+        const Pixels split = shoot();
+        const Color l = split.at(50, 60), r = split.at(110, 60);
+        std::printf("    terrain layers: left %d,%d,%d right %d,%d,%d\n", l.r, l.g, l.b, r.r, r.g, r.b);
+        assert(l.r > l.b + 60 && r.b > r.r + 60);
+        std::vector<kin::u8> half(129 * 129, 128);
+        assert(terrain.set_weights(0, {0, 0}, {129, 129}, half) && terrain.set_weights(1, {0, 0}, {129, 129}, half));
+        terrain.set_look({.blend = 0.0f});
+        const Color mixed = shoot().at(80, 60);
+        terrain.set_look({.blend = 1.0f});
+        const Color higher = shoot().at(80, 60);
+        std::printf("    terrain layers: half and half %d,%d,%d by weight, %d,%d,%d by height\n", mixed.r, mixed.g,
+                    mixed.b, higher.r, higher.g, higher.b);
+        assert(std::abs(int(mixed.r) - int(mixed.b)) < 25 && mixed.r > 40);
+        assert(higher.r > higher.b + 60);
+    });
+}
+
+// Sculpting (Terrain3D::brush): on a flat terrain 10 m up, a raise of 2 m lifts the brush's middle by 2 m and
+// leaves what is past its radius; smooth lowers the bump's top, flatten pulls it toward its height, noise moves it;
+// paint gives a layer its share. A stroke of dabs is one undo step: undo puts every sample back exactly, redo
+// does it again. The drawn surface follows (a pick at the bump), so does a Jolt height field of it (a ray down), and
+// a .kinterrain file keeps heights, weights and layers.
+void test_gpu_terrain_sculpt() {
+    with_gpu("test_gpu_terrain_sculpt", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_terrain_sculpt", "no glslc");
+            return;
+        }
+        auto surface = kin::compile_terrain_surface(r3d);
+        assert(surface);
+        const std::vector<kin::u16> flat(129 * 129, 32768);
+        kin::Terrain3D terrain =
+            kin::Terrain3D::create(r3d, *surface, {.samples = {129, 129}, .spacing = 0.5f, .max_height = 20.0f}, flat)
+                .value_or({});
+        assert(terrain.valid());
+        const float base = *terrain.height({10.0f, 10.0f});
+        assert(std::abs(base - 10.0f) < 1e-3f);
+        using Mode = kin::TerrainBrushMode3D;
+        const auto changed = terrain.brush({.mode = Mode::Raise, .radius = 6.0f, .strength = 2.0f}, {32.0f, 32.0f});
+        assert(!changed.empty() && changed.at.x <= 52 && changed.at.x + changed.size.x >= 76);
+        const float top = *terrain.height({32.0f, 32.0f});
+        assert(std::abs(top - (base + 2.0f)) < 0.01f && std::abs(*terrain.height({32.0f, 39.0f}) - base) < 1e-3f);
+        assert(terrain.can_undo() && !terrain.can_redo());
+        (void)terrain.brush({.mode = Mode::Smooth, .radius = 6.0f, .strength = 1.0f}, {32.0f, 32.0f});
+        const float smoothed = *terrain.height({32.0f, 35.0f});
+        (void)terrain.brush({.mode = Mode::Flatten, .radius = 6.0f, .strength = 1.0f, .height = 11.0f}, {32.0f, 32.0f});
+        assert(std::abs(*terrain.height({32.0f, 32.0f}) - 11.0f) < 0.01f);
+        (void)terrain.brush({.mode = Mode::Noise, .radius = 6.0f, .strength = 1.0f, .scale = 2.0f}, {32.0f, 32.0f});
+        float spread = 0.0f;
+        for (float x = 28.0f; x <= 36.0f; x += 0.5f)
+            spread = std::max(spread, std::abs(*terrain.height({x, 32.0f}) - 11.0f));
+        std::printf("    terrain sculpt: raised to %.3f, smoothed side %.3f, flattened to 11, noise up to %.3f\n", top,
+                    smoothed, spread);
+        assert(spread > 0.05f && spread < 1.0f);
+        (void)terrain.brush({.mode = Mode::Paint, .radius = 6.0f, .strength = 0.5f, .layer = 2}, {32.0f, 32.0f});
+        const auto w = terrain.weights({64, 64});
+        assert(std::abs(int(w[2]) - 128) <= 2 && std::abs(int(w[0]) - 127) <= 2);
+        // A stroke of three dabs: one undo step, exact both ways.
+        const std::vector<kin::u16> before(terrain.heights().begin(), terrain.heights().end());
+        const std::size_t steps = 5;
+        terrain.begin_stroke();
+        for (int i = 0; i < 3; ++i)
+            (void)terrain.brush({.mode = Mode::Raise, .radius = 4.0f, .strength = 1.0f}, {50.0f + i * 2.0f, 50.0f});
+        const auto stroke = terrain.end_stroke();
+        assert(!stroke.empty());
+        const std::vector<kin::u16> after(terrain.heights().begin(), terrain.heights().end());
+        assert(after != before && terrain.undo() && std::ranges::equal(terrain.heights(), before));
+        assert(terrain.can_redo() && terrain.redo() && std::ranges::equal(terrain.heights(), after));
+        int undone = 0;
+        while (terrain.undo())
+            ++undone;
+        assert(undone == static_cast<int>(steps + 1) && std::ranges::equal(terrain.heights(), flat));
+        while (terrain.redo()) {
+        }
+        assert(std::ranges::equal(terrain.heights(), after));
+        // Drawn: a pick straight down at the stroke's middle finds the raised surface.
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+        kin::Scene3D scene;
+        // (Near enough for the finest level, unmorphed: the drawn surface is the samples'.)
+        scene.camera = kin::Camera3D::look_at({52.0f, 30.0f, 50.0f}, {52.0f, 0.0f, 50.0f}, 30.0f, {0, 0, -1});
+        assert(terrain.draw(scene, 4));
+        render_ok(r3d, view, scene);
+        const kin::PickResult3D picked = r3d.pick(view, {80, 60}).value_or({});
+        const float expected = terrain.height({picked.position.x, picked.position.z}).value_or(-1.0f);
+        std::printf("    terrain sculpt: picked %.3f at the stroke, the terrain %.3f\n", picked.position.y, expected);
+        assert(picked.hit && picked.id == 4 && std::abs(picked.position.y - expected) < 0.05f);
+        // Physics: a height field of it.
+        kin::World3D world;
+        const kin::Shape3D shape = kin::terrain_shape3d(terrain);
+        assert(shape.valid());
+        (void)world.create_body({.shape = shape, .motion = kin::Body3DMotion::Static});
+        world.step(1.0f / 60.0f);
+        const auto ray = world.raycast({52.0f, 40.0f, 50.0f}, {52.0f, -10.0f, 50.0f});
+        assert(ray && std::abs(ray->point.y - expected) < 0.1f);
+        // Lowered by 3 m there, the height field updated in place (its range kept open for it): the ray follows.
+        const kin::Body3D ground = world.bodies().front();
+        const auto dug =
+            terrain.brush({.mode = Mode::Lower, .radius = 3.0f, .strength = 3.0f, .falloff = 0.0f}, {52.0f, 50.0f});
+        assert(kin::update_terrain_collision(world, ground, terrain, dug));
+        world.step(1.0f / 60.0f);
+        const auto deeper = world.raycast({52.0f, 40.0f, 50.0f}, {52.0f, -10.0f, 50.0f});
+        std::printf("    terrain sculpt: collision %.3f, lowered in place to %.3f (the terrain %.3f)\n", ray->point.y,
+                    deeper ? deeper->point.y : -1.0f, *terrain.height({52.0f, 50.0f}));
+        assert(deeper && std::abs(deeper->point.y - *terrain.height({52.0f, 50.0f})) < 0.1f);
+        // A .kinterrain file.
+        std::array<kin::TerrainLayer3D, 3> layers{};
+        layers[1].tint = {0.2f, 0.4f, 0.1f};
+        layers[2].albedo = kin::Image{{2, 2}, std::vector<kin::u8>(16, 200)};
+        assert(terrain.set_layers(layers, {4, 4}));
+        const auto file = std::filesystem::temp_directory_path() / "kin_terrain_test.kinterrain";
+        assert(terrain.save(file));
+        auto loaded = kin::Terrain3D::load(r3d, *surface, file);
+        std::filesystem::remove(file);
+        assert(loaded && std::ranges::equal(loaded->heights(), terrain.heights()) && loaded->layer_count() == 3);
+        assert(loaded->weights({64, 64}) == terrain.weights({64, 64}) && loaded->desc().spacing == 0.5f);
     });
 }
 
@@ -25461,6 +25812,10 @@ int main(int argc, char** argv) {
     RUN(test_gpu_motion_blur());
     RUN(test_gpu_subsurface());
     RUN(test_gpu_subsurface_transmission());
+    RUN(test_gpu_terrain());
+    RUN(test_gpu_terrain_layers());
+    RUN(test_gpu_terrain_sculpt());
+    RUN(test_gpu_terrain_gi());
     RUN(test_gpu_glow());
     RUN(test_gpu_lens_film_grade());
     RUN(test_gpu_depth_of_field());
