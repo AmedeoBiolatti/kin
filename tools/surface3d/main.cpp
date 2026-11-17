@@ -27,9 +27,10 @@ int main(int argc, char** argv) {
         Renderer2D renderer{make_render_backend(window, false, true)};
         Renderer3D r3d{renderer};
         const auto features = available_graph_features(renderer);
-        if (!r3d.capabilities().surface_stages || !r3d.capabilities().surface_particles ||
-            !r3d.capabilities().sun_shadow_pass || !r3d.capabilities().local_shadow_pass ||
-            !r3d.capabilities().material_inputs || !r3d.capabilities().bloom_pass || !r3d.capabilities().output_pass ||
+        if (!r3d.capabilities().gpu_particles || !r3d.capabilities().surface_stages ||
+            !r3d.capabilities().surface_particles || !r3d.capabilities().sun_shadow_pass ||
+            !r3d.capabilities().local_shadow_pass || !r3d.capabilities().material_inputs ||
+            !r3d.capabilities().bloom_pass || !r3d.capabilities().output_pass ||
             !(features & graph_feature::attachment_arrays) || !(features & graph_feature::compute) ||
             !(features & graph_feature::buffers)) {
             std::cerr
@@ -130,6 +131,21 @@ int main(int argc, char** argv) {
         MaterialInputs3D inputs;
         Texture bound_pattern;
         std::shared_ptr<IDataBufferBackend> bound_palette;
+        ParticleDesc3D sparks_desc;
+        sparks_desc.max_particles = 512;
+        sparks_desc.rate = 120;
+        sparks_desc.spread = 30;
+        sparks_desc.speed = {1, 3};
+        sparks_desc.lifetime = {.5f, 1.5f};
+        sparks_desc.size = {.04f, .08f};
+        sparks_desc.gravity = {0, -2, 0};
+        sparks_desc.colour_start = {3, .7f, .1f};
+        sparks_desc.colour_end = {1, .05f, 0};
+        sparks_desc.look.blend = ParticleBlend3D::Additive;
+        const auto sparks = r3d.create_gpu_particles(sparks_desc, 7).value_or({});
+        const auto emitter_transform = Mat4f::translation({1.5f, -.8f, 1});
+        check(bool(sparks) && bool(r3d.update_gpu_particles(sparks, {.transform = emitter_transform, .burst = 32})),
+              "GPU emitter creation failed");
         f32 angle = 20;
         const auto picture = [&](bool reference) {
             scene.clear();
@@ -161,6 +177,7 @@ int main(int argc, char** argv) {
             check(bool(scene.draw_particles({.softness = .25f, .lit = .5f, .receives_shadow = true}, sprites)),
                   "sprites rejected");
 
+            check(bool(scene.draw_particles(sparks)), "GPU sparks rejected");
             auto prepared = r3d.prepare(scene).value_or({});
             check(bool(prepared), "scene preparation failed");
             SunShadow3D shadow;
@@ -282,11 +299,17 @@ int main(int argc, char** argv) {
                          "bloom/output and ASCII; zero-copy attachment handoff saves "
                       << graph_resource_payload(graph.resources[11]) << " payload bytes\n";
         } else
-            app.run([&](f32 dt) { angle += dt * 20; },
-                    [&](f32) {
-                        picture(false);
-                        renderer.present();
-                    });
+            app.run(
+                [&](f32 dt) {
+                    angle += dt * 20;
+                    check(bool(r3d.update_gpu_particles(
+                              sparks, {.dt = std::min<f64>(dt, .25), .transform = emitter_transform})),
+                          "GPU spark update failed");
+                },
+                [&](f32) {
+                    picture(false);
+                    renderer.present();
+                });
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
         return 1;

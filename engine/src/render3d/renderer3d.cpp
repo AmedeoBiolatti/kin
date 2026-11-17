@@ -37,6 +37,60 @@ RendererCapabilities3D Renderer3D::capabilities() const {
     return _backend ? _backend->capabilities() : RendererCapabilities3D{};
 }
 
+Result3D<GpuParticleSystem3D> Renderer3D::create_gpu_particles(const ParticleDesc3D& d, u32 seed) {
+    _errors.clear();
+    const auto fail = [&](const char* reason) {
+        fail3d(_errors, "Renderer3D::create_gpu_particles", reason);
+        return Result3D<GpuParticleSystem3D>{std::nullopt, _errors};
+    };
+    const auto finite3 = [](Vec3f v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    const auto range = [](ParticleRange3D r) { return std::isfinite(r.min) && std::isfinite(r.max) && r.min <= r.max; };
+    const auto colour = [](LinearRgb c) { return std::isfinite(c.r) && std::isfinite(c.g) && std::isfinite(c.b); };
+    if (!d.max_particles || d.max_particles > 1048576 || !std::isfinite(d.rate) || d.rate < 0 ||
+        d.rate > 1048576 * 120.0f || !range(d.lifetime) || d.lifetime.min <= 0 || !range(d.speed) || !range(d.size) ||
+        d.size.min < 0 || !range(d.rotation) || !range(d.spin) || !finite3(d.extent) || d.extent.x < 0 ||
+        d.extent.y < 0 || d.extent.z < 0 || !finite3(d.velocity_min) || !finite3(d.velocity_max) ||
+        !finite3(d.gravity) || !std::isfinite(d.drag) || d.drag < 0 || !std::isfinite(d.wind_influence) ||
+        !colour(d.colour_start) || !colour(d.colour_end) ||
+        static_cast<u32>(d.shape) > static_cast<u32>(ParticleShape3D::Disc))
+        return fail("invalid capacity, emission, ranges or forces");
+    for (f32 f : {d.cone_angle,    d.spread,           d.size_start,    d.size_mid,         d.size_end,
+                  d.alpha_start,   d.alpha_end,        d.fade_in,       d.colour_variation, d.frames_per_life,
+                  d.ground_height, d.bounce,           d.look.axis.x,   d.look.axis.y,      d.look.axis.z,
+                  d.look.stretch,  d.look.stretch_min, d.look.softness, d.look.ring,        d.look.soft_distance,
+                  d.look.lit})
+        if (!std::isfinite(f))
+            return fail("non-finite lifetime curve or appearance");
+    const u64 frames = u64(std::max(d.look.atlas_columns, 1u)) * std::max(d.look.atlas_rows, 1u);
+    if (frames > std::numeric_limits<u32>::max() ||
+        static_cast<u32>(d.look.blend) > static_cast<u32>(ParticleBlend3D::Premultiplied) ||
+        static_cast<u32>(d.look.facing) > static_cast<u32>(ParticleFacing3D::Flat))
+        return fail("invalid atlas or particle appearance enum");
+    if (d.look.casts_shadow && (!std::isfinite(d.look.shadow_cutoff) || d.look.shadow_cutoff < 0 ||
+                                d.look.shadow_cutoff > 1 || !capabilities().particle_shadows))
+        return fail("invalid shadow cutoff or particle shadows unavailable");
+    if (!_backend || !_backend->capabilities().gpu_particles)
+        return fail("GPU particles are unavailable");
+    auto value = _backend->create_gpu_particles(d, seed);
+    if (!value)
+        return fail("device refused particle resources or texture");
+    return result3d(GpuParticleSystem3D{std::move(value)});
+}
+
+Status3D Renderer3D::update_gpu_particles(const GpuParticleSystem3D& system, const GpuParticleUpdate3D& u) {
+    _errors.clear();
+    bool finite = std::isfinite(u.dt) && u.dt >= 0 && u.dt <= ParticleSystem3D::max_catch_up &&
+                  std::isfinite(u.wind.x) && std::isfinite(u.wind.y) && std::isfinite(u.wind.z);
+    for (float f : u.transform.m)
+        finite = finite && std::isfinite(f);
+    if (!finite || !system || !_backend || !_backend->update_gpu_particles(system.backend(), u)) {
+        fail3d(_errors, "Renderer3D::update_gpu_particles",
+               "invalid update, foreign emitter or device recording failure");
+        return status3d(false, _errors);
+    }
+    return status3d(true);
+}
+
 // A bake that passed the cache's checksum but is not a build of this kind (a format changed without its version): built
 // again, and the new build replaces it.
 void Renderer3D::warn_refused_bake(bool restored) {
@@ -729,6 +783,8 @@ bool Renderer3D::render_operation(View3D& view, const Scene3D& scene, const View
         _errors = overlay->diagnostics();
         return false;
     }
+    if (!scene.gpu_particle_draws().empty() && !capabilities().gpu_particles)
+        return fail3d(_errors, "Renderer3D::render", "GPU particles are unavailable on this backend");
     const auto start = std::chrono::steady_clock::now();
     bool drawn = false;
     if (auto* fallback = dynamic_cast<FallbackView*>(view.backend())) {

@@ -30,6 +30,7 @@
 #include <vector>
 
 namespace kin {
+class IGpuParticleBackend3D;
 
 namespace gpu {
 // Wraps a GpuTexture so it lives behind a kin::Texture.
@@ -347,6 +348,7 @@ private:
     gpu::GpuGeometryBatch _batch;
     std::optional<gpu::GpuFrame> _frame;
     std::vector<std::shared_ptr<ITextureBackend>> _retained;            // textures the frame's draws use
+    std::vector<std::shared_ptr<IGpuParticleBackend3D>> _retained_particles;
     std::vector<std::shared_ptr<IDataBufferBackend>> _retained_buffers; // and data buffers
     std::vector<gpu::GpuTexture> _retired_textures; // replaced this frame (made mipmapped), kept till submit
     SDL_GPUSampler* _sampler_mipmapped = nullptr;   // trilinear, for ScaleMode::Mipmapped

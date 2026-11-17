@@ -834,6 +834,17 @@ bool Scene3D::draw_particles_operation(const ParticleSystem3D& system, u64 histo
     return _errors.empty();
 }
 
+Status3D Scene3D::draw_particles(const GpuParticleSystem3D& system) {
+    if (!_errors.empty())
+        return status3d(false, _errors);
+    if (!system) {
+        fail_submission("invalid GPU particle system");
+        return status3d(false, _errors);
+    }
+    _gpu_particle_draws.push_back(system);
+    return status3d(true);
+}
+
 Status3D Scene3D::draw_decal(const Decal3D& decal) {
     if (!_errors.empty())
         return status3d(false, _errors);
@@ -874,6 +885,7 @@ void Scene3D::clear() {
     _instance_groups.clear();
     _joints.clear();
     _skin_offsets.clear();
+    _gpu_particle_draws.clear();
     _particle_draws.clear();
     _particle_sprites.clear();
     _decals.clear();

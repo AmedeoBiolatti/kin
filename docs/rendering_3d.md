@@ -1907,6 +1907,118 @@ maps), `particle_shadow_submitted` / `particle_shadow_dropped` (unique uploaded
 casters), `particle_shadow_draws` / `particle_shadow_instances` (including repeats
 per light/cascade), and `particle_shadow_bytes` (allocated caster GPU buffer).
 
+**GPU emitters (native).** `capabilities().gpu_particles` enables persistent compute
+simulation for visual effects. Create once, update explicitly, and submit the
+shared handle each frame:
+
+```cpp
+kin::ParticleDesc3D desc;
+desc.rate = 2000;
+desc.max_particles = 20000;
+desc.gravity = {0, -9.8f, 0};
+desc.look.blend = kin::ParticleBlend3D::Additive;
+auto sparks = renderer3d.create_gpu_particles(desc, 7).value_or({});
+// Once per simulation update, before preparing/rendering any consumers:
+renderer3d.update_gpu_particles(sparks, {.dt = dt, .transform = emitter_transform});
+scene.draw_particles(sparks);
+```
+
+The immutable description reuses the CPU emitter's shapes, birth ranges,
+size/colour/alpha curves, rotation/spin, flipbook, gravity, drag and optional
+height-plane kill/bounce. `GpuParticleUpdate3D::wind` supplies a constant world-space
+air velocity for that update, scaled by `wind_influence`; it does not evaluate
+`Wind3D`'s spatial gust field. Existing particles remain in world space when the
+birth transform moves. Rate births have sub-frame ages; `burst` births happen at
+the end of the update. `clear = true` resets particles, fractional emission and
+the birth sequence before applying that update. A finite timestep in `[0, .25]`
+is required; split larger intervals explicitly. Physics uses a variable step
+with analytic gravity/constant-air drag and a discrete ground response. GPU
+results are visual and are not bitwise deterministic across devices or frame
+partitions. Use `ParticleSystem3D` for deterministic gameplay, save/restore and
+rollback.
+
+State (32 bytes per slot) and render sprites (64 bytes per slot) stay on the
+GPU. Each update dispatches over capacity; dead slots are invisible. Capacity
+is 1–1,048,576 slots; births overwrite the oldest ring slots at capacity,
+including when an earlier slot died first. Large bursts retain only their latest
+capacity births. No per-frame sprite upload, live-count readback or CPU particle
+iteration is needed. Copies and scene submissions share simulation state;
+rendering, including multiple views, never advances it. Scenes retain submitted
+handles until `clear()`; recorded work retains resources until submission.
+
+With `look.sort = true` (the default), GPU emitters and sorted CPU sprites
+share one GPU composition stream. A 256-slot shared-memory sort followed by
+global merges orders admitted sprites far-to-near across all those sources.
+The existing CPU-owned transparent mesh commands supply camera-depth anchors;
+a compute pass binary-searches the sorted keys and produces indirect sprite
+draws between those commands. Glass, CPU particles and different GPU emitters
+therefore interleave by centre depth without a particle/depth-key readback or a
+CPU walk of GPU particle records. Stable ties retain source/slot order; mesh
+commands precede equal-depth sorted sprites, as on the CPU path. This is the
+same centre-order model as CPU rendering, not order-independent polygon sorting.
+Intersecting quads or meshes still have the usual centre-sorting approximation.
+
+`look.sort = false` keeps the source as one approximate run in raw slot order:
+at the GPU emitter's current depth, or the mean admitted depth for a CPU source.
+Scenes without a sorted GPU emitter retain the ordinary CPU composition path.
+Simulation and per-view motion snapshots stay in original GPU ring-slot order;
+the gathered draw records pair each selected sprite with its own previous data.
+
+Source textures and their existing mip levels are copied on the GPU into a
+cached RGBA16F atlas, preserving the native sampling colour space and the
+existing decode-after-filter policy for gamma textures. Each mip occupies its
+own rectangle; every sample
+clamps within that image to prevent neighbours bleeding in. This avoids a
+fixed texture-binding limit on the shared draw. Nearest, bilinear and trilinear
+sampling, flipbooks and texture LOD bias are retained. Requested anisotropy uses
+bounded major-axis taps over those independent mip rectangles; its filtering
+kernel can differ from driver-specific hardware anisotropy. The half-float
+cache can introduce normal half-float colour/alpha rounding. Texture identity,
+contents, mip-chain or colour-decoding changes rebuild the atlas; render-target
+sources are refreshed conservatively. No CPU image download or recompression
+is involved.
+
+The shared stream uses 64 bytes per admitted sprite for current records, another
+64 with TAA, and eight bytes per padded sort key, plus source/mip metadata,
+CPU-anchor data and indirect arguments. Buffers grow and are reused; the atlas
+is cached, and resources are released after 120 renders without composition.
+`particle_composition_bytes` reports allocated shared GPU storage and atlas
+payload; `particle_composition_segments` counts encoded indirect intervals,
+including empty ones. `transparent_draw_runs` and particle batch counts include
+those encoded commands; no live draw count is downloaded. GPU sources share the frame's
+1,048,576-slot budget after CPU sources. Lighting, fog, atlas textures, facing,
+blend modes, soft intersections and shadow **reception** use the existing sprite
+path. `look.casts_shadow = true` also casts the same alpha-tested quads into stock
+sun/cascade, moon, point and spot maps, including off-camera particles. GPU
+casters reuse simulation storage with no caster upload. Each map admits up to
+16,384 capacity slots after CPU casters; dead and clipped slots still consume
+that budget. Shadow caches track emitter identity, update revision, the billboard
+camera and texture contents. An update conservatively invalidates its maps;
+rendering unchanged emitters reuses them. Clearing or removing a caster clears
+its old shadows. Explicit graph shadow producers retain their mesh-only contract.
+TAA retains the previous GPU
+sprite records separately for each view and reconstructs each billboard with that
+view's previous camera. Matching birth identities preserve motion through several
+simulation updates between renders. Births, recycled slots, `clear`, view resets,
+texture changes and abrupt opacity/colour/flipbook changes reject stale history.
+Stable coverage accumulates temporal samples using the same policy as CPU sprites.
+The history-coverage pass follows the colour pass's per-copy composition order,
+including indirect intervals, so a layer behind a fresh sprite cannot overwrite
+its motion marker.
+This adds 64 bytes per capacity slot per active TAA view, counted in `feature_bytes`,
+with GPU-to-GPU copies and no CPU particle readback. Histories are released when
+an emitter leaves a rendered view or TAA is disabled.
+`gpu_particle_slots`, `gpu_particle_batches` and `gpu_particle_bytes` expose the
+admitted capacity and state/order allocation in `debug_stats()`; general particle
+counts include capacity slots, including dead slots, for these sources.
+Unsupported backends return diagnostic failures; check capabilities. Authored
+ECS emitters and procedural weather continue to use their existing CPU path.
+
+`kin_surface3d` demonstrates persistent GPU sparks alongside graph-owned mesh,
+lighting and transparent passes. Update emitters before scene preparation and
+graph execution; the handles are live inputs, not prepared snapshots. Explicit
+surface soft particles still require a separate sampled `soft_depth`.
+
 **Weather** (`Weather3D`, four `WeatherLayer3D`: rain, snow, dust, mist). A layer is `max_particles` in a box `box` round the camera of
 which the first `intensity` share are shown (one at a time: smooth); each one's place is a formula of its number and `weather.time`
 (fall speed, the wind's drift, a flutter), wrapped into the box in **world space**, so that it does not move when the camera does and any
@@ -1922,9 +2034,7 @@ weather: the same wind.
 
 `debug_stats()` has `particles_submitted`, `particles_drawn` (after the view's cull and the 1,048,576 sprites a frame it takes), `particle_batches`,
 `particle_soft`, `weather_particles`, `particles_dropped` and `particle_cpu_ms`. `capabilities().particles` and `soft_particles`. Not done:
-depth-hit splashes (the ground is one height), collisions with anything,
-GPU-simulated particles (the CPU writes the instance buffer each frame), a sort across
-batches, and rain that stops under a roof (it falls through Sponza's nave).
+depth-hit splashes and collisions beyond the single ground height, and rain that stops under a roof (it falls through Sponza's nave).
 Moving particles and weather use the temporal reprojection described above.
 Native emitters supply stable birth IDs; immediate callers can supply sprite IDs
 and an emitter history ID, or retain stable submission order.

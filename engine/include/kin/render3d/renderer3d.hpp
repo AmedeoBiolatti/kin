@@ -121,6 +121,11 @@ public:
     bool available() const { return _backend != nullptr; }
     // What views can have; all defaults where 3D isn't available.
     RendererCapabilities3D capabilities() const;
+    // Native compute simulation, immutable description. Sorted sources compose
+    // globally with CPU sprites and transparent meshes. Capacity <= 1,048,576.
+    Result3D<GpuParticleSystem3D> create_gpu_particles(const ParticleDesc3D& desc, u32 seed = 1);
+    Status3D update_gpu_particles(const GpuParticleSystem3D&, const GpuParticleUpdate3D&);
+
     Renderer2D& renderer() const { return *_renderer; }
 
     // `data` kept on the GPU. Empty when 3D isn't available or the data is

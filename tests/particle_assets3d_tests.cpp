@@ -306,6 +306,552 @@ void particle_gpu(Renderer2D& renderer) {
     assets.trim();
     check(assets.stats().texture_entries == 0, "particle texture retained after unload");
 }
+// Exercise the persistent simulation through its public API and actual pixels.
+void simulated_gpu(Renderer2D& renderer) {
+    Renderer3D r(renderer);
+    check(r.capabilities().gpu_particles, "GPU particle simulation unavailable");
+    ParticleDesc3D d;
+    d.max_particles = 65; // partial final compute group
+    d.lifetime = {.5f, .5f};
+    d.speed = {0, 0};
+    d.size = {1, 1};
+    d.alpha_start = d.alpha_end = 1;
+    d.look.fogged = false;
+    d.look.softness = 0;
+    d.colour_start = d.colour_end = {1, 0, 0};
+    auto make = r.create_gpu_particles(d, 7);
+    check(make, "GPU emitter creation failed: " + diagnostics3d_text(make.diagnostics));
+    auto system = *make;
+    auto copy = system;
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({0, 0, 0}, {0, 0, -1}, 60);
+    scene.cull = false;
+    check(scene.draw_particles(copy), "GPU emitter submission failed");
+    auto view = r.create_view({160, 120}, {.samples = 1}).value_or({});
+    const auto picture = [&](View3D& v) {
+        renderer.clear(colors::black);
+        check(r.render(v, scene), "GPU particle render failed: " + diagnostics3d_text(r.diagnostics()));
+        renderer.draw_texture(v.texture(), {0, 0, 160, 120});
+        std::vector<u8> pixels;
+        Vec2i size;
+        check(renderer.read_rgba({0, 0, 160, 120}, pixels, size), "GPU particle readback failed");
+        renderer.present();
+        return pixels;
+    };
+    const auto centre = [](const auto& pixels) { return pixels[(60 * 160 + 80) * 4]; };
+    check(centre(picture(view)) == 0, "new GPU emitter is not empty");
+    GpuParticleUpdate3D u;
+    u.transform = Mat4f::translation({0, 0, -4});
+    u.burst = 1;
+    check(r.update_gpu_particles(system, u), "GPU burst failed");
+    const auto first = picture(view);
+    check(centre(first) > 200, "GPU burst did not draw");
+    check(picture(view) == first, "rendering advanced the GPU simulation");
+    auto second = r.create_view({160, 120}, {.samples = 1}).value_or({});
+    check(picture(second) == first, "second view changed simulation");
+    auto bad = u;
+    bad.dt = std::numeric_limits<f64>::quiet_NaN();
+    check(!r.update_gpu_particles(system, bad), "GPU NaN timestep accepted");
+    bad.dt = -1;
+    check(!r.update_gpu_particles(system, bad), "GPU negative timestep accepted");
+    bad.dt = .251;
+    check(!r.update_gpu_particles(system, bad), "GPU catch-up bound ignored");
+    check(!r.update_gpu_particles({}, u), "empty GPU handle accepted");
+    check(picture(view) == first, "invalid update mutated GPU state");
+    u.burst = 0;
+    u.dt = .25;
+    u.emitting = false;
+    check(r.update_gpu_particles(copy, u) && r.update_gpu_particles(copy, u), "GPU expiry update failed");
+    check(centre(picture(view)) == 0, "GPU particles did not expire");
+    u.dt = 0;
+    u.burst = 1000000;
+    check(r.update_gpu_particles(system, u), "bounded oversized GPU burst failed");
+    check(centre(picture(view)) > 200 && r.debug_stats().particles_drawn == 65,
+          "GPU ring capacity or partial group failed");
+    u.burst = 0;
+    u.clear = true;
+    check(r.update_gpu_particles(system, u) && centre(picture(view)) == 0, "GPU clear failed");
+    // Rate emission, world-space motion, lifetime curves and TAA/soft variants.
+    d.rate = 8;
+    d.velocity_min = d.velocity_max = {4, 0, 0};
+    d.look.soft = true;
+    system = r.create_gpu_particles(d, 3).value_or({});
+    scene.clear();
+    check(scene.draw_particles(system), "GPU rate emitter submission failed");
+    scene.taa.enabled = true;
+    u.clear = false;
+    u.emitting = true;
+    u.dt = .125;
+    check(r.update_gpu_particles(system, u) && centre(picture(view)) > 200, "GPU rate/soft/TAA path failed");
+    u.emitting = false;
+    u.dt = .25;
+    check(r.update_gpu_particles(system, u), "GPU motion update failed");
+    check(centre(picture(view)) < 20, "GPU particles did not move in world space");
+    // Scene and recorded commands keep resources alive after the caller drops handles.
+    copy = {};
+    system = {};
+    make = {};
+    (void)picture(view);
+    scene.clear();
+    check(scene.gpu_particle_draws().empty(), "scene clear retained GPU submissions");
+    // Compare analytic gravity/drag against the existing fixed-step CPU model.
+    d = ParticleDesc3D{};
+    d.max_particles = 1;
+    d.speed = {0, 0};
+    d.lifetime = {2, 2};
+    d.size = {.2f, .2f};
+    d.gravity = {0, -8, 0};
+    d.drag = 2;
+    d.alpha_start = d.alpha_end = 1;
+    d.colour_start = d.colour_end = {1, 0, 0};
+    d.look.fogged = false;
+    d.look.softness = 0;
+    system = r.create_gpu_particles(d).value_or({});
+    scene.taa.enabled = false;
+    check(scene.draw_particles(system), "GPU force emitter submission failed");
+    u = {};
+    u.transform = Mat4f::translation({0, 0, -4});
+    u.burst = 1;
+    check(r.update_gpu_particles(system, u), "GPU force burst failed");
+    u.burst = 0;
+    u.dt = .25;
+    u.wind = {2, 0, 0};
+    u.emitting = false;
+    check(r.update_gpu_particles(system, u), "GPU force update failed");
+    ParticleSystem3D control;
+    control.desc = d;
+    control.transform = u.transform;
+    control.burst(1);
+    Wind3D wind;
+    wind.speed = 2;
+    control.update(.25, &wind);
+    const auto projected = scene.camera.project(control.particles()[0].position, {0, 0, 160, 120});
+    const auto forced = picture(view);
+    check(projected && forced[(int(projected->pos.y) * 160 + int(projected->pos.x)) * 4] > 200 && centre(forced) < 20,
+          "GPU gravity/drag differs from CPU reference");
+    const auto allocations = renderer.backend_stats().gpu_memory.allocations;
+    u.dt = 0;
+    for (int i = 0; i < 4; ++i) {
+        check(r.update_gpu_particles(system, u) && r.render(view, scene), "warmed GPU update/render failed");
+        renderer.present();
+    }
+    check(renderer.backend_stats().gpu_memory.allocations == allocations && r.debug_stats().device_waits == 0,
+          "warmed GPU simulation allocated resources or waited");
+    auto invalid = d;
+    invalid.max_particles = 0;
+    check(!r.create_gpu_particles(invalid), "zero GPU capacity accepted");
+    invalid = d;
+    invalid.max_particles = 1048577;
+    check(!r.create_gpu_particles(invalid), "oversized GPU capacity accepted");
+    invalid = d;
+    invalid.look.casts_shadow = true;
+    check(r.create_gpu_particles(invalid), "GPU shadow casting rejected");
+    invalid.look.shadow_cutoff = std::numeric_limits<f32>::quiet_NaN();
+    check(!r.create_gpu_particles(invalid), "invalid GPU shadow cutoff accepted");
+    invalid = d;
+    invalid.lifetime = {0, 1};
+    check(!r.create_gpu_particles(invalid), "zero GPU lifetime accepted");
+}
+void gpu_depth_order(Renderer2D& renderer) {
+    Renderer3D r(renderer);
+    for (u32 capacity : {3u, 257u, 1025u, 20000u})
+        for (bool sorted : {false, true}) {
+            ParticleDesc3D d;
+            d.max_particles = capacity;
+            d.speed = {0, 0};
+            d.lifetime = {1, 1};
+            d.size = {2, 2};
+            d.colour_start = {1, 0, 0};
+            d.colour_end = {0, 0, 1};
+            d.alpha_start = d.alpha_end = .5f;
+            d.look.fogged = false;
+            d.look.softness = 0;
+            d.look.sort = sorted;
+            auto system = r.create_gpu_particles(d).value_or({});
+            check(r.update_gpu_particles(system, {.transform = Mat4f::translation({0, 0, -4}), .burst = 1}),
+                  "sorted front birth failed");
+            if (capacity > 3)
+                check(r.update_gpu_particles(system,
+                                             {.transform = Mat4f::translation({1000, 0, -4}), .burst = capacity - 2}),
+                      "sorted offscreen births failed");
+            check(r.update_gpu_particles(system, {.dt = .25, .emitting = false}) &&
+                      r.update_gpu_particles(system, {.dt = .25, .emitting = false}),
+                  "sorted aging failed");
+            check(r.update_gpu_particles(system, {.transform = Mat4f::translation({0, 0, -6}), .burst = 1}),
+                  "sorted back birth failed");
+            auto gpu_view = r.create_view({160, 120}, {.samples = 1}).value_or({});
+            auto cpu_view = r.create_view({160, 120}, {.samples = 1}).value_or({});
+            auto other_view = r.create_view({160, 120}, {.samples = 1}).value_or({});
+            std::vector<u8> first;
+            for (int camera = 0; camera < 3; ++camera) {
+                Scene3D gpu, cpu;
+                gpu.camera = cpu.camera = camera == 1 ? Camera3D::look_at({0, 0, -10}, {0, 0, 0}, 60)
+                                                      : Camera3D::look_at({0, 0, 0}, {0, 0, -1}, 60);
+                check(gpu.draw_particles(system), "sorted GPU submission failed");
+                ParticleSprite3D sprites[2];
+                sprites[0].position = {0, 0, -4};
+                sprites[0].colour = {.5f, 0, .5f};
+                sprites[1].position = {0, 0, -6};
+                sprites[1].colour = {1, 0, 0};
+                for (auto& p : sprites) {
+                    p.size = 2;
+                    p.alpha = .5f;
+                }
+                check(cpu.draw_particles(d.look, sprites), "sorted CPU oracle rejected");
+                const auto shoot = [&](View3D& v, const Scene3D& scene) {
+                    renderer.clear(colors::black);
+                    check(r.render(v, scene), "sorted render failed");
+                    renderer.draw_texture(v.texture(), {0, 0, 160, 120});
+                    std::vector<u8> pixels;
+                    Vec2i size;
+                    check(renderer.read_rgba({0, 0, 160, 120}, pixels, size), "sorted readback failed");
+                    renderer.present();
+                    return pixels;
+                };
+                const auto expected = shoot(cpu_view, cpu);
+                const auto actual = shoot(camera == 1 ? other_view : gpu_view, gpu);
+                int worst = 0;
+                for (std::size_t i = 0; i < actual.size(); ++i)
+                    worst = std::max(worst, std::abs(int(actual[i]) - int(expected[i])));
+                check(worst <= 1, "GPU depth order/culling differs from CPU sorted sprites");
+                if (camera == 0)
+                    first = actual;
+                if (camera == 2)
+                    check(actual == first, "second view left a stale GPU sort");
+            }
+        }
+}
+
+void gpu_motion_history(Renderer2D& renderer) {
+    Renderer3D r(renderer);
+    int accumulated = 0;
+    for (const auto facing :
+         {ParticleFacing3D::Camera, ParticleFacing3D::Stretched, ParticleFacing3D::Axis, ParticleFacing3D::Flat}) {
+        ParticleDesc3D d;
+        d.max_particles = 1;
+        d.lifetime = {10, 10};
+        d.speed = {0, 0};
+        d.size = {.7f, .7f};
+        d.velocity_min = d.velocity_max = {.25f, .1f, 0};
+        d.rotation = {15, 15};
+        d.spin = {30, 30};
+        d.alpha_start = d.alpha_end = .65f;
+        d.colour_start = d.colour_end = {1, .3f, .1f};
+        d.look.fogged = false;
+        d.look.softness = .25f;
+        d.look.facing = facing;
+        d.look.stretch = .6f;
+        if (facing == ParticleFacing3D::Flat)
+            d.look.axis = {0, 0, 1};
+        auto system = r.create_gpu_particles(d).value_or({});
+        auto temporal = r.create_view({160, 120}, {.samples = 1}).value_or({});
+        auto oracle = r.create_view({160, 120}, {.samples = 1}).value_or({});
+        auto spatial = r.create_view({160, 120}, {.samples = 1}).value_or({});
+        auto other = r.create_view({160, 120}, {.samples = 1}).value_or({});
+        Vec3f origin{-.3f, .1f, -4};
+        GpuParticleUpdate3D u;
+        u.transform = Mat4f::translation(origin);
+        u.burst = 1;
+        check(r.update_gpu_particles(system, u), "temporal GPU burst failed");
+        f32 age = 0;
+        u64 birth = 1;
+        for (int frame = 0; frame < 26; ++frame) {
+            u = {};
+            u.emitting = false;
+            u.transform = Mat4f::translation(origin);
+            if (frame == 10 || frame == 14) {
+                u.clear = frame == 10;
+                u.burst = 1;
+                age = 0;
+                ++birth;
+            } else if (frame > 0 && frame < 16) {
+                u.dt = 1. / 16;
+                age += 1.f / 16;
+            }
+            check(r.update_gpu_particles(system, u), "temporal GPU update failed");
+            Scene3D gpu, cpu;
+            const f32 camera_x = frame < 16 ? .008f * frame : .12f;
+            gpu.camera = cpu.camera = Camera3D::look_at({camera_x, 0, 0}, {camera_x, 0, -1}, 60);
+            gpu.taa = cpu.taa = {.enabled = true, .blend = .98f, .sharpness = 0};
+            const bool submitted = frame != 22 && frame != 23;
+            if (submitted) {
+                check(gpu.draw_particles(system), "temporal GPU submission failed");
+                ParticleSprite3D p;
+                p.position = origin + d.velocity_min * age;
+                p.velocity = d.velocity_min;
+                p.size = .7f;
+                p.alpha = .65f;
+                p.colour = d.colour_start;
+                p.rotation = (15.f + age * 30.f) * (3.14159265358979323846f / 180);
+                p.id = birth;
+                check(cpu.draw_particles(d.look, std::span{&p, 1}, 17), "temporal CPU oracle submission failed");
+            }
+            if (frame == 18) {
+                temporal.reset_history();
+                oracle.reset_history();
+            }
+            const auto shoot = [&](View3D& view, const Scene3D& scene) {
+                renderer.clear(colors::black);
+                check(r.render(view, scene), "temporal GPU picture failed");
+                renderer.draw_texture(view.texture(), {0, 0, 160, 120});
+                std::vector<u8> pixels;
+                Vec2i size;
+                check(renderer.read_rgba({0, 0, 160, 120}, pixels, size), "temporal GPU readback failed");
+                renderer.present();
+                return pixels;
+            };
+            const auto expected = shoot(oracle, cpu);
+            const auto actual = shoot(temporal, gpu);
+            int worst = 0;
+            for (std::size_t i = 0; i < actual.size(); ++i)
+                worst = std::max(worst, std::abs(int(actual[i]) - int(expected[i])));
+            if (worst > 3)
+                std::cerr << "GPU history facing " << int(facing) << " frame " << frame << ": " << worst << '\n';
+            check(worst <= 3, "GPU particle TAA differs from CPU motion history");
+            gpu.taa.blend = 0;
+            const auto fresh = shoot(spatial, gpu);
+            if (frame == 21)
+                for (std::size_t i = 0; i < actual.size(); ++i)
+                    accumulated += std::abs(int(actual[i]) - int(fresh[i])) > 2;
+            // A second camera's render must not replace the first view's past.
+            gpu.taa.blend = .98f;
+            gpu.camera = Camera3D::look_at({.4f, .2f, .1f}, {0, 0, -4}, 60);
+            check(r.render(other, gpu), "second GPU history view failed");
+            renderer.present();
+        }
+    }
+    check(accumulated > 0, "GPU particle TAA still rejects every temporal sample");
+}
+void gpu_global_composition(Renderer2D& renderer) {
+    Renderer3D r(renderer);
+    const auto plane = r.create_mesh(meshes::box({1, 1, .02f})).value_or({});
+    const auto read = [&](const Texture& texture) {
+        renderer.clear(colors::black);
+        renderer.draw_texture(texture, {0, 0, 160, 120});
+        std::vector<u8> pixels;
+        Vec2i size;
+        check(renderer.read_rgba({0, 0, 160, 120}, pixels, size), "composition readback failed");
+        renderer.present();
+        return pixels;
+    };
+    const auto equal = [&](const auto& a, const auto& b, const std::string& label, int tolerance = 3) {
+        int worst = 0;
+        std::size_t at = 0;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (std::abs(int(a[i]) - int(b[i])) > worst) {
+                worst = std::abs(int(a[i]) - int(b[i]));
+                at = i;
+            }
+        if (worst > tolerance)
+            std::cerr << label << " max=" << worst << " pixel=" << at / 4 << " channel=" << at % 4
+                      << " actual=" << int(a[at]) << " expected=" << int(b[at]) << '\n';
+        check(worst <= tolerance, label);
+    };
+    for (bool linear : {false, true}) {
+        check(renderer.set_color_space(linear ? ColorSpace::Linear : ColorSpace::Gamma),
+              "composition colour space failed");
+        for (int mode = 0; mode < 4; ++mode)
+            for (bool taa : {false, true}) {
+                std::vector<u8> pixels(37 * 19 * 4);
+                for (int y = 0; y < 19; ++y)
+                    for (int x = 0; x < 37; ++x) {
+                        auto i = (y * 37 + x) * 4;
+                        pixels[i] = u8(40 + x * 5);
+                        pixels[i + 1] = u8(30 + y * 9);
+                        pixels[i + 2] = u8((x + y) % 2 ? 210 : 50);
+                        pixels[i + 3] = u8(mode == 2 ? 0 : 80 + (x % 9) * 18);
+                    }
+                auto texture = renderer.create_texture_from_rgba(pixels.data(), {37, 19});
+                renderer.set_scale_mode(texture, mode == 1   ? ScaleMode::Nearest
+                                                 : mode == 2 ? ScaleMode::Linear
+                                                             : ScaleMode::Mipmapped);
+                ParticleDesc3D a;
+                a.max_particles = 3;
+                a.speed = {0, 0};
+                a.lifetime = {10, 10};
+                a.size = mode == 3 ? ParticleRange3D{.4f, .4f} : ParticleRange3D{2.6f, 2.6f};
+                a.colour_start = a.colour_end = {1, .15f, .05f};
+                a.alpha_start = a.alpha_end = .45f;
+                a.look.softness = .25f;
+                a.look.sort = true;
+                if (mode)
+                    a.look.texture = texture;
+                a.look.blend = mode == 1   ? ParticleBlend3D::Additive
+                               : mode == 2 ? ParticleBlend3D::Premultiplied
+                                           : ParticleBlend3D::Alpha;
+                ParticleDesc3D b = a;
+                b.colour_start = b.colour_end = {.05f, .6f, 1};
+                b.alpha_start = b.alpha_end = .6f;
+                b.look.texture = {};
+                b.look.blend = ParticleBlend3D::Alpha;
+                b.look.facing = ParticleFacing3D::Axis;
+                if (mode == 3) {
+                    a.look.lit = b.look.lit = 1;
+                    a.look.receives_shadow = b.look.receives_shadow = true;
+                    a.look.soft = true;
+                    a.look.soft_distance = .5f;
+                    b.look.fogged = false;
+                }
+                auto ga = r.create_gpu_particles(a, 7).value_or({}), gb = r.create_gpu_particles(b, 9).value_or({});
+                std::array<Vec3f, 2> pa{{{0, 0, mode == 3 ? -11.9f : -8.f}, {0, 0, -3}}};
+                // Exercise stable source ties and mesh-before-sprite ties as well as
+                // distinct depths. The unsorted one-sprite source below is a
+                // CPU-owned anchor in the premultiplied case.
+                const std::array<Vec3f, 2> pb{{{0, 0, mode == 1 ? -8.f : -7.f}, {0, 0, mode == 1 ? -5.f : -4.f}}};
+                const auto birth = [&](const GpuParticleSystem3D& system, Vec3f p, bool clear = false) {
+                    check(r.update_gpu_particles(system,
+                                                 {.transform = Mat4f::translation(p), .burst = 1, .clear = clear}),
+                          "composition GPU birth failed");
+                };
+                birth(ga, pa[0]);
+                birth(ga, pa[1]);
+                birth(gb, pb[0]);
+                birth(gb, pb[1]);
+                std::vector<Texture> extra_textures;
+                std::vector<GpuParticleSystem3D> extra;
+                if (mode == 1)
+                    for (int i = 0; i < 15; ++i) {
+                        const u8 colour[]{u8(40 + i * 11), u8(220 - i * 8), u8(60 + i * 7), u8(50 + i * 9)};
+                        extra_textures.push_back(renderer.create_texture_from_rgba(colour, {1, 1}));
+                        auto desc = b;
+                        desc.max_particles = 1;
+                        desc.look.texture = extra_textures.back();
+                        extra.push_back(r.create_gpu_particles(desc, u32(i + 21)).value_or({}));
+                        birth(extra.back(), {0, 0, -3.2f - f32(i) * .32f});
+                    }
+                const auto options = ViewOptions3D{.samples = mode % 2 ? 4u : 1u};
+                auto gpu_view = r.create_view({160, 120}, options).value_or({});
+                auto cpu_view = r.create_view({160, 120}, options).value_or({});
+                auto target_gpu = renderer.create_render_target({160, 120}),
+                     target_cpu = renderer.create_render_target({160, 120});
+                auto depth = renderer.create_render_attachment({160, 120}, TextureFormat::Depth32Float);
+                auto soft = renderer.create_render_attachment({160, 120}, TextureFormat::Depth32Float);
+                auto normals = renderer.create_render_attachment({160, 120}, TextureFormat::Rg16Float);
+                const auto build = [&](bool gpu, int frame) {
+                    Scene3D s;
+                    s.camera = Camera3D::look_at({.015f * frame, 0, 0}, {.015f * frame, 0, -1}, 60);
+                    s.taa = {.enabled = taa, .blend = .95f, .sharpness = 0};
+                    s.lights.sun.color = {};
+                    (void)s.draw(plane, Mat4f::translation({0, 0, -12}) * Mat4f::scaling({14, 12, 1}),
+                                 {.color = Color::rgb(30, 45, 60), .unlit = true, .casts_shadow = false});
+                    Material3D glass{.color = Color::rgba(80, 210, 130, 125), .unlit = true, .blend = Blend3D::Alpha};
+                    const std::array copies{Mat4f::translation({0, 0, -5}) * Mat4f::scaling({4, 4, 1}),
+                                            Mat4f::translation({0, 0, -9}) * Mat4f::scaling({5, 5, 1})};
+                    (void)s.draw_instanced(plane, copies, glass);
+                    if (mode == 3) {
+                        s.lights.sun = {.direction = normalize(Vec3f{-.5f, 1, 1}), .color = {1.4f, .8f, .5f}};
+                        s.lights.shadow_area = {{-5, -4, -14}, {5, 5, 2}};
+                        s.lights.shadow_resolution = 128;
+                        s.lights.points.push_back({.position = {1, 1, -3}, .color = {5, 2, 7}, .radius = 15});
+                        s.fog = {.enabled = true, .density = .02f, .colour = {.2f, .3f, .4f}};
+                        (void)s.draw(plane, Mat4f::translation({.8f, .2f, -2}) * Mat4f::scaling({.1f, 1, 1}),
+                                     {.color = colors::white});
+                    }
+                    const auto sprites = [&](const ParticleDesc3D& d, auto positions, u64 history) {
+                        std::vector<ParticleSprite3D> sprites;
+                        for (u32 i = 0; i < positions.size(); ++i) {
+                            ParticleSprite3D p;
+                            p.position = positions[i];
+                            p.size = d.size.min;
+                            p.colour = d.colour_start;
+                            p.alpha = d.alpha_start;
+                            p.id = history * 10 + i + 1;
+                            sprites.push_back(p);
+                        }
+                        check(s.draw_particles(d.look, sprites, history), "composition CPU oracle rejected");
+                    };
+                    if (frame != 3) {
+                        if (gpu)
+                            check(s.draw_particles(ga), "composition emitter A rejected");
+                        else
+                            sprites(a, pa, frame >= 2 ? 101 : 1);
+                    }
+                    if (gpu)
+                        check(s.draw_particles(gb), "composition emitter B rejected");
+                    else
+                        sprites(b, pb, 2);
+                    for (u32 i = 0; i < extra.size(); ++i) {
+                        if (gpu)
+                            check(s.draw_particles(extra[i]), "composition extra texture emitter rejected");
+                        else {
+                            auto desc = b;
+                            desc.look.texture = extra_textures[i];
+                            sprites(desc, std::array{Vec3f{0, 0, -3.2f - f32(i) * .32f}}, u64(i + 10));
+                        }
+                    }
+                    ParticleSprite3D cpu;
+                    cpu.position = {0, 0, -6};
+                    cpu.size = 3;
+                    cpu.colour = {.2f, .1f, 1};
+                    cpu.alpha = .35f;
+                    cpu.id = 900;
+                    check(s.draw_particles({.softness = .25f, .sort = mode != 2}, std::span{&cpu, 1}, 900),
+                          "composition CPU particle rejected");
+                    return s;
+                };
+                for (int frame = 0; frame < 5; ++frame) {
+                    if (frame == 1 && mode) {
+                        pixels[0] = 180;
+                        pixels[1] = 40;
+                        check(renderer.update_texture(texture, {}, {37, 19}, pixels.data()),
+                              "composition texture update failed");
+                    }
+                    if (frame == 2) {
+                        pa = {Vec3f{0, 0, -2.5f}, Vec3f{0, 0, -8.5f}};
+                        birth(ga, pa[0], true);
+                        birth(ga, pa[1]);
+                    }
+                    const auto expected_scene = build(false, frame), actual_scene = build(true, frame);
+                    renderer.clear(colors::black);
+                    check(r.render(cpu_view, expected_scene), "composition CPU view failed");
+                    const auto expected = read(cpu_view.texture());
+                    renderer.clear(colors::black);
+                    check(r.render(gpu_view, actual_scene), "composition GPU view failed");
+                    check(r.debug_stats().particle_composition_segments >= 3 && r.debug_stats().device_waits == 0,
+                          "composition did not split around transparent mesh copies");
+                    equal(read(gpu_view.texture()), expected,
+                          "global GPU composition mode " + std::to_string(mode) + " linear " + std::to_string(linear) +
+                              " TAA " + std::to_string(taa) + " frame " + std::to_string(frame));
+                    if (!taa && frame == 0) {
+                        const auto surface = [&](const Scene3D& scene, RenderTarget& target) {
+                            renderer.clear(colors::black);
+                            const auto prepared = r.prepare(scene).value_or({});
+                            if (mode == 3)
+                                check(r.render_geometry_prepared({soft, normals}, prepared),
+                                      "composition soft depth failed");
+                            check(r.render_surface({.colour = target, .depth = depth}, prepared,
+                                                   {.stage = SurfaceStage3D::Opaque}),
+                                  "composition opaque surface failed");
+                            check(r.render_surface({.colour = target, .depth = depth}, prepared,
+                                                   {.stage = SurfaceStage3D::Transparent,
+                                                    .particles = true,
+                                                    .soft_depth = mode == 3 ? soft : Texture{}}),
+                                  "composition transparent surface failed");
+                            check(prepared.valid() && r.debug_stats().device_waits == 0,
+                                  "composition expired prepared inputs");
+                            return read(target.texture());
+                        };
+                        const auto ref = surface(expected_scene, target_cpu);
+                        equal(surface(actual_scene, target_gpu), ref,
+                              "global GPU surface mode " + std::to_string(mode));
+                    }
+                }
+                auto stable = build(true, 4);
+                renderer.clear(colors::black);
+                check(r.render(gpu_view, stable), "composition warmup failed");
+                renderer.present();
+                const auto allocations = renderer.backend_stats().gpu_memory.allocations;
+                for (int i = 0; i < 3; ++i) {
+                    renderer.clear(colors::black);
+                    check(r.render(gpu_view, stable), "composition warmed render failed");
+                    renderer.present();
+                }
+                check(renderer.backend_stats().gpu_memory.allocations == allocations,
+                      "stable global composition allocated GPU handles");
+            }
+    }
+    check(renderer.set_color_space(ColorSpace::Gamma), "composition colour space restore failed");
+}
 } // namespace
 int main(int argc, char** argv) {
     try {
@@ -325,6 +871,10 @@ int main(int argc, char** argv) {
             throw std::runtime_error("GPU backend required");
         ready = true;
         Renderer2D renderer(std::move(backend));
+        simulated_gpu(renderer);
+        gpu_motion_history(renderer);
+        gpu_depth_order(renderer);
+        gpu_global_composition(renderer);
         particle_gpu(renderer);
         std::cout << "Particle authoring, isolation, budgets, texture sharing and reload checks passed\n";
     } catch (const std::exception& e) {

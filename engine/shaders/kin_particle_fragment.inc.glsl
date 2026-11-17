@@ -22,12 +22,21 @@ layout(location = 6) in float vMix;
 layout(location = 7) in vec3 vLocalLight;
 #endif
 
+#ifndef KIN_PARTICLE_COMPOSITE
 layout(set = 2, binding = 0) uniform sampler2D uTexture; // white without one
+#endif
 #ifdef KIN_SOFT
 layout(set = 2, binding = 1) uniform sampler2D uDepth; // the pre-pass's depth (reverse Z), read by texel
 #endif
 
+#ifdef KIN_PARTICLE_COMPOSITE
+#define frag frame_frag
+#endif
 #include "kin_particle_frag_uniforms.inc.glsl"
+#ifdef KIN_PARTICLE_COMPOSITE
+#undef frag
+#include "kin_particle_composition_fragment.inc.glsl"
+#endif
 
 #ifdef KIN_PARTICLE_SHADOWS
 #include "kin_particle_shadow.inc.glsl"
@@ -50,6 +59,9 @@ float smooth01(float x) {
 }
 
 void main() {
+#ifdef KIN_PARTICLE_COMPOSITE
+    composition_fragment();
+#endif
 #include "kin_particle_sample.inc.glsl"
     float fade = 1.0;
 #ifdef KIN_SOFT
@@ -123,6 +135,9 @@ void main() {
         coverage = frag.tint.w > .5 ? 8.0 : 4.0;
     const float energy = dot(frag.tint.rgb + vLocalLight, vec3(.2126, .7152, .0722));
     signature = energy / (1.0 + energy);
+#endif
+#ifdef KIN_PARTICLE_COMPOSITE
+    if ((composition_look.range.z&2u)==0u) signature=0.0;
 #endif
     FragColor = vec4(coverage + signature, 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
 #endif

@@ -60,7 +60,7 @@ class GpuTexture {
 public:
     GpuTexture() = default;
     GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
-               SDL_GPUTextureUsageFlags usage = 0);
+               SDL_GPUTextureUsageFlags usage = 0, u32 levels = 1);
     // A texture (of `levels` mip levels) that goes back to `pool` (as `bytes`) when released.
     GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
                std::shared_ptr<GpuTexturePool> pool, u64 bytes, SDL_GPUTextureUsageFlags usage, u32 levels = 1);
@@ -74,6 +74,7 @@ public:
     SDL_GPUTexture* handle() const { return _texture; }
     u32 width() const { return _width; }
     u32 height() const { return _height; }
+    u32 levels() const { return _levels; }
     SDL_GPUTextureFormat format() const { return _format; }
     bool belongs_to(SDL_GPUDevice* device) const { return _device && *_device == device; }
     SDL_GPUTextureUsageFlags usage() const { return _usage; }

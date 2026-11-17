@@ -614,6 +614,7 @@ void GpuRenderer2DBackend::end_frame() {
     _frame.reset();
     _retained.clear();
     _retained_buffers.clear();
+    _retained_particles.clear();
     _retired_textures.clear();
     _last_retained = nullptr;
     ++_frame_serial;

@@ -332,6 +332,79 @@ void receivers(Fixture& f) {
     }
 }
 
+void simulated_casters(Fixture& f) {
+    auto view = f.r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+    for (int kind = 0; kind < 5; ++kind)
+        for (bool outside : {false, true}) {
+            auto p = sprite();
+            if (outside)
+                p.position.x = -4.5f;
+            auto l = look(f.white);
+            ParticleDesc3D d;
+            d.max_particles = 1;
+            d.speed = {0, 0};
+            d.lifetime = {10, 10};
+            d.size = {p.size, p.size};
+            d.alpha_start = d.alpha_end = p.alpha;
+            d.colour_start = d.colour_end = p.colour;
+            d.look = l;
+            auto system = f.r3d.create_gpu_particles(d).value_or({});
+            check(system &&
+                      f.r3d.update_gpu_particles(system, {.transform = Mat4f::translation(p.position), .burst = 1}),
+                  "GPU caster creation failed");
+            const auto expected = f.shoot(view, f.scene(kind, l, p, outside));
+            auto gpu = f.scene(kind, l, p, outside, false);
+            check(gpu.draw_particles(system), "GPU caster submission failed");
+            const auto actual = f.shoot(view, gpu);
+            check(actual.rgba == expected.rgba, "GPU particle shadow differs from CPU caster");
+            check(f.r3d.debug_stats().particle_shadow_draws > 0 &&
+                      f.r3d.debug_stats().particle_shadow_uploaded_bytes == 0,
+                  "GPU caster did not draw directly from simulation storage");
+            for (int i = 0; i < 3; ++i)
+                f.shoot(view, gpu);
+            check(f.r3d.debug_stats().particle_shadow_draws == 0, "unchanged GPU caster did not reuse maps");
+            // Clear and re-use the same raw slot at another position.
+            p.position.x += .8f;
+            check(f.r3d.update_gpu_particles(system,
+                                             {.transform = Mat4f::translation(p.position), .burst = 1, .clear = true}),
+                  "GPU caster clear/rebirth failed");
+            const auto moved = f.shoot(view, gpu);
+            check(f.r3d.debug_stats().particle_shadow_draws > 0, "GPU update left cached shadow maps");
+            check(moved.rgba == f.shoot(view, f.scene(kind, l, p, outside)).rgba,
+                  "moved GPU caster differs from CPU reference");
+            check(f.r3d.update_gpu_particles(system, {.clear = true}), "GPU caster clear failed");
+            check(f.shoot(view, gpu).rgba == f.shoot(view, f.scene(kind, l, p, outside, false)).rgba,
+                  "cleared GPU slots still cast shadows");
+        }
+    for (auto facing :
+         {ParticleFacing3D::Camera, ParticleFacing3D::Stretched, ParticleFacing3D::Axis, ParticleFacing3D::Flat}) {
+        auto p = sprite();
+        p.velocity = {.3f, -2, 0};
+        auto l = look({});
+        l.facing = facing;
+        l.softness = .25f;
+        l.ring = .4f;
+        if (facing == ParticleFacing3D::Flat)
+            l.axis = {0, 0, 1};
+        ParticleDesc3D d;
+        d.max_particles = 1;
+        d.lifetime = {10, 10};
+        d.speed = {0, 0};
+        d.size = {p.size, p.size};
+        d.velocity_min = d.velocity_max = p.velocity;
+        d.colour_start = d.colour_end = p.colour;
+        d.alpha_start = d.alpha_end = p.alpha;
+        d.look = l;
+        auto system = f.r3d.create_gpu_particles(d).value_or({});
+        check(f.r3d.update_gpu_particles(system, {.transform = Mat4f::translation(p.position), .burst = 1}),
+              "facing GPU caster birth failed");
+        auto gpu = f.scene(0, l, p, false, false);
+        check(gpu.draw_particles(system), "facing GPU caster submission failed");
+        const auto expected = f.shoot(view, f.scene(0, l, p));
+        check(f.shoot(view, gpu).rgba == expected.rgba, "GPU shadow facing/coverage differs from CPU reference");
+    }
+}
+
 void run(Fixture& f) {
     auto view = f.r3d.create_view({160, 120}).value_or({});
     check(!ParticleLook3D{}.casts_shadow, "casting is not opt-in");

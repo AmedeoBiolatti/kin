@@ -25,6 +25,7 @@
 #include <kin/render3d/camera3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -178,6 +179,34 @@ struct ParticleDesc3D {
     f32 bounce = 0.0f;
     // How it is drawn.
     ParticleLook3D look{};
+};
+
+// A visual emitter kept on the native GPU. Copies share mutable simulation state.
+// Created/updated through Renderer3D; drawing never advances it. There is no CPU
+// readback or deterministic snapshot. Sorted sources share the global transparent order.
+class IGpuParticleBackend3D {
+public:
+    virtual ~IGpuParticleBackend3D() = default;
+    virtual const ParticleDesc3D& description() const = 0;
+    virtual Vec3f centre() const = 0;
+};
+class GpuParticleSystem3D {
+public:
+    GpuParticleSystem3D() = default;
+    explicit GpuParticleSystem3D(std::shared_ptr<IGpuParticleBackend3D> backend) : _backend(std::move(backend)) {}
+    explicit operator bool() const { return bool(_backend); }
+    const std::shared_ptr<IGpuParticleBackend3D>& backend() const { return _backend; }
+
+private:
+    std::shared_ptr<IGpuParticleBackend3D> _backend;
+};
+struct GpuParticleUpdate3D {
+    f64 dt = 0;        // finite, [0, 0.25]; excess catch-up must be handled by the caller
+    Mat4f transform{}; // births only; existing particles stay in world space
+    u32 burst = 0;
+    bool emitting = true;
+    bool clear = false; // discard old particles and restart emission/seed sequence
+    Vec3f wind{};       // constant world-space air velocity during this update
 };
 
 // Live state of one particle (public for tests and tools).

@@ -33,6 +33,21 @@ class JobSystem;
 namespace kin::gpu {
 
 class GpuDevice;
+class GpuDataBuffer;
+class GpuParticles3D final : public IGpuParticleBackend3D {
+public:
+    ParticleDesc3D desc;
+    Vec3f origin{};
+    std::shared_ptr<GpuBuffer> state, sprites;
+    std::shared_ptr<GpuDataBuffer> order;
+    u32 seed = 1, next = 0, epoch = 0;
+    u64 birth = 0, revision = 0, serial = 0;
+    f64 carry = 0;
+    bool initialized = false;
+    const ParticleDesc3D& description() const override { return desc; }
+    Vec3f centre() const override { return origin; }
+};
+
 class GpuTextureBackend;
 
 // A view's bounding planes (xyz the normal, inward, length 1; w the offset),
@@ -502,6 +517,14 @@ private:
         f32 alpha = 0, frame = 0;
     };
     std::vector<ParticleHistory> _taa_particles;
+    struct GpuParticleHistory {
+        std::weak_ptr<GpuParticles3D> source;
+        std::shared_ptr<GpuDataBuffer> samples;
+        Camera3D camera;
+        u64 texture_key = 0;
+        bool valid = false;
+    };
+    std::vector<std::shared_ptr<GpuParticleHistory>> _taa_gpu_particles;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
     // With Lod3D::occlusion (made by the first render that asks): the depth pyramid (level 0 a quarter of the view's
     // size, each next half of the one before; `_hiz_levels` of them), the depth it is built from when no pre-pass makes
@@ -657,6 +680,8 @@ public:
     bool set_morph_weights(IMeshBackend3D& mesh, std::span<const f32> weights) override;
     std::shared_ptr<IMeshBackend3D> copy_mesh(const IMeshBackend3D& mesh) override;
     std::optional<f32> read_exposure(IViewBackend3D& view) override;
+    std::shared_ptr<IGpuParticleBackend3D> create_gpu_particles(const ParticleDesc3D&, u32) override;
+    bool update_gpu_particles(const std::shared_ptr<IGpuParticleBackend3D>&, const GpuParticleUpdate3D&) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32 side) override;
     bool capture_reflection(IReflectionCaptureBackend3D& capture, Scene3D& scene, Vec3f position,
@@ -791,7 +816,7 @@ private:
     // made.
     SDL_GPUGraphicsPipeline* particle_pipeline(SDL_GPUTextureFormat format, u32 samples, ParticleBlend3D blend,
                                                bool soft, bool velocity, bool reactive = false, bool local = false,
-                                               bool shadows = false) const;
+                                               bool shadows = false, bool gpu = false) const;
     // The camera's turn into the pre-pass's velocity target, over the pre-pass's depth.
     SDL_GPUGraphicsPipeline* sky_velocity_pipeline(SDL_GPUTextureFormat depth) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
@@ -1139,6 +1164,7 @@ private:
     void match_particles(FrameCtx& ctx, u32 total);
     void upload_particles(FrameCtx& ctx, u32 total);
     void prepare_particles(FrameCtx& ctx);
+    void prepare_gpu_particle_order(const std::shared_ptr<GpuParticles3D>&, const Camera3D&, const GpuFrustum&, bool);
     void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false, u32 batch = ~0u, u32 first = 0,
                         u32 count = 0);
     bool reactive_pass(FrameCtx& ctx);
@@ -1242,6 +1268,7 @@ private:
     GpuShader _particle_vertex_shader; // particle.vert
     GpuShader _particle_shader;        // particle.frag
     GpuShader _particle_soft_shader;   // particle_soft.frag
+    GpuShader _particle_gpu_temporal_vertex, _particle_gpu_vertex, _particle_gpu_light, _particle_gpu_shadow;
     GpuShader _particle_temporal_vertex;
     GpuShader _reactive_shader, _particle_reactive_shader, _particle_soft_reactive_shader;
     GpuShader _particle_light_vertex, _particle_light_shader, _particle_soft_light_shader;
@@ -1249,6 +1276,45 @@ private:
     GpuShader _particle_shadow_vertex, _particle_shadow_shader, _particle_soft_shadow_shader;
     GpuShader _particle_reactive_shadow_shader, _particle_soft_reactive_shadow_shader;
     GpuShader _particle_cast_shader;
+    struct CompositionLook {
+        f32 axis[4], atlas[4], stretch[4], tint[4], disc[4], flags[4];
+        u32 range[4];
+        f32 right[4], up[4], eye[4], forward[4];
+    };
+    struct CompositionMip {
+        u32 rect[4], meta[4];
+    };
+    struct CompositionImage {
+        Texture texture;
+        SDL_GPUTexture* handle = nullptr;
+        u64 key = 0;
+        u32 first_mip = 0, levels = 1;
+        bool unstable = false;
+    };
+    struct CompositionRect {
+        u32 x, y, width, height, layer;
+    };
+    std::vector<CompositionImage> _composition_images;
+    std::vector<CompositionRect> _composition_rects;
+    std::shared_ptr<GpuTextureBackend> _composition_atlas;
+    std::shared_ptr<GpuDataBuffer> _composition_current, _composition_previous, _composition_order, _composition_looks,
+        _composition_mips, _composition_anchors, _composition_arguments;
+    std::vector<CompositionLook> _composition_look_data;
+    std::vector<u32> _composition_batches;
+    u32 _composition_count = 0, _composition_segments = 0;
+    bool _composition_active = false, _composition_decode = false;
+    u32 _composition_idle = 0;
+    GpuShader _composition_vertex, _composition_fragment, _composition_reactive, _composition_atlas_shader;
+    SDL_GPUComputePipeline *_composition_gather = nullptr, *_composition_keys = nullptr, *_composition_args = nullptr;
+    void prepare_particle_composition(FrameCtx&);
+    void order_particle_composition(FrameCtx&);
+    void draw_particle_composition(FrameCtx&, SDL_GPURenderPass*, bool reactive, u32 segment = 0);
+    SDL_GPUGraphicsPipeline* particle_composition_pipeline(SDL_GPUTextureFormat, u32 samples, bool reactive) const;
+    void prepare_particle_atlas(std::span<const Texture>, bool decode);
+    void composition_buffer(std::shared_ptr<GpuDataBuffer>&, u32 bytes, SDL_GPUBufferUsageFlags usage);
+    SDL_GPUComputePipeline* _particle_simulate = nullptr;
+    SDL_GPUComputePipeline *_particle_order_init = nullptr, *_particle_order_merge = nullptr;
+    u64 _particle_serial = 0;
     bool _particles_available = false;
     bool _soft_particles_available = false;
     bool _particles_warned = false;
@@ -1257,6 +1323,9 @@ private:
     std::shared_ptr<GpuBuffer> _particle_buffer; // the frame's sprites, batch by batch (GpuParticle3D); grows
     struct ParticleBatch {
         ParticleLook3D look;
+        std::shared_ptr<GpuParticles3D> gpu;
+        std::shared_ptr<GpuView3D::GpuParticleHistory> gpu_history;
+        bool gpu_history_known = false, composed = false;
         Texture texture; // the look's, kept for the draw
         u32 first = 0;   // in the instance buffer, after culling and sorting
         u32 count = 0;
@@ -1269,6 +1338,7 @@ private:
     std::vector<ParticleBatch> _particle_batches;
     struct ParticleCastBatch {
         ParticleLook3D look;
+        std::shared_ptr<GpuParticles3D> gpu;
         u32 first = 0, count = 0;
         Vec3f centre{};
         f32 radius = 0;

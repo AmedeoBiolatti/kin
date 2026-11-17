@@ -1,0 +1,4 @@
+#version 450 core
+#define KIN_GPU_PARTICLES
+#define KIN_PARTICLE_SHADOWS
+#include "kin_particle_vertex.inc.glsl"

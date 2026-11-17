@@ -1,5 +1,4 @@
 #include "gpu_device.hpp"
-#include <kin/platform/window.hpp>
 
 #include "gpu_memory.hpp"
 
@@ -12,6 +11,7 @@
 #include <kin/assets/texture_file.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/platform/window.hpp>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -283,7 +283,7 @@ GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat 
         throw sdl_error("SDL_CreateGPUTexture (target) failed");
     }
     poison_texture(texture, format, width, height, 1, levels, usage, samples);
-    return GpuTexture{_shared, texture, width, height, format, usage};
+    return GpuTexture{_shared, texture, width, height, format, usage, levels};
 }
 
 GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
@@ -342,7 +342,8 @@ GpuTexture GpuDevice::create_texture_array(u32 width, u32 height, std::span<cons
         tracked_release_texture(_device, texture);
         throw;
     }
-    return GpuTexture{_shared, texture, width, height, info.format, info.usage}; // not pooled: a kind of its own
+    return GpuTexture{_shared,     texture,    width, height,
+                      info.format, info.usage, levels}; // not pooled: a kind of its own
 }
 
 GpuTexture GpuDevice::create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
@@ -731,7 +732,7 @@ GpuTexture GpuDevice::make_mipmapped(const GpuTexture& source) {
     if (levels > 1) {
         SDL_GenerateMipmapsForGPUTexture(_upload_commands, texture);
     }
-    return GpuTexture{_shared, texture, w, h, source.format()}; // not pooled: a kind of its own
+    return GpuTexture{_shared, texture, w, h, source.format(), info.usage, levels}; // not pooled: a kind of its own
 }
 
 void GpuDevice::generate_mipmaps(SDL_GPUTexture* texture) {

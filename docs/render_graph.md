@@ -303,6 +303,14 @@ Soft intersections need a separate sampled, two-dimensional D32F `soft_depth`, m
 
 Lit sprites use the scene's lights and the explicitly supplied sun/local maps. Null bindings remain unshadowed even after stock rendering has populated private maps. Public sun/local producers still rasterize mesh casters only; sprite `casts_shadow` does not add public caster work. Fill shadows, public sky/fog, AO/GI/TAA, MSAA and temporal history remain outside this operation. Sprite texture handles are retained through queued recording; later CPU uploads submit preceding reads before replacement and expire frame-scoped prepared handles. GPU producers remain ordered within the frame.
 
+Sorted GPU emitters use the same GPU-only global sprite composition as stock
+views: sorted CPU sprites and GPU emitters share depth order, with indirect ranges
+between transparent mesh commands. The operation gathers records and motion data,
+sorts keys and maintains its private texture/mip atlas inside the callback; it
+does not read particle data back or expire prepared handles. Particle texture
+reads still need the normal graph declarations and must not alias the active
+attachments. `sort = false` remains an explicit whole-source approximation.
+
 Prepared bounds and compatible instance/joint uploads are shared across these consumers. Visibility, LOD selection, particle selection and composition sorting remain per operation. The [surface graph example](../tools/surface3d/main.cpp) demonstrates the explicit versioned colour path with glass, sprites, sun/local maps, HDR toon, bloom/output and ASCII. The [stage tests](../tests/render3d_surface_stages_tests.cpp) compare combined, in-place and versioned pictures against stock rendering and check depth/source preservation, ownership, soft intersections, history isolation and warmed GPU resource reuse.
 
 

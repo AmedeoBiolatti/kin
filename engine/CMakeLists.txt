@@ -505,7 +505,7 @@ if(KIN_EXPERIMENTAL_3D)
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/clouds3d.cpp src/render3d/particles3d.cpp
         src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/terrain3d.cpp src/render3d/hdr_decode.c)
     if(KIN_HAS_GPU_RENDERER)
-        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
+        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp src/renderer/gpu/gpu_particles3d.cpp src/renderer/gpu/gpu_particle_composition.cpp
                                           src/renderer/gpu/gpu_area_lights3d.cpp src/renderer/gpu/gpu_area_lights_ltc.cpp
                                           src/renderer/gpu/gpu_portal_sun3d.cpp
                                           src/renderer/gpu/gpu_mesh_pool.cpp)

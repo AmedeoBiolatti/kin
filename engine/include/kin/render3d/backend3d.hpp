@@ -69,6 +69,7 @@ struct RendererCapabilities3D {
     // Whether particles and weather can be drawn (P3c: the billboard shaders could be made), and whether soft particles
     // can (the depth-reading variant and the pre-pass's targets); where not, they are not drawn and a line in the log
     // says so once.
+    bool gpu_particles = false; // persistent compute-simulated visual emitters
     bool particles = false;
     bool soft_particles = false;
     bool particle_shadows = false; // optional particle shadow-map casting and reception
@@ -313,6 +314,11 @@ public:
     virtual ~IRendererBackend3D() = default;
 
     virtual RendererCapabilities3D capabilities() const = 0;
+    virtual std::shared_ptr<IGpuParticleBackend3D> create_gpu_particles(const ParticleDesc3D&, u32) { return {}; }
+    virtual bool update_gpu_particles(const std::shared_ptr<IGpuParticleBackend3D>&, const GpuParticleUpdate3D&) {
+        return false;
+    }
+
     // Null when the data can't be uploaded (validated already). `chain`, when
     // not null, holds the levels of detail to keep with it (level 0 of it is `data`).
     // `clusters`, when not null, is the mesh's cluster hierarchy (MeshOptions3D::clusters), to keep for the cut: `data`

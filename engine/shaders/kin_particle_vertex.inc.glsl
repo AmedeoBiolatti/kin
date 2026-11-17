@@ -16,26 +16,15 @@ layout(std430, set = 0, binding = 0) readonly buffer Particles {
     Particle particles[];
 };
 
-layout(set = 1, binding = 0) uniform ParticleDraw {
-    mat4 view_projection; // jittered: where the pixel is drawn
-    vec4 right;           // xyz: the camera's right,
-    vec4 up;              //      up
-    vec4 eye;             // xyz: where it is, w: 1 for an orthographic camera
-    vec4 forward;         // xyz: where it looks
-    vec4 axis;            // xyz: the Axis and Flat facings' axis (unit), w: the facing (0 camera, 1 stretched, 2 axis, 3 flat)
-    vec4 atlas;           // x: columns, y: rows, z: frames, w: 1 to mix two frames
-    vec4 stretch;         // x: seconds a streak spans, y: its least length
-    uvec4 first;          // x: this batch's first sprite, y: 1 when fogged
-    vec4 sun_direction;   // xyz: toward the sun
-    vec4 sun_light;       // rgb: its light
-    KinFog fog;
-    KinSky sky;
-    vec4 clip; // Camera3D::clip_plane: drawn where dot(xyz, world) + w >= 0 (0, 0, 0, 1: everywhere)
-} draw;
-layout(set = 1, binding = 1) uniform FogTable {
-    vec4 rows[KIN_FOG_ROWS * 4];
-} fog_table;
-KIN_FOG_TABLE_READER(particle_fog_sky, draw.sky, fog_table.rows)
+#ifdef KIN_GPU_PARTICLES
+#ifdef KIN_PARTICLE_TEMPORAL
+layout(std430,set=0,binding=2) readonly buffer ParticleOrder { uvec2 order[]; };
+#else
+layout(std430,set=0,binding=1) readonly buffer ParticleOrder { uvec2 order[]; };
+#endif
+#endif
+
+#include "kin_particle_draw.inc.glsl"
 #ifdef KIN_PARTICLE_LIGHTS
 layout(set = 1, binding = 2) uniform ParticleLights {
     vec4 counts; // points, spots, lit fraction
@@ -60,13 +49,25 @@ layout(location = 7) out vec3 vLocalLight;
 #endif
 
 #ifdef KIN_PARTICLE_TEMPORAL
+#ifdef KIN_GPU_PARTICLES
+layout(std430, set = 0, binding = 1) readonly buffer PreviousParticles { Particle prior_particles[]; };
+#else
 struct PreviousQuad { vec4 corners[4]; };
 layout(std430, set = 0, binding = 1) readonly buffer PreviousParticles { PreviousQuad quads[]; };
-layout(set = 1, binding = 3) uniform Temporal { mat4 current; mat4 prior; } temporal;
+#endif
+layout(set = 1, binding = 3) uniform Temporal {
+    mat4 current; mat4 prior;
+#ifdef KIN_GPU_PARTICLES
+    vec4 right, up, eye, forward;
+    uvec4 history; // x: valid previous slots, y: forced reset, z: blends frames
+#endif
+} temporal;
 layout(location = 10) out vec3 vCurrent;
 layout(location = 11) out vec3 vPrevious;
 layout(location = 12) flat out float vFresh;
 #endif
+
+#include "kin_particle_quad.inc.glsl"
 
 const vec2 CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));
 const int CORNER_OF[6] = int[6](0, 1, 2, 0, 2, 3);
@@ -80,48 +81,46 @@ vec2 frame_uv(float frame, vec2 uv) {
 }
 
 void main() {
-    const Particle p = particles[draw.first.x + uint(gl_InstanceIndex)];
+    uint slot = draw.first.x + uint(gl_InstanceIndex);
+#ifdef KIN_GPU_PARTICLES
+    bool visible = true;
+    if (draw.first.z != 0u) {
+        uvec2 key = order[slot];
+        slot = key.y;
+        visible = key.x != 0u;
+    }
+#endif
+    Particle p = particles[slot];
+#ifdef KIN_GPU_PARTICLES
+    if (!visible) { p.colour = vec4(0); p.position_size.w = 0.0; }
+#endif
     const vec2 c = CORNERS[CORNER_OF[gl_VertexIndex]];
     const vec3 centre = p.position_size.xyz;
-    const float half_size = p.position_size.w * 0.5;
     const bool ortho = draw.eye.w > 0.5;
-    const vec3 to_eye = ortho ? -draw.forward.xyz : normalize(draw.eye.xyz - centre);
-    const int facing = int(draw.axis.w + 0.5);
-    vec3 world;
-    if (facing == 1) {
-        // Along the velocity: the head at the particle, the tail a streak behind; broad toward the viewer.
-        vec3 streak = p.axis_rotation.xyz * draw.stretch.x;
-        const float l = length(streak);
-        if (l < draw.stretch.y) {
-            streak = l > 1e-6 ? streak * (draw.stretch.y / l) : vec3(0.0, draw.stretch.y, 0.0);
-        }
-        const float len = length(streak);
-        const vec3 dir = len > 1e-6 ? streak / len : vec3(0.0, 1.0, 0.0);
-        vec3 side = cross(dir, to_eye);
-        side = dot(side, side) > 1e-12 ? normalize(side) : draw.right.xyz;
-        const float along = c.y * 0.5 + 0.5;
-        world = centre - streak * (1.0 - along) + side * (c.x * half_size);
-    } else if (facing == 2) {
-        const vec3 up = draw.axis.xyz;
-        vec3 right = cross(up, to_eye);
-        right = dot(right, right) > 1e-12 ? normalize(right) : draw.right.xyz;
-        world = centre + right * (c.x * half_size) + up * (c.y * half_size);
-    } else if (facing == 3) {
-        const vec3 n = draw.axis.xyz;
-        const vec3 helper = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-        const vec3 t = normalize(cross(n, helper));
-        const vec3 b = cross(n, t);
-        const float cs = cos(p.axis_rotation.w), sn = sin(p.axis_rotation.w);
-        world = centre + (t * cs + b * sn) * (c.x * half_size) + (t * -sn + b * cs) * (c.y * half_size);
-    } else {
-        const float cs = cos(p.axis_rotation.w), sn = sin(p.axis_rotation.w);
-        world = centre + (draw.right.xyz * cs + draw.up.xyz * sn) * (c.x * half_size) +
-                (draw.right.xyz * -sn + draw.up.xyz * cs) * (c.y * half_size);
-    }
+    const vec3 world = kin_particle_corner(p, c, draw.right, draw.up, draw.eye, draw.forward, draw.axis, draw.stretch);
     gl_Position = draw.view_projection * vec4(world, 1.0);
     gl_ClipDistance[0] = dot(draw.clip.xyz, world) + draw.clip.w;
 #ifdef KIN_PARTICLE_TEMPORAL
+#ifdef KIN_GPU_PARTICLES
+    bool known = temporal.history.y == 0u && slot < temporal.history.x;
+    Particle before = p;
+    if (known) {
+        before = prior_particles[slot];
+        known = all(equal(floatBitsToUint(before.frame.yzw), floatBitsToUint(p.frame.yzw))) &&
+                before.colour.a > 0.0 && abs(before.colour.a - p.colour.a) < 0.15 &&
+                all(lessThan(abs(before.colour.rgb - p.colour.rgb), vec3(0.15))) &&
+                abs(before.frame.x - p.frame.x) < 1.0 &&
+                (temporal.history.z != 0u || floor(before.frame.x + 0.5) == floor(p.frame.x + 0.5)) &&
+                dot(before.position_size.xyz - centre, before.position_size.xyz - centre) <
+                    max(1.0, p.position_size.w * p.position_size.w * 16.0);
+    }
+    const vec4 previous = known
+        ? vec4(kin_particle_corner(before, c, temporal.right, temporal.up, temporal.eye, temporal.forward,
+                                   draw.axis, draw.stretch), 0.0)
+        : vec4(world, 1.0);
+#else
     const vec4 previous = quads[draw.first.x + uint(gl_InstanceIndex)].corners[CORNER_OF[gl_VertexIndex]];
+#endif
     vCurrent = (temporal.current * vec4(world, 1.0)).xyw;
     vPrevious = (temporal.prior * vec4(previous.xyz, 1.0)).xyw;
     vFresh = previous.w;

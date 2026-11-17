@@ -214,6 +214,10 @@ struct RenderDebugStats3D : RenderStats3D {
     // each), `particle_batches`: batches drawn (one instanced draw each), `particle_soft`: batches that read the depth,
     // `weather_particles`: of the submitted, the weather's. `particles_dropped`: past the frame's limit.
     // `particle_cpu_ms`: the weather's making, the culling, the sorting and the writing.
+    // GPU emitters count admitted capacity slots, including dead slots. No live
+    // count is read back. GPU bytes include state/sprites (96 per slot) and padded sort keys.
+    u32 gpu_particle_slots = 0, gpu_particle_batches = 0;
+    u64 gpu_particle_bytes = 0;
     u32 particles_submitted = 0;
     u32 particle_batches = 0;
     u32 particle_soft = 0;
@@ -234,9 +238,11 @@ struct RenderDebugStats3D : RenderStats3D {
     // passes), and the CPU time of the cuts (choosing, compacting, handing over the upload).
     u32 cluster_copies = 0;
     u64 clusters_tested = 0;
-    u32 transparent_draw_runs = 0;   // main colour runs after global mesh/sprite ordering
-    u64 composition_order_bytes = 0; // retained CPU capacity of the compact composition commands
-    f64 transparent_sort_ms = 0;     // CPU scheduling/sort/compaction, never GPU time
+    u32 transparent_draw_runs = 0;         // main colour runs after global mesh/sprite ordering
+    u64 particle_composition_bytes = 0;    // shared GPU records, keys, atlas, metadata and indirect arguments
+    u32 particle_composition_segments = 0; // encoded intervals between CPU-owned transparent commands
+    u64 composition_order_bytes = 0;       // retained CPU capacity of the compact composition commands
+    f64 transparent_sort_ms = 0;           // CPU scheduling/sort/compaction, never GPU time
     u32 clusters_drawn = 0;
     u32 cluster_budget_fallbacks = 0;          // submitted copies conservatively using their complete level-zero mesh
     u64 cluster_budget_reserved_triangles = 0; // worst-case cut storage, including sun views; no readback

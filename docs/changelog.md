@@ -64,6 +64,11 @@ releases may change APIs.
   as `SceneEnvironment3D`'s `motion_blur*`. Reads TAA's velocity (without TAA it runs TAA's passes with no jitter or history, one sample); native renderer only (WebGL2 says once it is
   off). Mirrors, portals and reflection captures render without it. The stock 3D frame graph gains a `motion_blur`
   pass (`frame_graph_passes3d` is 15 with depth of field's).
+- Experimental native GPU particles ([3D rendering](rendering_3d.md#particles-and-weather)):
+  persistent compute simulation, GPU-only sorting with CPU sprites and transparent meshes,
+  per-view TAA history, soft intersections and stock shadow casting and reception.
+  `GpuParticleSystem3D` uses explicit updates; rendering never advances simulation.
+  GPU results are visual rather than deterministic; use CPU particles for save/restore and rollback.
 - Experimental native temporal upscaling ([3D rendering](rendering_3d.md#temporal-upscaling)):
   `ViewOptions3D::render_scale` shades at a lower resolution while retaining display-size output, picking and LOD;
   `View3D::render_resolution()` reports the shading size. Requires temporal AA and backend support.

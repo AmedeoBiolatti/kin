@@ -19,8 +19,14 @@ vec3 shadow_offset_normal(vec3 n) { return n; }
 
 vec3 particle_shadow_tint() {
     const float lit = frag.disc.w;
-    const float sun = mix(1.0, sunlight(frame.sun_direction.xyz), locals.counts.w);
-    const float moon = moonlight(frame.fill_direction.xyz);
+#ifdef KIN_PARTICLE_COMPOSITE
+    if (lit<=0.0) return frag.tint.rgb;
+    const bool receive=composition_receives_shadow;
+#else
+    const bool receive=true;
+#endif
+    const float sun = receive ? mix(1.0, sunlight(frame.sun_direction.xyz), locals.counts.w) : 1.0;
+    const float moon = receive ? moonlight(frame.fill_direction.xyz) : 1.0;
     // frag.tint already includes unshadowed ambient and directional light.
     vec3 tint = frag.tint.rgb + 0.5 * lit *
         (frame.sun_color.rgb * (sun - 1.0) + frame.fill_color.rgb * (moon - 1.0));
@@ -34,7 +40,7 @@ vec3 particle_shadow_tint() {
         const vec3 shadow_to = at.xyz - vWorld;
         const float distance = length(shadow_to);
         const vec3 toward = shadow_to * inversesqrt(max(dot(shadow_to, shadow_to), 1e-8));
-        const float visibility = point_light_shadow(i, toward, toward, distance);
+        const float visibility = receive ? point_light_shadow(i, toward, toward, distance) : 1.0;
         tint += 0.5 * lit * colour.rgb * (window * window * visibility / max(d2, colour.w));
     }
     for (int i = 0; i < int(locals.counts.x); ++i) {
@@ -51,7 +57,7 @@ vec3 particle_shadow_tint() {
         const vec3 shadow_to = at.xyz - vWorld;
         const float distance = length(shadow_to);
         const vec3 shadow_toward = shadow_to * inversesqrt(max(dot(shadow_to, shadow_to), 1e-8));
-        const float visibility = more.y < 0.0 ? 1.0 : local_shadow(int(more.y), shadow_toward, shadow_toward, distance);
+        const float visibility = !receive || more.y < 0.0 ? 1.0 : local_shadow(int(more.y), shadow_toward, shadow_toward, distance);
         tint += 0.5 * lit * colour.rgb * (window * window * cone * cone * visibility / max(d2, colour.w));
     }
     return max(tint, vec3(0.0));

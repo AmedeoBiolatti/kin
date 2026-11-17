@@ -21,7 +21,10 @@ set(_kin_gpu_shader_names_3D
     prepass_skinned.vert prepass_velocity_skinned.vert mesh_fog.frag mesh_velocity_fog.frag mesh_light.frag
     mesh_light_fog.frag mesh_velocity_light.frag mesh_velocity_light_fog.frag sky.frag sky_velocity.frag
     sky_velocity_only.frag sky_env.frag view_output_dither.frag particle.vert particle.frag particle_soft.frag
-    particle_temporal.vert taa_reactive.frag particle_reactive.frag particle_soft_reactive.frag particle_light.vert
+    particle_temporal.vert particle_gpu_temporal.vert particle_gpu.vert particle_gpu_light.vert particle_gpu_shadow.vert
+    particle_order_init.comp particle_order_merge.comp particle_simulate.comp
+    particle_composition_gather.comp particle_composition_keys.comp particle_composition_args.comp
+    particle_composition.vert particle_composition.frag particle_composition_reactive.frag particle_atlas.frag taa_reactive.frag particle_reactive.frag particle_soft_reactive.frag particle_light.vert
     particle_light.frag particle_soft_light.frag particle_reactive_light.frag particle_soft_reactive_light.frag particle_shadow.vert particle_shadow.frag
     particle_soft_shadow.frag particle_reactive_shadow.frag particle_soft_reactive_shadow.frag particle_cast.frag
     gi_clear.comp gi_voxelize.comp gi_voxelize_attributes.comp gi_flood.comp gi_view.frag gi_proxy.frag

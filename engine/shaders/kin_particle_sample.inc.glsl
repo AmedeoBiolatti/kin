@@ -2,9 +2,17 @@
     vec4 tex = vec4(1.0);
     float shape = 1.0;
     if (frag.flags.w > 0.5) {
+#ifdef KIN_PARTICLE_COMPOSITE
+        tex = composition_picture(vUV0);
+#else
         tex = texture(uTexture, vUV0);
+#endif
         if (vMix > 0.0) {
+#ifdef KIN_PARTICLE_COMPOSITE
+            tex = mix(tex, composition_picture(vUV1), vMix);
+#else
             tex = mix(tex, texture(uTexture, vUV1), vMix);
+#endif
         }
         if (frag.flags.y > 0.5) {
             tex.rgb = decode(tex.rgb);

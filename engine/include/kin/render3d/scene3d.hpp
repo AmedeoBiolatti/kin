@@ -1150,6 +1150,10 @@ public:
     Status3D draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites, u64 history_id = 0);
     // The system's live particles with its desc's look.
     Status3D draw_particles(const ParticleSystem3D& system, u64 history_id = 0);
+    // Retains a live GPU emitter; an update changes every scene that holds it.
+    Status3D draw_particles(const GpuParticleSystem3D& system);
+    std::span<const GpuParticleSystem3D> gpu_particle_draws() const { return _gpu_particle_draws; }
+
     // A decal (Decal3D), drawn by its `order`, then grouped by picture; clear() takes them away. The overlay's are not
     // drawn.
     Status3D draw_decal(const Decal3D& decal);
@@ -1288,6 +1292,7 @@ private:
     std::vector<InstanceGroup> _instance_groups;
     std::vector<Mat4f> _joints;
     std::vector<u32> _skin_offsets;
+    std::vector<GpuParticleSystem3D> _gpu_particle_draws;
     std::vector<ParticleDraw> _particle_draws;
     std::vector<ParticleSprite3D> _particle_sprites;
     std::vector<Decal3D> _decals;
