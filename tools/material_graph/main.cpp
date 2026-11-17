@@ -19,7 +19,8 @@
 namespace {
 
 int usage() {
-    std::cerr << "usage: kin_material_graph check <graph> | glsl <graph> <out> | cook <graph> [<out>] | nodes\n";
+    std::cerr << "usage: kin_material_graph check <graph> | glsl <graph> <out> | cook [--baked-lighting] <graph> [<out>]"
+                 " | nodes\n";
     return 2;
 }
 
@@ -48,6 +49,16 @@ const char* type_name(kin::GraphType3D t) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // (cook --baked-lighting: the variants reading baked lighting too; taken out wherever it is.)
+    bool baked_lighting = false;
+    for (int i = 1; i < argc; ++i)
+        if (std::string_view(argv[i]) == "--baked-lighting") {
+            baked_lighting = true;
+            for (int j = i; j + 1 < argc; ++j)
+                argv[j] = argv[j + 1];
+            --argc;
+            break;
+        }
     if (argc < 2)
         return usage();
     const std::string_view command = argv[1];
@@ -71,7 +82,7 @@ int main(int argc, char** argv) {
     }
     if (command == "cook") {
         std::string why;
-        const auto cooked = kin::cook_material_graph3d(text, &why);
+        const auto cooked = kin::cook_material_graph3d(text, &why, {.baked_lighting = baked_lighting});
         if (!cooked) {
             // An error a line, each naming the graph (as check's do): where a build's output points.
             std::istringstream lines(why.empty() ? std::string("it can't be cooked") : why);

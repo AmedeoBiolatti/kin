@@ -13,6 +13,7 @@
 
 #include <array>
 #include <kin/core/math3d.hpp>
+#include <kin/render3d/baked_lighting_gpu3d.hpp>
 #include <kin/render3d/camera3d.hpp>
 #include <kin/render3d/environment3d.hpp>
 #include <kin/render3d/mesh3d.hpp>
@@ -133,10 +134,23 @@ enum class SurfaceVariant3D : u8 {
     VertexPrepassVelocity,
     VertexShadow,
     VertexShadowMask,
+    // Baked lighting's (Scene3D::baked_lighting), optional: the light variants reading the bake (a lightmapped copy's
+    // lightmap, else the probes'): plain, fog, velocity, velocity and fog. Without them the surface's copies are lit as
+    // without the bake; a surface that moves its vertices reads the probes, not lightmaps. A cooked material graph has
+    // them where it was cooked for baked lighting (MaterialGraphCookOptions3D::baked_lighting).
+    Baked,
+    BakedFog,
+    VelocityBaked,
+    VelocityBakedFog,
     Count
 };
 inline constexpr u32 surface_required_variants3d = 8, surface_mask_variant3d = u32(SurfaceVariant3D::ShadowMask),
-                     surface_vertex_variant3d = u32(SurfaceVariant3D::VertexMesh);
+                     surface_vertex_variant3d = u32(SurfaceVariant3D::VertexMesh),
+                     surface_baked_variant3d = u32(SurfaceVariant3D::Baked);
+// Whether a variant is a vertex shader (World Position Offset's).
+constexpr bool surface_vertex_variant(u32 variant) {
+    return variant >= surface_vertex_variant3d && variant < surface_baked_variant3d;
+}
 inline constexpr u32 surface_variant_count3d = u32(SurfaceVariant3D::Count);
 
 // The backend's copy of a surface shader (Renderer3D::create_surface_shader).
@@ -359,17 +373,33 @@ struct MeshInstance3D {
     // Stable per-copy identity for temporal history. Keep it for the object's lifetime;
     // use a new value on replacement. Zero retains legacy id/order/spatial matching.
     u64 history_id = 0;
+    // Its lightmap with Scene3D::baked_lighting: its placement in the bake (BakedLightingData3D::placements) plus one;
+    // 0: none (the bake's probes light it). Read only for a mesh with lightmap UVs.
+    u32 lightmap = 0;
+    // Zero: keeps the copy free of padding (the shadow caches compare copies byte by byte).
+    u32 reserved = 0;
 };
+static_assert(sizeof(MeshInstance3D) == 88, "a MeshInstance3D without padding (see `reserved`)");
 
 // World-space box enclosing the renderer's transformed mesh spheres. Cache it while transforms
 // stay unchanged; recompute after edits. These bounds also cover rotated and negative scales.
 Bounds3D instance_bounds(const Mesh3D& mesh, std::span<const Mat4f> transforms);
 Bounds3D instance_bounds(const Mesh3D& mesh, std::span<const MeshInstance3D> instances);
 
+// How a light takes part in baked lighting (kin/render3d/baked_lighting3d.hpp). Without baked lighting in the scene
+// (Scene3D::baked_lighting) every light is drawn as Realtime.
+// - Realtime: drawn each frame, left out of the bake (no bounced light from it in the lightmaps or the probes).
+// - Mixed: drawn each frame (its direct light and shadows, on everything); its bounced light is baked.
+// - Baked: all of its light is baked, direct and bounced; with baked lighting in the scene it is not drawn at all:
+//   lightmapped copies have it in their lightmap, others from the baked probes (no shadows of what moves, no
+//   highlight).
+enum class LightBake3D : u8 { Realtime, Mixed, Baked };
+
 // Light from far away, in one direction: the sun.
 struct DirectionalLight3D {
     Vec3f direction{-0.4f, 1.0f, 0.3f}; // toward the light (any length but zero)
     LinearRgb color{1.0f, 1.0f, 1.0f};  // linear; above 1 is brighter
+    LightBake3D bake = LightBake3D::Realtime;
 };
 
 // Light from a point: a muzzle flash, a lamp. It falls off with the square of
@@ -400,6 +430,7 @@ struct PointLightSource3D {
     // Names the light across frames, for the choice of which light has a shadow map (hysteresis) and for its place in a
     // cache; 0: its index in Lights3D::points.
     u32 id = 0;
+    LightBake3D bake = LightBake3D::Realtime; // see LightBake3D
 };
 
 // Light from a point in a cone: a torch, a lamp shade, a car's headlight (P3b). The same photometry as
@@ -419,13 +450,14 @@ struct SpotLightSource3D {
     f32 volumetric = 1.0f;   // times its light in the fog's air (Fog3D::volumetric): 0 lights no fog
     // A perspective shadow map over the cone, at most Lights3D::max_shadowed_spots a frame (the most important ones).
     bool shadow_enabled = false;
-    u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
-    f32 shadow_bias = 1.0f;          // map texels
-    f32 shadow_normal_offset = 1.5f; // map texels
-    f32 shadow_near_plane = 0.05f;   // metres
-    f32 shadow_distance = 0.0f;      // metres; 0 uses radius
-    f32 shadow_softness = 1.0f;      // map texels
-    u32 id = 0;                      // as PointLightSource3D::id, over Lights3D::spots
+    u32 shadow_resolution = 0;                // texels; 0 uses Lights3D::local_shadow_resolution
+    f32 shadow_bias = 1.0f;                   // map texels
+    f32 shadow_normal_offset = 1.5f;          // map texels
+    f32 shadow_near_plane = 0.05f;            // metres
+    f32 shadow_distance = 0.0f;               // metres; 0 uses radius
+    f32 shadow_softness = 1.0f;               // map texels
+    u32 id = 0;                               // as PointLightSource3D::id, over Lights3D::spots
+    LightBake3D bake = LightBake3D::Realtime; // see LightBake3D
 };
 
 // A second directional light's shadow: the moon's, when the fill light is the moon (P3b). Its own cascade set, drawn
@@ -1042,6 +1074,13 @@ public:
     bool specular_multiscatter = true;
     Lod3D lod{};
     GlobalIllumination3D global_illumination{};
+    // Baked lighting (kin/render3d/baked_lighting3d.hpp; Renderer3D::create_baked_lighting): with it, lightmapped
+    // copies (MeshInstance3D::lightmap, of meshes with lightmap UVs) take their diffuse light from their lightmap, and
+    // other copies from its probes where they are, in place of the ambient light, the environment's, the reflection
+    // probes' and global illumination's (their reflections stay). Lights whose LightBake3D is Baked are then not drawn.
+    // The stock materials, surface shaders and custom shaders made with KIN_BAKED_LIGHT read it (not unlit materials),
+    // with the light variants. Empty: none.
+    BakedLighting3D baked_lighting{};
     std::vector<PortalLink3D> portals; // this frame's apertures; clear() drops them with the scene's draws
     RenderDebugOptions3D debug{};      // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:

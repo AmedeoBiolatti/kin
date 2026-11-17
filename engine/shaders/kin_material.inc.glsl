@@ -8,6 +8,17 @@
 //
 // Light colours are irradiance over pi (a white surface facing a light of
 // colour c shows c), so a BRDF f meets a light as f * pi * c * cos.
+// A custom shader that reads baked lighting (Scene3D::baked_lighting) defines KIN_BAKED_LIGHT before including this:
+// kin_lit's diffuse light is then the bake's, kin_baked_light gives it, and samplers 12 and 13 are the bake's (its own
+// extra inputs start at 14).
+#if defined(KIN_BAKED_LIGHT) && !defined(KIN_BAKED)
+#define KIN_BAKED
+#endif
+// (Every mesh vertex shader writes the lightmap's place, none where the copy has no lightmap: every baked variant reads
+// it.)
+#if defined(KIN_BAKED) && !defined(KIN_LIGHTMAP)
+#define KIN_LIGHTMAP
+#endif
 #ifndef KIN_NO_CUSTOM_PARAMS
 #define KIN_CUSTOM_MATERIAL
 #define KIN_FOG
@@ -73,12 +84,26 @@ layout(set = 2, binding = 11) uniform sampler2DArrayShadow uMoonShadow;  // dept
 // Global illumination (G5; docs/3d_plan.md): only the stock light variants (mesh_light*.frag) have it, so that every
 // other shader, and custom ones, keep their samplers. The probes' light on what the pre-pass drew, read once a texel at
 // half the view's size (gi_resolve.comp).
+#ifdef KIN_BAKED
+// Baked lighting (Scene3D::baked_lighting; kin/render3d/baked_lighting3d.hpp): the baked variants (mesh_baked*.frag, a
+// surface's and a custom shader's) bind the lightmaps' pages and the probes in the GI's first two places, the GI's being of no use
+// to them (their diffuse light is the bake's), so that their samplers and buffers are where the light variants' are.
+layout(set = 2, binding = 12) uniform sampler2DArray uLightmap; // a page a layer: the light arriving, over pi (rgb)
+layout(set = 2, binding = 13) uniform sampler3D uBakedProbes;   // the probes' a + b.n: red's, green's then blue's
+                                                                // grids along z (rgba: a, b.x, b.y, b.z)
+#else
 layout(set = 2, binding = 12) uniform sampler2D uGiLight; // rgb: the light facing the surface; a: its depth along the
                                                           // view (less: the probes have none there; 0: no surface)
 layout(set = 2, binding = 13) uniform sampler2D uGiSlope; // the light facing way d is rgb * (w + xyz . d)
+#endif
 layout(set = 2, binding = 14) uniform sampler2D uGiCoverage; // share of probe lighting (.r; .a with frame.gi.y),
                                                              // the rest ambient; with frame.gi.y, rgb: the area
                                                              // lights' irradiance over pi (gi_area.comp)
+#endif
+#if defined(KIN_BAKED) && !defined(KIN_GI)
+// A custom shader's (KIN_BAKED_LIGHT): the bake's pages and probes in the two samplers after kin's twelve.
+layout(set = 2, binding = 12) uniform sampler2DArray uLightmap;
+layout(set = 2, binding = 13) uniform sampler3D uBakedProbes;
 #endif
 #ifdef KIN_SURFACE
 // A surface's maps past its five (Material3D::graph_maps: a material graph's, a layer each), the sampler after the
@@ -928,6 +953,7 @@ KinSurface kin_stock_surface() {
 // map's) for the diffuse (`probed`) and `r` for the reflections (`traced`). False where the probes have no light for it
 // (the sky's stands).
 // With area lights (frame.gi.y), `area`: their irradiance over pi facing the surface (else 0).
+#ifndef KIN_BAKED
 bool kin_gi_resolved(vec3 n, vec3 r, float depth, vec2 depth_slope, out vec3 probed, out vec3 traced,
                      out float coverage, out vec3 area) {
     const ivec2 size = textureSize(uGiLight, 0);
@@ -997,6 +1023,84 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, vec2 depth_slope, out vec3 pro
     probed = light.rgb * clamp(slope.w + dot(slope.xyz, n), 0.0, 4.0);
     traced = light.rgb * clamp(slope.w + dot(slope.xyz, r), 0.0, 4.0);
     return true;
+}
+#endif
+#endif
+
+#ifdef KIN_BAKED
+#ifdef KIN_LIGHTMAP
+// The copy's place on its lightmap (mesh_lightmap*.vert): uv on the page, and the page's layer (negative: none).
+layout(location = 12) in vec2 vLightmapUV;
+layout(location = 13) flat in float vLightmapLayer;
+#endif
+// The baked probes' light facing `n` at `p` (frame.baked: the grid's corner and size; uBakedProbes: six grids along z,
+// red's, green's and blue's a + b.n, then each probe's visibility, its x, y and z ways' mean and mean square distance
+// to what its rays met), and how far `p` is inside the grid (1 inside, to 0 half a spacing out). From the eight probes
+// round the point moved a quarter of a spacing along the normal, each weighed trilinearly, by whether it is in front
+// of the surface and by whether it can see the point (Chebyshev's inequality): no light through a wall from a probe on
+// its far side. (BakedProbes3D::light is the same on the CPU.)
+vec3 kin_baked_probes(vec3 p, vec3 n, out float cover) {
+    const vec3 lo = frame.baked[0].xyz, size = frame.baked[1].xyz;
+    const ivec3 texels = textureSize(uBakedProbes, 0);
+    const ivec3 count = ivec3(texels.xy, texels.z / 6);
+    const vec3 spacing = size / max(vec3(count - 1), vec3(1.0));
+    const vec3 q = p + n * (0.25 * min(spacing.x, min(spacing.y, spacing.z)));
+    const vec3 margin = min(q - lo, lo + size - q) / (0.5 * spacing);
+    cover = clamp(1.0 + min(margin.x, min(margin.y, margin.z)), 0.0, 1.0);
+    const vec3 g = clamp((q - lo) / max(size, vec3(1e-6)), 0.0, 1.0) * vec3(count - 1);
+    const ivec3 base = clamp(ivec3(floor(g)), ivec3(0), max(count - 2, ivec3(0)));
+    const vec3 f = clamp(g - vec3(base), 0.0, 1.0);
+    vec4 r = vec4(0.0), gr = vec4(0.0), b = vec4(0.0);
+    float total = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        const ivec3 o = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        const ivec3 c = min(base + o, count - 1);
+        const vec3 t = mix(1.0 - f, f, vec3(o));
+        const vec3 to = q - (lo + vec3(c) * spacing);
+        const float dist = length(to);
+        const vec3 d = dist > 1e-4 ? to / dist : n;
+        const float facing = 0.5 * (dot(-d, n) + 1.0);
+        float w = facing * facing + 0.2;
+        const vec4 vx = texelFetch(uBakedProbes, ivec3(c.xy, c.z + 3 * count.z), 0);
+        const vec4 vy = texelFetch(uBakedProbes, ivec3(c.xy, c.z + 4 * count.z), 0);
+        const vec4 vz = texelFetch(uBakedProbes, ivec3(c.xy, c.z + 5 * count.z), 0);
+        // Each axis's way toward the point: its distance along that axis against the probe's distances that way
+        // (Chebyshev), the three weighed by the direction's squared components.
+        const vec2 mx = to.x >= 0.0 ? vx.xy : vx.zw, my = to.y >= 0.0 ? vy.xy : vy.zw, mz = to.z >= 0.0 ? vz.xy : vz.zw;
+        const vec3 mean = vec3(mx.x, my.x, mz.x), mean2 = vec3(mx.y, my.y, mz.y);
+        const vec3 variance = abs(mean2 - mean * mean) + 1e-4;
+        const vec3 beyond = max(abs(to) - mean, vec3(0.0));
+        const vec3 chebyshev = variance / (variance + beyond * beyond);
+        const vec3 e = pow(chebyshev, d * d);
+        const float seen = e.x * e.y * e.z;
+        w = t.x * t.y * t.z * max(w * seen * seen * seen, 1e-4);
+        r += w * texelFetch(uBakedProbes, c, 0);
+        gr += w * texelFetch(uBakedProbes, ivec3(c.xy, c.z + count.z), 0);
+        b += w * texelFetch(uBakedProbes, ivec3(c.xy, c.z + 2 * count.z), 0);
+        total += w;
+    }
+    const vec4 d = vec4(1.0, n) / max(total, 1e-8);
+    return max(vec3(dot(r, d), dot(gr, d), dot(b, d)), vec3(0.0));
+}
+
+// The bake's diffuse light facing `n` here (in the ambient light's units: a white surface shows it): the copy's lightmap
+// where it has one (`share` 1), else the probes' (`share` how far inside their grid it is: 1 inside, to 0 half a
+// spacing out); false with none (no bake, or outside the probes).
+bool kin_baked_light(vec3 n, out vec3 light, out float share) {
+    light = vec3(0.0);
+    share = 0.0;
+#ifdef KIN_LIGHTMAP
+    if (vLightmapLayer >= 0.0) {
+        light = textureLod(uLightmap, vec3(vLightmapUV, vLightmapLayer), 0.0).rgb;
+        share = 1.0;
+        return true;
+    }
+#endif
+    if (frame.baked[0].w > 0.5) {
+        light = kin_baked_probes(vWorld, n, share);
+        return share > 0.0;
+    }
+    return false;
 }
 #endif
 
@@ -1372,10 +1476,11 @@ vec3 kin_lit_surface(KinSurface surface) {
     const vec3 offset_normal = shadow_offset_normal(n); // the moon's and the local lights' shadows, as the sun's
 #endif
     const float sun = dot(n, frame.sun_direction.xyz);
+    // (frame.sun_color.w: 1 when the sun's light is baked, LightBake3D::Baked: in the lightmaps and the probes.)
 #ifdef KIN_DIRECT_LIGHT
-    if (dot(frame.sun_color.rgb, vec3(1.0)) > 0.0) {
+    if (dot(frame.sun_color.rgb, vec3(1.0)) > 0.0 && frame.sun_color.w < 0.5) {
 #else
-    if (sun > 0.0 || backlit || wrap > 0.0) {
+    if ((sun > 0.0 || backlit || wrap > 0.0) && frame.sun_color.w < 0.5) {
 #endif
         // (A back-lit thin surface's shadow from its side facing the sun: the point pushed off that way.)
         float lit = sunlight(sun > 0.0 || !backlit ? n : -n, world_dx, world_dy);
@@ -1538,6 +1643,7 @@ vec3 kin_lit_surface(KinSurface surface) {
     // surface they see, kept out by walls. The reflections too, in so far as a rough surface's are its surroundings'
     // light along the reflection, blurred: what the probes see that way; a smooth surface keeps the sky's sharp
     // reflection, dimmed by how much of the sky's light the probes see that way (none in a closed room).
+#ifndef KIN_BAKED
     if (frame.gi.x > 0.5) {
         const vec3 r = normalize(mix(reflect(-v, n), n, s.alpha));
         const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
@@ -1557,6 +1663,25 @@ vec3 kin_lit_surface(KinSurface surface) {
             above = mix(above, mix(traced, above * seen, smooth_share), coverage);
             const float coat_smooth = (1.0 - coat_roughness) * (1.0 - coat_roughness);
             coat_above = mix(coat_above, mix(traced, coat_above * seen, coat_smooth), coverage);
+        }
+    }
+#endif
+#endif
+#ifdef KIN_BAKED
+    // Baked lighting: the diffuse light is the copy's lightmap's where it has one, else the baked probes' where they
+    // are (frame.baked[0].w), in place of the sky's, the environment's and the reflection probes'. The reflections
+    // stay the environment's and the probes'.
+    {
+        vec3 baked;
+        float share;
+        if (kin_baked_light(n, baked, share)) {
+            around = mix(around, baked, share);
+            if (share >= 1.0 && vLightmapLayer >= 0.0) {
+                behind = around; // (a lightmap has one side's)
+            } else if (backlit || wrap > 0.5) {
+                float cover_behind;
+                behind = mix(behind, kin_baked_probes(vWorld, -n, cover_behind), cover_behind);
+            }
         }
     }
 #endif

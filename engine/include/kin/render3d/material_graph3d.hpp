@@ -117,9 +117,16 @@ struct CookedMaterialGraph3D {
 std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked);
 std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<const u8> bytes,
                                                                     std::string* why = nullptr);
+// What a cook makes beyond what every graph needs. `baked_lighting`: the variants that read baked lighting
+// (SurfaceVariant3D::Baked ... VelocityBakedFog: four more, for a game whose scenes have a bake; without them its
+// copies are lit as without the bake, and the log says so once).
+struct MaterialGraphCookOptions3D {
+    bool baked_lighting = false;
+};
 // The graph compiled and cooked now by glslc (kin/renderer/shader_compiler.hpp); none, with why (the graph's errors,
 // each naming its node, or glslc's messages).
-std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view graph, std::string* why = nullptr);
+std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view graph, std::string* why = nullptr,
+                                                           const MaterialGraphCookOptions3D& options = {});
 
 struct MaterialGraphNode3D {
     std::string type, summary;

@@ -125,6 +125,22 @@ Status3D MeshData3D::validate() const {
             }
         }
     }
+    if (!lightmap_uv.empty()) {
+        if (lightmap_uv.size() != vertices.size()) {
+            return fail("the lightmap UVs have " + std::to_string(lightmap_uv.size()) + " entries for " +
+                        std::to_string(vertices.size()) + " vertices");
+        }
+        if (!skin.empty() || !morph_targets.empty()) {
+            return fail("a skinned or morphed mesh cannot have lightmap UVs");
+        }
+        for (std::size_t i = 0; i < lightmap_uv.size(); ++i) {
+            const Vec2f uv = lightmap_uv[i];
+            if (!std::isfinite(uv.x) || !std::isfinite(uv.y) || uv.x < -1e-4f || uv.y < -1e-4f || uv.x > 1.0001f ||
+                uv.y > 1.0001f) {
+                return fail("lightmap UV " + std::to_string(i) + " is outside [0, 1]");
+            }
+        }
+    }
     if (morph_targets.size() > max_morph_targets) {
         return fail(std::to_string(morph_targets.size()) + " morph targets, more than " +
                     std::to_string(max_morph_targets));
@@ -265,6 +281,8 @@ Bounds3D MeshData3D::bounds() const {
 }
 
 void MeshData3D::append(const MeshData3D& other, const Mat4f& transform) {
+    // Charts laid out for each mesh alone would overlap in the whole: they are made again for it.
+    lightmap_uv.clear();
     // The result is indexed: unindexed vertices so far get indices first.
     if (indices.empty() && !vertices.empty()) {
         for (u32 i = 0; i < static_cast<u32>(vertices.size()); ++i) {

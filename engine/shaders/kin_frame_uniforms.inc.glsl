@@ -50,4 +50,5 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     // subsurface materials' scattered share, which the scattering pass puts back); 2 the subsurface pass (that share
     // alone, the fog's transmittance applied, its profile's number + 1 in alpha).
     vec4 subsurface;
+    vec4 baked[2]; // the baked probes (Scene3D::baked_lighting): their grid's corner (xyz) and 1 with probes (w); its size
 } frame;

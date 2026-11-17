@@ -24,6 +24,8 @@
 
 namespace kin {
 
+struct BakedLightingData3D;
+
 // What 3D views can have on this device.
 struct RendererCapabilities3D {
     // The depth buffer views draw with: 32-bit float where the device has it,
@@ -339,6 +341,8 @@ public:
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).
     virtual std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
+    // Baked lighting's pages, placements and probes (render3d/baked_lighting3d.hpp): none where unsupported.
+    virtual std::shared_ptr<IBakedLightingBackend3D> create_baked_lighting(const BakedLightingData3D&) { return {}; }
     // Reflection probes' pictures (render3d/reflection_probes3d.hpp): none where unsupported.
     virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32) { return {}; }
     // `lighting`: ReflectionCaptureOptions3D::global_illumination's view (null: none).
@@ -354,6 +358,12 @@ public:
     // render attachment's texels (RGBA16F: four halves each). They wait for the GPU.
     virtual bool read_mesh(const IMeshBackend3D&, u32 /*vertex_count*/, MeshData3D&) { return false; }
     virtual bool read_texture(const Texture&, std::vector<u8>&, Vec2i&) { return false; }
+    // A sampled texture's colours as RGBA8 (as stored: a colour map's sRGB), scaled to at most `max_side` texels a side
+    // (any format, block-compressed too); false where it cannot be read.
+    virtual bool read_texture_colors(const Texture&, u32 /*max_side*/, std::vector<u8>&, Vec2i&) { return false; }
+    // An environment's picture read back (linear RGB floats, rows from the top); null: the panorama the backend last
+    // made of the procedural sky (Lights3D::sky_lights_scene), none before a render did.
+    virtual bool read_environment(const IEnvironmentBackend3D*, std::vector<f32>&, Vec2i&) { return false; }
     virtual std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture_from(Vec2i, std::span<const f32>) {
         return {};
     }

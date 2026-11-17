@@ -36,6 +36,14 @@ void register_render3d_components(EcsWorld& world) {
             .field("visible", &ModelRenderer3D::visible)
             .field("id", &ModelRenderer3D::id)
             .description("What picking answers for it; 0: the entity's own.");
+    if (!registry.find("StaticLighting3D"))
+        registry.native<StaticLighting3D>("StaticLighting3D")
+            .field("lightmapped", &StaticLighting3D::lightmapped)
+            .description("Baked with a lightmap (its meshes need lightmap UVs); else lit by the bake's probes.")
+            .field("texel_scale", &StaticLighting3D::texel_scale)
+            .description("Times the bake's lightmap texels a unit, for this entity.")
+            .field("lightmap", &StaticLighting3D::lightmap)
+            .description("Written by the bake: its first part's lightmap placement plus one; 0: none.");
     if (!registry.find("ModelMaterials3D"))
         registry.native<ModelMaterials3D>("ModelMaterials3D")
             .field("asset", &ModelMaterials3D::asset)
@@ -260,6 +268,16 @@ void register_render3d_components(EcsWorld& world) {
         scalar("shadow_distance", &T::shadow_distance);
         scalar("shadow_softness", &T::shadow_softness);
         scalar("volumetric", &T::volumetric);
+        b.template property<std::string>(
+             "bake", [](const T& v) { return std::string(light_bake_name(v.bake)); },
+             [](T& v, const std::string& name) {
+                 const auto mode = light_bake_from_name(name);
+                 if (mode)
+                     v.bake = *mode;
+                 return mode.has_value();
+             })
+            .description("Its part in baked lighting: \"realtime\" (drawn, not baked), \"mixed\" (drawn, its bounce "
+                         "baked) or \"baked\" (all baked; not drawn where the scene has its bake).");
         if constexpr (std::is_same_v<T, SpotLight3D>) {
             b.field("inner_angle", &T::inner_angle)
                 .units("degrees")
@@ -386,7 +404,11 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
                 continue;
             const std::string path = original->asset.id;
             std::string error;
-            auto model = assets.load_model(path).value_or({}).shared();
+            // What stands still with a lightmap (StaticLighting3D) has lightmap UVs: its file's, else laid out.
+            MeshOptions3D options;
+            if (const auto* baked = entity.get<StaticLighting3D>(); !skinned && baked && baked->lightmapped)
+                options.lightmap_uv = true;
+            auto model = assets.load_model(path, options).value_or({}).shared();
             error = diagnostics3d_text(assets.diagnostics());
             if (model) {
                 const bool has_skin = std::any_of(model->parts.begin(), model->parts.end(), [](const auto& part) {

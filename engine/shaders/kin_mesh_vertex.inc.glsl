@@ -63,6 +63,22 @@ layout(location = 11) out vec3 vLocal; // the point in the copy's own space (a s
 #ifdef KIN_DRAW_MATERIALS
 layout(location = 9) flat out uint vMaterial;
 #endif
+#ifdef KIN_LIGHTMAP
+// Lightmapped copies (mesh_lightmap*.vert; Scene3D::baked_lighting): the mesh's lightmap UVs (MeshData3D::lightmap_uv),
+// a second vertex stream, and the baked lighting's placements after the instances (and the velocity variant's
+// Previous, or the indexed one's visible instances): two vec4 each, the scale (xy) and offset (zw) onto the page, then the page's layer. A
+// copy's is normal2.w's bits (MeshInstance3D::lightmap): its placement plus one, 0 none.
+layout(location = 4) in vec2 aLightmapUV;
+#if defined(KIN_VELOCITY) || defined(KIN_INDEXED)
+layout(std430, set = 0, binding = 2 + KIN_VS_SHIFT) readonly buffer KinLightmaps { vec4 kin_lightmaps[]; };
+#else
+layout(std430, set = 0, binding = 1 + KIN_VS_SHIFT) readonly buffer KinLightmaps { vec4 kin_lightmaps[]; };
+#endif
+#endif
+// The copy's place on its lightmap (baked lighting): written by every variant, none (layer -1) but the lightmapped
+// ones', so that any fragment shader reading the bake (custom ones too) meets them.
+layout(location = 12) out vec2 vLightmapUV;
+layout(location = 13) flat out float vLightmapLayer;
 
 #include "kin_srgb.inc.glsl"
 
@@ -116,6 +132,16 @@ void main() {
     }
     vId = floatBitsToUint(instance.normal0.w);
     vObject = instance.model[3].xyz;
+    vLightmapUV = vec2(0.0);
+    vLightmapLayer = -1.0;
+#ifdef KIN_LIGHTMAP
+    const uint placed = floatBitsToUint(instance.normal2.w);
+    if (placed != 0u && 2u * placed <= uint(kin_lightmaps.length())) {
+        const vec4 at = kin_lightmaps[2u * (placed - 1u)];
+        vLightmapUV = aLightmapUV * at.xy + at.zw;
+        vLightmapLayer = kin_lightmaps[2u * placed - 1u].x;
+    }
+#endif
 #ifdef KIN_VELOCITY
 #ifdef KIN_SKIN
     // The copy's model matrix of the frame before times its pose of the frame before (the same expressions as

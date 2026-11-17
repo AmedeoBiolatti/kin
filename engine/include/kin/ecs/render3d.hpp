@@ -129,6 +129,7 @@ struct PointLight3D {
     f32 shadow_distance = 0.0f;      // metres; 0 uses radius
     f32 shadow_softness = 1.0f;      // map texels
     bool enabled = true;
+    LightBake3D bake = LightBake3D::Realtime; // its part in baked lighting (SceneEnvironment3D::baked_lighting)
 };
 
 // A spot light at the entity's WorldTransform3D, shining down the entity's own -Z axis (the way a camera looks; turn
@@ -148,6 +149,18 @@ struct SpotLight3D {
     f32 shadow_distance = 0.0f;      // metres; 0 uses radius
     f32 shadow_softness = 1.0f;      // map texels
     bool enabled = true;
+    LightBake3D bake = LightBake3D::Realtime; // its part in baked lighting (SceneEnvironment3D::baked_lighting)
+};
+
+// What stands still for baked lighting (docs/rendering_3d.md, "Baked lighting"; bake_scene_lighting): the entity's
+// MeshRenderer3D, or its ModelRenderer3D's parts that neither bend nor morph, are baked where they are, hiding and
+// bouncing light. `lightmapped`: each gets a lightmap (its meshes need lightmap UVs: a model's second UV set, or
+// MeshOptions3D::lightmap_uv), else the bake's probes light it. `lightmap` is the bake's: the first part's placement
+// plus one (a model's parts follow in order), 0: none; saved with the scene.
+struct StaticLighting3D {
+    bool lightmapped = true;
+    f32 texel_scale = 1.0f; // times the bake's texels a unit, for this entity
+    u32 lightmap = 0;
 };
 
 // A particle emitter at the entity's WorldTransform3D (P3c; opt-in: no emitters, no particles). The simulation is the

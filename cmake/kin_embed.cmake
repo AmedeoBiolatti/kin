@@ -32,14 +32,15 @@
 #     (kin/scene/planar_views3d.hpp). About 2 MB, which is why the engine does not carry them. Needs glslc; sets
 #     KIN_PLANAR_SURFACES on <target> when it built them.
 #
-#   kin_cook_material_graph(<out_var> SOURCE <graph> [OUTPUT <file>])
+#   kin_cook_material_graph(<out_var> SOURCE <graph> [OUTPUT <file>] [BAKED_LIGHTING])
 #     A material graph (kin.material-graph/1) cooked at build time by the
 #     kin_material_graph tool (glslc): its layout and every variant's SPIR-V in
 #     one file, by default <binary dir>/<graph's name>.spv. A game ships it
 #     beside the graph in its content as <graph>.spv, where
-#     Assets3D::load_material_graph looks.
+#     Assets3D::load_material_graph looks. BAKED_LIGHTING: the variants that read
+#     baked lighting too (for a game whose scenes have a bake: four more).
 #
-#   kin_cook_material_graphs(<out_var> CONTENT <dir> [MISSING <var>])
+#   kin_cook_material_graphs(<out_var> CONTENT <dir> [MISSING <var>] [BAKED_LIGHTING])
 #     Every material graph in a content folder (*.kingraph, in its subfolders
 #     too) cooked as kin_cook_material_graph cooks one, each beside its graph
 #     as <graph>.spv: where Assets3D::load_material_graph looks, so whatever
@@ -256,7 +257,7 @@ function(kin_compile_surface_shader out_var)
 endfunction()
 
 function(kin_cook_material_graph out_var)
-    cmake_parse_arguments(ARG "" "SOURCE;OUTPUT" "" ${ARGN})
+    cmake_parse_arguments(ARG "BAKED_LIGHTING" "SOURCE;OUTPUT" "" ${ARGN})
     if(NOT ARG_SOURCE)
         message(FATAL_ERROR "kin_cook_material_graph: SOURCE is required")
     endif()
@@ -274,10 +275,14 @@ function(kin_cook_material_graph out_var)
     # The tool writes its shaders to temporary files and has glslc read the engine's
     # includes from KIN_SHADER_INCLUDE_DIR, so there is no depfile: it follows them all.
     file(GLOB includes CONFIGURE_DEPENDS "${KIN_SHADER_INCLUDE_DIR}/*.inc.glsl")
+    set(baked "")
+    if(ARG_BAKED_LIGHTING)
+        set(baked "--baked-lighting")
+    endif()
     add_custom_command(
         OUTPUT "${output}"
-        COMMAND "${CMAKE_COMMAND}" -E env "KIN_GLSLC=${KIN_GLSLC}" $<TARGET_FILE:kin_material_graph> cook "${source}"
-                "${output}"
+        COMMAND "${CMAKE_COMMAND}" -E env "KIN_GLSLC=${KIN_GLSLC}" $<TARGET_FILE:kin_material_graph> cook ${baked}
+                "${source}" "${output}"
         DEPENDS "${source}" kin_material_graph ${includes}
         COMMENT "kin_material_graph: ${name} -> ${name}.spv"
         VERBATIM)
@@ -285,7 +290,7 @@ function(kin_cook_material_graph out_var)
 endfunction()
 
 function(kin_cook_material_graphs out_var)
-    cmake_parse_arguments(ARG "" "CONTENT;MISSING" "" ${ARGN})
+    cmake_parse_arguments(ARG "BAKED_LIGHTING" "CONTENT;MISSING" "" ${ARGN})
     if(NOT ARG_CONTENT)
         message(FATAL_ERROR "kin_cook_material_graphs: CONTENT is required")
     endif()
@@ -295,7 +300,11 @@ function(kin_cook_material_graphs out_var)
     set(missing "")
     if(graphs AND TARGET kin_material_graph AND KIN_GLSLC AND NOT CMAKE_CROSSCOMPILING)
         foreach(graph IN LISTS graphs)
-            kin_cook_material_graph(spv SOURCE "${graph}" OUTPUT "${graph}.spv")
+            if(ARG_BAKED_LIGHTING)
+                kin_cook_material_graph(spv SOURCE "${graph}" OUTPUT "${graph}.spv" BAKED_LIGHTING)
+            else()
+                kin_cook_material_graph(spv SOURCE "${graph}" OUTPUT "${graph}.spv")
+            endif()
             list(APPEND cooked "${spv}")
         endforeach()
     else()

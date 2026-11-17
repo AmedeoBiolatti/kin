@@ -15,6 +15,7 @@
 #include <array>
 #include <chrono>
 #include <kin/render3d/backend3d.hpp>
+#include <kin/render3d/baked_lighting3d.hpp>
 #include <kin/render3d/local_lights3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
@@ -153,6 +154,9 @@ public:
     // and the sphere each joint's vertices stay within, for the culling of posed copies (render3d/skeleton3d.hpp).
     SDL_GPUBuffer* skin = nullptr;
     std::vector<SkinBound3D> skin_bounds;
+    // With lightmap UVs (MeshData3D::lightmap_uv; never with levels, clusters, a skin or morph targets): the second
+    // vertex buffer of the lightmapped variants (two floats a vertex).
+    SDL_GPUBuffer* lightmap_uv = nullptr;
     SDL_GPUBuffer* indices =
         nullptr; // the chunk's, when `chunk` is set (then levels[].first_index counts from the mesh's range in it)
     u32 index_count = 0; // level 0's
@@ -219,6 +223,19 @@ public:
     u64 generation = 0; // counts the filterings (the reflection array copies the specular again when it changes)
 };
 
+// Baked lighting (render3d/baked_lighting3d.hpp; Scene3D::baked_lighting): the lightmaps' pages (an RGBA16F array,
+// every page in the corner of a layer as large as the largest), each placement's two vec4s as the lightmapped variants
+// read them (scale and offset onto its layer; the layer, -1 for none), and the probes (an RGBA16F volume: red's,
+// green's, blue's, then their visibility's three grids along z; a black 1 x 1 x 6 one without).
+class GpuBakedLighting3D final : public IBakedLightingBackend3D {
+public:
+    GpuTexture pages;
+    GpuTexture probes;
+    GpuBuffer placements;
+    Bounds3D probe_area{};
+    u32 probe_depth = 0; // probes along z (0: none)
+};
+
 // A reflection probe's picture (render3d/reflection_probes3d.hpp): the view it is captured with (square, 90 degrees,
 // float), its six faces, and the panorama made of them, mipmapped, as an environment's picture is. The renderer
 // filters the panorama into a layer of its reflection array (GpuRenderer3D::prepare_reflections).
@@ -238,6 +255,10 @@ public:
     GpuShader shader;
     SharedDevice device;
     std::vector<ShaderResourceInfo> textures, buffers;
+    // It reads baked lighting (made with KIN_BAKED_LIGHT: the bake's pages at 12 and probes at 13), its own extra
+    // inputs from `first_input` (12 without; 14 with).
+    bool baked = false;
+    u32 first_input = 12;
     bool valid() const override { return bool(shader); }
 };
 // A material's surface shader (Material3D::surface): its variants, in SurfaceVariant3D's order, each standing for the
@@ -271,7 +292,7 @@ public:
     }
     // Its vertex variants (a surface with an offset: World Position Offset): optional, all or none.
     bool offsets() const {
-        for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+        for (u32 i = surface_vertex_variant3d; i < surface_baked_variant3d; ++i)
             if (!variants[i])
                 return false;
         return true;
@@ -286,6 +307,14 @@ public:
         return true;
     }
     SDL_GPUShader* mask(SurfaceVariant3D v) const { return variants[u32(v)].handle(); }
+    // Baked lighting's variants (optional): the probes' (velocity too where `velocity`), and the lightmaps'.
+    bool bakes(bool velocity) const {
+        return variants[u32(SurfaceVariant3D::Baked)] && variants[u32(SurfaceVariant3D::BakedFog)] &&
+               (!velocity ||
+                (variants[u32(SurfaceVariant3D::VelocityBaked)] && variants[u32(SurfaceVariant3D::VelocityBakedFog)]));
+    }
+    // Said once: a bake was drawn without it reading it (a graph cooked without baked lighting's variants).
+    mutable bool warned_bake = false;
 };
 class GpuMaterialInputs3D final : public IMaterialInputsBackend3D {
 public:
@@ -683,6 +712,9 @@ public:
     std::shared_ptr<IGpuParticleBackend3D> create_gpu_particles(const ParticleDesc3D&, u32) override;
     bool update_gpu_particles(const std::shared_ptr<IGpuParticleBackend3D>&, const GpuParticleUpdate3D&) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
+    std::shared_ptr<IBakedLightingBackend3D> create_baked_lighting(const BakedLightingData3D& baked) override;
+    bool read_texture_colors(const Texture& texture, u32 max_side, std::vector<u8>& rgba, Vec2i& size) override;
+    bool read_environment(const IEnvironmentBackend3D* environment, std::vector<f32>& rgb, Vec2i& size) override;
     std::shared_ptr<IReflectionCaptureBackend3D> create_reflection_capture(u32 side) override;
     bool capture_reflection(IReflectionCaptureBackend3D& capture, Scene3D& scene, Vec3f position,
                             const ReflectionCaptureOptions3D& options, IViewBackend3D* lighting,
@@ -752,6 +784,9 @@ private:
         Visibility
     };
     enum class Unlit : u8 { Off, Colour, Textured };
+    // A main-pass draw's baked lighting (Scene3D::baked_lighting): none, the probes' (mesh_baked*.frag), or its
+    // copies' lightmaps (mesh_lightmap.vert with mesh_baked*.frag; a copy without one: the probes').
+    enum class BakedVariant : u8 { Off, Probes, Lightmap };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
     bool make_targets(GpuView3D& view);
@@ -767,7 +802,7 @@ private:
                                       SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false,
                                       bool fog = false, bool lights = false, Unlit unlit = Unlit::Off,
                                       bool indexed = false, const GpuSurfaceShader3D* surface = nullptr,
-                                      bool compact_shadow = false) const;
+                                      bool compact_shadow = false, BakedVariant baked = BakedVariant::Off) const;
     // Pure requests shared by actual draws and conservative warm-up variants.
     struct MaterialPipeline {
         const GpuMaterialShader3D* custom;
@@ -783,6 +818,7 @@ private:
         MaterialPipeline material;
         bool velocity, skinned;
         bool fog = false, lights = false, indexed = false, materials = false;
+        BakedVariant baked = BakedVariant::Off;
     };
     struct MaterialUniforms {
         f32 params[4], pbr[4], maps[4], emission[4], uv[4];
@@ -1246,6 +1282,14 @@ private:
     GpuShader _mesh_velocity_light_shader;     // mesh_velocity_light.frag
     GpuShader _mesh_velocity_light_fog_shader; // mesh_velocity_light_fog.frag
     bool _lights_available = false;
+    // Baked lighting's variants (Scene3D::baked_lighting): mesh_lightmap.vert, its indexed and velocity variants, and
+    // the light variants' fragment shaders reading the bake (mesh_baked*.frag: a copy's lightmap, else the probes'), by
+    // fog + 2 velocity.
+    GpuShader _lightmap_vertex, _lightmap_indexed_vertex, _velocity_lightmap_vertex;
+    std::array<GpuShader, 4> _baked_fragments;
+    bool _baked_available = false;
+    // What the baked variants bind without a bake's own (never read then): a black page and black probes.
+    std::shared_ptr<GpuBakedLighting3D> _no_baked_lighting;
     bool _lights_warned = false;
     GpuShader _sky_shader;               // sky.frag
     GpuShader _sky_velocity_shader;      // sky_velocity.frag
@@ -1853,6 +1897,11 @@ private:
     u64 draw_plan_bytes() const;
     void prepare_draw_plan(FrameCtx& ctx);
     DrawCommand* main_command(FrameCtx& ctx, u32 ref, bool materials);
+    // A main-pass draw's baked lighting variant (BakedVariant): Off without the scene's bake, for the overlay, and for
+    // what reads no light or reads it its own way (unlit, wireframe, custom and surface shaders).
+    BakedVariant baked_variant(const FrameCtx& ctx, const DrawRef& ref) const;
+    // The scene's baked lighting where it can be drawn (ctx.baked; none: nullptr), set before the lights are chosen.
+    const GpuBakedLighting3D* baked_lighting(const Scene3D& scene) const;
     bool prepare_main_indices(FrameCtx& ctx);
     void emit_draw_span(FrameCtx& ctx, const DrawSpan& span, bool materials);
     void retain_draw_materials(FrameCtx& ctx);

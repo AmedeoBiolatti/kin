@@ -4,6 +4,7 @@
 #include <kin/assets/bake_cache.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/render3d/baked_lighting3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <limits>
@@ -126,14 +127,33 @@ Mesh3D Renderer3D::create_mesh_operation(const MeshData3D& data, const MeshOptio
     return upload_validated_mesh(data, requested);
 }
 
-Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptions3D& requested) {
+Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& given, const MeshOptions3D& requested) {
     _errors.clear();
     MeshOptions3D options = requested;
+    // Lightmap UVs laid out where asked for and missing (a static mesh drawn with its lightmap).
+    std::optional<MeshData3D> unwrapped;
+    if (options.lightmap_uv && !given.lightmapped() && !given.skinned() && !given.morphed()) {
+        unwrapped = given;
+        if (const Status3D laid = generate_lightmap_uv(*unwrapped, {.resolution = options.lightmap_resolution});
+            !laid) {
+            KIN_LOG_WARN_F("render", "3D: lightmap UVs not made",
+                           (LogFields{{.name = "reason", .value = laid.diagnostics.front()}}));
+            unwrapped.reset();
+        }
+    }
+    const MeshData3D& data = unwrapped ? *unwrapped : given;
     if (data.morphed() && (options.clusters || options.levels > 1)) {
         // Morph targets move the vertices: levels and clusters are built from one shape and would not follow.
         KIN_LOG_WARN("render", "3D: a mesh with morph targets cannot have levels of detail or clusters: made without");
         options.clusters = false;
         options.levels = 1;
+    }
+    if (data.lightmapped() && options.clusters) {
+        // A cluster hierarchy welds the vertices anew: the lightmap UVs would not follow. Levels of detail keep them
+        // (a level is another list of the mesh's own triangles' vertices).
+        KIN_LOG_WARN("render", "3D: a mesh with lightmap UVs cannot have clusters: made with levels instead");
+        options.clusters = false;
+        options.levels = std::max(options.levels, 4u);
     }
     if (data.skinned() && (options.clusters || options.levels > 1)) {
         // A skinned mesh moves with its joints: levels and clusters are built from the mesh at rest and would not

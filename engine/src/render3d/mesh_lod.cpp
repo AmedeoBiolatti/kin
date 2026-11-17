@@ -90,7 +90,8 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
     // derivatives of the position, as for flat clusters). A vertex for each corner of each level, to carry its
     // triangle's normal, took the kiln's 4 levels 12.8 M vertices; these are at most the first level's (a level only
     // drops vertices of the one before). The mesh's vertices are not touched.
-    if (data.indices.empty() && is_flat_soup(data)) {
+    // (Not for a mesh with lightmap UVs: its levels must index its own vertices, which carry them.)
+    if (data.indices.empty() && is_flat_soup(data) && !data.lightmapped()) {
         const bool uniform = uniform_flat_attributes(data);
         std::vector<u32> current(vertex_count);
         const std::array<meshopt_Stream, 3> streams{
@@ -188,9 +189,12 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
     // is a vertex of the mesh, so the levels still index the mesh's own vertices.
     std::vector<u32> current;
     if (data.indices.empty()) {
+        // (Its lightmap UVs too: corners alike but on two charts stay two.)
         std::vector<u32> remap(vertex_count);
-        const std::size_t unique = meshopt_generateVertexRemap(
-            remap.data(), nullptr, vertex_count, data.vertices.data(), vertex_count, sizeof(MeshVertex3D));
+        const std::array<meshopt_Stream, 2> streams{{{data.vertices.data(), sizeof(MeshVertex3D), sizeof(MeshVertex3D)},
+                                                     {data.lightmap_uv.data(), sizeof(Vec2f), sizeof(Vec2f)}}};
+        const std::size_t unique = meshopt_generateVertexRemapMulti(remap.data(), nullptr, vertex_count, vertex_count,
+                                                                    streams.data(), data.lightmapped() ? 2 : 1);
         std::vector<u32> first(unique, ~0u);
         for (std::size_t i = 0; i < vertex_count; ++i) {
             first[remap[i]] = std::min(first[remap[i]], static_cast<u32>(i));
@@ -203,20 +207,28 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
         current = data.indices;
     }
 
-    // What the simplifier minds besides where the surface is: normals, UVs, vertex colours.
-    const float weights[9] = {options.normal_weight, options.normal_weight, options.normal_weight,
-                              options.uv_weight,     options.uv_weight,     options.color_weight,
-                              options.color_weight,  options.color_weight,  options.color_weight};
+    // What the simplifier minds besides where the surface is: normals, UVs, vertex colours, and lightmap UVs (as UVs:
+    // a lightmap's charts keep their seams, and a level reads the lightmap where its triangles are).
+    const bool lightmap = data.lightmapped();
+    const float weights[11] = {options.normal_weight, options.normal_weight, options.normal_weight,
+                               options.uv_weight,     options.uv_weight,     options.color_weight,
+                               options.color_weight,  options.color_weight,  options.color_weight,
+                               options.uv_weight,     options.uv_weight};
+    const std::size_t stride = lightmap ? 11 : 9;
     std::size_t attribute_count = 0;
-    for (const float w : weights) {
-        attribute_count += w > 0.0f ? 1 : 0;
+    for (std::size_t k = 0; k < stride; ++k) {
+        attribute_count += weights[k] > 0.0f ? 1 : 0;
     }
     std::vector<f32> attributes;
     if (attribute_count > 0) {
-        attributes.resize(vertex_count * 9);
+        attributes.resize(vertex_count * stride);
         for (std::size_t i = 0; i < vertex_count; ++i) {
             const MeshVertex3D& v = data.vertices[i];
-            f32* a = &attributes[i * 9];
+            f32* a = &attributes[i * stride];
+            if (lightmap) {
+                a[9] = data.lightmap_uv[i].x;
+                a[10] = data.lightmap_uv[i].y;
+            }
             a[0] = v.normal.x;
             a[1] = v.normal.y;
             a[2] = v.normal.z;
@@ -241,9 +253,9 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
         const std::size_t kept =
             attribute_count > 0
                 ? meshopt_simplifyWithAttributes(simplified.data(), current.data(), current.size(), positions,
-                                                 vertex_count, sizeof(MeshVertex3D), attributes.data(), 9 * sizeof(f32),
-                                                 weights, 9, nullptr, target_of(current_triangles), max_error, flags,
-                                                 &relative)
+                                                 vertex_count, sizeof(MeshVertex3D), attributes.data(),
+                                                 stride * sizeof(f32), weights, stride, nullptr,
+                                                 target_of(current_triangles), max_error, flags, &relative)
                 : meshopt_simplify(simplified.data(), current.data(), current.size(), positions, vertex_count,
                                    sizeof(MeshVertex3D), target_of(current_triangles), max_error, flags, &relative);
         if (stops(kept / 3, current_triangles)) {
@@ -261,7 +273,7 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
 
 // The bake of a chain (mesh_levels_bake_key, save_mesh_levels). Raise it whenever build_mesh_levels would make another
 // chain from the same mesh and options (the key then changes, so no old bake is read), or the bytes change.
-constexpr u32 levels_bake_version = 3;
+constexpr u32 levels_bake_version = 4;
 
 u64 mesh_levels_bake_key(const MeshData3D& data, const MeshOptions3D& options) {
     BakeKey key{"kin.mesh_levels", levels_bake_version};

@@ -70,6 +70,10 @@ public:
     // a mip chain of complete_mip_levels() levels generated on the GPU with the uploads: a material graph's maps past
     // its five slots. Not pooled.
     GpuTexture create_texture_array(u32 width, u32 height, std::span<const u8* const> layers);
+    // A sampled RGBA16F 2D array (`volume` false: `slices` layers) or 3D texture (`volume`: `slices` deep) of width x
+    // height texels a slice, filled from `halves` (four a texel, slice by slice, rows from the top): baked lighting's
+    // pages and probes. Not pooled.
+    GpuTexture create_half_texture(u32 width, u32 height, u32 slices, bool volume, std::span<const u16> halves);
     // A 3D texture of `format`, width x height x depth (the GI scene's voxels); its texels are not set.
     GpuTexture create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
                              SDL_GPUTextureUsageFlags usage);
@@ -217,6 +221,7 @@ private:
         u32 x = 0, y = 0, w = 0, h = 0;
         u32 level = 0;
         u32 layer = 0; // of a 2D array
+        u32 z = 0;     // of a 3D texture
         bool blocks = false; // block-compressed texels, tightly packed: Vulkan wants a row length of 0 (or whole blocks)
         SDL_GPUBuffer* buffer = nullptr;
         u32 buffer_offset = 0;

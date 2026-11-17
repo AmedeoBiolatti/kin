@@ -1356,6 +1356,96 @@ the plan's G5b results.
   posed anew each render, about 1.6 ms of GPU a render at full clock and 2.35 throttled (a fifth of the frame without
   it: the GI scene about 15%, the probes 28%, their light on the view 21%, reading it in the main pass 36%).
 
+### Baked lighting
+
+Light worked out ahead of time on the CPU and drawn for almost nothing (`kin/render3d/baked_lighting3d.hpp`): the
+alternative to global illumination where it costs too much, and static light of higher quality where it does not.
+
+- **Lightmaps:** each copy of a static mesh gets a rectangle on a page of texels (linear RGB floats) holding the
+  diffuse light that reaches its surface: the sky's past what hides it, the bounced light of every light that is not
+  Realtime, and all the light of Baked lights. Drawn, it takes the place of the ambient, environment, reflection-probe
+  and GI diffuse light; reflections stay the environment's and the probes'. A mesh needs **lightmap UVs**
+  (`MeshData3D::lightmap_uv`: every triangle its own place in [0, 1]^2): glTF's `TEXCOORD_1` is read as them (a mesh
+  that neither bends nor morphs, all of them in [0, 1]); `generate_lightmap_uv(mesh, {resolution, padding})` lays
+  them out with xatlas (charts cut, flattened and packed; seam vertices split; deterministic), and
+  `MeshOptions3D::lightmap_uv` does it as a mesh is made where it has none (the same mesh and resolution give the same
+  UVs, so a bake read back from the GPU agrees with what is drawn). A mesh with lightmap UVs can have levels of detail
+  (the simplifier minds its lightmap UVs' seams as it does its UVs'; every level indexes the mesh's own vertices, so it
+  reads the same lightmap) but not clusters (asked for, it gets four levels instead, with a warning in the log).
+- **Probes:** a grid over the lightmapped copies (or `probe_area`), every `probe_spacing` units, each the light
+  arriving from all round as linear spherical harmonics (`a + b.n` facing `n`, in the ambient light's units), Baked
+  lights' direct light included, and how far its rays went each of six ways (+x, -x, +y, -y, +z, -z: the mean and mean
+  square of the distance to what they met, `BakedProbes3D::visibility`). A copy without a lightmap takes its diffuse
+  light from the eight probes round each of its points (moved a quarter of a spacing along its normal), each weighed
+  trilinearly, by whether it is in front of the surface, and by whether it can see the point (Chebyshev's inequality
+  on its distances along each axis toward it, as DDGI's probes, with six ways in place of an octahedral map): a
+  probe on the far side of a wall gives nothing (a point inside a dark room by a wall the grid straddles took 14% of
+  the sky's light through it without, 1.3% with). Fading to the ambient light half a spacing outside the grid. Probes
+  inside something (most of their rays meet backs) take their neighbours' light and see nothing.
+- **Lights** choose their part (`LightBake3D`, on `DirectionalLight3D`, `PointLightSource3D` and
+  `SpotLightSource3D`): `Realtime` (the default: drawn, left out of the bake), `Mixed` (drawn each frame with its
+  shadows on everything; its bounced light is baked) and `Baked` (all of it baked; with `Scene3D::baked_lighting` it
+  is not drawn at all: no highlights, and what moves casts no shadow from it; a Baked sun still colours the sky and
+  the fog). `drawn_lights(lights)` is the list as drawn.
+- **The bake** (`bake_lighting(surfaces, lights, sky, settings, control)`): each `BakeSurface3D` is a mesh, its
+  transform, a diffuse colour (times the vertex colour and an optional base-colour picture: `BakeTexture3D`), its
+  emission, `lightmapped` (else it only hides and bounces light), `texel_scale` and `double_sided`. The sky is
+  `bake_sky(lights)` (the ambient above, the ground ambient below: what the stock shaders give a surface from it,
+  exactly) or a panorama (equirectangular linear RGB, as an environment's). `LightBakeSettings3D`: `texels_per_unit`
+  (4; each copy's square side within `min_texels`..`max_texels`), `page_size` (1024; pages cut down to what they
+  hold), `padding`, `samples` (128 rays a texel and a bounce), `bounces` (3), `denoise` (an edge-aware blur of the
+  indirect light among texels of one surface), `backface_limit`, the probes' settings and `seed`. Direct light is
+  sampled over each texel's footprint and each light's body (`size`: soft shadows); indirect light pass by pass (each
+  pass's rays read the last pass's lightmaps where they hit), so `bounces` passes hold that many bounces. It runs on
+  `control.jobs` (a `JobSystem`), can be stopped (`control.stop`) and reports `progress`. The same input gives the same
+  texels to the bit on any number of threads. `BakedLightingData3D::stats` counts texels, rays and seconds.
+- **Drawn:** `renderer.create_baked_lighting(data)` makes the GPU copy (`BakedLighting3D`: the pages as an RGBA16F
+  array, the placements, the probes as an RGBA16F volume); set `scene.baked_lighting` and each lightmapped copy's
+  `MeshInstance3D::lightmap` (its placement in `data.placements` plus one; 0: the probes light it). The stock lit
+  materials read it through the light variants (`mesh_baked*`, with `mesh_lightmap*.vert` and the lightmap UVs'
+  vertex stream for lightmapped copies): with baked lighting the light variant is always used. Surface shaders (material graphs) read it
+  through four baked variants of their own (`SurfaceVariant3D::Baked` ... `VelocityBakedFog`: plain, fog, velocity,
+  velocity and fog; a lightmapped copy's with the lightmap UVs' vertex shader). Compiled from source they are always
+  made; a cooked graph has them where it was cooked for baked lighting (`MaterialGraphCookOptions3D::baked_lighting`,
+  `kin_material_graph cook --baked-lighting`, `BAKED_LIGHTING` on `kin_cook_material_graph(s)` and `kin_game`), and
+  without them it is lit as without the bake (the log says so once). A surface that moves its vertices reads the
+  probes, not lightmaps. Custom shaders read it when made to (`KIN_BAKED_LIGHT`, see Custom shaders);
+  unlit materials do not. Ambient occlusion still applies on top. Not on WebGL2 yet.
+- **Files:** `save_baked_lighting(data, folder)` writes `lighting.json` (the placements, the probe grid), a Radiance
+  picture a page (`lightmap_<n>.hdr`) and `probes.bin`; `load_baked_lighting(folder)` reads them through the content
+  folder or pack.
+
+```cpp
+#include <kin/render3d/baked_lighting3d.hpp>
+
+kin::MeshData3D floor = kin::meshes::plane({8, 8});
+(void)kin::generate_lightmap_uv(floor, {.resolution = 128});
+scene.lights.sun.bake = kin::LightBake3D::Mixed; // drawn, its bounce baked
+const kin::BakeSurface3D surfaces[] = {{.mesh = &floor, .albedo = {0.6f, 0.6f, 0.6f}}};
+auto baked = kin::bake_lighting(surfaces, scene.lights, kin::bake_sky(scene.lights), {}, {.jobs = &jobs});
+const kin::Mesh3D floor_mesh = r3d.create_mesh(floor).value_or({});
+scene.baked_lighting = r3d.create_baked_lighting(*baked).value_or({});
+const kin::MeshInstance3D copy{.transform = kin::Mat4f::identity(), .lightmap = 1}; // placement 0
+(void)scene.draw_instanced(floor_mesh, std::span{&copy, 1}, material);
+```
+
+#### Baked lighting on entities
+
+`StaticLighting3D` marks what stands still: the entity's `MeshRenderer3D`, or its `ModelRenderer3D`'s parts that
+neither bend nor morph, with a lightmap where `lightmapped` and its meshes have lightmap UVs (a model's second UV set,
+or loaded with `MeshOptions3D::lightmap_uv`), else lit by the probes; `texel_scale` for that entity. `PointLight3D`
+and `SpotLight3D` have `bake` (`"realtime"`, `"mixed"`, `"baked"`), `SceneEnvironment3D` `sun_bake`, `fill_bake`,
+`baked_lighting` (the bake's content folder) and the bake's settings (`bake_texels_per_unit`, `bake_samples`,
+`bake_bounces`, `bake_page_size`, `bake_denoise`, `bake_probes`, `bake_probe_spacing`, `bake_probe_samples`).
+`bake_scene_lighting(world, renderer, content, "lighting")` bakes the world as it stands (meshes read back from the
+GPU as drawn; materials by their colour, metalness and emission with their base colour and emission maps
+(`Renderer3D::read_texture_colors`, at up to 256 texels a side); the sky as drawn: the procedural sky's panorama with
+`sky_lights_scene` (`Renderer3D::read_sky_environment`: render once before baking), else the environment's picture
+(`Renderer3D::read_environment`; a game's own in `Scene3D::lights`: pass the scene as the last argument), else the
+ambient and ground ambient), writes the bake into the content, and sets each `StaticLighting3D::lightmap` and the
+environment's `baked_lighting` (save the scene to keep them). `SceneBakedLighting3D::update(world, scene)` puts the
+bake the active environment names in the scene each frame; `SceneSession3D` runs it.
+
 ### Levels of detail
 
 `r3d.create_mesh(data, {.levels = 4})` (or `load_model(path, {.levels = 4})`) builds, at load, up to
@@ -2079,6 +2169,16 @@ compiled shaders retain the parameter prefix and their original shading behavior
 The blend mode, depth and culling are the material's, as ever; the shadow and
 pick passes draw the material as if it had no shader.
 
+A custom shader that defines `KIN_BAKED_LIGHT` before the include reads baked lighting (Scene3D::baked_lighting):
+`kin_lit`'s diffuse light is then the bake's (the copy's lightmap, else the probes'), as the stock materials', and
+`bool kin_baked_light(vec3 n, out vec3 light, out float share)` gives it for a lighting of its own (in the ambient
+light's units: a white surface shows `light`; `share` 1 from a lightmap, the probes' cover else; false: none here).
+Samplers 12 and 13 are then the bake's (its pages, a 2D array, and its probes, a 3D texture: a black one without a
+bake), and its own extra inputs start at 14 (two at most). Its lightmapped copies are drawn with the lightmap UVs'
+vertex stream; every stock mesh vertex shader writes the lightmap's place (none where a copy has none), so the same
+shader serves both. Use `kin_lit` or `kin_baked_light`: a shader whose compiled code reads neither is not seen as
+reading the bake.
+
 `r3d.create_material_shader(spirv)` makes one from SPIR-V (build it with
 `kin_compile_glsl`, which adds the include path; `cmake/kin_spirv.cmake` does
 too, and skips `*.inc.glsl`; see `examples/CMakeLists.txt`);
@@ -2259,7 +2359,10 @@ surface (and what its parameters did). `Assets3D::load_material_graph(path)` loa
   shipped game, which has no glslc, loads. `kin_game` cooks every graph in a game's content so, beside it
   (`kin_cook_material_graphs(<var> CONTENT <dir>)`), and its package and content pack wait for them; a build that
   can't cook (no glslc, or Android's cross-compile, whose tools don't run on the build machine) needs them cooked
-  already, by a desktop build, and kept with the content: a shipping build does not configure without them;
+  already, by a desktop build, and kept with the content: a shipping build does not configure without them. A game
+  whose scenes have baked lighting cooks its graphs with the four variants that read it too (`cook
+  --baked-lighting`, `BAKED_LIGHTING` on `kin_cook_material_graph(s)` and `kin_game`; Baked lighting); cooked
+  without them, a graph is lit as without the bake, and the log says so once;
 - else the source, compiled now with glslc (development); without glslc and no cooked file, an error saying so.
 
 Invalidating the graph or its cooked file (`SceneSession3D` does, for watched material files' dependencies) rebinds
@@ -2300,7 +2403,7 @@ Build/run `kin_surface3d` for explicit sun/local graph shadows, this [toon shade
 
 Native `RendererCapabilities3D::material_inputs` supports immutable `MaterialInputs3D` sets created with `r3d.create_material_inputs(shader, textures, buffers)` and assigned to `Material3D::inputs`. The factory returns owned diagnostics. Create sets outside hot draw loops and share them across draws; the handle uses shared ownership, with resource vectors owned once per set. Stock materials carry an empty handle. Sets belong to one exact shader and device. Replacement shaders or different graph allocations require a new set; uploads into existing handles do not.
 
-The twelve existing sampled slots remain reserved. Extra textures use consecutive SPIR-V set 2 bindings 12–15, with no gaps. Read-only storage buffers follow **all** sampled slots in that set: binding `12 + extra_texture_count` for the first, then consecutive bindings, up to eight buffers. SDL fragment storage slots start at zero; GLSL descriptor bindings include the sampler offset. Uniform buffers remain set 3 bindings 0–3, with their existing layouts.
+The twelve existing sampled slots remain reserved (fourteen for a shader reading baked lighting: `KIN_BAKED_LIGHT`). Extra textures use consecutive SPIR-V set 2 bindings 12–15 (14–15), with no gaps. Read-only storage buffers follow **all** sampled slots in that set: binding `12 + extra_texture_count` for the first, then consecutive bindings, up to eight buffers. SDL fragment storage slots start at zero; GLSL descriptor bindings include the sampler offset. Uniform buffers remain set 3 bindings 0–3, with their existing layouts.
 
 ```glsl
 #version 450 core
