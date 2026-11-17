@@ -162,7 +162,9 @@ struct Fog3D {
 // Their shadow (`shadows`): the sun's light through the layer, from a map round the camera along the sun, on the
 // surfaces the depth pre-pass draws (which it turns on) and in the volumetric fog's sunlight (Fog3D::volumetric's
 // sun_and_moon, Fog3D::sun_shadows): their shade drifts over the ground, and shafts come down through their gaps.
-// Off by default; needs a perspective camera (WebGL2: EXT_color_buffer_float, and no shadows or sky light there).
+// Off by default. Any camera: an orthographic one (an isometric view) walks parallel rays from its pixels' points on
+// the near plane; from under the layer looking down it sees none of them, only their shadow drifting over the ground.
+// WebGL2 needs EXT_color_buffer_float and leaves their shadows and sky light out.
 // Authored as SceneEnvironment3D's clouds_*. docs/3d_plan.md, "Volumetric clouds".
 struct Clouds3D {
     bool enabled = false;

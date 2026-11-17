@@ -9,6 +9,7 @@ uniform mat4 uInverseViewProjection, uViewProjection;
 uniform vec3 uEye;
 uniform vec2 uTarget;
 uniform bool uLinear;
+uniform bool uOrthographic;
 out vec4 outColor;
 vec3 encode(vec3 c) {
     c = clamp(c, 0.0, 1.0);
@@ -24,8 +25,14 @@ void main() {
     for (int i = 0; i < 4; ++i)
         dist = max(dist, texelFetch(uDistance, clamp(base + ivec2(i & 1, i >> 1), ivec2(0), size - 1), 0).r);
     vec4 far_point = uInverseViewProjection * vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+    vec3 from = uEye;
     vec3 dir = normalize(far_point.xyz - uEye * far_point.w);
-    vec4 clip = uViewProjection * vec4(uEye + dir * max(dist, 1.0), 1.0);
+    if (uOrthographic) {
+        vec4 near_point = uInverseViewProjection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+        from = near_point.xyz / near_point.w;
+        dir = normalize(far_point.xyz / far_point.w - from);
+    }
+    vec4 clip = uViewProjection * vec4(from + dir * max(dist, 1.0), 1.0);
     // (The meshes' vertex shaders map kin's 0 to 1 onto GL's -1 to 1, so the window's depth is kin's own.)
     gl_FragDepth = clamp(clip.z / max(clip.w, 1e-6), 0.0, 1.0);
     float cover = 1.0 - c.a;

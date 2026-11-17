@@ -599,12 +599,13 @@ struct CloudEnvUniforms {
 };
 static_assert(sizeof(CloudEnvUniforms) == 352);
 // Samples along the sun's ray through the layer for each texel of the clouds' shadow map.
-constexpr u32 cloud_shadow_steps = 32;
+constexpr u32 cloud_shadow_steps = 48;
 
-// Whether Scene3D::clouds has anything to draw: on, some coverage and density, a layer, a perspective camera.
-bool clouds_possible(const Clouds3D& c, const Camera3D& camera) {
+// Whether Scene3D::clouds has anything to draw: on, some coverage and density, a layer. (Any camera: an orthographic
+// one's rays are parallel, each from its pixel's point on the near plane.)
+bool clouds_possible(const Clouds3D& c, const Camera3D&) {
     return c.enabled && c.coverage > 0.0f && c.density > 0.0f && std::isfinite(c.bottom) && std::isfinite(c.top) &&
-           c.top != c.bottom && camera.projection == Projection3D::Perspective;
+           c.top != c.bottom;
 }
 // mesh_fog.frag's slot 2.
 struct FogBlockUniforms {
@@ -16924,7 +16925,8 @@ bool GpuRenderer3D::clouds_trace(FrameCtx& ctx) {
     CloudTraceUniforms u{};
     std::memcpy(u.to_world, to_world.m, sizeof(u.to_world));
     put(u.eye, eye, static_cast<f32>(view->_clouds_frame++ % 4096u));
-    put(u.size, {static_cast<f32>(w), static_cast<f32>(h), 0.0f}, 0.0f);
+    const f32 orthographic = camera.projection == Projection3D::Orthographic ? 1.0f : 0.0f;
+    put(u.size, {static_cast<f32>(w), static_cast<f32>(h), orthographic}, 0.0f);
     u.clouds = ctx.cloud_params;
     u.atmosphere = ctx.cloud_atmosphere;
     if (ctx.fog) {
@@ -16965,7 +16967,7 @@ bool GpuRenderer3D::clouds_trace(FrameCtx& ctx) {
         CloudResolveUniforms r{};
         std::memcpy(r.to_world, to_world.m, sizeof(r.to_world));
         std::memcpy(r.previous, view->_clouds_previous.m, sizeof(r.previous));
-        put(r.eye, eye, 0.0f);
+        put(r.eye, eye, orthographic);
         put(r.size, {static_cast<f32>(w), static_cast<f32>(h), history}, previous ? 1.0f : 0.0f);
         const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> out{
             SDL_GPUStorageTextureReadWriteBinding{.texture = view->_clouds[written].handle(), .cycle = true},
@@ -17000,7 +17002,7 @@ bool GpuRenderer3D::clouds_trace(FrameCtx& ctx) {
     std::memcpy(a.view_projection, ctx.drawn[0].m, sizeof(a.view_projection));
     put(a.eye, eye, 0.0f);
     const bool encode = !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // a gamma target
-    put(a.target, {static_cast<f32>(extent.x), static_cast<f32>(extent.y), encode ? 1.0f : 0.0f}, 0.0f);
+    put(a.target, {static_cast<f32>(extent.x), static_cast<f32>(extent.y), encode ? 1.0f : 0.0f}, orthographic);
     stats.clouds = true;
     stats.clouds_history = previous;
     stats.clouds_texels = w * h;

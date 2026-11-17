@@ -13,7 +13,7 @@ layout(std140, set = 3, binding = 0) uniform Params {
     mat4 inverse_view_projection; // clip space (as the meshes are drawn: jittered) to world
     mat4 view_projection;         // and back
     vec4 eye;                     // xyz: the camera
-    vec4 target;                  // xy: the picture's size, z: 1 when it holds sRGB-encoded colour (an 8-bit view)
+    vec4 target; // xy: the picture's size, z: 1 when it holds sRGB-encoded colour (an 8-bit view), w: 1 orthographic
 } params;
 
 vec3 kin_encode(vec3 c) {
@@ -31,9 +31,18 @@ void main() {
     // 0 (and is filtered in at a cloud's edge), and a cloud is never nearer than it is.
     const vec4 around = textureGather(uDistance, uv, 0);
     const float dist = max(max(around.x, around.y), max(around.z, around.w));
-    const vec4 near = params.inverse_view_projection * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
-    const vec3 dir = normalize(near.xyz / near.w - params.eye.xyz);
-    const vec4 clip = params.view_projection * vec4(params.eye.xyz + dir * max(dist, 1.0), 1.0);
+    const vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    const vec4 near = params.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+    vec3 from = params.eye.xyz, dir;
+    if (params.target.w > 0.5) {
+        // Orthographic: the ray from the pixel's point on the near plane, parallel to the view.
+        const vec4 far_point = params.inverse_view_projection * vec4(ndc, 0.0, 1.0);
+        from = near.xyz / near.w;
+        dir = normalize(far_point.xyz / far_point.w - from);
+    } else {
+        dir = normalize(near.xyz / near.w - from);
+    }
+    const vec4 clip = params.view_projection * vec4(from + dir * max(dist, 1.0), 1.0);
     // Reverse Z: nearer is greater; past a finite far plane the clouds are at the far plane (behind every mesh).
     gl_FragDepth = clamp(clip.z / max(clip.w, 1e-6), 0.0, 1.0);
     const float cover = 1.0 - c.a;

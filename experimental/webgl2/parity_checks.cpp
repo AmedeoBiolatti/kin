@@ -591,6 +591,24 @@ void check_clouds(Renderer2D& r, Renderer3D& r3d) {
             "Parity submission failed");
     b.render("A plane in front of the clouds");
     near(b.at(32, 32), {200, 40, 40, 255}, 2, "The clouds stay behind a plane in front of them");
+    // An orthographic camera above the layer looking down: the clouds' tops in its rays (parallel, from the near
+    // plane).
+    scene.clear();
+    scene.camera = Camera3D::look_at({0, 6000, 0}, {0, 0, -6000});
+    scene.camera.projection = Projection3D::Orthographic;
+    scene.camera.height = 3000;
+    scene.clouds.enabled = false;
+    b.render("An orthographic view of a clear sky");
+    const auto open_sky = b.at(32, 32);
+    scene.clouds.enabled = true;
+    for (int frame = 0; frame < 3; ++frame)
+        b.render("An orthographic view of the clouds' tops");
+    const auto from_above = b.at(32, 32);
+    if (std::abs(from_above[0] - open_sky[0]) + std::abs(from_above[2] - open_sky[2]) <= 20)
+        std::cerr << "clouds from above: " << from_above[0] << ' ' << from_above[1] << ' ' << from_above[2]
+                  << ", clear " << open_sky[0] << ' ' << open_sky[1] << ' ' << open_sky[2] << '\n';
+    require(std::abs(from_above[0] - open_sky[0]) + std::abs(from_above[2] - open_sky[2]) > 20,
+            "An orthographic camera sees the clouds");
     std::cout << "web parity: volumetric clouds passed\n";
 }
 void check_webgl_parity(Renderer2D& r, Renderer3D& r3d) {

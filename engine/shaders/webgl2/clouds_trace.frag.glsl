@@ -17,6 +17,7 @@ uniform KinFog uFog;
 uniform highp sampler2D uDepth; // the opaque meshes' depth (kin's reverse Z 0 to 1; 0 nothing)
 uniform vec4 uUnprojectXY, uUnprojectZW; // the depth to view space, as native's
 uniform vec4 uDepthSize;                 // xy: its size; z: 1 when it bounds the rays
+uniform bool uOrthographic;              // parallel rays, each from its pixel's point on the near plane
 layout(location = 0) out vec4 out0;
 layout(location = 1) out vec4 out1;
 // The farthest surface in the walk texel's pixels (native kin_cloud_limit; rows up): its distance, 1e30 for none.
@@ -37,6 +38,8 @@ float cloud_limit() {
     float w = uUnprojectZW.z * farthest + uUnprojectZW.w;
     vec3 seen = vec3(uUnprojectXY.x * ndc.x + uUnprojectXY.z, uUnprojectXY.y * ndc.y + uUnprojectXY.w,
                      uUnprojectZW.x * farthest + uUnprojectZW.y) / w;
+    if (uOrthographic) // along the ray from the near plane (depth 1): the view depth between them
+        return abs(seen.z - (uUnprojectZW.x + uUnprojectZW.y) / (uUnprojectZW.z + uUnprojectZW.w));
     return length(seen);
 }
 void main() {
@@ -44,6 +47,11 @@ void main() {
     vec4 far_point = uToWorld * vec4(ndc, 0.0, 1.0);
     vec3 eye = uEye.xyz;
     vec3 dir = normalize(far_point.xyz - eye * far_point.w);
+    if (uOrthographic) {
+        vec4 near_point = uToWorld * vec4(ndc, 1.0, 1.0);
+        eye = near_point.xyz / near_point.w;
+        dir = normalize(far_point.xyz / far_point.w - eye);
+    }
     vec2 span = kin_cloud_span(uClouds, eye, dir);
     span.y = min(span.y, cloud_limit());
     if (span.x >= span.y) {

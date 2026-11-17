@@ -17,7 +17,7 @@ layout(set = 1, binding = 1, r32f) uniform writeonly image2D uOutDistance;
 layout(std140, set = 2, binding = 0) uniform Params {
     mat4 to_world; // this frame's clip space (without the jitter) to world
     mat4 previous; // the last frame's view-projection (without the jitter)
-    vec4 eye;      // xyz: the camera
+    vec4 eye;      // xyz: the camera, w: 1 for an orthographic one
     vec4 size;     // xy: the texels, z: the history's share, w: 1 with a history
 } params;
 
@@ -43,10 +43,18 @@ void main() {
         }
     }
     const vec2 uv = (vec2(xy) + 0.5) / params.size.xy;
-    const vec4 near = params.to_world * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
-    const vec3 dir = normalize(near.xyz / near.w - params.eye.xyz);
-    const vec4 before = dist > 0.0 ? params.previous * vec4(params.eye.xyz + dir * dist, 1.0)
-                                   : params.previous * vec4(dir, 0.0);
+    const vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    const vec4 near = params.to_world * vec4(ndc, 1.0, 1.0);
+    vec4 before;
+    if (params.eye.w > 0.5) {
+        // Orthographic: the ray from the pixel's point on the near plane, parallel to the view.
+        const vec4 far_point = params.to_world * vec4(ndc, 0.0, 1.0);
+        const vec3 from = near.xyz / near.w;
+        before = params.previous * vec4(from + normalize(far_point.xyz / far_point.w - from) * dist, 1.0);
+    } else {
+        const vec3 dir = normalize(near.xyz / near.w - params.eye.xyz);
+        before = dist > 0.0 ? params.previous * vec4(params.eye.xyz + dir * dist, 1.0) : params.previous * vec4(dir, 0.0);
+    }
     vec4 result = current;
     float result_distance = dist;
     if (before.w > 0.0) {

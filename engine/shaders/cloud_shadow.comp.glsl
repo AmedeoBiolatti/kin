@@ -2,7 +2,8 @@
 // The clouds' shadow map (Clouds3D::shadows): for each texel of a square of the plane at the layer's middle height
 // (`shadow_extent` across, round where the camera's ray toward the sun crosses it), the sun's light that gets through
 // the layer along the sun's ray through that point: e^-tau, tau summed over `steps` samples between the base and the
-// top (the shell's curvature left out: the square is small beside the planet). Read with kin_cloud_shadow.
+// top of the clouds' shapes without their detail (the shell's curvature left out: the square is small beside the
+// planet). Read with kin_cloud_shadow.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(set = 0, binding = 0) uniform sampler3D uShape;
@@ -34,10 +35,15 @@ void main() {
     const float dy = (top - bottom) / float(steps);
     const float ds = dy / l.y; // the ray's length per sample
     float depth = 0.0;
+    // Each texel's samples moved by its own share of a step (interleaved gradient noise): with the same heights
+    // everywhere, the steps lined up into bands across the ground along the sun.
+    const float offset = fract(52.9829189 * fract(dot(vec2(xy), vec2(0.06711056, 0.00583715))));
     for (int k = 0; k < steps; ++k) {
-        const float y = bottom + (float(k) + 0.5) * dy;
+        const float y = bottom + (float(k) + offset) * dy;
         const vec3 p = vec3(q.x + l.x / l.y * (y - params.map.w), y, q.y + l.z / l.y * (y - params.map.w));
-        depth += kin_cloud_density(c, uShape, uDetail, uWeather, p, y, true);
+        // (The shapes without their worn detail: a shadow from kilometres up is soft, and the detail, finer than the
+        // samples' spacing along the sun, banded it.)
+        depth += kin_cloud_density(c, uShape, uDetail, uWeather, p, y, false);
     }
     imageStore(uOut, xy, vec4(exp(-depth * c.cover.z * ds), 0.0, 0.0, 1.0));
 }

@@ -7,6 +7,7 @@ uniform highp sampler2D uCurrent, uCurrentDistance, uHistory, uHistoryDistance;
 uniform mat4 uToWorld, uPrevious;
 uniform vec3 uEye;
 uniform vec4 uSize; // xy: the texels, z: the history's share, w: 1 with a history
+uniform bool uOrthographic;
 layout(location = 0) out vec4 out0;
 layout(location = 1) out vec4 out1;
 void main() {
@@ -28,6 +29,11 @@ void main() {
     vec4 far_point = uToWorld * vec4(ndc, 0.0, 1.0);
     vec3 dir = normalize(far_point.xyz - uEye * far_point.w);
     vec4 before = dist > 0.0 ? uPrevious * vec4(uEye + dir * dist, 1.0) : uPrevious * vec4(dir, 0.0);
+    if (uOrthographic) {
+        vec4 near_point = uToWorld * vec4(ndc, 1.0, 1.0);
+        vec3 from = near_point.xyz / near_point.w;
+        before = uPrevious * vec4(from + normalize(far_point.xyz / far_point.w - from) * dist, 1.0);
+    }
     if (before.w <= 0.0) return;
     vec2 then = before.xy / before.w * 0.5 + 0.5;
     if (any(lessThan(then, vec2(0.0))) || any(greaterThan(then, vec2(1.0)))) return;
