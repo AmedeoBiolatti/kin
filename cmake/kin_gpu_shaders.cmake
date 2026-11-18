@@ -37,7 +37,9 @@ set(_kin_gpu_shader_names_3D
     view_output_effects.frag glow_down.comp glow_up.comp glow_flare.comp glow_streak.comp glow_compose.comp
     subsurface_scatter.comp subsurface_combine.frag
     cloud_noise.comp cloud_weather.comp clouds_trace.comp clouds_resolve.comp clouds_apply.frag cloud_shadow.comp
-    cloud_shadow_screen.comp clouds_env.frag)
+    cloud_shadow_screen.comp clouds_env.frag
+    mesh_lightmap.vert mesh_lightmap_indexed.vert mesh_velocity_lightmap.vert mesh_baked.frag mesh_baked_fog.frag mesh_velocity_baked.frag
+    mesh_velocity_baked_fog.frag)
 
 set(_kin_gpu_shader_names ${_kin_gpu_shader_names_2D})
 if(KIN_EXPERIMENTAL_3D)

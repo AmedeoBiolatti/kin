@@ -75,9 +75,17 @@ struct MeshData3D {
     // or clusters, and is blended before it is skinned.
     std::vector<MorphTarget3D> morph_targets;
     std::vector<f32> morph_weights;
+    // Optional: a second set of texture coordinates, one for each vertex, or none: where a copy reads its lightmap
+    // (kin/render3d/baked_lighting3d.hpp). Every triangle has a place of its own in [0, 1] x [0, 1] (none overlap, none
+    // repeat), with room between the charts for the texels round their edges: glTF's TEXCOORD_1 when a model has it,
+    // or generate_lightmap_uv. A mesh with them can have levels of detail (made minding their seams; every level reads
+    // the lightmap) but not clusters (asked for: levels instead), and cannot be skinned or morphed. append() drops them
+    // (the joined charts would overlap: make them again).
+    std::vector<Vec2f> lightmap_uv;
 
     bool skinned() const { return !skin.empty(); }
     bool morphed() const { return !morph_targets.empty(); }
+    bool lightmapped() const { return !lightmap_uv.empty(); }
     // The joints the skin uses: one more than the highest index with a weight above zero (0 for an unskinned mesh).
     u32 skin_joint_count() const;
     std::size_t triangle_count() const { return (indices.empty() ? vertices.size() : indices.size()) / 3; }
@@ -135,6 +143,13 @@ struct MeshOptions3D {
     // number of triangles in a cluster (at most 128).
     bool clusters = false;
     u32 cluster_triangles = 128;
+    // Lightmap UVs laid out (generate_lightmap_uv, kin/render3d/baked_lighting3d.hpp; for a square of
+    // `lightmap_resolution` texels) where a mesh has none of its own: a static model drawn with its lightmap
+    // (Scene3D::baked_lighting) whose file has no second UV set. The same mesh and resolution give the same UVs, so a
+    // bake made from the model's file (bake_scene_lighting) and the mesh drawn agree. Not for a skinned or morphed
+    // mesh.
+    bool lightmap_uv = false;
+    u32 lightmap_resolution = 256;
     bool operator==(const MeshOptions3D&) const = default;
 };
 

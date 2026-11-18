@@ -30,6 +30,7 @@ fonts and additional libraries through its `LICENSE_FILES` argument.
 | [stb_vorbis](https://github.com/nothings/stb) | 1.22 (commit 2c980bb) | Public domain (Unlicense) or MIT | Sean Barrett |
 | [cgltf](https://github.com/jkuhlmann/cgltf) (with `KIN_EXPERIMENTAL_3D`) | 1.14 | MIT | Johannes Kuhlmann |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `KIN_EXPERIMENTAL_3D`; simplifier, meshlet builder, cluster partitioner, index and vertex-cache tools) | 0.25 | MIT | Arseny Kapoulkine |
+| [xatlas](https://github.com/jpcy/xatlas) (with `KIN_EXPERIMENTAL_3D`; lightmap UV charts and packing) | commit f700c77 | MIT | Jonathan Young |
 | [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (with `KIN_EXPERIMENTAL_3D`; the rigid body engine behind `kin/physics3d`) | 5.5.0 | MIT | Jorrit Rouwe |
 
 Native GPU builds use a marked, generated variant of SDL's Vulkan translation unit

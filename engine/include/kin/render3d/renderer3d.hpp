@@ -40,6 +40,7 @@ namespace kin {
 class Renderer2D;
 class Assets3D;
 class BakeCache;
+struct BakedLightingData3D;
 
 // A picture a 3D scene is drawn into (colour and depth), laid into the frame
 // with Renderer2D::draw_texture(view.texture(), rect). Cheap to copy (copies
@@ -167,6 +168,10 @@ public:
     // One from a Radiance .hdr file, read through the content folder or pack.
     // A failed result explains why it could not be read.
     Result3D<Environment3D> load_environment(const std::filesystem::path& path);
+    // Baked lighting on the GPU (Scene3D::baked_lighting) from a bake (render3d/baked_lighting3d.hpp: bake_lighting or
+    // load_baked_lighting). A failed result explains why: 3D or the light variants not available, pages too large for
+    // the device. The bake can be let go after.
+    Result3D<BakedLighting3D> create_baked_lighting(const BakedLightingData3D& baked);
     // A reflection probe's picture (render3d/reflection_probes3d.hpp), `side` pixels a face of its six (16 to 1024),
     // empty until captured; empty where 3D or compute isn't available.
     Result3D<ReflectionCapture3D> create_reflection_capture(u32 side = 128);
@@ -184,6 +189,24 @@ public:
     // top). Each waits for the GPU (what is recorded so far is submitted first).
     Result3D<MeshData3D> read_mesh(const Mesh3D& mesh);
     Result3D<std::vector<f32>> read_linear_texture(const Texture& texture);
+    // A material's picture read back for tools (bake_scene_lighting's base colour and emission maps): RGBA8 texels as
+    // stored (a colour map's sRGB bytes), rows from the top, scaled (linear filtering) to at most `max_side` a side.
+    // Any 2D format, block-compressed ones too. Waits for the GPU.
+    struct TextureColors3D {
+        Vec2i size{};
+        std::vector<u8> rgba;
+    };
+    Result3D<TextureColors3D> read_texture_colors(const Texture& texture, u32 max_side = 256);
+    // An environment's picture (linear RGB floats, three a texel, rows from the top, 2:1: what create_environment
+    // takes), and the panorama the renderer last made of a scene's procedural sky (Lights3D::sky_lights_scene: world
+    // space, before Lights3D::environment_intensity; none until a render made it). For tools: baked lighting's sky.
+    // Wait for the GPU.
+    struct EnvironmentPicture3D {
+        Vec2i size{};
+        std::vector<f32> rgb;
+    };
+    Result3D<EnvironmentPicture3D> read_environment(const Environment3D& environment);
+    Result3D<EnvironmentPicture3D> read_sky_environment();
     // Whether `view`'s global illumination has light yet (what capture_reflection's global_illumination borrows).
     bool global_illumination_lit(const View3D& view) const;
     Result3D<ReflectionCapture3D> load_reflection_capture(const std::filesystem::path& path);

@@ -19,6 +19,7 @@
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/scene/baked_lighting_scene3d.hpp>
 #include <kin/scene/planar_views3d.hpp>
 #include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
@@ -1796,6 +1797,69 @@ void gpu_frame_cost(Renderer2D& renderer) {
 }
 } // namespace
 
+// Baked lighting on entities: a model standing still (StaticLighting3D, its lightmap UVs laid out at load) under a
+// Baked lamp. bake_scene_lighting writes the bake into the content and sets the entity's lightmap and the
+// environment's `baked_lighting`; the session then draws it, so that the lamp (not drawn any more) still lights the box
+// from its lightmap, switched off or not. Without the bake, the switched-off lamp lights nothing.
+void gpu_baked_lighting(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
+    write(scratch.path / "baked_lighting.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,5]},"SceneCamera3D":{"fov":50}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"ambient":[0,0,0],"sun_color":[0,0,0],
+        "bake_samples":32,"bake_bounces":1,"bake_probe_samples":64}}},
+      {"id":"box","components":{"Transform3D":{"position":[0,0,0]},"ModelRenderer3D":{"asset":"parts.glb"},
+        "StaticLighting3D":{}}},
+      {"id":"lamp","components":{"Transform3D":{"position":[0,0,2.5]},
+        "PointLight3D":{"color":[8,8,8],"radius":10,"bake":"baked"}}}]})");
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {160, 120};
+    options.view.samples = 1;
+    options.warm_up = false;
+    SceneSession3D session{r3d, assets, options};
+    check(session.load("baked_lighting.kinscene"), "baked lighting scene failed");
+    const auto lit = [&] {
+        renderer.clear();
+        if (!session.render())
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        renderer.draw_texture(session.view()->texture(), {0, 0, 160, 120});
+        std::vector<u8> pixels;
+        Vec2i size;
+        check(renderer.read_rgba({0, 0, 160, 120}, pixels, size), "baked lighting read failed");
+        renderer.present();
+        const auto at = session.scene()->camera.project({0, 0, 0.5f}, {0, 0, 160, 120});
+        check(bool(at), "the box is off screen");
+        // (The box is red: the lamp's light on it, red.)
+        return int(pixels[(std::size_t(at->pos.y) * 160 + std::size_t(at->pos.x)) * 4]);
+    };
+    const int drawn = lit();
+    check(session.scene()->lights.points.size() == 1 && session.scene()->lights.points[0].bake == LightBake3D::Baked,
+          "the lamp's bake mode was not collected");
+    auto stats = bake_scene_lighting(*session.world(), r3d, scratch.path, "lighting");
+    if (!stats)
+        for (const auto& e : stats.diagnostics)
+            std::cerr << e << '\n';
+    check(stats.ok() && stats->lightmapped > 0, "bake_scene_lighting failed");
+    check(std::filesystem::exists(scratch.path / "lighting" / "lighting.json") &&
+              std::filesystem::exists(scratch.path / "lighting" / "lightmap_0.hdr"),
+          "the bake was not written");
+    check(session.entity("box").get<StaticLighting3D>()->lightmap == 1, "the box's lightmap was not set");
+    check(session.entity("environment").get<SceneEnvironment3D>()->baked_lighting == "lighting",
+          "the environment does not name the bake");
+    session.entity("lamp").get_mut<PointLight3D>()->enabled = false;
+    const int baked = lit();
+    check(bool(session.scene()->baked_lighting), "the session did not draw the bake");
+    session.entity("environment").get_mut<SceneEnvironment3D>()->baked_lighting.clear();
+    const int dark = lit();
+    std::cerr << "baked lighting: lamp drawn " << drawn << ", baked (lamp off) " << baked << ", unbaked (lamp off) "
+              << dark << '\n';
+    check(drawn > 100 && baked > 100 && dark < 10, "the bake does not light the box as the lamp did");
+    std::cout << "baked lighting: baked from entities, drawn by the session\n";
+}
+
 int main(int argc, char** argv) {
     // The CPU and headless checks run everywhere (CI's jobs without a GPU too); only the GPU checks are skipped there.
     try {
@@ -1829,6 +1893,7 @@ int main(int argc, char** argv) {
         gpu_planar(renderer);
         gpu_terrain(renderer);
         gpu_probes(renderer);
+        gpu_baked_lighting(renderer);
         gpu_frame_pick(renderer);
         gpu_frame_cost(renderer);
         std::cout << "Transactional scene lifecycle, reload, budgets and ownership checks passed\n";

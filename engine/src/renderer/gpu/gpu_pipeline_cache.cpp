@@ -153,7 +153,8 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
         vb.pitch = 3 * sizeof(f32);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0);
-    } else if (layout == GpuVertexLayout::MeshVertices || layout == GpuVertexLayout::SkinnedMeshVertices) {
+    } else if (layout == GpuVertexLayout::MeshVertices || layout == GpuVertexLayout::SkinnedMeshVertices ||
+               layout == GpuVertexLayout::LightmappedMeshVertices) {
         vb.pitch = sizeof(GpuMeshVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(GpuMeshVertex, x));
@@ -191,6 +192,14 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
         slot = 1;
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, offsetof(GpuSkinVertex, j0));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSkinVertex, w0));
+        buffer_count = 2;
+    } else if (layout == GpuVertexLayout::LightmappedMeshVertices) {
+        // The lightmap UVs of the second buffer, at location 4.
+        vbs[1].slot = 1;
+        vbs[1].pitch = 2 * sizeof(f32);
+        vbs[1].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        slot = 1;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 0);
         buffer_count = 2;
     }
     SDL_GPUVertexInputState vertex_input{};

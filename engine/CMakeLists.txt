@@ -496,6 +496,24 @@ if(KIN_EXPERIMENTAL_3D)
     set_source_files_properties(${_kin_meshopt_sources} PROPERTIES COMPILE_OPTIONS
         "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
+    # Lightmap UVs (generate_lightmap_uv, kin/render3d/baked_lighting3d.hpp): xatlas (MIT), one source file. It has no
+    # release tags; pinned at a commit.
+    FetchContent_Declare(xatlas
+        URL https://github.com/jpcy/xatlas/archive/f700c7790aaa030e794b52ba7791a05c085faf0c.tar.gz
+        URL_HASH SHA256=57b56dbedab3bf0a487e4c0ed3cc3fe79210d4a008d59a8326af59196a3487eb
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(xatlas)
+    if(NOT xatlas_POPULATED)
+        FetchContent_Populate(xatlas)
+    endif()
+    target_sources(kin_engine PRIVATE "${xatlas_SOURCE_DIR}/source/xatlas/xatlas.cpp")
+    set_source_files_properties("${xatlas_SOURCE_DIR}/source/xatlas/xatlas.cpp" PROPERTIES COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>" SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_DEFINITIONS XA_MULTITHREADED=0)
+    set_source_files_properties(src/render3d/lightmap_uv3d.cpp PROPERTIES
+        INCLUDE_DIRECTORIES "${xatlas_SOURCE_DIR}/source/xatlas")
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};xatlas.txt|${xatlas_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/material_graph3d.cpp src/render3d/material_import3d.cpp src/render3d/material_import_unity3d.cpp src/render3d/material_import_unreal3d.cpp src/render3d/image_decode3d.cpp src/render3d/import_decode.c src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
     target_sources(kin_engine PRIVATE
@@ -503,7 +521,8 @@ if(KIN_EXPERIMENTAL_3D)
         src/render3d/renderer3d.cpp
         src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/clouds3d.cpp src/render3d/particles3d.cpp
-        src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/terrain3d.cpp src/render3d/hdr_decode.c)
+        src/render3d/environment.cpp src/render3d/snapshot3d.cpp src/render3d/terrain3d.cpp src/render3d/hdr_decode.c
+        src/render3d/baked_lighting3d.cpp src/render3d/bake_bvh3d.cpp src/render3d/lightmap_uv3d.cpp)
     if(KIN_HAS_GPU_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp src/renderer/gpu/gpu_particles3d.cpp src/renderer/gpu/gpu_particle_composition.cpp
                                           src/renderer/gpu/gpu_area_lights3d.cpp src/renderer/gpu/gpu_area_lights_ltc.cpp
@@ -534,6 +553,7 @@ if(KIN_EXPERIMENTAL_3D)
             src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp
             src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/scene/planar_views3d.cpp
             src/scene/reflection_probes3d.cpp src/scene/terrains3d.cpp
+            src/scene/baked_lighting_scene3d.cpp
             src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp)
     endif()
     option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)

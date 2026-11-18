@@ -305,6 +305,39 @@ GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL
     return GpuTexture{_shared, texture, width, height, format, usage};
 }
 
+GpuTexture GpuDevice::create_half_texture(u32 width, u32 height, u32 slices, bool volume,
+                                          std::span<const u16> halves) {
+    const u64 slice_halves = static_cast<u64>(width) * height * 4;
+    if (width == 0 || height == 0 || slices == 0 || halves.size() != slice_halves * slices ||
+        slice_halves * 2 > 0xFFFFFFFFull) {
+        throw std::runtime_error("create_half_texture failed: invalid arguments");
+    }
+    SDL_GPUTextureCreateInfo info{};
+    info.type = volume ? SDL_GPU_TEXTURETYPE_3D : SDL_GPU_TEXTURETYPE_2D_ARRAY;
+    info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = slices;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
+    if (!texture) {
+        throw sdl_error("SDL_CreateGPUTexture (half-float texture) failed");
+    }
+    try {
+        for (u32 slice = 0; slice < slices; ++slice) {
+            UploadDestination to{.texture = texture, .w = width, .h = height};
+            (volume ? to.z : to.layer) = slice;
+            stage_upload(to, static_cast<u32>(slice_halves * 2), halves.data() + slice_halves * slice, false, nullptr);
+        }
+    } catch (...) {
+        tracked_release_texture(_device, texture);
+        throw;
+    }
+    return GpuTexture{_shared, texture, width, height, info.format, info.usage};
+}
+
 GpuTexture GpuDevice::create_texture_array(u32 width, u32 height, std::span<const u8* const> layers) {
     if (width == 0 || height == 0 || layers.empty()) {
         throw std::runtime_error("create_texture_array failed: invalid arguments");
@@ -678,6 +711,7 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
         destination.layer = to.layer;
         destination.x = to.x;
         destination.y = to.y;
+        destination.z = to.z;
         destination.w = to.w;
         destination.h = to.h;
         destination.d = 1;

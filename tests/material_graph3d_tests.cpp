@@ -280,7 +280,16 @@ void cooked() {
             CHECK(v.size() > 20 && v[0] == 3 && v[1] == 2 && v[2] == 35 && v[3] == 7);
         }
         for (u32 i = surface_mask_variant3d; i < surface_variant_count3d; ++i)
-            CHECK(now->spirv[i].empty()); // no alpha: no cut-out variants
+            CHECK(now->spirv[i].empty()); // no alpha: no cut-outs; no offset: no vertex variants; no baked lighting's
+        // Cooked for baked lighting: its four variants too, and nothing else more.
+        const auto baked = cook_material_graph3d(graph("", "", R"("roughness": 0.25)"), &why, {.baked_lighting = true});
+        CHECK(baked.has_value());
+        for (u32 i = 0; i < surface_variant_count3d; ++i) {
+            const auto& v = baked->spirv[i];
+            const bool wanted = i < surface_mask_variant3d || i >= surface_baked_variant3d;
+            CHECK(wanted ? v.size() > 20 && v[0] == 3 && v[1] == 2 && v[2] == 35 && v[3] == 7 : v.empty());
+        }
+        CHECK(surface_variant_count3d - surface_baked_variant3d == 4);
         CHECK(!cook_material_graph3d(graph("", "", R"("roughness": "nowhere")"), &why) && contains(why, "nowhere"));
     }
 #ifdef KIN_TEST_COOKED_GRAPH
@@ -435,11 +444,11 @@ void offsets() {
     if (!cooked)
         std::cerr << why << '\n';
     CHECK(cooked.has_value());
-    for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+    for (u32 i = surface_vertex_variant3d; i < surface_baked_variant3d; ++i)
         CHECK(cooked->spirv[i].size() > 20);
     const auto plain = cook_material_graph3d(graph("", "", R"("roughness": 0.5)"), &why);
     CHECK(plain && plain->spirv[surface_vertex_variant3d].empty());
-    std::cout << "a graph's offset compiles into the " << surface_variant_count3d - surface_vertex_variant3d
+    std::cout << "a graph's offset compiles into the " << surface_baked_variant3d - surface_vertex_variant3d
               << " vertex variants\n";
 }
 
@@ -472,7 +481,7 @@ void offset_reads_the_object() {
     if (!cooked)
         std::cerr << why << '\n';
     CHECK(cooked.has_value());
-    for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+    for (u32 i = surface_vertex_variant3d; i < surface_baked_variant3d; ++i)
         CHECK(cooked->spirv[i].size() > 20);
 }
 
@@ -500,7 +509,7 @@ void reads_the_local_position() {
     // Its fragment variants and its offset's vertex ones (no alpha: no cut-out variants).
     for (u32 i = 0; i < surface_mask_variant3d; ++i)
         CHECK(cooked->spirv[i].size() > 20);
-    for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+    for (u32 i = surface_vertex_variant3d; i < surface_baked_variant3d; ++i)
         CHECK(cooked->spirv[i].size() > 20);
 }
 

@@ -22,6 +22,7 @@ inline void add_mesh(BakeKey& key, const MeshData3D& data) {
     key.value(static_cast<u32>(MESHOPTIMIZER_VERSION));
     key.bytes(data.vertices.data(), data.vertices.size() * sizeof(MeshVertex3D));
     key.bytes(data.indices.data(), data.indices.size() * sizeof(u32));
+    key.bytes(data.lightmap_uv.data(), data.lightmap_uv.size() * sizeof(Vec2f));
 }
 
 inline void write_vertices(BakeWriter& w, const std::vector<MeshVertex3D>& vertices) {

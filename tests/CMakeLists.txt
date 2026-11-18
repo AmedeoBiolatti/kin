@@ -617,6 +617,12 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     # Area lights' hierarchy and emitters (GlobalIllumination3D::area_lights), on the CPU.
     kin_add_test(kin_render3d_area_lights_tests kin-render3d-area-lights SOURCES render3d_area_lights_tests.cpp)
     target_include_directories(kin_render3d_area_lights_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/renderer/gpu)
+    # Baked lighting's baker, lightmap UVs, probes and files (kin/render3d/baked_lighting3d.hpp), on the CPU.
+    kin_add_test(kin_render3d_baked_lighting_tests kin-render3d-baked-lighting SOURCES render3d_baked_lighting_tests.cpp)
+    target_include_directories(kin_render3d_baked_lighting_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/render3d)
+    kin_add_test(kin_render3d_baked_lighting_gpu_tests kin-render3d-baked-lighting-gpu
+                 SOURCES render3d_baked_lighting_gpu_tests.cpp)
+    set_tests_properties(kin-render3d-baked-lighting-gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_draw_commands_tests kin-render3d-draw-commands SOURCES render3d_draw_commands_tests.cpp)
     set_tests_properties(kin-render3d-draw-commands PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     set_tests_properties(kin-render3d-direct-cache PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)

@@ -9,6 +9,7 @@
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/scene/baked_lighting_scene3d.hpp>
 #include <kin/scene/reflection_probes3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>
@@ -456,11 +457,12 @@ struct SceneSession3D::Data {
         Scene3D scene;
         View3D view;
         ViewOptions3D options;
-        std::unique_ptr<PlanarViews3D> planar;      // made for the first Mirror3D or Portal3D
-        std::unique_ptr<ReflectionProbes3D> probes; // made for the first ReflectionProbe3D
-        std::unique_ptr<PortalTravel3D> travel;     // made for the first PortalTraveller3D
-        std::unique_ptr<Terrains3D> terrains;       // made for the first TerrainRenderer3D
-        f64 clock = 0;                              // seconds stepped: Scene3D::time (a material graph's `time`)
+        std::unique_ptr<PlanarViews3D> planar;       // made for the first Mirror3D or Portal3D
+        std::unique_ptr<ReflectionProbes3D> probes;  // made for the first ReflectionProbe3D
+        std::unique_ptr<SceneBakedLighting3D> baked; // made for the first SceneEnvironment3D naming a bake
+        std::unique_ptr<PortalTravel3D> travel;      // made for the first PortalTraveller3D
+        std::unique_ptr<Terrains3D> terrains;        // made for the first TerrainRenderer3D
+        f64 clock = 0;                               // seconds stepped: Scene3D::time (a material graph's `time`)
         std::vector<std::filesystem::path> dependencies;
         std::map<std::filesystem::path, SourceStamp> watches;
         std::map<u64, Spawned> spawned;
@@ -2663,6 +2665,20 @@ bool SceneSession3D::render_operation(f32 alpha) {
     if (!collect_operation(alpha))
         return false;
     auto& state = *_data->current;
+    // The baked lighting the environment names (SceneEnvironment3D::baked_lighting), before anything renders the scene.
+    if (!state.baked) {
+        bool named = false;
+        state.world.each(
+            [&](flecs::entity, const SceneEnvironment3D& e) { named = named || !e.baked_lighting.empty(); });
+        if (named)
+            state.baked = std::make_unique<SceneBakedLighting3D>(_data->renderer, _data->assets.root());
+    }
+    if (state.baked) {
+        if (const auto baked = state.baked->update(state.world, state.scene); !baked) {
+            _data->errors = baked.diagnostics;
+            return false;
+        }
+    }
     // The reflection probes first: the mirrors' and portals' pictures reflect them too.
     if (state.probes || state.world.raw().count<ReflectionProbe3D>() > 0) {
         if (!state.probes)

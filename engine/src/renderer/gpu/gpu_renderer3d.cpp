@@ -363,8 +363,9 @@ struct FrameUniforms {
     f32 portal_sun[4];    // count, shadow texel (uv), sun shadow strength
     PortalSunLight portal[max_portal_sun_maps];
     f32 subsurface[4]; // x: 0 all the light, 1 the main pass's split, 2 the subsurface pass's (kin_subsurface_keep)
+    f32 baked[8];      // the baked probes (Scene3D::baked_lighting): their grid's corner and 1 with probes; its size
 };
-static_assert(sizeof(FrameUniforms) == 4016 && sizeof(FrameUniforms) <= 4096);
+static_assert(sizeof(FrameUniforms) == 4048 && sizeof(FrameUniforms) <= 4096);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -1159,12 +1160,25 @@ public:
         const SDL_GPUBufferBinding skin{mesh->skin, 0};
         SDL_BindGPUVertexBuffers(_pass, 1, &skin, 1);
         _skin_mesh = mesh;
+        _lightmap_uv = nullptr;
+    }
+
+    // A lightmapped mesh's lightmap UVs, the second vertex buffer (after bind_mesh; the pipeline is a lightmapped one).
+    void bind_lightmap_uv(const GpuMesh3D* mesh) {
+        if (mesh->lightmap_uv == _lightmap_uv) {
+            return;
+        }
+        const SDL_GPUBufferBinding uv{mesh->lightmap_uv, 0};
+        SDL_BindGPUVertexBuffers(_pass, 1, &uv, 1);
+        _lightmap_uv = mesh->lightmap_uv;
+        _skin_mesh = nullptr;
     }
 
     // Forget what is bound: something else (the sky pass) bound its own pipeline, in the same render pass.
     void reset() {
         _pipeline = nullptr;
         _skin_mesh = nullptr;
+        _lightmap_uv = nullptr;
         _vertices = nullptr;
         _indices = nullptr;
     }
@@ -1175,6 +1189,7 @@ private:
     std::array<SDL_GPUBuffer*, 7> _storage{}; // largest vertex storage layout: skinned velocity with morph targets
     u32 _storage_count = 0;
     const GpuMesh3D* _skin_mesh = nullptr;
+    const SDL_GPUBuffer* _lightmap_uv = nullptr;
     SDL_GPUBuffer* _vertices = nullptr;
     const SDL_GPUBuffer* _indices = nullptr;
     u32 _first_index = 0;
@@ -1244,8 +1259,8 @@ GpuMesh3D::~GpuMesh3D() {
             buffer_pool->retire(std::move(shadow_allocation));
     }
     if (device && *device) {
-        for (SDL_GPUBuffer* buffer :
-             {buffer_pool ? nullptr : vertices, skin, chunk || buffer_pool ? nullptr : indices, previous}) {
+        for (SDL_GPUBuffer* buffer : {buffer_pool ? nullptr : vertices, skin, lightmap_uv,
+                                      chunk || buffer_pool ? nullptr : indices, previous}) {
             if (buffer) {
                 tracked_release_buffer(*device, buffer); // freed once the GPU is done with it
             }
@@ -2060,6 +2075,40 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                              /*uniform_buffers=*/4, /*samplers=*/16, /*storage_buffers=*/5);
             }
             _lights_available = true;
+            // Baked lighting's variants (Scene3D::baked_lighting): the light variants' layout, the bake's pages and
+            // probes in the GI's first two samplers; the lightmapped vertex shaders read one more storage buffer.
+            try {
+                _lightmap_vertex =
+                    GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "mesh_lightmap.vert.spv", 1, 0, 2);
+                if (_retained_enabled)
+                    _lightmap_indexed_vertex = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                                        "mesh_lightmap_indexed.vert.spv", 1, 0, 3);
+                if (_mesh_velocity_shader)
+                    _velocity_lightmap_vertex = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                                         "mesh_velocity_lightmap.vert.spv", 1, 0, 3);
+                const std::array<const char*, 4> baked{"mesh_baked.frag.spv", "mesh_baked_fog.frag.spv",
+                                                       "mesh_velocity_baked.frag.spv",
+                                                       "mesh_velocity_baked_fog.frag.spv"};
+                for (u32 i = 0; i < 4; ++i) {
+                    if (i >= 2 && !_mesh_velocity_light_shader)
+                        continue;
+                    _baked_fragments[i] = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, baked[i],
+                                                                   3 + (i & 1), 15 + (i & 1), 5);
+                }
+                auto none = std::make_shared<GpuBakedLighting3D>();
+                const std::array<u16, 4> black{};
+                const std::array<u16, 24> black6{};
+                none->pages = device.create_half_texture(1, 1, 1, false, black);
+                none->probes = device.create_half_texture(1, 1, 6, true, black6);
+                const std::array<f32, 8> nowhere{0, 0, 0, 0, -1, 0, 0, 0};
+                none->placements =
+                    device.create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nowhere.data(), sizeof(nowhere));
+                _no_baked_lighting = std::move(none);
+                _baked_available = true;
+            } catch (const std::exception& e) {
+                KIN_LOG_WARN_F("render", "3D: baked lighting unavailable",
+                               (LogFields{{.name = "reason", .value = e.what()}}));
+            }
             // What the light variants bind where they read nothing: no screen-space reflections (their last storage
             // buffer) and no reflection array (binding 6, a 2D array: a one-layer white one, never a 2D texture).
             _ssr_dummy = std::make_shared<GpuBuffer>(
@@ -2316,7 +2365,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat d
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass,
                                                  bool mask, SDL_GPUShader* custom, bool velocity, bool skinned,
                                                  bool fog, bool lights, Unlit unlit, bool indexed,
-                                                 const GpuSurfaceShader3D* surface, bool compact_shadow) const {
+                                                 const GpuSurfaceShader3D* surface, bool compact_shadow,
+                                                 BakedVariant baked) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
@@ -2431,6 +2481,33 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                   : (lit ? (fogged ? _mesh_light_fog_shader : _mesh_light_shader)
                                          : (fogged ? _mesh_fog_shader : _fragment_shader))
                                         .handle();
+    GpuVertexLayout main_layout = layout;
+    // A custom shader reading the bake (KIN_BAKED_LIGHT): its lightmapped copies with the lightmap UVs' stream.
+    if (baked == BakedVariant::Lightmap && custom && unlit == Unlit::Off && !skinned) {
+        const GpuShader& lightmap_vertex = indexed ? _lightmap_indexed_vertex : _lightmap_vertex;
+        if (lightmap_vertex) {
+            vertex = lightmap_vertex.handle();
+            main_layout = GpuVertexLayout::LightmappedMeshVertices;
+        }
+    }
+    // Baked lighting (Scene3D::baked_lighting): a stock lit material's light variant reading the bake; a lightmapped
+    // mesh's with the lightmap UVs' stream (not skinned, not moved by a surface: those read the probes).
+    if (baked != BakedVariant::Off && lit && !custom && unlit == Unlit::Off && _baked_available) {
+        const GpuShader& lightmap_vertex = velocity  ? _velocity_lightmap_vertex
+                                           : indexed ? _lightmap_indexed_vertex
+                                                     : _lightmap_vertex;
+        // (A surface's own baked variants; one that moves its vertices keeps its vertex variant and reads the probes.)
+        const bool lightmap = baked == BakedVariant::Lightmap && !skinned && !moves && bool(lightmap_vertex);
+        const u32 v = u32(fogged) + 2 * u32(velocity);
+        const GpuShader& f = surface ? surface->variants[surface_baked_variant3d + v] : _baked_fragments[v];
+        if (f) {
+            fragment = f.handle();
+            if (lightmap) {
+                vertex = lightmap_vertex.handle();
+                main_layout = GpuVertexLayout::LightmappedMeshVertices;
+            }
+        }
+    }
 
     if (unlit != Unlit::Off) {
         vertex = (indexed ? (unlit == Unlit::Textured ? _indexed_unlit_textured_vertex : _indexed_unlit_vertex)
@@ -2445,7 +2522,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                        .fragment = fragment,
                        .blend = blend,
                        .format = format,
-                       .layout = layout,
+                       .layout = main_layout,
                        .depth_stencil = _depth_format,
                        .depth = pass == Pass::Opaque ? GpuDepthTest::TestWrite : GpuDepthTest::Test,
                        .cull = cull && pass != Pass::Wire ? GpuCull::Back : GpuCull::None,
@@ -2509,7 +2586,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& requ
     }
     return pipeline(request.format, request.samples, m.cull, m.pass, m.mask,
                     m.custom ? m.custom->shader.handle() : nullptr, request.velocity, request.skinned, request.fog,
-                    request.lights, m.unlit, request.indexed, m.custom ? nullptr : m.surface);
+                    request.lights, m.unlit, request.indexed, m.custom ? nullptr : m.surface, false, request.baked);
 }
 
 GpuRenderer3D::MaterialUniforms GpuRenderer3D::material_uniforms(const Material3D& material, Unlit unlit) {
@@ -2952,7 +3029,9 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
         // A mesh with morph targets has a vertex buffer of its own, which update_mesh_vertices rewrites (cycled).
         mesh->dynamic = source.morphed();
         mesh->vertex_count = static_cast<u32>(vertex_count);
-        if (!clusters && !source.skinned() && !mesh->dynamic) {
+        // (A lightmapped mesh's second stream is read from its first vertex: its vertices are at the start of their
+        // own buffer too.)
+        if (!clusters && !source.skinned() && !mesh->dynamic && !source.lightmapped()) {
             if (!_mesh_buffers)
                 _mesh_buffers = std::make_shared<GpuMeshBufferPool>(_device->shared(), gi_read);
             mesh->allocation = _mesh_buffers->allocate(vertex_bytes, index_bytes);
@@ -3015,6 +3094,24 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                 }
             },
             mesh->vertex_offset);
+        // (Levels of detail index the mesh's own vertices: a lightmapped mesh's chain has no vertices of its own.)
+        if (!clusters && (!chain || chain->extra_vertices.empty()) && source.lightmapped() &&
+            source.lightmap_uv.size() == vertex_count) {
+            // The lightmap UVs (MeshData3D::lightmap_uv): a second vertex buffer, two floats a vertex, read by the
+            // lightmapped variants (mesh_lightmap.vert) with Scene3D::baked_lighting.
+            const SDL_GPUBufferCreateInfo uv_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+                                                  .size = static_cast<u32>(vertex_count * sizeof(Vec2f)),
+                                                  .props = 0};
+            mesh->lightmap_uv = tracked_create_buffer(_device->handle(), &uv_info);
+            if (!mesh->lightmap_uv) {
+                throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
+            }
+            upload(mesh->lightmap_uv, vertex_count, sizeof(Vec2f),
+                   [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+                       std::memcpy(out + begin * sizeof(Vec2f), source.lightmap_uv.data() + first + begin,
+                                   (end - begin) * sizeof(Vec2f));
+                   });
+        }
         if (!clusters && !chain && source.skinned() && source.skin.size() == vertex_count) {
             // The skin stream: a second vertex buffer, 8 bytes a vertex. A joint whose weight came to nothing points at
             // joint 0 (always there), so that the shader never reads a matrix that is not.
@@ -3360,10 +3457,18 @@ std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(
                 if (r.binding >= 16)
                     throw std::runtime_error("material sampled binding exceeds fifteen");
                 samplers = std::max(samplers, r.binding + 1);
+                // Baked lighting's probes (KIN_BAKED_LIGHT): the only 3D sampler a material may have, at 13; the
+                // bake's pages at 12 then, and its own inputs after them.
+                if (r.binding == 13 && r.dimensions == 3)
+                    shader->baked = true;
             }
         if (samplers > 16)
             throw std::runtime_error("material sampler limit is sixteen (twelve reserved)");
-        shader->textures.resize(samplers - 12);
+        if (shader->baked) {
+            shader->first_input = 14;
+            samplers = std::max(samplers, 14u);
+        }
+        shader->textures.resize(samplers - shader->first_input);
         std::array<bool, 4> texture_slots{};
         std::array<bool, 16> sampled_bindings{};
         std::array<bool, 8> buffer_slots{};
@@ -3375,6 +3480,11 @@ std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(
                 if (sampled_bindings[r.binding])
                     throw std::runtime_error("duplicate sampled material binding");
                 sampled_bindings[r.binding] = true;
+                if (shader->baked && (r.binding == 12 || r.binding == 13)) {
+                    if (r.binding == 12 && (r.dimensions != 2 || !r.arrayed || r.comparison))
+                        throw std::runtime_error("baked lighting's pages (binding 12) must be a 2D array");
+                    continue;
+                }
                 if (r.dimensions != 2 || r.multisampled || r.sample_type == ShaderSampleType::Unknown ||
                     r.sample_type == ShaderSampleType::Sint)
                     throw std::runtime_error("material sampled inputs require float/unsigned 2D or 2D-array images");
@@ -3383,8 +3493,8 @@ std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(
                     if (r.arrayed != shadow || r.comparison != shadow || r.sample_type != ShaderSampleType::Float)
                         throw std::runtime_error("reserved material sampler layout mismatch");
                 } else {
-                    texture_slots[r.binding - 12] = true;
-                    shader->textures[r.binding - 12] = r;
+                    texture_slots[r.binding - shader->first_input] = true;
+                    shader->textures[r.binding - shader->first_input] = r;
                 }
             } else if (r.kind == ShaderResourceKind::StorageBuffer && r.set == 2) {
                 if (r.binding < samplers || r.binding >= samplers + 8 || !r.read_only || !r.min_bytes)
@@ -3399,9 +3509,11 @@ std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(
             } else
                 throw std::runtime_error("unsupported material descriptor set, kind or uniform slot");
         }
-        for (u32 i = 0; i < samplers - 12; ++i)
+        for (u32 i = 0; i < samplers - shader->first_input; ++i)
             if (!texture_slots[i])
-                throw std::runtime_error("extra sampled texture bindings must be dense from twelve");
+                throw std::runtime_error(
+                    "extra sampled texture bindings must be dense from twelve (fourteen with baked "
+                    "lighting)");
         shader->buffers.resize(buffer_count);
         for (u32 i = 0; i < buffer_count; ++i)
             if (!buffer_slots[i])
@@ -3433,7 +3545,7 @@ GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surfac
                     continue; // a merged draws' variant it lacks
                 std::string error;
                 const auto layout = reflect_spirv({spirv[i].data(), static_cast<u32>(spirv[i].size())}, &error);
-                if (i >= surface_vertex_variant3d) { // a vertex variant (an offset): its maps, storage and blocks
+                if (surface_vertex_variant(i)) { // a vertex variant (an offset): its maps, storage and blocks
                     if (pass == 0)
                         continue;
                     if (!layout || layout->execution_model != 0)
@@ -3464,9 +3576,12 @@ GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surfac
                 // variants' 15 samplers and 4 storage buffers (shadows, GI, the light grid, the area lights), one
                 // uniform block more with fog; the velocity variants the same as the others; the merged draws' (as
                 // mesh_material.frag's) their draws' records after them, and the surface's parameters after those.
-                const bool lights = (i & 2) != 0, fog = (i & 1) != 0,
+                // (Baked lighting's are light variants: the bake's pages and probes in the GI's places.)
+                const bool baked = i >= surface_baked_variant3d;
+                const bool lights = baked || (i & 2) != 0,
+                           fog = baked ? ((i - surface_baked_variant3d) & 1) != 0 : (i & 1) != 0,
                            merged = i >= surface_required_variants3d && i < surface_mask_variant3d,
-                           mask = i >= surface_mask_variant3d;
+                           mask = i >= surface_mask_variant3d && !baked;
                 // A cut-out's: the five maps and the cut-out block (the visibility pass's query block too).
                 const u32 uniforms =
                     mask ? 1 + u32(i == u32(SurfaceVariant3D::VisibilityMask)) : (lights ? 3 : 2) + u32(fog);
@@ -3484,7 +3599,9 @@ GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surfac
                     std::optional<bool> shifted;
                     u32 first_storage = ~0u;
                     for (const auto& r : layout->resources) {
-                        if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2 && r.dimensions == 3)
+                        // (the fog volume past the stock samplers: a baked variant's probes are 3D too, at 13)
+                        if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2 && r.dimensions == 3 &&
+                            r.binding >= samplers)
                             volume = true;
                         else if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2 && r.binding == samplers)
                             shifted = true;
@@ -3695,6 +3812,89 @@ std::shared_ptr<GpuEnvironment3D> GpuRenderer3D::allocate_environment(u32 w, u32
     environment->irradiance =
         make(64, 32, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
     return environment;
+}
+
+std::shared_ptr<IBakedLightingBackend3D> GpuRenderer3D::create_baked_lighting(const BakedLightingData3D& baked) {
+    if (!_baked_available) {
+        return {};
+    }
+    try {
+        auto out = std::make_shared<GpuBakedLighting3D>();
+        // The pages: each in the corner of a layer as large as the largest; the placements' scale and offset onto it.
+        u32 w = 1, h = 1;
+        for (const LightmapPage3D& page : baked.pages) {
+            w = std::max(w, static_cast<u32>(page.size.x));
+            h = std::max(h, static_cast<u32>(page.size.y));
+        }
+        const u32 layers = std::max<u32>(1, static_cast<u32>(baked.pages.size()));
+        std::vector<u16> halves(static_cast<std::size_t>(w) * h * 4 * layers, 0);
+        for (u32 p = 0; p < baked.pages.size(); ++p) {
+            const LightmapPage3D& page = baked.pages[p];
+            if (page.rgb.size() != 3 * static_cast<std::size_t>(page.size.x) * page.size.y)
+                return {};
+            for (u32 y = 0; y < static_cast<u32>(page.size.y); ++y) {
+                for (u32 x = 0; x < static_cast<u32>(page.size.x); ++x) {
+                    const f32* c = page.rgb.data() + 3 * (static_cast<std::size_t>(y) * page.size.x + x);
+                    u16* t = halves.data() + 4 * ((static_cast<std::size_t>(p) * h + y) * w + x);
+                    t[0] = to_half(c[0]);
+                    t[1] = to_half(c[1]);
+                    t[2] = to_half(c[2]);
+                    t[3] = to_half(1.0f);
+                }
+            }
+        }
+        out->pages = _device->create_half_texture(w, h, layers, false, halves);
+        std::vector<f32> placements(std::max<std::size_t>(1, baked.placements.size()) * 8, 0.0f);
+        for (std::size_t i = 0; i < placements.size() / 8; ++i) {
+            f32* r = placements.data() + 8 * i;
+            r[4] = -1.0f;
+            if (i >= baked.placements.size() || !baked.placements[i].placed())
+                continue;
+            const LightmapPlacement3D& p = baked.placements[i];
+            if (p.page >= baked.pages.size())
+                return {};
+            const f32 sx = static_cast<f32>(baked.pages[p.page].size.x) / static_cast<f32>(w);
+            const f32 sy = static_cast<f32>(baked.pages[p.page].size.y) / static_cast<f32>(h);
+            r[0] = p.scale_offset.x * sx;
+            r[1] = p.scale_offset.y * sy;
+            r[2] = p.scale_offset.z * sx;
+            r[3] = p.scale_offset.w * sy;
+            r[4] = static_cast<f32>(p.page);
+        }
+        out->placements = _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, placements.data(),
+                                                 static_cast<u32>(placements.size() * sizeof(f32)));
+        // The probes: six grids along z: red's, green's then blue's a, b.x, b.y, b.z, then their visibility's x, y and
+        // z ways (the + way's mean and mean square, the - way's).
+        const BakedProbes3D& probes = baked.probes;
+        if (!probes.empty()) {
+            const u32 nx = probes.count[0], ny = probes.count[1], nz = probes.count[2];
+            const std::size_t n = static_cast<std::size_t>(nx) * ny * nz;
+            if (probes.sh.size() != n * 12 || (!probes.visibility.empty() && probes.visibility.size() != n * 12))
+                return {};
+            std::vector<u16> volume(n * 6 * 4);
+            for (u32 c = 0; c < 6; ++c) {
+                for (std::size_t probe = 0; probe < n; ++probe) {
+                    const std::size_t texel = c * n + probe;
+                    for (u32 k = 0; k < 4; ++k) {
+                        const f32 value = c < 3                       ? probes.sh[12 * probe + 4 * c + k]
+                                          : probes.visibility.empty() ? (k & 1 ? 1e4f : 100.0f)
+                                                                      : probes.visibility[12 * probe + 4 * (c - 3) + k];
+                        volume[4 * texel + k] = to_half(value);
+                    }
+                }
+            }
+            out->probes = _device->create_half_texture(nx, ny, 6 * nz, true, volume);
+            out->probe_area = probes.area;
+            out->probe_depth = nz;
+        } else {
+            const std::array<u16, 24> black{};
+            out->probes = _device->create_half_texture(1, 1, 6, true, black);
+        }
+        return out;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: baked lighting not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
 }
 
 std::shared_ptr<IEnvironmentBackend3D> GpuRenderer3D::create_environment(Vec2i size, std::span<const f32> rgb) {
@@ -5732,6 +5932,9 @@ struct GpuRenderer3D::FrameCtx {
     // local views' skinned casters).
     std::vector<u32> spots;
     bool lights_variant = false;
+    // The scene's baked lighting (Scene3D::baked_lighting) where its variants are made: Baked lights not drawn, lit
+    // stock draws reading it (baked_variant).
+    const GpuBakedLighting3D* baked = nullptr;
     // The light grid: possible (the light variants made, Scene3D::debug.light_grid), and then every point and spot
     // light in view is chosen (up to max_grid_lights each) and build_light_grid lists them by cell. Their shadows'
     // layers (-1: none), as ctx.chosen and ctx.spots. The grid's slicing, for the frame block.
@@ -6359,6 +6562,7 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
     setup_frame(ctx);
     choose_point_lights(ctx);
     choose_local_lights(ctx);
+    ctx.lights_variant = ctx.lights_variant || ctx.baked; // (the bake is read by the light variants only)
     if (local_depth) {
         ctx.local_depth = &local_depth->texture();
         ctx.lu.local[0] = 1.f / static_cast<f32>(local->depth.size().x);
@@ -7966,8 +8170,12 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
                                       16.0f))
                     : 0;
 
+    // Baked lighting where it can be drawn: Baked lights are then not drawn (their light is in the bake).
+    ctx.baked = ctx.geometry_only ? nullptr : baked_lighting(scene);
+    const bool sun_drawn = !(ctx.baked && scene.lights.sun.bake == LightBake3D::Baked);
     if (ctx.geometry_only || ctx.surface_only) {
-        ctx.sun_shines = scene.lights.sun.color.r + scene.lights.sun.color.g + scene.lights.sun.color.b > 0;
+        ctx.sun_shines =
+            sun_drawn && scene.lights.sun.color.r + scene.lights.sun.color.g + scene.lights.sun.color.b > 0;
         _gpu_markers = scene.debug.gpu_pass_markers;
         ctx.drawn = ctx.view_projections;
         ctx.main_projection = scene.camera.projection_matrix(ctx.aspect);
@@ -7999,7 +8207,7 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
         ctx.taa = false;
     }
     // A sun with no colour lights nothing and casts nothing: no shadow map, no contact shadows.
-    ctx.sun_shines = scene.lights.sun.color.r + scene.lights.sun.color.g + scene.lights.sun.color.b > 0.0f;
+    ctx.sun_shines = sun_drawn && scene.lights.sun.color.r + scene.lights.sun.color.g + scene.lights.sun.color.b > 0.0f;
     // Contact shadows are the sun's shadow: they fade with sun_shadow_strength (in the shader, through the lights
     // variant), and at 0 there is nothing to march for.
     ctx.contact_wanted = scene.contact_shadows.enabled && ctx.sun_shines && scene.lights.sun_shadow_strength > 0.0f;
@@ -8391,7 +8599,8 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         std::vector<std::pair<f32, u32>> reaching;
         for (u32 i = 0; i < static_cast<u32>(lights.spots.size()); ++i) {
             const SpotLightSource3D& light = lights.spots[i];
-            if (light.radius <= 0.0f || light.color.r + light.color.g + light.color.b <= 0.0f) {
+            if (light.radius <= 0.0f || light.color.r + light.color.g + light.color.b <= 0.0f ||
+                (ctx.baked && light.bake == LightBake3D::Baked)) {
                 continue;
             }
             Vec3f c;
@@ -10977,6 +11186,8 @@ GpuInstance3D GpuRenderer3D::pack_instance(const MeshInstance3D& instance, Color
     f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, f32(clip), n2.x, n2.y, n2.z, 0.0f};
     const u32 id = instance.id + 1; // 0: nothing there
     std::memcpy(&normal[3], &id, sizeof(id));
+    // (the third column's w: the copy's lightmap placement plus one, as bits: mesh_lightmap.vert)
+    std::memcpy(&normal[11], &instance.lightmap, sizeof(instance.lightmap));
     std::memcpy(g.normal, normal, sizeof(g.normal));
     const Color tint = instance.tint;
     g.color[0] = _srgb_to_linear[m.r] * _srgb_to_linear[tint.r];
@@ -13824,6 +14035,52 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
     ctx.stats.draw_plan_bytes = bytes;
 }
 
+GpuRenderer3D::BakedVariant GpuRenderer3D::baked_variant(const FrameCtx& ctx, const DrawRef& ref) const {
+    if (!ctx.baked || !ctx.lights_variant || ref.scene != 0)
+        return BakedVariant::Off;
+    const Material3D& m = ref.draw->material;
+    if (m.unlit || m.wireframe)
+        return BakedVariant::Off;
+    // A custom shader reads the bake where it was made to (KIN_BAKED_LIGHT): the plain vertex shaders, never the
+    // velocity ones (a custom shader writes no velocity).
+    if (m.shader.backend()) {
+        const auto* custom = dynamic_cast<const GpuMaterialShader3D*>(m.shader.backend().get());
+        if (!custom || !custom->baked || !_no_baked_lighting)
+            return BakedVariant::Off;
+        const GpuShader& vertex = ref.retained != ~0u ? _lightmap_indexed_vertex : _lightmap_vertex;
+        return ref.mesh->lightmap_uv && !ref.skinned && vertex ? BakedVariant::Lightmap : BakedVariant::Probes;
+    }
+    if (!_baked_fragments[2 * u32(ctx.main_velocity)])
+        return BakedVariant::Off;
+    // A surface shader reads the bake with its own baked variants (a surface made without them: not at all).
+    const auto* surface = dynamic_cast<const GpuSurfaceShader3D*>(m.surface.backend().get());
+    if (m.surface.backend() && (!surface || !surface->bakes(ctx.main_velocity))) {
+        if (surface && !surface->warned_bake) {
+            surface->warned_bake = true;
+            KIN_LOG_WARN("render", "3D: a material graph drawn with baked lighting has no baked lighting variants: lit "
+                                   "as without the bake (cook it for baked lighting: kin_material_graph cook "
+                                   "--baked-lighting, or BAKED_LIGHTING)");
+        }
+        return BakedVariant::Off;
+    }
+    if (surface && surface->offsets())
+        return BakedVariant::Probes;
+    if (ref.mesh->lightmap_uv && !ref.skinned) {
+        const GpuShader& vertex = ctx.main_velocity     ? _velocity_lightmap_vertex
+                                  : ref.retained != ~0u ? _lightmap_indexed_vertex
+                                                        : _lightmap_vertex;
+        if (vertex)
+            return BakedVariant::Lightmap;
+    }
+    return BakedVariant::Probes;
+}
+
+const GpuBakedLighting3D* GpuRenderer3D::baked_lighting(const Scene3D& scene) const {
+    if (!_baked_available || !_lights_available || !scene.baked_lighting)
+        return nullptr;
+    return dynamic_cast<const GpuBakedLighting3D*>(scene.baked_lighting.backend().get());
+}
+
 GpuRenderer3D::DrawCommand* GpuRenderer3D::main_command(FrameCtx& ctx, u32 r, bool materials) {
     if (!_draw_plan_valid || _refs[r].draw->material.shader.backend())
         return nullptr;
@@ -13831,9 +14088,10 @@ GpuRenderer3D::DrawCommand* GpuRenderer3D::main_command(FrameCtx& ctx, u32 r, bo
     const auto& ref = _refs[r];
     const auto* view = ctx.view;
     const u32 format = ctx.taa ? hdr_format : view->_format, samples = ctx.taa ? 1 : view->_samples;
+    const BakedVariant baked = baked_variant(ctx, ref);
     const u64 key = u64(format) | (u64(samples) << 32) | (u64(ctx.taa) << 40) | (u64(ctx.main_velocity) << 41) |
                     (u64(ctx.fog) << 42) | (u64(ctx.lights_variant) << 43) | (u64(ref.retained != ~0u) << 44) |
-                    (u64(materials) << 45);
+                    (u64(materials) << 45) | (u64(baked) << 46);
     const u64 revision = _owner->_pipelines.revision();
     if (command.pipeline_key != key || command.pipeline_revision != revision) {
         command.selection =
@@ -13842,7 +14100,7 @@ GpuRenderer3D::DrawCommand* GpuRenderer3D::main_command(FrameCtx& ctx, u32 r, bo
         command.uniforms = material_uniforms(ref.draw->material, command.selection.unlit);
         command.pipeline = pipeline(MeshPipelineRequest{static_cast<SDL_GPUTextureFormat>(format), samples,
                                                         command.selection, ctx.main_velocity, ref.skinned, ctx.fog,
-                                                        ctx.lights_variant, ref.retained != ~0u, materials});
+                                                        ctx.lights_variant, ref.retained != ~0u, materials, baked});
         command.pipeline_key = command.pipeline ? key : ~0ull; // failed allocations must remain retryable
         command.pipeline_revision = revision;
         ++ctx.stats.draw_pipeline_misses;
@@ -14030,8 +14288,9 @@ void GpuRenderer3D::emit_draw_span(FrameCtx& ctx, const DrawSpan& span, bool mat
         const auto& ref = _refs[r];
         if (!ref.out_count())
             continue;
-        // (A scattering material keeps a draw of its own: its subsurface block is not in the materials' table.)
-        if (!(materials && span.materials && ref.direct && ref.levels == 1 && !ref.clustered &&
+        // (A scattering material keeps a draw of its own: its subsurface block is not in the materials' table; baked
+        // lighting's variants have no material-table counterparts either: those draws go one by one.)
+        if (!(materials && span.materials && ref.direct && ref.levels == 1 && !ref.clustered && !ctx.baked &&
               _draw_material_slots[ref.scene] != ~0u && !subsurface_material(ref.draw->material))) {
             _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
             batch = ~0u;
@@ -14264,9 +14523,10 @@ void GpuRenderer3D::choose_point_lights(FrameCtx& ctx) {
     const Scene3D& scene = ctx.scene;
     const Lights3D& lights = scene.lights;
     RenderDebugStats3D& stats = ctx.stats;
-    // Point lights: those reaching the view, strongest and nearest first.
+    // Point lights: those reaching the view, strongest and nearest first (not those baked, with baked lighting).
     for (const PointLightSource3D& light : lights.points) {
-        if (light.radius <= 0 || !sphere_in(ctx.frustums[0], light.position, light.radius)) {
+        if (light.radius <= 0 || !sphere_in(ctx.frustums[0], light.position, light.radius) ||
+            (ctx.baked && light.bake == LightBake3D::Baked)) {
             continue;
         }
         // What it adds a unit from the camera's nearest surface it reaches:
@@ -14307,12 +14567,22 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     const f32 sun_degrees = scene.sky.enabled ? std::clamp(scene.sky.sun_size, 0.0f, 20.0f) : 0.53f;
     put(f.sun_direction, normalize(to_space.apply_vector(normalize(lights.sun.direction))),
         0.5f * sun_degrees * (3.14159265f / 180.0f));
-    put_color(f.sun_color, lights.sun.color, 0.0f);
+    // (w: 1 when the sun's light is baked, LightBake3D::Baked: surfaces take it from the bake, the sky keeps it.)
+    const bool sun_baked = s == 0 && ctx.baked && lights.sun.bake == LightBake3D::Baked; // (the overlay's own lights)
+    put_color(f.sun_color, lights.sun.color, sun_baked ? 1.0f : 0.0f);
+    if (s == 0 && ctx.baked && ctx.baked->probe_depth > 0) {
+        const Bounds3D& area = ctx.baked->probe_area;
+        put(f.baked, area.min, 1.0f);
+        put(f.baked + 4, area.max - area.min, static_cast<f32>(ctx.baked->probe_depth));
+    }
     put_color(f.ambient, lights.ambient, 0.0f);
     put_color(f.ground_ambient, (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient), 0.0f);
     const bool fill = length_squared(lights.fill.direction) > 0;
     put(f.fill_direction, fill ? normalize(to_space.apply_vector(normalize(lights.fill.direction))) : Vec3f{}, 0.0f);
-    put_color(f.fill_color, fill ? lights.fill.color : LinearRgb{}, 0.0f);
+    put_color(f.fill_color,
+              fill && !(s == 0 && ctx.baked && lights.fill.bake == LightBake3D::Baked) ? lights.fill.color
+                                                                                       : LinearRgb{},
+              0.0f);
     const bool lit_by_sun_shadow = ctx.shadows && s == 0;
     const std::size_t points = std::min<std::size_t>(ctx.chosen.size(), max_lights);
     put(f.flags,
@@ -14561,6 +14831,14 @@ bool GpuRenderer3D::read_mesh(const IMeshBackend3D& base, u32 vertex_count, Mesh
             out.skin[i].weights = {f32(s.w0) / 255.0f, f32(s.w1) / 255.0f, f32(s.w2) / 255.0f, f32(s.w3) / 255.0f};
         }
     }
+    out.lightmap_uv.clear();
+    if (mesh->lightmap_uv) {
+        if (!_device->read_buffer(mesh->lightmap_uv, 0, vertex_count * u32(sizeof(Vec2f)), bytes) ||
+            bytes.size() < std::size_t(vertex_count) * sizeof(Vec2f))
+            return false;
+        out.lightmap_uv.resize(vertex_count);
+        std::memcpy(out.lightmap_uv.data(), bytes.data(), std::size_t(vertex_count) * sizeof(Vec2f));
+    }
     return true;
 }
 
@@ -14576,6 +14854,73 @@ bool GpuRenderer3D::read_texture(const Texture& texture, std::vector<u8>& texels
     const u32 w = own->texture().width(), h = own->texture().height();
     size = {i32(w), i32(h)};
     return _device->read_texture_region(own->texture(), 0, 0, w, h, 8, texels);
+}
+
+bool GpuRenderer3D::read_texture_colors(const Texture& texture, u32 max_side, std::vector<u8>& rgba, Vec2i& size) {
+    const auto* own = dynamic_cast<const GpuTextureBackend*>(texture.backend().get());
+    if (!own || !own->texture() || own->array_layers() > 0)
+        return false;
+    const GpuTexture& source = own->texture();
+    const u32 w = source.width(), h = source.height();
+    const f32 scale = std::min(1.0f, static_cast<f32>(max_side) / static_cast<f32>(std::max(w, h)));
+    const u32 tw = std::max(1u, static_cast<u32>(std::lround(static_cast<f32>(w) * scale)));
+    const u32 th = std::max(1u, static_cast<u32>(std::lround(static_cast<f32>(h) * scale)));
+    // Blitted into RGBA8 (the GPU decodes any format): an sRGB format's into an sRGB target, so the bytes are those
+    // stored either way (a colour map's sRGB).
+    const SDL_GPUTextureFormat f = source.format();
+    const bool srgb =
+        f == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB || f == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB ||
+        f == SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM_SRGB || f == SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM_SRGB ||
+        f == SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM_SRGB || f == SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM_SRGB ||
+        f == SDL_GPU_TEXTUREFORMAT_ASTC_4x4_UNORM_SRGB;
+    try {
+        GpuTexture target = _device->create_target(
+            tw, th, srgb ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        _owner->ensure_frame();
+        _owner->flush_to_frame();
+        SDL_GPUBlitInfo blit{};
+        blit.source.texture = source.handle();
+        blit.source.w = w;
+        blit.source.h = h;
+        blit.destination.texture = target.handle();
+        blit.destination.w = tw;
+        blit.destination.h = th;
+        blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+        blit.filter = SDL_GPU_FILTER_LINEAR;
+        SDL_BlitGPUTexture(_owner->_frame->command_buffer(), &blit);
+        _owner->_frame->submit();
+        _owner->end_frame();
+        size = {i32(tw), i32(th)};
+        return _device->read_texture_region(target, 0, 0, tw, th, 4, rgba);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: a texture not read back", (LogFields{{.name = "reason", .value = e.what()}}));
+        return false;
+    }
+}
+
+bool GpuRenderer3D::read_environment(const IEnvironmentBackend3D* environment, std::vector<f32>& rgb, Vec2i& size) {
+    const auto* own = environment ? dynamic_cast<const GpuEnvironment3D*>(environment) : _sky_env.get();
+    if (!own || !own->source)
+        return false;
+    if (_owner->_frame) {
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    const u32 w = own->source.width(), h = own->source.height();
+    std::vector<u8> texels;
+    if (!_device->read_texture_region(own->source, 0, 0, w, h, 8, texels) || texels.size() < std::size_t(w) * h * 8)
+        return false;
+    rgb.resize(std::size_t(w) * h * 3);
+    for (std::size_t i = 0; i < std::size_t(w) * h; ++i)
+        for (std::size_t c = 0; c < 3; ++c) {
+            u16 half;
+            std::memcpy(&half, &texels[i * 8 + c * 2], sizeof(half));
+            rgb[i * 3 + c] = from_half(half);
+        }
+    size = {static_cast<i32>(w), static_cast<i32>(h)};
+    return true;
 }
 
 bool GpuRenderer3D::read_reflection_capture(IReflectionCaptureBackend3D& base, std::vector<f32>& rgb, Vec2i& size) {
@@ -16317,6 +16662,13 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         ctx.lights_variant && ctx.moon_cascades > 0 && _moon_map ? _moon_map.handle() : _no_shadow.handle(),
         _compare_sampler};
     const std::array<SDL_GPUTextureSamplerBinding, 3> gi_binding = gi_bindings(*view, ctx.gi_resolved);
+    // Baked lighting's pages and probes, in the GI's first two places in its variants (black ones without a bake).
+    const GpuBakedLighting3D* baked_textures = ctx.baked ? ctx.baked : _no_baked_lighting.get();
+    const std::array<SDL_GPUTextureSamplerBinding, 2> baked_bindings{
+        SDL_GPUTextureSamplerBinding{baked_textures ? baked_textures->pages.handle() : _owner->_white.handle(),
+                                     _owner->_sampler_linear},
+        SDL_GPUTextureSamplerBinding{baked_textures ? baked_textures->probes.handle() : _owner->_white.handle(),
+                                     _owner->_sampler_linear}};
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
@@ -16474,7 +16826,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                     : pipeline(MeshPipelineRequest{sss || ctx.taa ? hdr_format : view->_format,
                                                    sss || ctx.taa ? 1u : view->_samples, selection, ctx.main_velocity,
                                                    ref.skinned, ctx.fog && !custom, ctx.lights_variant && !custom,
-                                                   ref.retained != ~0u, item.materials});
+                                                   ref.retained != ~0u, item.materials, baked_variant(ctx, ref)});
             if (!p) {
                 continue;
             }
@@ -16501,16 +16853,26 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 item.materials      ? _main_draw_indices->handle()
                 : _retained_indices ? _retained_indices->handle()
                                     : nullptr};
-            if (binder.bind_pipeline(p,
-                                     ref.retained != ~0u ? retained_buffers.data()
-                                     : skinned_velocity  ? skinned_velocity_buffers.data()
-                                     : ref.skinned       ? skinned_buffers.data()
-                                                         : buffers.data(),
-                                     ref.retained != ~0u            ? 2
-                                     : skinned_velocity             ? 6
-                                     : ref.skinned                  ? 3
-                                     : ctx.main_velocity && !custom ? 2
-                                                                    : 1)) {
+            // Baked lighting: a lightmapped draw's placements follow its other vertex storage buffers.
+            const BakedVariant baked = baked_variant(ctx, ref);
+            const bool lightmapped = baked == BakedVariant::Lightmap;
+            SDL_GPUBuffer* const* vertex_storage = ref.retained != ~0u ? retained_buffers.data()
+                                                   : skinned_velocity  ? skinned_velocity_buffers.data()
+                                                   : ref.skinned       ? skinned_buffers.data()
+                                                                       : buffers.data();
+            u32 vertex_storage_count = ref.retained != ~0u            ? 2
+                                       : skinned_velocity             ? 6
+                                       : ref.skinned                  ? 3
+                                       : ctx.main_velocity && !custom ? 2
+                                                                      : 1;
+            std::array<SDL_GPUBuffer*, 3> lightmap_storage{};
+            if (lightmapped) {
+                std::copy_n(vertex_storage, vertex_storage_count, lightmap_storage.begin());
+                lightmap_storage[vertex_storage_count] = ctx.baked->placements.handle();
+                vertex_storage = lightmap_storage.data();
+                ++vertex_storage_count;
+            }
+            if (binder.bind_pipeline(p, vertex_storage, vertex_storage_count)) {
                 bound_textures = unbound;
                 bound_inputs = nullptr;
                 bound_binding = ~0u;
@@ -16544,12 +16906,16 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         contact_binding,
                         local_binding,
                         moon_binding,
-                        gi_binding[0],
-                        gi_binding[1],
+                        baked != BakedVariant::Off ? baked_bindings[0] : gi_binding[0],
+                        baked != BakedVariant::Off ? baked_bindings[1] : gi_binding[1],
                         gi_binding[2]};
                     // Custom shaders have twelve; the stock light variants fifteen (global illumination's light and
                     // coverage).
                     SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 15u : 10u);
+                    // A custom shader reading the bake (KIN_BAKED_LIGHT): its pages and probes after kin's twelve
+                    // (black ones without a bake: never read then).
+                    if (custom && custom->baked)
+                        SDL_BindGPUFragmentSamplers(pass, 12, baked_bindings.data(), 2);
                     if (selection.surface && selection.surface->graph_maps) { // the sampler after those
                         const Texture& maps = material.graph_maps ? material.graph_maps : _white_maps;
                         _owner->retain(maps);
@@ -16622,7 +16988,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                                                  : _owner->_sampler_nearest};
                     }
                     if (!inputs->input_textures.empty())
-                        SDL_BindGPUFragmentSamplers(pass, 12, extra.data(),
+                        SDL_BindGPUFragmentSamplers(pass, custom->first_input, extra.data(),
                                                     static_cast<u32>(inputs->input_textures.size()));
                     std::array<SDL_GPUBuffer*, 8> storage_inputs{};
                     for (u32 i = 0; i < inputs->input_buffers.size(); ++i) {
@@ -16647,6 +17013,8 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
             if (ref.skinned) {
                 binder.bind_skin(ref.mesh);
+            } else if (lightmapped) {
+                binder.bind_lightmap_uv(ref.mesh);
             }
             if (selection.surface) {
                 // A surface shader's block is the stock one with its parameters after it.
@@ -18507,6 +18875,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     fit_sun_shadow(ctx);
     choose_point_lights(ctx);
     choose_local_lights(ctx);
+    ctx.lights_variant = ctx.lights_variant || ctx.baked; // (the bake is read by the light variants only)
     build_light_grid(ctx);
     cull_and_upload(ctx);
     prepare_particles(ctx);

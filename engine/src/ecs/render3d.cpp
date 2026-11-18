@@ -248,6 +248,7 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
     // while a Flecs table is being iterated, including in non-authored worlds.
     world.component<ModelMaterials3D>();
     world.component<MorphWeights3D>();
+    world.component<StaticLighting3D>();
     auto* tracking = _tracking.get();
     tracking->world = world.c_ptr();
     const auto transform_id = world.id<Transform3D>(), world_id = world.id<WorldTransform3D>();
@@ -1259,6 +1260,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             const auto renderers = it.field<const MeshRenderer3D>(1);
             const auto presentation = it.field<const RenderTransform3D>(2);
             const bool own_world = it.is_self(0), own_renderer = it.is_self(1), own_presentation = it.is_self(2);
+            // (Baked lighting: a static entity's lightmap placement, StaticLighting3D::lightmap.)
+            const bool baked_table = it.table().has<StaticLighting3D>();
             Bucket* last = nullptr; // entities of a table mostly share a mesh
             for (const auto i : it) {
                 ++tracking.stats.collection_visits;
@@ -1275,8 +1278,10 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                 }
                 // Picking retains the low entity index; history includes generation, scope and lease.
                 bind(it.entity(i).id(), *last);
-                last->instances.push_back(
-                    {*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu), history_id(it.entity(i))});
+                const StaticLighting3D* baked = baked_table ? it.entity(i).get<StaticLighting3D>() : nullptr;
+                last->instances.push_back({*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu),
+                                           history_id(it.entity(i)),
+                                           baked && baked->lightmapped ? baked->lightmap : 0u});
             }
         }
     });
@@ -1289,6 +1294,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
         if (!placement)
             return;
         const u32 id = renderer.id ? renderer.id : u32(entity.id() & 0xFFFFFFFFu);
+        const auto* baked = entity.get<StaticLighting3D>();
+        const u32 lightmap = baked && baked->lightmapped ? baked->lightmap : 0u; // its first part's
         const auto* overrides = entity.get<ModelMaterials3D>();
         const auto* binding = overrides && overrides->binding && overrides->binding->model.lock() == renderer.model &&
                                       overrides->binding->materials.size() == renderer.model->parts.size()
@@ -1332,7 +1339,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             bind(entity.id(), bucket, static_cast<u32>(index));
             bucket.instances.push_back(
                 {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint, id,
-                 detail::part_history3d(history_id(entity), index)});
+                 detail::part_history3d(history_id(entity), index),
+                 lightmap ? lightmap + static_cast<u32>(index) : 0u});
         }
     });
     const bool empty_buckets =
@@ -1376,7 +1384,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                                    .shadow_near_plane = light.shadow_near_plane,
                                    .shadow_distance = light.shadow_distance,
                                    .shadow_softness = light.shadow_softness,
-                                   .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
+                                   .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu),
+                                   .bake = light.bake});
         }
     });
     _spot_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const SpotLight3D& light,
@@ -1402,7 +1411,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                                   .shadow_near_plane = light.shadow_near_plane,
                                   .shadow_distance = light.shadow_distance,
                                   .shadow_softness = light.shadow_softness,
-                                  .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
+                                  .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu),
+                                  .bake = light.bake});
         }
     });
     // Particles (P3c): each enabled emitter's live particles, as a batch with its desc's look.

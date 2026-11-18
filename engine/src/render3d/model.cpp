@@ -904,11 +904,28 @@ private:
             data.morph_targets.clear();
             data.morph_weights.clear();
         }
+        // A second set of texture coordinates is where lightmaps are read (MeshData3D::lightmap_uv: Blender's second
+        // UV map, Unity's and Unreal's lightmap UVs), for a mesh that neither bends nor morphs, all of it in [0, 1].
+        if (const cgltf_accessor* second = attribute_index(primitive, cgltf_attribute_type_texcoord, 1);
+            second && second != uvs && second->type == cgltf_type_vec2 && second->count == positions->count && !skin &&
+            data.morph_targets.empty()) {
+            data.lightmap_uv.resize(positions->count);
+            bool inside = true;
+            for (cgltf_size i = 0; i < second->count && inside; ++i) {
+                Vec2f& uv = data.lightmap_uv[i];
+                inside = cgltf_accessor_read_float(second, i, &uv.x, 2) && std::isfinite(uv.x) && std::isfinite(uv.y) &&
+                         uv.x >= -1e-4f && uv.y >= -1e-4f && uv.x <= 1.0001f && uv.y <= 1.0001f;
+                uv = {std::clamp(uv.x, 0.0f, 1.0f), std::clamp(uv.y, 0.0f, 1.0f)};
+            }
+            if (!inside)
+                data.lightmap_uv.clear();
+        }
         if (!normals) {
             // Flat: each triangle its own vertices, facing its own way. Morph targets move the same corners (their
             // normals stay the triangle's at rest).
             MeshData3D flat;
             flat.morph_weights = data.morph_weights;
+            const bool lightmapped = data.lightmapped();
             for (const MorphTarget3D& target : data.morph_targets)
                 flat.morph_targets.push_back({target.name, {}, {}});
             const std::size_t count = data.indices.empty() ? data.vertices.size() : data.indices.size();
@@ -926,6 +943,8 @@ private:
                     flat.vertices.push_back(v[k]);
                     if (skin)
                         flat.skin.push_back(data.skin[at[k]]);
+                    if (lightmapped)
+                        flat.lightmap_uv.push_back(data.lightmap_uv[at[k]]);
                     for (std::size_t t = 0; t < data.morph_targets.size(); ++t)
                         flat.morph_targets[t].positions.push_back(data.morph_targets[t].positions[at[k]]);
                 }

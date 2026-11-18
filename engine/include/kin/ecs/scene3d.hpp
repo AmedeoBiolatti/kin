@@ -3,6 +3,7 @@
 #include <kin/ecs/render3d.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/backend3d.hpp>
+#include <kin/render3d/baked_lighting3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
 
 namespace kin {
@@ -45,6 +46,10 @@ struct SceneEnvironment3D {
     // The picture (samples, background, hdr, exposure, bloom). `pick` is not
     // authored and never applied: picking is the game's (see scene3d_view_options).
     ViewOptions3D view;
+    // Baked lighting (kin/scene/baked_lighting_scene3d.hpp): the content folder of the bake that lights the scene
+    // (empty: none), and how bake_scene_lighting makes it.
+    std::string baked_lighting;
+    LightBakeSettings3D bake{};
     bool enabled = true;
     i32 priority = 0;
 };

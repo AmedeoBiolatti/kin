@@ -9,6 +9,20 @@ releases may change APIs.
 
 ### Added
 
+- Baked lighting ([3D rendering](rendering_3d.md#baked-lighting)): a deterministic, multithreaded CPU path tracer
+  (`bake_lighting`) bakes lightmaps for static meshes (`MeshData3D::lightmap_uv`, imported from glTF `TEXCOORD_1` or
+  laid out with xatlas: `generate_lightmap_uv`, `MeshOptions3D::lightmap_uv`) and a grid of light probes for what
+  moves, from the sky, emissive surfaces and lights by their `LightBake3D` (Realtime, Mixed: bounce baked, Baked: all
+  baked and no longer drawn). `Renderer3D::create_baked_lighting` and `Scene3D::baked_lighting` draw it through new
+  light variants; `MeshInstance3D::lightmap` picks a copy's lightmap. Entities: `StaticLighting3D`, lights' and the
+  environment's `bake` modes, `SceneEnvironment3D::baked_lighting`, `bake_scene_lighting` and
+  `SceneBakedLighting3D` (`SceneSession3D` applies it): the bake samples materials' base colour and emission maps
+  (`Renderer3D::read_texture_colors`) and the sky as drawn (`read_sky_environment`, `read_environment`). Probes keep
+  their light from leaking through walls (per-axis visibility, as DDGI's); surface shaders (material graphs) read the
+  bake through four new `SurfaceVariant3D` baked variants (cooked or built where asked: `--baked-lighting`, `BAKED_LIGHTING`, also on `kin_compile_surface_shader` and `kin_terrain_surface`; the terrain reads the probes), custom shaders through `KIN_BAKED_LIGHT` (`kin_lit`,
+  `kin_baked_light`); lightmapped meshes can have levels of detail. Files:
+  `save_baked_lighting`/`load_baked_lighting`. Native SDL_GPU only so far (not WebGL2).
+
 - 3D heightmap terrain ([3D rendering](rendering_3d.md#terrain)): `Terrain3D` with CDLOD level of detail (one
   instanced grid, heights and morphing in kin's terrain surface, every pass culled by the nodes' boxes), up to 16
   weight-mapped layers with height blending, sculpting brushes (raise, lower, smooth, flatten, noise, paint) with

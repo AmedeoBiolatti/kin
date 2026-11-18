@@ -71,6 +71,8 @@ endfunction()
 #       [STEAM_REDIST <dir>]   # Steam's API library to ship beside it: the SDK's
 #                              # redistributable_bin folder, a folder holding the
 #                              # library, or the library itself (docs/platform_services.md)
+#       [BAKED_LIGHTING]       # its material graphs cooked to read baked lighting too
+#                              # (docs/rendering_3d.md, Baked lighting)
 #       [NO_CONTENT])          # the game has no content folder
 #
 # On the target it sets KIN_GAME_TITLE, KIN_GAME_VERSION, KIN_GAME_ICON (the
@@ -204,15 +206,19 @@ endfunction()
 # build needs them cooked already (by a desktop build, and kept with the content):
 # it does not configure without them. (Not for the web: WebGL2 draws a graph
 # material's stock fallback, from the graph's source.)
-function(_kin_game_graphs out_var target content)
+function(_kin_game_graphs out_var target content baked_lighting)
     set(${out_var} "" PARENT_SCOPE)
     if(NOT COMMAND kin_cook_material_graphs)
         return() # (kin_game without kin's build, cmake/kin_embed.cmake: no tools to cook with)
     endif()
-    string(MD5 key "${content}")
+    string(MD5 key "${content}|${baked_lighting}")
     get_property(made GLOBAL PROPERTY "KIN_GAME_GRAPHS_${key}")
     if(NOT made)
-        kin_cook_material_graphs(cooked CONTENT "${content}" MISSING missing)
+        if(baked_lighting)
+            kin_cook_material_graphs(cooked CONTENT "${content}" MISSING missing BAKED_LIGHTING)
+        else()
+            kin_cook_material_graphs(cooked CONTENT "${content}" MISSING missing)
+        endif()
         if(cooked)
             set(made "${target}_graphs")
             add_custom_target(${made} DEPENDS ${cooked})
@@ -236,7 +242,7 @@ function(_kin_game_graphs out_var target content)
 endfunction()
 
 function(kin_game target)
-    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST;INFO;STEAM_APP_ID;STEAM_REDIST;IMPORTS"
+    cmake_parse_arguments(ARG "NO_CONTENT;BAKED_LIGHTING" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST;INFO;STEAM_APP_ID;STEAM_REDIST;IMPORTS"
         "FILES;RUNTIME_TARGETS" ${ARGN})
     if(NOT ARG_NAME)
         set(ARG_NAME "${target}")
@@ -352,7 +358,7 @@ function(kin_game target)
     endif()
     set(graphs_target "")
     if(content AND IS_DIRECTORY "${content}" AND NOT EMSCRIPTEN)
-        _kin_game_graphs(graphs_target ${target} "${content}")
+        _kin_game_graphs(graphs_target ${target} "${content}" "${ARG_BAKED_LIGHTING}")
     endif()
 
     if(EMSCRIPTEN)

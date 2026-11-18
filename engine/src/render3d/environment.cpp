@@ -181,6 +181,38 @@ Result3D<MeshData3D> Renderer3D::read_mesh(const Mesh3D& mesh) {
     return {std::move(data), {}};
 }
 
+Result3D<Renderer3D::TextureColors3D> Renderer3D::read_texture_colors(const Texture& texture, u32 max_side) {
+    _errors.clear();
+    TextureColors3D out;
+    if (!texture || max_side == 0 || !_backend ||
+        !_backend->read_texture_colors(texture, max_side, out.rgba, out.size) ||
+        out.rgba.size() < std::size_t(out.size.x) * std::size_t(out.size.y) * 4) {
+        fail3d(_errors, "Renderer3D::read_texture_colors", "not a 2D texture, or it could not be read back");
+        return {std::nullopt, _errors};
+    }
+    return result3d(std::move(out));
+}
+
+Result3D<Renderer3D::EnvironmentPicture3D> Renderer3D::read_environment(const Environment3D& environment) {
+    _errors.clear();
+    EnvironmentPicture3D out;
+    if (!environment || !_backend || !_backend->read_environment(environment.backend().get(), out.rgb, out.size)) {
+        fail3d(_errors, "Renderer3D::read_environment", "no environment, or it could not be read back");
+        return {std::nullopt, _errors};
+    }
+    return result3d(std::move(out));
+}
+
+Result3D<Renderer3D::EnvironmentPicture3D> Renderer3D::read_sky_environment() {
+    _errors.clear();
+    EnvironmentPicture3D out;
+    if (!_backend || !_backend->read_environment(nullptr, out.rgb, out.size)) {
+        fail3d(_errors, "Renderer3D::read_sky_environment", "no sky panorama made yet, or it could not be read back");
+        return {std::nullopt, _errors};
+    }
+    return result3d(std::move(out));
+}
+
 Result3D<std::vector<f32>> Renderer3D::read_linear_texture(const Texture& texture) {
     _errors.clear();
     std::vector<u8> texels;
@@ -347,7 +379,7 @@ bool surface_has_offset(std::string_view surface) {
 }
 
 std::string surface_shader_source(std::string_view surface, SurfaceVariant3D variant) {
-    if (u32(variant) >= surface_vertex_variant3d && variant != SurfaceVariant3D::Count) {
+    if (surface_vertex_variant(u32(variant))) {
         // A vertex variant: the offset's prelude, the surface's offset, then the stock vertex shader's body.
         static constexpr const char* bodies[] = {"kin_mesh_vertex.inc.glsl",    "kin_mesh_vertex.inc.glsl",
                                                  "kin_mesh_vertex.inc.glsl",    "kin_prepass_vertex.inc.glsl",
@@ -361,7 +393,7 @@ std::string surface_shader_source(std::string_view surface, SurfaceVariant3D var
         source += std::string("#include \"") + bodies[u32(variant) - surface_vertex_variant3d] + "\"\n";
         return source;
     }
-    if (u32(variant) >= surface_mask_variant3d && variant != SurfaceVariant3D::Count) {
+    if (u32(variant) >= surface_mask_variant3d && u32(variant) < surface_vertex_variant3d) {
         // A cut-out pass's shader: its body (inputs, the cut-out's resources, main), then the surface's alpha.
         static constexpr const char* bodies[] = {"kin_shadow_mask.inc.glsl", "kin_pick_mask.inc.glsl",
                                                  "kin_prepass_mask.inc.glsl", "kin_prepass_velocity_mask.inc.glsl",
@@ -434,6 +466,21 @@ std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant) {
         static constexpr std::array<const char*, 1> shadow_mask{"KIN_SHADOW_MASK"};
         return shadow_mask;
     }
+    case SurfaceVariant3D::Baked:
+    case SurfaceVariant3D::BakedFog:
+    case SurfaceVariant3D::VelocityBaked:
+    case SurfaceVariant3D::VelocityBakedFog: {
+        // As mesh_baked*.frag: the light variants with KIN_BAKED, by fog + 2 velocity.
+        static constexpr std::array<std::array<const char*, 6>, 4> sets{{
+            {"KIN_LIGHTS", "KIN_GI", "KIN_LIGHT_GRID", "KIN_BAKED"},
+            {"KIN_LIGHTS", "KIN_GI", "KIN_LIGHT_GRID", "KIN_BAKED", "KIN_FOG"},
+            {"KIN_LIGHTS", "KIN_GI", "KIN_LIGHT_GRID", "KIN_BAKED", "KIN_VELOCITY"},
+            {"KIN_LIGHTS", "KIN_GI", "KIN_LIGHT_GRID", "KIN_BAKED", "KIN_VELOCITY", "KIN_FOG"},
+        }};
+        static constexpr std::array<u32, 4> counts{4, 5, 5, 6};
+        const u32 k = u32(variant) - surface_baked_variant3d;
+        return std::span<const char* const>{sets[k]}.first(counts[k]);
+    }
     default: // the cut-outs' (their wrapper defines what they need), the plain vertex variants'
         break;
     case SurfaceVariant3D::Count:
@@ -500,7 +547,8 @@ SurfaceShader3D Renderer3D::compile_surface_text_operation(const std::string& su
         std::vector<std::filesystem::path> files;
         bool ok = true;
         for (u32 i = 0; i < surface_variant_count3d && ok; ++i) { // (all of them, the merged draws' too)
-            const bool vertex = i >= surface_vertex_variant3d, mask = i >= surface_mask_variant3d && !vertex;
+            const bool vertex = surface_vertex_variant(i),
+                       mask = i >= surface_mask_variant3d && i < surface_vertex_variant3d;
             if ((mask && !alpha) || (vertex && !offset))
                 continue;
             const auto file = std::filesystem::temp_directory_path() /

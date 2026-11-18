@@ -1424,7 +1424,8 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
     return cooked;
 }
 
-std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view text, std::string* why) {
+std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view text, std::string* why,
+                                                           const MaterialGraphCookOptions3D& options) {
     const auto fail = [&](std::string w) -> std::optional<CookedMaterialGraph3D> {
         if (why)
             *why = std::move(w);
@@ -1444,9 +1445,11 @@ std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view text
     std::string w;
     bool ok = true;
     for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
-        // The cut-outs' variants only for a graph whose alpha they can compute; the vertex ones for one with an offset.
-        const bool vertex = i >= surface_vertex_variant3d;
-        if ((i >= surface_mask_variant3d && !vertex && !cooked.graph.cutout) || (vertex && !cooked.graph.offset))
+        // The cut-outs' variants only for a graph whose alpha they can compute; the vertex ones for one with an offset;
+        // baked lighting's where asked for.
+        const bool vertex = surface_vertex_variant(i);
+        if ((i >= surface_mask_variant3d && i < surface_vertex_variant3d && !cooked.graph.cutout) ||
+            (vertex && !cooked.graph.offset) || (i >= surface_baked_variant3d && !options.baked_lighting))
             continue;
         const std::filesystem::path file = std::filesystem::temp_directory_path() /
                                            (stem + "-" + std::to_string(i) + (vertex ? ".vert.glsl" : ".frag.glsl"));

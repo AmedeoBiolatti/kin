@@ -339,6 +339,28 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("auto_exposure_low", view.auto_exposure.low);
         SETTING("auto_exposure_high", view.auto_exposure.high);
         SETTING("auto_exposure_centre_weight", view.auto_exposure.centre_weight);
+        // Baked lighting: the sun's and the fill's part in it, the bake's folder, and how it is made.
+        const auto bake_mode = [&](const char* name, DirectionalLight3D Lights3D::*light) {
+            builder.property<std::string>(
+                name, [light](const auto& v) { return std::string(light_bake_name((v.lights.*light).bake)); },
+                [light](auto& v, const std::string& word) {
+                    const auto mode = light_bake_from_name(word);
+                    if (mode)
+                        (v.lights.*light).bake = *mode;
+                    return mode.has_value();
+                });
+        };
+        bake_mode("sun_bake", &Lights3D::sun);
+        bake_mode("fill_bake", &Lights3D::fill);
+        builder.field("baked_lighting", &SceneEnvironment3D::baked_lighting);
+        SETTING("bake_texels_per_unit", bake.texels_per_unit);
+        SETTING("bake_samples", bake.samples);
+        SETTING("bake_bounces", bake.bounces);
+        SETTING("bake_page_size", bake.page_size);
+        SETTING("bake_denoise", bake.denoise);
+        SETTING("bake_probes", bake.probes);
+        SETTING("bake_probe_spacing", bake.probe_spacing);
+        SETTING("bake_probe_samples", bake.probe_samples);
 #undef SETTING
 #undef RGB_SETTING
     }
