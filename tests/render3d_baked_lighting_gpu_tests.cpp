@@ -10,8 +10,10 @@
 #include <kin/platform/app.hpp>
 #include <kin/render3d/baked_lighting3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/terrain3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 
 using namespace kin;
 
@@ -331,6 +333,47 @@ void test_probes_through_walls(Renderer2D& r, Renderer3D& r3d) {
 }
 
 // Refusals: a placement on a page the bake has not, a probe grid whose values do not match.
+// Terrain (kin's terrain surface, its vertices moved by the height map) under a bake whose probes are green and a
+// Baked sun: lit by the probes, the sun not drawn on it; without the bake, the sun's.
+void test_terrain(Renderer2D& r, Renderer3D& r3d) {
+    if (!shader_compiler_available()) {
+        std::cout << "baked lighting: terrain skipped (no glslc)\n";
+        return;
+    }
+    const SurfaceShader3D surface = compile_terrain_surface(r3d).value_or({});
+    assert(surface);
+    const TerrainDesc3D desc{.samples = {33, 33}, .spacing = 0.5f, .min_height = 0.0f, .max_height = 4.0f};
+    const std::vector<u16> heights(33 * 33, u16(65535 / 4)); // flat, at 1
+    Terrain3D terrain = Terrain3D::create(r3d, surface, desc, heights).value_or({});
+    assert(terrain.valid());
+    terrain.set_look({.color = {1, 1, 1}, .roughness = 1.0f});
+    BakedLightingData3D data;
+    data.probes.area = {{0, 0, 0}, {16, 4, 16}};
+    data.probes.count = {2, 2, 2};
+    for (int i = 0; i < 8; ++i)
+        data.probes.sh.insert(data.probes.sh.end(), {0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 0, 0, 0});
+    BakedLighting3D baked = r3d.create_baked_lighting(data).value_or({});
+    assert(baked);
+    View3D view = r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    const auto shot = [&](bool bake) {
+        Scene3D scene;
+        scene.lights = dark();
+        scene.lights.sun.direction = {0, 1, 0};
+        scene.lights.sun.color = {0, 0, 2};
+        scene.lights.sun.bake = LightBake3D::Baked;
+        scene.camera = Camera3D::look_at({8, 6, 8.01f}, {8, 1, 8}, 50);
+        if (bake)
+            scene.baked_lighting = baked;
+        assert(terrain.draw(scene));
+        return shoot(r, r3d, view, scene, {8, 1, 8});
+    };
+    const Rgb with = shot(true), without = shot(false);
+    std::cerr << "terrain: baked " << with << " / unbaked " << without << "\n";
+    assert(with.g > 100 && with.r < 20 && with.b < 20);
+    assert(without.b > 100 && without.g < 20);
+    std::cout << "baked lighting: terrain reads the probes\n";
+}
+
 void test_refusals(Renderer3D& r3d) {
     BakedLightingData3D bad;
     bad.placements.push_back({3, {0.5f, 0.5f, 0, 0}});
@@ -358,4 +401,5 @@ int main() {
     test_lightmap_and_probes(r, r3d, true);
     test_baked_lights_not_drawn(r, r3d);
     test_probes_through_walls(r, r3d);
+    test_terrain(r, r3d);
 }

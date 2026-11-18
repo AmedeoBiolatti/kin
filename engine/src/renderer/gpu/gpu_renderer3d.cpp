@@ -363,7 +363,7 @@ struct FrameUniforms {
     f32 portal_sun[4];    // count, shadow texel (uv), sun shadow strength
     PortalSunLight portal[max_portal_sun_maps];
     f32 subsurface[4]; // x: 0 all the light, 1 the main pass's split, 2 the subsurface pass's (kin_subsurface_keep)
-    f32 baked[8]; // the baked probes (Scene3D::baked_lighting): their grid's corner and 1 with probes; its size
+    f32 baked[8];      // the baked probes (Scene3D::baked_lighting): their grid's corner and 1 with probes; its size
 };
 static_assert(sizeof(FrameUniforms) == 4048 && sizeof(FrameUniforms) <= 4096);
 // A custom material shader's: kin_param(0..3).

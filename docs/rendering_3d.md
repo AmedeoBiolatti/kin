@@ -1407,9 +1407,11 @@ alternative to global illumination where it costs too much, and static light of 
   through four baked variants of their own (`SurfaceVariant3D::Baked` ... `VelocityBakedFog`: plain, fog, velocity,
   velocity and fog; a lightmapped copy's with the lightmap UVs' vertex shader). Compiled from source they are always
   made; a cooked graph has them where it was cooked for baked lighting (`MaterialGraphCookOptions3D::baked_lighting`,
-  `kin_material_graph cook --baked-lighting`, `BAKED_LIGHTING` on `kin_cook_material_graph(s)` and `kin_game`), and
-  without them it is lit as without the bake (the log says so once). A surface that moves its vertices reads the
-  probes, not lightmaps. Custom shaders read it when made to (`KIN_BAKED_LIGHT`, see Custom shaders);
+  `kin_material_graph cook --baked-lighting`, `BAKED_LIGHTING` on `kin_cook_material_graph(s)` and `kin_game`), a
+  surface compiled at build time where asked (`BAKED_LIGHTING` on `kin_compile_surface_shader`, and on
+  `kin_terrain_surface` for the terrain), and without them it is lit as without the bake (the log says so once; a
+  Baked sun or light is then missing from it). A surface that moves its vertices (the terrain too) reads the probes,
+  not lightmaps. Custom shaders read it when made to (`KIN_BAKED_LIGHT`, see Custom shaders);
   unlit materials do not. Ambient occlusion still applies on top. Not on WebGL2 yet.
 - **Files:** `save_baked_lighting(data, folder)` writes `lighting.json` (the placements, the probe grid), a Radiance
   picture a page (`lightmap_<n>.hdr`) and `probes.bin`; `load_baked_lighting(folder)` reads them through the content

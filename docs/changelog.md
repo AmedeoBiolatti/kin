@@ -19,7 +19,7 @@ releases may change APIs.
   `SceneBakedLighting3D` (`SceneSession3D` applies it): the bake samples materials' base colour and emission maps
   (`Renderer3D::read_texture_colors`) and the sky as drawn (`read_sky_environment`, `read_environment`). Probes keep
   their light from leaking through walls (per-axis visibility, as DDGI's); surface shaders (material graphs) read the
-  bake through four new `SurfaceVariant3D` baked variants (cooked where asked: `--baked-lighting`, `BAKED_LIGHTING`), custom shaders through `KIN_BAKED_LIGHT` (`kin_lit`,
+  bake through four new `SurfaceVariant3D` baked variants (cooked or built where asked: `--baked-lighting`, `BAKED_LIGHTING`, also on `kin_compile_surface_shader` and `kin_terrain_surface`; the terrain reads the probes), custom shaders through `KIN_BAKED_LIGHT` (`kin_lit`,
   `kin_baked_light`); lightmapped meshes can have levels of detail. Files:
   `save_baked_lighting`/`load_baked_lighting`. Native SDL_GPU only so far (not WebGL2).
 

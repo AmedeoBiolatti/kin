@@ -62,7 +62,11 @@ constexpr std::array<const char*, surface_variant_count3d> terrain_variants{"pla
                                                                             "vertex_prepass_indexed",
                                                                             "vertex_prepass_velocity",
                                                                             "vertex_shadow",
-                                                                            "vertex_shadow_mask"};
+                                                                            "vertex_shadow_mask",
+                                                                            "baked",
+                                                                            "baked_fog",
+                                                                            "velocity_baked",
+                                                                            "velocity_baked_fog"};
 static_assert(terrain_variants.size() == surface_variant_count3d);
 
 // (The GI scene shapes its grid by the height map itself, in the material's colour: Terrain3D's mean colour.)
@@ -118,8 +122,10 @@ Result3D<SurfaceShader3D> create_terrain_surface(Renderer3D& renderer,
     for (u32 i = 0; i < surface_variant_count3d; ++i) {
         const std::string name = std::string("terrain.") + terrain_variants[i] + ".spv";
         variants[i] = spirv ? spirv(name) : std::span<const u8>{};
-        // (The cut-outs' are not built: the terrain is opaque.)
-        const bool optional = i >= surface_mask_variant3d && i < surface_vertex_variant3d;
+        // (The cut-outs' are not built: the terrain is opaque; baked lighting's only with kin_terrain_surface's
+        // BAKED_LIGHTING.)
+        const bool optional =
+            (i >= surface_mask_variant3d && i < surface_vertex_variant3d) || i >= surface_baked_variant3d;
         if (variants[i].empty() && !optional)
             errors.push_back("terrain surface: no " + name);
     }

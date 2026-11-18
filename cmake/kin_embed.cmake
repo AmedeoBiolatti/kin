@@ -8,7 +8,8 @@
 #     machines without glslc. With neither, it skips the shaders and <out_var>
 #     lists only those it has.
 #
-#   kin_compile_surface_shader(<out_var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl [CUTOUTS] [OFFSET])
+#   kin_compile_surface_shader(<out_var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl [CUTOUTS] [OFFSET]
+#                              [BAKED_LIGHTING])
 #     A 3D surface shader (Material3D::surface; docs/rendering_3d.md, Surface
 #     shaders): its eight variants, each kin's mesh fragment shader with the
 #     source's kin_surface() between its halves, compiled with that variant's
@@ -17,13 +18,15 @@
 #     (the merged draws' four after the eight); with CUTOUTS (a surface
 #     defining kin_surface_alpha) the cut-out passes' five after those; with
 #     OFFSET (a surface defining kin_surface_offset, under KIN_SURFACE_VERTEX,
-#     its fragment part under its #else) the eight vertex variants after those.
-#     Needs glslc (no KIN_SPIRV_DIR form yet).
+#     its fragment part under its #else) the eight vertex variants after those;
+#     with BAKED_LIGHTING the four that read baked lighting (Scene3D::baked_lighting) after those (without them
+#     the surface is lit as without the bake). Needs glslc (no KIN_SPIRV_DIR form yet).
 #
-#   kin_terrain_surface(<target>)
+#   kin_terrain_surface(<target> [BAKED_LIGHTING])
 #     kin's terrain surface (engine/shaders/terrain.surface.glsl, its vertex variants too) compiled and built into
 #     <target> (kin_embed_files, NAME terrain_surface): create_terrain_surface(r3d, terrain_surface) makes it
 #     (kin/render3d/terrain3d.hpp). Needs glslc; sets KIN_TERRAIN_SURFACE on <target> when it built it.
+#     BAKED_LIGHTING: with the variants that read baked lighting (for a game whose scenes have a bake).
 #
 #   kin_planar_surfaces(<target>)
 #     kin's planar surfaces (mirrors and portals: engine/shaders/planar_reflection.surface.glsl and
@@ -148,11 +151,18 @@ set(_KIN_SURFACE_VERTEX_vertex_prepass_indexed kin_prepass_vertex.inc.glsl KIN_I
 set(_KIN_SURFACE_VERTEX_vertex_prepass_velocity kin_prepass_velocity_vertex.inc.glsl KIN_VELOCITY CACHE INTERNAL "")
 set(_KIN_SURFACE_VERTEX_vertex_shadow kin_shadow_vertex.inc.glsl CACHE INTERNAL "")
 set(_KIN_SURFACE_VERTEX_vertex_shadow_mask kin_shadow_vertex.inc.glsl KIN_SHADOW_MASK CACHE INTERNAL "")
+# The baked lighting variants' (BAKED_LIGHTING), after the vertex variants.
+set(_KIN_SURFACE_BAKED baked baked_fog velocity_baked velocity_baked_fog CACHE INTERNAL "")
+set(_KIN_SURFACE_DEFINES_baked KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_BAKED CACHE INTERNAL "")
+set(_KIN_SURFACE_DEFINES_baked_fog KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_BAKED KIN_FOG CACHE INTERNAL "")
+set(_KIN_SURFACE_DEFINES_velocity_baked KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_BAKED KIN_VELOCITY CACHE INTERNAL "")
+set(_KIN_SURFACE_DEFINES_velocity_baked_fog KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_BAKED KIN_VELOCITY KIN_FOG
+    CACHE INTERNAL "")
 # The cut-outs' (CUTOUTS: a surface defining kin_surface_alpha), each its pass's body (kin_<pass>.inc.glsl).
 set(_KIN_SURFACE_MASKS shadow_mask pick_mask prepass_mask prepass_velocity_mask visibility_mask CACHE INTERNAL "")
 
 function(kin_compile_surface_shader out_var)
-    cmake_parse_arguments(ARG "CUTOUTS;OFFSET" "OUTPUT_DIR;SOURCE" "" ${ARGN})
+    cmake_parse_arguments(ARG "CUTOUTS;OFFSET;BAKED_LIGHTING" "OUTPUT_DIR;SOURCE" "" ${ARGN})
     set(depfile_tool "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_shader_depfile.cmake")
     if(NOT ARG_OUTPUT_DIR OR NOT ARG_SOURCE)
         message(FATAL_ERROR "kin_compile_surface_shader: OUTPUT_DIR and SOURCE are required")
@@ -177,7 +187,12 @@ function(kin_compile_surface_shader out_var)
 #include \"kin_mesh_main.inc.glsl\"
 ")
     set(outputs)
-    foreach(variant IN LISTS _KIN_SURFACE_VARIANTS)
+    set(baked_outputs)
+    set(fragment_variants ${_KIN_SURFACE_VARIANTS})
+    if(ARG_BAKED_LIGHTING)
+        list(APPEND fragment_variants ${_KIN_SURFACE_BAKED})
+    endif()
+    foreach(variant IN LISTS fragment_variants)
         set(defines)
         foreach(define IN LISTS _KIN_SURFACE_DEFINES_${variant})
             list(APPEND defines "-D${define}")
@@ -194,7 +209,11 @@ function(kin_compile_surface_shader out_var)
             DEPFILE "${depfile}"
             COMMENT "glslc: ${name} (${variant}) -> ${stem}.${variant}.spv"
             VERBATIM)
-        list(APPEND outputs "${output}")
+        if(variant IN_LIST _KIN_SURFACE_BAKED)
+            list(APPEND baked_outputs "${output}") # (listed last: SurfaceVariant3D's order)
+        else()
+            list(APPEND outputs "${output}")
+        endif()
     endforeach()
     if(ARG_CUTOUTS)
         foreach(mask IN LISTS _KIN_SURFACE_MASKS)
@@ -253,6 +272,7 @@ function(kin_compile_surface_shader out_var)
             list(APPEND outputs "${output}")
         endforeach()
     endif()
+    list(APPEND outputs ${baked_outputs})
     set(${out_var} "${outputs}" PARENT_SCOPE)
 endfunction()
 
@@ -364,8 +384,14 @@ ${close_ns}")
 endfunction()
 
 function(kin_terrain_surface target)
+    cmake_parse_arguments(ARG "BAKED_LIGHTING" "" "" ${ARGN})
     set(dir "${CMAKE_CURRENT_BINARY_DIR}/kin_terrain_surface/${target}")
-    kin_compile_surface_shader(terrain OFFSET OUTPUT_DIR "${dir}" SOURCE "${KIN_SHADER_INCLUDE_DIR}/terrain.surface.glsl")
+    set(baked)
+    if(ARG_BAKED_LIGHTING)
+        set(baked BAKED_LIGHTING)
+    endif()
+    kin_compile_surface_shader(terrain OFFSET ${baked} OUTPUT_DIR "${dir}"
+                               SOURCE "${KIN_SHADER_INCLUDE_DIR}/terrain.surface.glsl")
     if(terrain)
         kin_embed_files(${target} NAME terrain_surface FILES ${terrain})
         target_compile_definitions(${target} PRIVATE KIN_TERRAIN_SURFACE)
