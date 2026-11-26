@@ -121,6 +121,7 @@ releases may change APIs.
 
 ### Changed
 
+- Rigid opaque and alpha-masked meshes use a cheaper sun-shadow vertex shader when their draw needs no clipping.
 - The GPU renderer reorders full-detail triangles for stock sun shadows when doing so improves vertex reuse.
   Qualifying meshes share the extra index buffer across all their instances.
 
