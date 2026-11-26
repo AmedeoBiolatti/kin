@@ -1,3 +1,4 @@
+#include "../engine/src/renderer/gpu/gpu_renderer3d.hpp"
 #include "attachment_graph_shaders.hpp"
 
 #include <array>
@@ -5,6 +6,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <kin/platform/app.hpp>
+#include <kin/render3d/mesh_lod3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/graph_resources.hpp>
@@ -253,16 +255,80 @@ void imports_and_lifetimes(Fixture& f) {
     std::cout << "attachment graph: imported history preservation, retained resize outputs, queued release and CPU "
                  "read/write ordering\n";
 }
-std::vector<u8> probe(Fixture& f, const Texture& texture, u32 layer) {
+std::vector<u8> probe(Fixture& f, const Texture& texture, u32 layer, int bit_shift = -1) {
     f.r.clear(colors::black);
     ShaderParams params;
     params.uniforms[0] = f32(layer);
+    params.uniforms[1] = bit_shift >= 0 ? 1.f : 0.f;
+    params.uniforms[2] = f32(bit_shift);
     f.r.draw_shader_surface({0, 0, 128, 96}, f.probe, params, texture);
     std::vector<u8> out;
     Vec2i size;
     assert(f.r.read_rgba({0, 0, 128, 96}, out, size));
     f.r.present();
     return out;
+}
+void sun_index_order(Fixture& f) {
+    auto sphere = meshes::sphere(1.f, 32, 16);
+    for (auto& vertex : sphere.vertices)
+        vertex.color.a = vertex.position.x > 0 ? 255 : 0;
+    const auto triangles = std::move(sphere.indices);
+    // Interleave distant triangles to exercise the cache optimizer. Expand the same triangles
+    // into independent vertices for the reference, which always uses the original draw order.
+    MeshData3D expanded;
+    for (std::size_t lane = 0; lane < 31; ++lane) {
+        for (std::size_t i = 3 * lane; i < triangles.size(); i += 3 * 31) {
+            for (std::size_t j = i; j < i + 3; ++j) {
+                sphere.indices.push_back(triangles[j]);
+                expanded.vertices.push_back(sphere.vertices[triangles[j]]);
+            }
+        }
+    }
+    const MeshOptions3D options{.levels = 2};
+    const auto indexed = f.r3d.create_mesh(sphere, options).value_or({});
+    const auto reference = f.r3d.create_mesh(expanded).value_or({});
+    const auto* mesh = dynamic_cast<const gpu::GpuMesh3D*>(indexed.backend().get());
+    const auto* plain = dynamic_cast<const gpu::GpuMesh3D*>(reference.backend().get());
+    assert(mesh && mesh->sun_indices && mesh->vertex_offset > 0 && plain && !plain->sun_indices);
+
+    const auto render = [&](const Mesh3D& caster, Blend3D blend, int level = 0) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0, 2, 5}, {});
+        scene.lod.enabled = true;
+        scene.debug.force_level = level;
+        scene.lights.shadow_area = {{-2, -2, -2}, {2, 2, 2}};
+        assert(scene.draw(caster, {}, {.blend = blend}));
+        const auto map = f.r.create_render_attachment({64, 64}, TextureFormat::Depth32Float, 1);
+        f.r.clear();
+        const auto p = f.r3d.prepare(scene).value_or({});
+        assert(f.r3d.render_sun_shadow(map, p, initial_size));
+        return map;
+    };
+    std::size_t opaque_pixels = 0;
+    for (const auto blend : {Blend3D::Opaque, Blend3D::Mask}) {
+        const auto actual = render(indexed, blend), expected = render(reference, blend);
+        // Read all 32 depth bits through the probe's RGB8 output.
+        for (const int shift : {0, 24})
+            assert(probe(f, actual, 0, shift) == probe(f, expected, 0, shift));
+        const auto coverage = probe(f, actual, 0);
+        std::size_t covered = 0;
+        for (std::size_t i = 0; i < coverage.size(); i += 4)
+            covered += coverage[i] != 0;
+        if (blend == Blend3D::Opaque)
+            opaque_pixels = covered;
+        else
+            assert(covered > 0 && covered < opaque_pixels);
+    }
+    // LOD1 indices follow LOD0 in the original pool allocation.
+    const auto chain = build_mesh_levels(sphere, options);
+    assert(chain.count() == 2 && chain.extra_vertices.empty());
+    MeshData3D coarse;
+    for (const u32 i : chain.levels[1].indices)
+        coarse.vertices.push_back(sphere.vertices[i]);
+    const auto coarse_mesh = f.r3d.create_mesh(coarse).value_or({});
+    const auto actual = render(indexed, Blend3D::Opaque, 1), expected = render(coarse_mesh, Blend3D::Opaque);
+    for (const int shift : {0, 24})
+        assert(probe(f, actual, 0, shift) == probe(f, expected, 0, shift));
 }
 void depth_arrays(Fixture& f) {
     const auto a = f.r.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 3),
@@ -320,5 +386,6 @@ int main(int argc, char** argv) {
         versions(f);
         imports_and_lifetimes(f);
         depth_arrays(f);
+        sun_index_order(f);
     }
 }

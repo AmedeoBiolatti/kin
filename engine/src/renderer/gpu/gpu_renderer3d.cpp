@@ -27,6 +27,7 @@
 #include <kin/renderer/color_grading.hpp>
 #include <limits>
 #include <map>
+#include <meshoptimizer.h>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -2959,6 +2960,46 @@ void GpuRenderer3D::collect_mesh_buffers() {
     _mesh_buffers->collect();
 }
 
+static void upload_shadow_buffer(GpuDevice& device, SDL_GPUBuffer* buffer, u32 base, const void* data, u32 bytes) {
+    constexpr u32 piece = 8u * 1024u * 1024u;
+    for (u32 first = 0; first < bytes;) {
+        const u32 count = std::min(piece, bytes - first);
+        device.upload_storage_buffer(buffer, base + first, count, static_cast<const u8*>(data) + first, false);
+        first += count;
+    }
+}
+
+// Reordering stock depth-only draws is safe even for cutouts: each triangle keeps its three original
+// vertices, UVs and alpha. Only pay for another index buffer when the cache model predicts a useful gain.
+static GpuBuffer make_sun_indices(GpuDevice& device, const MeshData3D& source) {
+    const auto& indices = source.indices;
+    if (indices.size() < 256 * 3)
+        return {};
+    try {
+        const auto analyze = [&](const std::vector<u32>& order) {
+            return meshopt_analyzeVertexCache(order.data(), order.size(), source.vertices.size(), 16, 32, 0);
+        };
+        const auto before = analyze(indices);
+        // Even a perfect order has to transform every referenced vertex once.
+        if (before.atvr < 10.0f / 9.0f)
+            return {};
+        std::vector<u32> ordered(indices.size());
+        meshopt_optimizeVertexCache(ordered.data(), indices.data(), indices.size(), source.vertices.size());
+        if (u64(analyze(ordered).vertices_transformed) * 10 > u64(before.vertices_transformed) * 9)
+            return {};
+        const u32 bytes = static_cast<u32>(ordered.size() * sizeof(u32));
+        const SDL_GPUBufferCreateInfo info{.usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = bytes};
+        GpuBuffer buffer{device.shared(), tracked_create_buffer(device.handle(), &info), bytes};
+        if (buffer)
+            upload_shadow_buffer(device, buffer.handle(), 0, ordered.data(), bytes);
+        return buffer;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: using original sun shadow indices",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
 std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& source, const MeshLodChain3D* chain,
                                                            std::shared_ptr<const MeshClusters3D> clusters) {
     collect_mesh_buffers();
@@ -3304,8 +3345,12 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                                     static_cast<u32>(chain->levels[l].indices.size()), chain->levels[l].error});
             level_start += chain->levels[l].indices.size();
         }
-        if (_capabilities.local_shadow_pass && !mesh->clusters && !source.skinned() && !mesh->dynamic)
-            prepare_shadow_mesh(*mesh, source, chain);
+        if (!mesh->clusters && !source.skinned() && !mesh->dynamic) {
+            if (_capabilities.sun_shadow_pass)
+                mesh->sun_indices = make_sun_indices(*_device, source);
+            if (_capabilities.local_shadow_pass)
+                prepare_shadow_mesh(*mesh, source, chain);
+        }
         return mesh;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = e.what()}}));
@@ -3321,15 +3366,6 @@ void GpuRenderer3D::prepare_shadow_mesh(GpuMesh3D& mesh, const MeshData3D& sourc
             return;
         const u32 vertex_bytes = static_cast<u32>(geometry.positions.size() * sizeof(Vec3f));
         const u32 index_bytes = static_cast<u32>(geometry.indices.size() * sizeof(u32));
-        const auto upload = [&](SDL_GPUBuffer* buffer, u32 base, const void* data, u32 bytes) {
-            constexpr u32 piece = 8u * 1024u * 1024u;
-            for (u32 first = 0; first < bytes;) {
-                const u32 count = std::min(piece, bytes - first);
-                _device->upload_storage_buffer(buffer, base + first, count, static_cast<const u8*>(data) + first,
-                                               false);
-                first += count;
-            }
-        };
         if (mesh.buffer_pool) {
             // The same pool serves both strides; every subsequent full-mesh
             // allocation must still start at a whole 36-byte vertex.
@@ -3338,10 +3374,10 @@ void GpuRenderer3D::prepare_shadow_mesh(GpuMesh3D& mesh, const MeshData3D& sourc
             mesh.shadow_allocation = mesh.buffer_pool->allocate(padded, index_bytes);
         }
         if (mesh.shadow_allocation) {
-            upload(mesh.shadow_vertex_buffer(), mesh.shadow_allocation.vertices.offset, geometry.positions.data(),
-                   vertex_bytes);
-            upload(mesh.shadow_index_buffer(), mesh.shadow_allocation.indices.offset, geometry.indices.data(),
-                   index_bytes);
+            upload_shadow_buffer(*_device, mesh.shadow_vertex_buffer(), mesh.shadow_allocation.vertices.offset,
+                                 geometry.positions.data(), vertex_bytes);
+            upload_shadow_buffer(*_device, mesh.shadow_index_buffer(), mesh.shadow_allocation.indices.offset,
+                                 geometry.indices.data(), index_bytes);
         } else {
             const SDL_GPUBufferCreateInfo vertex_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX, .size = vertex_bytes};
             const SDL_GPUBufferCreateInfo index_info{.usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = index_bytes};
@@ -3349,8 +3385,8 @@ void GpuRenderer3D::prepare_shadow_mesh(GpuMesh3D& mesh, const MeshData3D& sourc
             GpuBuffer indices{_device->shared(), tracked_create_buffer(_device->handle(), &index_info), index_bytes};
             if (!vertices || !indices)
                 return; // Optional representation: the original mesh remains usable.
-            upload(vertices.handle(), 0, geometry.positions.data(), vertex_bytes);
-            upload(indices.handle(), 0, geometry.indices.data(), index_bytes);
+            upload_shadow_buffer(*_device, vertices.handle(), 0, geometry.positions.data(), vertex_bytes);
+            upload_shadow_buffer(*_device, indices.handle(), 0, geometry.indices.data(), index_bytes);
             mesh.shadow_vertices = std::move(vertices);
             mesh.shadow_indices = std::move(indices);
         }
@@ -15437,12 +15473,10 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                                      : ref.skinned       ? skinned_storage
                                                          : shadow_storage,
                                      ref.skinned ? 4 : 2);
-                if (ref.clustered && !cluster_index) {
-                    continue;
-                }
-                binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
-                if (ref.skinned) {
-                    binder.bind_skin(ref.mesh);
+                if (ref.clustered) {
+                    if (!cluster_index)
+                        continue;
+                    binder.bind_mesh(ref.mesh, cluster_index);
                 }
                 if (cutout) {
                     bind_cutout(commands, pass, caster);
@@ -15486,6 +15520,9 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                                      : ref.retained != ~0u ? ref.level_first[l] + 1
                                                            : 0;
                     const u32 first = uniforms.bind(ref.level_first[l], list, own != nullptr);
+                    binder.bind_mesh(ref.mesh, l == 0 && !own ? ref.mesh->sun_indices.handle() : nullptr);
+                    if (ref.skinned)
+                        binder.bind_skin(ref.mesh);
                     binder.draw(ref.mesh->levels[l].index_count, count, ref.mesh->levels[l].first_index, first);
                     ++stats.shadow_draws;
                     stats.shadow_casters += count;

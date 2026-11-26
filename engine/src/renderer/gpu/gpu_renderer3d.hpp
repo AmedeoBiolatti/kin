@@ -137,8 +137,9 @@ public:
     SharedDevice device;
     SDL_GPUBuffer* vertices = nullptr;
     // Optional immutable position-only topology for stock opaque local shadows.
-    // The original stream remains authoritative for every other mesh consumer.
     GpuBuffer shadow_vertices, shadow_indices;
+    // Optional LOD0 triangle order for stock directional shadows, addressing the original vertices.
+    GpuBuffer sun_indices;
     GpuMeshBufferAllocation shadow_allocation;
     bool has_shadow_mesh() const { return shadow_allocation || (shadow_vertices && shadow_indices); }
     SDL_GPUBuffer* shadow_vertex_buffer() const {
