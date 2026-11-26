@@ -1267,7 +1267,7 @@ private:
     GpuShader _output_shader;         // view_output.frag
     GpuShader _pick_shader;           // pick.frag
     GpuShader _visibility_shader, _visibility_mask_shader;
-    GpuShader _shadow_mask_shader;             // shadow_mask.frag
+    GpuShader _shadow_mask_shader; // shadow_mask.frag
     GpuShader _sun_unclipped_vertex_shader, _sun_mask_unclipped_vertex_shader;
     GpuShader _shadow_mask_vertex_shader;      // shadow_mask.vert
     GpuShader _pick_mask_shader;               // pick_mask.frag

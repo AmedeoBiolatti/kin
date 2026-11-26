@@ -15469,8 +15469,8 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                                     (u32(stock == Pass::UnclippedSunShadow) << 3);
                 SDL_GPUGraphicsPipeline*& cached = pipelines[variant];
                 if (!own && !cached)
-                    cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, stock, cutout,
-                                      nullptr, false, ref.skinned);
+                    cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, stock, cutout, nullptr,
+                                      false, ref.skinned);
                 SDL_GPUGraphicsPipeline* p =
                     own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout,
                                    nullptr, false, ref.skinned, false, false, Unlit::Off, false, own)
