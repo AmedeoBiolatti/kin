@@ -44,8 +44,10 @@ void main() {
                                   instance.model);
 #endif
     gl_Position = draw.view_projection * world;
+#ifndef KIN_UNCLIPPED_SUN
     gl_ClipDistance[0] = draw.first.w != 0u ? dot(draw.clip, world)
         : kin_clip_distance(draw.clip, world.xyz, instance.normal1.w, draw.first.z, instance.normal0.w);
+#endif
 #ifdef KIN_SHADOW_MASK
     vWorld = world.xyz;
     vUV = aUV;

@@ -330,6 +330,38 @@ void sun_index_order(Fixture& f) {
     for (const int shift : {0, 24})
         assert(probe(f, actual, 0, shift) == probe(f, expected, 0, shift));
 }
+// The sun uses a neutral clip plane even if the camera has one. A portal's whole_if_cut
+// copy must disappear from the map, including when both draws otherwise share a pipeline.
+void sun_clip_modes(Fixture& f) {
+    const auto picture = [&](Blend3D blend, DrawClip3D right_clip, bool draw_right, bool right_first) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0, 2, 8}, {});
+        scene.camera.clip_plane = {0, 1, 0, 10};
+        scene.lights.shadow_area = {{-5, -3, -3}, {5, 3, 3}};
+        const auto box = [&](float x, DrawClip3D clip) {
+            const MeshInstance3D instance{.transform = Mat4f::translation({x, 0, 0})};
+            assert(scene.draw_instanced(f.box, std::span(&instance, 1), {.blend = blend}, clip));
+        };
+        if (draw_right && right_first)
+            box(2, right_clip);
+        box(-2, DrawClip3D::camera);
+        if (draw_right && !right_first)
+            box(2, right_clip);
+        const auto map = f.r.create_render_attachment({64, 64}, TextureFormat::Depth32Float, 1);
+        f.r.clear();
+        const auto p = f.r3d.prepare(scene).value_or({});
+        assert(f.r3d.render_sun_shadow(map, p, initial_size));
+        return probe(f, map, 0);
+    };
+    for (const auto blend : {Blend3D::Opaque, Blend3D::Mask}) {
+        const auto left = picture(blend, DrawClip3D::camera, false, false);
+        const auto both = picture(blend, DrawClip3D::camera, true, false);
+        assert(left != both);
+        assert(picture(blend, DrawClip3D::whole, true, false) == both);
+        for (const bool right_first : {false, true})
+            assert(picture(blend, DrawClip3D::whole_if_cut, true, right_first) == left);
+    }
+}
 void depth_arrays(Fixture& f) {
     const auto a = f.r.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 3),
                b = f.r.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 3);
@@ -387,5 +419,6 @@ int main(int argc, char** argv) {
         imports_and_lifetimes(f);
         depth_arrays(f);
         sun_index_order(f);
+        sun_clip_modes(f);
     }
 }

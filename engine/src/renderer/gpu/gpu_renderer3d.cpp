@@ -1358,6 +1358,15 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
     }
     try {
+        _sun_unclipped_vertex_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow_unclipped.vert.spv", 1, 0, 2);
+        _sun_mask_unclipped_vertex_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow_mask_unclipped.vert.spv", 1, 0, 2);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: using general sun shadow shaders",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    try {
         _shadow_restore_shader =
             GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "shadow_restore.frag.spv", 1, 1);
     } catch (const std::exception& e) {
@@ -2392,7 +2401,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             .write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A});
     }
 
-    if (pass == Pass::Shadow) {
+    if (pass == Pass::Shadow || pass == Pass::UnclippedSunShadow) {
         // A closed mesh's back faces are behind its front ones from the sun
         // too: culled, the map is the same for half the triangles. Double-sided
         // (thin, open) meshes cast with both. shadow.vert places the vertices
@@ -2402,7 +2411,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             moves     ? surface->vertex(mask ? SurfaceVariant3D::VertexShadowMask : SurfaceVariant3D::VertexShadow)
             : skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
                       : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle();
-        return _owner->_pipelines.get(GpuPipelineKey{
+        GpuPipelineKey key{
             .vertex = vertex,
             .fragment = mask && surface && surface->masks() ? surface->mask(SurfaceVariant3D::ShadowMask)
                                                             : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
@@ -2411,7 +2420,14 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             .depth_stencil = _shadow_format,
             .depth = GpuDepthTest::TestWrite,
             .cull = cull ? GpuCull::Back : GpuCull::None,
-            .depth_only = true});
+            .depth_only = true};
+        if (pass == Pass::UnclippedSunShadow) {
+            key.vertex = (mask ? _sun_mask_unclipped_vertex_shader : _sun_unclipped_vertex_shader).handle();
+            if (auto* unclipped = _owner->_pipelines.get(key))
+                return unclipped;
+            key.vertex = vertex;
+        }
+        return _owner->_pipelines.get(key);
     }
     if (pass == Pass::Occluder) {
         // Lod3D::occlusion's depth of the frame's opaque meshes, when no pre-pass draws one: the shadow pass's shaders
@@ -15424,7 +15440,7 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     bool complete = ctx.shadows;
     SDL_GPUBuffer* shadow_storage[2] = {storage, _caster_lists && ctx.cascades > 1 ? _caster_lists->handle() : storage};
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
-    std::array<SDL_GPUGraphicsPipeline*, 8> pipelines{};
+    std::array<SDL_GPUGraphicsPipeline*, 16> pipelines{};
     for (u32 k = 0; ctx.shadows && k < ctx.cascades; ++k) {
         // Not cycled: the frames before are done with it in queue order, and
         // a frame rendering several views would otherwise be handed a new
@@ -15448,10 +15464,12 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                     continue;
                 }
                 const GpuSurfaceShader3D* own = caster.surface.backend() ? pass_surface(caster) : nullptr;
-                const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
+                const Pass stock = stock_sun_pass(ref.skinned, ref.draw->clip);
+                const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2) |
+                                    (u32(stock == Pass::UnclippedSunShadow) << 3);
                 SDL_GPUGraphicsPipeline*& cached = pipelines[variant];
                 if (!own && !cached)
-                    cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout,
+                    cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, stock, cutout,
                                       nullptr, false, ref.skinned);
                 SDL_GPUGraphicsPipeline* p =
                     own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout,
@@ -19386,10 +19404,16 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
             }
             if (index == 0 && (shadows || (lights_on && (spot_shadows || point_shadows || moon_shadow))) && opaque &&
                 m.casts_shadow) {
-                pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided, Pass::Shadow, cutout, nullptr, false,
-                         draw.skinned);
-                if (lights_on && (spot_shadows || point_shadows || moon_shadow) && !draw.skinned && !cutout &&
-                    mesh->has_shadow_mesh() && (!m.surface.backend() || !pass_surface(m)))
+                const bool local = lights_on && (spot_shadows || point_shadows || moon_shadow);
+                const auto* surface = m.surface.backend() ? pass_surface(m) : nullptr;
+                if (shadows)
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided,
+                             surface ? Pass::Shadow : stock_sun_pass(draw.skinned, draw.clip), cutout, nullptr, false,
+                             draw.skinned, false, false, Unlit::Off, false, surface);
+                if (local)
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided, Pass::Shadow, cutout, nullptr, false,
+                             draw.skinned);
+                if (local && !draw.skinned && !cutout && mesh->has_shadow_mesh() && !surface)
                     pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided, Pass::Shadow, false, nullptr, false,
                              false, false, false, Unlit::Off, false, nullptr, true);
             }

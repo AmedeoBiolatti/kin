@@ -414,6 +414,10 @@ admission, fingerprints, source/copy order and the 4 MiB retained-plan cap keep
 their existing rules. `local_task_bytes` includes shared ranges, clipping opcodes
 and count/cursor payload; `local_bucket_bytes` reports the visibility masks.
 
+The sun map uses a neutral clip plane. For rigid stock casters using `DrawClip3D::camera` or `whole`, the GPU
+renderer omits the user clip distance from the vertex shader. The general shadow shader handles `whole_if_cut`
+so portal-only copies disappear from the map.
+
 For stock directional shadows, the GPU renderer can reuse transformed vertices by drawing the full-detail triangles
 in a different order. At upload it considers rigid, indexed, non-clustered meshes with at least 256 triangles.
 It keeps a second 32-bit index buffer only if meshoptimizer predicts at least 10% fewer vertex transformations.

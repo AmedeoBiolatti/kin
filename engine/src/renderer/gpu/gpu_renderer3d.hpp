@@ -777,6 +777,7 @@ private:
         Alpha,
         Additive,
         Shadow,
+        UnclippedSunShadow,
         Pick,
         Prepass,
         Occluder,
@@ -784,6 +785,11 @@ private:
         ReactiveWire,
         Visibility
     };
+    // The directional map has a neutral clip plane and no hidden ID. whole_if_cut must still disappear.
+    static Pass stock_sun_pass(bool skinned, DrawClip3D clip) {
+        return !skinned && (clip == DrawClip3D::camera || clip == DrawClip3D::whole) ? Pass::UnclippedSunShadow
+                                                                                     : Pass::Shadow;
+    }
     enum class Unlit : u8 { Off, Colour, Textured };
     // A main-pass draw's baked lighting (Scene3D::baked_lighting): none, the probes' (mesh_baked*.frag), or its
     // copies' lightmaps (mesh_lightmap.vert with mesh_baked*.frag; a copy without one: the probes').
@@ -1262,6 +1268,7 @@ private:
     GpuShader _pick_shader;           // pick.frag
     GpuShader _visibility_shader, _visibility_mask_shader;
     GpuShader _shadow_mask_shader;             // shadow_mask.frag
+    GpuShader _sun_unclipped_vertex_shader, _sun_mask_unclipped_vertex_shader;
     GpuShader _shadow_mask_vertex_shader;      // shadow_mask.vert
     GpuShader _pick_mask_shader;               // pick_mask.frag
     GpuShader _prepass_vertex_shader;          // prepass.vert
