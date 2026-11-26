@@ -119,6 +119,11 @@ releases may change APIs.
   `Material3D::shader` draws as the stock material instead of refusing the view, and each feature the browser leaves
   out is logged once. `IRendererBackend3D::create_surface_source` lets a backend make a surface from its source.
 
+### Changed
+
+- The GPU renderer reorders full-detail triangles for stock sun shadows when doing so improves vertex reuse.
+  Qualifying meshes share the extra index buffer across all their instances.
+
 ### Fixed
 
 - Unlit 3D meshes were speckled with the background where the main pass starts from the depth pre-pass's depth
